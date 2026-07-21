@@ -1,12 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App, TFile, moment } from "obsidian";
-import type { ArticleSavingSettings, FeedItem } from "../../../src/types/types";
+import type {
+  ArticleSavingSettings,
+  CollectionSettings,
+  FeedItem,
+} from "../../../src/types/types";
 import {
   ArticleSaver,
   sanitizeFilename,
 } from "../../../src/services/article-saver";
 import * as fetchHelpers from "../../../src/utils/fetch-helpers";
 import { RESTRICTED_ARTICLE_REASON } from "../../../src/utils/full-article-fetch";
+import { CollectionRepository } from "../../../src/collection/collection-repository";
 
 function createSettings(
   overrides: Partial<ArticleSavingSettings> = {},
@@ -39,6 +44,22 @@ function createItem(overrides: Partial<FeedItem> = {}): FeedItem {
     coverImage: "",
     ...overrides,
   };
+}
+
+const collectionSettings: CollectionSettings = {
+  enabled: true,
+  dataFolder: ".rss-dashboard-data",
+  dailyIndexFolder: "Information/Daily",
+  savedNoteFolder: "Information/Saved",
+};
+
+const FIRST_ITEM_ID = "a".repeat(64);
+const SECOND_ITEM_ID = "b".repeat(64);
+const THIRD_ITEM_ID = "c".repeat(64);
+const FOURTH_ITEM_ID = "d".repeat(64);
+
+function ownedNote(itemId: string, body = "existing body"): string {
+  return `---\nrssDashboardId: ${JSON.stringify(itemId)}\n---\n\n${body}`;
 }
 
 beforeEach(() => {
@@ -138,23 +159,42 @@ describe("ArticleSaver.saveArticle", () => {
     expect(item.tags.map((t) => t.name)).toEqual(["tech", "Saved"]);
   });
 
-  it("trashes an existing file at the same path before creating a new one", async () => {
+  it("returns and opens the stable-ID note without rewriting it on a repeated save", async () => {
     const app = App.createMock();
     const settings = createSettings({
       defaultFolder: "Articles",
       defaultTemplate: "{{content}}",
     });
-    const saver = new ArticleSaver(app, settings);
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
 
-    const item = createItem({ title: "Repeat Title" });
+    const item = createItem({
+      title: "Repeat Title",
+      rssDashboardId: FIRST_ITEM_ID,
+    });
     await saver.saveArticle(item, undefined, undefined, "FIRST");
 
     const trashSpy = vi.spyOn(app.fileManager, "trashFile");
-    await saver.saveArticle(item, undefined, undefined, "SECOND");
+    const createSpy = vi.spyOn(app.vault, "create");
+    const openFile = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(app.workspace, "getLeaf").mockReturnValue({ openFile });
+    const result = await saver.saveArticle(
+      item,
+      undefined,
+      undefined,
+      "SECOND",
+    );
 
-    expect(trashSpy).toHaveBeenCalledTimes(1);
-    const trashed = trashSpy.mock.calls[0][0];
-    expect(trashed).toBeInstanceOf(TFile);
+    expect(result?.path).toBe("Information/Saved/Repeat Title.md");
+    expect(await app.vault.read(result!)).toContain("FIRST");
+    expect(await app.vault.read(result!)).not.toContain("SECOND");
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(trashSpy).not.toHaveBeenCalled();
+    expect(openFile).toHaveBeenCalledWith(result);
   });
 
   it("returns null and does not mark the item saved when writing fails", async () => {
@@ -174,29 +214,322 @@ describe("ArticleSaver.saveArticle", () => {
     expect(item.savedFilePath).toBeUndefined();
   });
 
-  it("continues saving when replacing an existing file hits a missing-path race", async () => {
+  it("uses deterministic ID suffixes without overwriting unrelated same-title notes", async () => {
     const app = App.createMock();
     const settings = createSettings({
       defaultFolder: "Articles",
       defaultTemplate: "{{content}}",
     });
-    const saver = new ArticleSaver(app, settings);
-
-    const item = createItem({ title: "Race Condition" });
-    await saver.saveArticle(item, undefined, undefined, "FIRST");
-
-    vi.spyOn(app.fileManager, "trashFile").mockRejectedValueOnce(
-      new Error("ENONET: no such file exists"),
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
     );
+    await app.vault.create(
+      "Information/Saved/Shared Title.md",
+      "unrelated user-authored note",
+    );
+    const trashSpy = vi.spyOn(app.fileManager, "trashFile");
 
-    const result = await saver.saveArticle(
-      item,
+    const first = await saver.saveArticle(
+      createItem({ title: "Shared Title", rssDashboardId: FIRST_ITEM_ID }),
+      undefined,
+      undefined,
+      "FIRST",
+    );
+    const second = await saver.saveArticle(
+      createItem({ title: "Shared Title", rssDashboardId: SECOND_ITEM_ID }),
       undefined,
       undefined,
       "SECOND",
     );
 
-    expect(result).toBeInstanceOf(TFile);
+    expect(first?.path).toBe(
+      `Information/Saved/Shared Title-${FIRST_ITEM_ID.slice(0, 8)}.md`,
+    );
+    expect(second?.path).toBe(
+      `Information/Saved/Shared Title-${SECOND_ITEM_ID.slice(0, 8)}.md`,
+    );
+    expect(
+      await app.vault.read("Information/Saved/Shared Title.md"),
+    ).toBe("unrelated user-authored note");
+    expect(trashSpy).not.toHaveBeenCalled();
+  });
+
+  it("uses the twelve-character suffix then fails clearly when all candidates conflict", async () => {
+    const app = App.createMock();
+    const settings = createSettings({ defaultTemplate: "{{content}}" });
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
+    const targetId = "123456789abc" + "d".repeat(52);
+    for (const path of [
+      "Information/Saved/Collision.md",
+      "Information/Saved/Collision-12345678.md",
+      "Information/Saved/Collision-123456789abc.md",
+    ]) {
+      await app.vault.create(path, ownedNote(SECOND_ITEM_ID, path));
+    }
+
+    const result = await saver.saveArticle(
+      createItem({ title: "Collision", rssDashboardId: targetId }),
+      undefined,
+      undefined,
+      "new body",
+    );
+
+    expect(result).toBeNull();
+    for (const path of [
+      "Information/Saved/Collision.md",
+      "Information/Saved/Collision-12345678.md",
+      "Information/Saved/Collision-123456789abc.md",
+    ]) {
+      expect(await app.vault.read(path)).toContain(path);
+    }
+  });
+
+  it("serializes owned frontmatter fields without allowing source URL injection", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-21T12:34:56.000Z"));
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      undefined,
+      collectionSettings,
+    );
+    const item = createItem({
+      rssDashboardId: FIRST_ITEM_ID,
+      feedTitle: 'Source "quoted"\ninjected: true',
+      link: "https://example.com/article\nmalicious: true",
+      pubDate: "2026-07-20T08:00:00.000Z",
+    });
+
+    const file = await saver.saveArticle(item, undefined, undefined, "BODY");
+    const written = await app.vault.read(file!);
+
+    expect(written).toContain(`rssDashboardId: ${JSON.stringify(FIRST_ITEM_ID)}`);
+    expect(written).toContain(
+      `source: ${JSON.stringify('Source "quoted"\ninjected: true')}`,
+    );
+    expect(written).toContain(
+      `sourceUrl: ${JSON.stringify("https://example.com/article\nmalicious: true")}`,
+    );
+    expect(written).toContain(
+      'publishedAt: "2026-07-20T08:00:00.000Z"',
+    );
+    expect(written).toContain('savedAt: "2026-07-21T12:34:56.000Z"');
+    expect(written).not.toMatch(/^malicious: true$/m);
+    expect(written).not.toMatch(/^injected: true$/m);
+    vi.useRealTimers();
+  });
+
+  it("escapes external values inside a custom frontmatter template", async () => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({
+        defaultTemplate:
+          '---\ntitle: "{{title}}"\nlink: "{{link}}"\nauthor: "{{author}}"\n---\n\n{{content}}',
+        includeFrontmatter: false,
+      }),
+      undefined,
+      collectionSettings,
+    );
+    const file = await saver.saveArticle(
+      createItem({
+        rssDashboardId: FIRST_ITEM_ID,
+        title: 'Title "quoted"\ninjectedTitle: true',
+        link: "https://example.com/path\ninjectedLink: true",
+        author: "Author\ninjectedAuthor: true",
+      }),
+      undefined,
+      undefined,
+      "BODY",
+    );
+    const written = await app.vault.read(file!);
+
+    expect(written).toContain('title: "Title \\"quoted\\"\\ninjectedTitle: true"');
+    expect(written).toContain(
+      'link: "https://example.com/path\\ninjectedLink: true"',
+    );
+    expect(written).toContain('author: "Author\\ninjectedAuthor: true"');
+    expect(written).not.toMatch(/^injected(?:Title|Link|Author): true$/m);
+  });
+
+  it("rejects traversal in the configured save folder and never scans outside it", async () => {
+    const app = App.createMock();
+    await app.vault.create("Outside/Do Not Read.md", ownedNote(FIRST_ITEM_ID));
+    const readSpy = vi.spyOn(app.vault, "read");
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      undefined,
+      { ...collectionSettings, savedNoteFolder: "../Outside" },
+    );
+
+    const result = await saver.saveArticle(
+      createItem({ rssDashboardId: FIRST_ITEM_ID }),
+      undefined,
+      undefined,
+      "BODY",
+    );
+
+    expect(result).toBeNull();
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(await app.vault.read("Outside/Do Not Read.md")).toContain(
+      "existing body",
+    );
+  });
+
+  it("rejects a configured folder that sanitizes to the vault root", async () => {
+    const app = App.createMock();
+    const createSpy = vi.spyOn(app.vault, "create");
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      undefined,
+      { ...collectionSettings, savedNoteFolder: ":::" },
+    );
+
+    const result = await saver.saveArticle(
+      createItem({ rssDashboardId: FIRST_ITEM_ID }),
+      undefined,
+      undefined,
+      "BODY",
+    );
+
+    expect(result).toBeNull();
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("serializes concurrent saves across saver instances for same and colliding IDs", async () => {
+    const app = App.createMock();
+    const settings = createSettings({ defaultTemplate: "{{content}}" });
+    const firstSaver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
+    const secondSaver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
+    const createSpy = vi.spyOn(app.vault, "create");
+    const same = createItem({
+      title: "Concurrent Same",
+      rssDashboardId: FIRST_ITEM_ID,
+    });
+
+    const [sameFirst, sameSecond] = await Promise.all([
+      firstSaver.saveArticle(same, undefined, undefined, "one"),
+      secondSaver.saveArticle({ ...same }, undefined, undefined, "two"),
+    ]);
+    const [collisionFirst, collisionSecond] = await Promise.all([
+      firstSaver.saveArticle(
+        createItem({ title: "Concurrent Collision", rssDashboardId: THIRD_ITEM_ID }),
+        undefined,
+        undefined,
+        "alpha",
+      ),
+      secondSaver.saveArticle(
+        createItem({ title: "Concurrent Collision", rssDashboardId: FOURTH_ITEM_ID }),
+        undefined,
+        undefined,
+        "beta",
+      ),
+    ]);
+
+    expect(sameFirst?.path).toBe(sameSecond?.path);
+    expect(collisionFirst?.path).toBe("Information/Saved/Concurrent Collision.md");
+    expect(collisionSecond?.path).toBe(
+      `Information/Saved/Concurrent Collision-${FOURTH_ITEM_ID.slice(0, 8)}.md`,
+    );
+    expect(
+      createSpy.mock.calls.filter(([path]) =>
+        String(path).includes("Concurrent Same"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("updates collection flags only after the note is durable and keeps it on sync failure", async () => {
+    const app = App.createMock();
+    const events: string[] = [];
+    const create = app.vault.create.bind(app.vault);
+    vi.spyOn(app.vault, "create").mockImplementationOnce(async (path, body) => {
+      events.push("write");
+      return await create(path, body);
+    });
+    const flagsSpy = vi
+      .spyOn(CollectionRepository.prototype, "updateFlags")
+      .mockImplementationOnce(async () => {
+        events.push("flags");
+        throw new Error("metadata unavailable");
+      });
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      undefined,
+      collectionSettings,
+    );
+
+    const file = await saver.saveArticle(
+      createItem({ rssDashboardId: FIRST_ITEM_ID }),
+      undefined,
+      undefined,
+      "BODY",
+    );
+
+    expect(events).toEqual(["write", "flags"]);
+    expect(file).toBeInstanceOf(TFile);
+    expect(await app.vault.read(file!)).toContain("BODY");
+    expect(flagsSpy).toHaveBeenCalledWith(FIRST_ITEM_ID, {
+      read: false,
+      starred: false,
+      saved: true,
+      savedNotePath: "Information/Saved/Test Article.md",
+    });
+    expect(console.warn).toHaveBeenCalledWith(
+      "[RSS Dashboard] Saved-note metadata sync failed; the note remains valid and will be repaired later.",
+    );
+  });
+
+  it("ignores caller-supplied YouTube media or transcript content", async () => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "# {{title}}\n\n{{content}}" }),
+      undefined,
+      collectionSettings,
+    );
+    vi.spyOn(
+      CollectionRepository.prototype,
+      "updateFlags",
+    ).mockResolvedValueOnce(undefined);
+    const file = await saver.saveArticle(
+      createItem({
+        rssDashboardId: FIRST_ITEM_ID,
+        title: "YouTube direct save",
+        link: "https://youtu.be/video-id",
+        description: "<p>Feed description only.</p>",
+        mediaType: "video",
+      }),
+      undefined,
+      undefined,
+      "downloaded transcript must not be saved",
+    );
+    const written = await app.vault.read(file!);
+
+    expect(written).toContain("Feed description only.");
+    expect(written).not.toContain("downloaded transcript");
+    expect(written).toContain('contentBasis: "title-description"');
   });
 
   it("creates nested folders one segment at a time", async () => {
@@ -393,6 +726,112 @@ describe("ArticleSaver.fetchFullArticleContent", () => {
 });
 
 describe("ArticleSaver.saveArticleWithFullContent", () => {
+  it("uses cached full text without another website request", async () => {
+    const app = App.createMock();
+    await app.vault.createFolder(".rss-dashboard-data");
+    await app.vault.createFolder(".rss-dashboard-data/content");
+    const cachedText = "<article><p>Short but valid cached article text.</p></article>";
+    await app.vault.adapter.write(
+      `.rss-dashboard-data/content/${FIRST_ITEM_ID}.md`,
+      `---\nschemaVersion: 1\nitemId: ${JSON.stringify(FIRST_ITEM_ID)}\nsourceUrl: "https://example.com/article"\nfetchedAt: "2026-07-21T08:00:00.000Z"\ncontentBasis: "full-text"\n---\n\n${cachedText}`,
+    );
+    vi.spyOn(
+      CollectionRepository.prototype,
+      "updateFlags",
+    ).mockResolvedValueOnce(undefined);
+    const fetchSpy = vi.spyOn(
+      fetchHelpers,
+      "fetchWithProxyFallbackDetailed",
+    );
+    fetchSpy.mockClear();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      "https://proxy/?url=",
+      collectionSettings,
+    );
+
+    const file = await saver.saveArticleWithFullContent(
+      createItem({ rssDashboardId: FIRST_ITEM_ID }),
+    );
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(file).toBeInstanceOf(TFile);
+    const written = await app.vault.read(file!);
+    expect(written).toContain("Short but valid cached article text.");
+    expect(written).toContain('contentBasis: "full-text"');
+  });
+
+  it("opens an existing stable-ID note before cache or network work", async () => {
+    const app = App.createMock();
+    await app.vault.createFolder("Information/Saved");
+    const existing = await app.vault.create(
+      "Information/Saved/Existing.md",
+      ownedNote(FIRST_ITEM_ID, "do not rewrite"),
+    );
+    const fetchSpy = vi.spyOn(
+      fetchHelpers,
+      "fetchWithProxyFallbackDetailed",
+    );
+    fetchSpy.mockClear();
+    const openFile = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(app.workspace, "getLeaf").mockReturnValue({ openFile });
+    const createSpy = vi.spyOn(app.vault, "create");
+    const saver = new ArticleSaver(
+      app,
+      createSettings(),
+      "https://proxy/?url=",
+      collectionSettings,
+    );
+
+    const file = await saver.saveArticleWithFullContent(
+      createItem({ rssDashboardId: FIRST_ITEM_ID }),
+    );
+
+    expect(file).toBe(existing);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(openFile).toHaveBeenCalledWith(existing);
+    expect(await app.vault.read(existing)).toContain("do not rewrite");
+  });
+
+  it("saves YouTube title and description without fetching media or full text", async () => {
+    const app = App.createMock();
+    vi.spyOn(
+      CollectionRepository.prototype,
+      "updateFlags",
+    ).mockResolvedValueOnce(undefined);
+    const fetchSpy = vi.spyOn(
+      fetchHelpers,
+      "fetchWithProxyFallbackDetailed",
+    );
+    fetchSpy.mockClear();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "# {{title}}\n\n{{content}}" }),
+      "https://proxy/?url=",
+      collectionSettings,
+    );
+    const item = createItem({
+      rssDashboardId: FIRST_ITEM_ID,
+      title: "Video title",
+      link: "https://www.youtube.com/watch?v=abc123",
+      feedUrl: "https://www.youtube.com/feeds/videos.xml?channel_id=channel",
+      description: "<p>Channel-provided description.</p>",
+      content: "<p>media/transcript payload must not be used</p>",
+      mediaType: "video",
+    });
+
+    const file = await saver.saveArticleWithFullContent(item);
+    const written = await app.vault.read(file!);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(written).toContain("# Video title");
+    expect(written).toContain("Channel-provided description.");
+    expect(written).not.toContain("media/transcript payload");
+    expect(written).toContain('contentBasis: "title-description"');
+  });
+
   it("prepends enclosure image when chosen feed HTML has no inline image", async () => {
     const app = App.createMock();
     const settings = createSettings({
@@ -559,21 +998,39 @@ describe("ArticleSaver.saveArticleWithFullContent", () => {
       content: "",
       failureType: "network",
     });
-    const saveSpy = vi.spyOn(saver, "saveArticle");
-
     const item = createItem({
       title: "Fallback Content",
       content:
         "<div><style>.bh__table { border: 1px solid #C0C0C0; }</style><p>Feed body wins.</p></div>",
     });
-    await saver.saveArticleWithFullContent(item);
+    const file = await saver.saveArticleWithFullContent(item);
 
-    expect(saveSpy).toHaveBeenCalledWith(
-      item,
-      undefined,
-      undefined,
-      "Feed body wins.",
+    expect(file).toBeInstanceOf(TFile);
+    expect(await app.vault.read(file!)).toContain("Feed body wins.");
+    expect(await app.vault.read(file!)).toContain('contentBasis: "feed"');
+  });
+
+  it("falls back to feed content when the explicit website request throws", async () => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      "https://proxy/?url=",
     );
+    vi.spyOn(
+      fetchHelpers,
+      "fetchWithProxyFallbackDetailed",
+    ).mockRejectedValueOnce(new Error("offline"));
+    const item = createItem({
+      title: "Thrown Fetch Fallback",
+      description: "<p>Durable feed fallback.</p>",
+    });
+
+    const file = await saver.saveArticleWithFullContent(item);
+
+    expect(file).toBeInstanceOf(TFile);
+    expect(await app.vault.read(file!)).toContain("Durable feed fallback.");
+    expect(await app.vault.read(file!)).toContain('contentBasis: "feed"');
   });
 
   it("uses richer feed content when fetched article content is only a short excerpt", async () => {
@@ -673,9 +1130,7 @@ describe("ArticleSaver.saveArticleWithFullContent", () => {
     const saver = new ArticleSaver(app, settings, "https://proxy/?url=");
 
     const fetchSpy = vi.spyOn(fetchHelpers, "fetchWithProxyFallbackDetailed");
-    const saveSpy = vi.spyOn(saver, "saveArticle");
     fetchSpy.mockClear();
-    saveSpy.mockClear();
 
     const item = createItem({
       title: "Bloomberg Video",
@@ -684,10 +1139,11 @@ describe("ArticleSaver.saveArticleWithFullContent", () => {
       mediaContentType: "image/jpeg",
     });
 
-    await saver.saveArticleWithFullContent(item);
+    const file = await saver.saveArticleWithFullContent(item);
 
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(saveSpy).toHaveBeenCalledWith(item, undefined, undefined);
+    expect(file).toBeInstanceOf(TFile);
+    expect(await app.vault.read(file!)).toContain('contentBasis: "feed"');
     expect(item.restrictedReason).toBeUndefined();
   });
 
@@ -898,7 +1354,7 @@ describe("ArticleSaver.{{image}} template variable", () => {
     expect(file).toBeInstanceOf(TFile);
     if (!file) return;
     const written = await app.vault.read(file);
-    expect(written).toBe(imageUrl);
+    expect(written).toContain(imageUrl);
   });
 
   it("resolves {{image}} from itunes.image href when other images missing", async () => {
@@ -919,7 +1375,7 @@ describe("ArticleSaver.{{image}} template variable", () => {
     expect(file).toBeInstanceOf(TFile);
     if (!file) return;
     const written = await app.vault.read(file);
-    expect(written).toBe(itunesImageUrl);
+    expect(written).toContain(itunesImageUrl);
   });
 
   it("falls back to empty string when no image is present", async () => {
@@ -938,7 +1394,7 @@ describe("ArticleSaver.{{image}} template variable", () => {
     expect(file).toBeInstanceOf(TFile);
     if (!file) return;
     const written = await app.vault.read(file);
-    expect(written).toBe("cover: ");
+    expect(written).toContain("cover: ");
   });
 
   it("prioritizes coverImage over image for {{image}} replacement", async () => {
@@ -960,6 +1416,6 @@ describe("ArticleSaver.{{image}} template variable", () => {
     expect(file).toBeInstanceOf(TFile);
     if (!file) return;
     const written = await app.vault.read(file);
-    expect(written).toBe(coverImageUrl);
+    expect(written).toContain(coverImageUrl);
   });
 });

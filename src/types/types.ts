@@ -1,4 +1,6 @@
 export interface FeedItem {
+  /** Stable collection identity once the item has entered the collection layer. */
+  rssDashboardId?: string;
   title: string;
   link: string;
   description: string;

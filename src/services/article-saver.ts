@@ -1,7 +1,15 @@
 import { App, Notice, TFile, moment } from "obsidian";
 import { Readability } from "@mozilla/readability";
 import TurndownService from "turndown";
-import { ArticleSavingSettings, FeedItem } from "../types/types";
+import {
+  ArticleSavingSettings,
+  type CollectionSettings,
+  FeedItem,
+} from "../types/types";
+import type { ContentBasis } from "../collection/collected-item";
+import { CollectionRepository } from "../collection/collection-repository";
+import { ExplicitContentCoordinator } from "../collection/explicit-content-coordinator";
+import { createCollectedItemId } from "../collection/item-identity";
 import { type FullArticleFetchResult } from "../utils/fetch-helpers";
 import {
   fetchFullArticleContentWithOutcome,
@@ -16,6 +24,12 @@ import {
   stripNonContentHtmlNodes,
 } from "../utils/html-text";
 import { normalizeSubstackImageUrl } from "../utils/substack-image-url";
+import { isYouTubeItem } from "../utils/youtube-detection";
+
+const STABLE_ITEM_ID = /^[a-f0-9]{64}$/;
+const savedNoteQueues = new WeakMap<object, Map<string, Promise<void>>>();
+const SAVED_NOTE_SYNC_WARNING =
+  "[RSS Dashboard] Saved-note metadata sync failed; the note remains valid and will be repaired later.";
 
 export function sanitizeFilename(name: string): string {
   const sanitized = name
@@ -31,15 +45,19 @@ export class ArticleSaver {
   private settings: ArticleSavingSettings;
   private turndownService: TurndownService;
   private corsProxyUrl: string | undefined;
+  private collectionSettings: CollectionSettings | undefined;
+  private explicitContentCoordinator: ExplicitContentCoordinator | undefined;
 
   constructor(
     app: App,
     settings: ArticleSavingSettings,
     corsProxyUrl?: string,
+    collectionSettings?: CollectionSettings,
   ) {
     this.app = app;
     this.settings = settings;
     this.corsProxyUrl = corsProxyUrl;
+    this.collectionSettings = collectionSettings;
     this.turndownService = new TurndownService();
 
     this.turndownService.addRule("math", {
@@ -260,15 +278,13 @@ export class ArticleSaver {
 
     const pubDate = item.pubDate ? new Date(item.pubDate) : new Date();
 
-    frontmatter = this.replaceDatePlaceholders(frontmatter, pubDate)
-      .replace(/{{title}}/g, item.title)
-      .replace(/{{tags}}/g, tagsString)
-      .replace(/{{source}}/g, item.feedTitle)
-      .replace(/{{link}}/g, item.link)
-      .replace(/{{author}}/g, item.author || "")
-      .replace(/{{feedTitle}}/g, item.feedTitle)
-      .replace(/{{guid}}/g, item.guid)
-      .replace(/{{image}}/g, this.getFallbackHeroUrl(item));
+    frontmatter = this.replaceTemplateValues(
+      this.replaceDatePlaceholders(frontmatter, pubDate),
+      item,
+      "",
+      tagsString,
+      true,
+    );
 
     if (item.mediaType === "video" && item.videoId) {
       const injection = `mediaType: video\nvideoId: "${item.videoId}"\n`;
@@ -322,7 +338,7 @@ export class ArticleSaver {
     template: string,
     rawContent?: string,
   ): string {
-    const content = rawContent
+    const content = rawContent !== undefined
       ? rawContent
       : this.prependFallbackHeroHtml(
           item,
@@ -342,18 +358,70 @@ export class ArticleSaver {
       : tagNames.join(", ");
 
     const replacedWithDates = this.replaceDatePlaceholders(template, pubDate);
+    const frontmatter = replacedWithDates.match(
+      /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,
+    );
+    if (!frontmatter) {
+      return this.replaceTemplateValues(
+        replacedWithDates,
+        item,
+        content,
+        tagsString,
+        false,
+      );
+    }
+    return (
+      this.replaceTemplateValues(
+        frontmatter[0],
+        item,
+        content,
+        tagsString,
+        true,
+      ) +
+      this.replaceTemplateValues(
+        replacedWithDates.slice(frontmatter[0].length),
+        item,
+        content,
+        tagsString,
+        false,
+      )
+    );
+  }
 
-    return replacedWithDates
-      .replace(/{{title}}/g, item.title)
-      .replace(/{{link}}/g, item.link)
-      .replace(/{{author}}/g, item.author || "")
-      .replace(/{{source}}/g, item.feedTitle)
-      .replace(/{{feedTitle}}/g, item.feedTitle)
-      .replace(/{{summary}}/g, item.summary || "")
-      .replace(/{{content}}/g, content)
-      .replace(/{{tags}}/g, tagsString)
-      .replace(/{{guid}}/g, item.guid)
-      .replace(/{{image}}/g, this.getFallbackHeroUrl(item));
+  private replaceTemplateValues(
+    template: string,
+    item: FeedItem,
+    content: string,
+    tags: string,
+    frontmatterSafe: boolean,
+  ): string {
+    const value = (raw: string): string =>
+      frontmatterSafe ? this.escapeFrontmatterTemplateValue(raw) : raw;
+    const replacements: Array<[RegExp, string]> = [
+      [/{{title}}/g, value(item.title)],
+      [/{{link}}/g, value(item.link)],
+      [/{{author}}/g, value(item.author || "")],
+      [/{{source}}/g, value(item.feedTitle)],
+      [/{{feedTitle}}/g, value(item.feedTitle)],
+      [/{{summary}}/g, value(item.summary || "")],
+      [/{{content}}/g, value(content)],
+      [/{{tags}}/g, value(tags)],
+      [/{{guid}}/g, value(item.guid)],
+      [/{{image}}/g, value(this.getFallbackHeroUrl(item))],
+    ];
+    return replacements.reduce(
+      (result, [pattern, replacement]) =>
+        result.replace(pattern, () => replacement),
+      template,
+    );
+  }
+
+  private escapeFrontmatterTemplateValue(value: string): string {
+    return value
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\r/g, "\\r")
+      .replace(/\n/g, "\\n");
   }
 
   private normalizePath(path: string): string {
@@ -613,68 +681,120 @@ export class ArticleSaver {
     customTemplate?: string,
   ): Promise<TFile | null> {
     try {
-      if (isLikelyVideoItem(item)) {
-        return await this.saveArticle(item, customFolder, customTemplate);
-      }
-
-      const loadingNotice = new Notice("Fetching full article content...", 0);
-
-      const fetchResult = await this.fetchArticleContentWithOutcome(item.link);
-      const feedContent = this.getPreferredFeedHtml(item);
-
-      if (!fetchResult.content) {
-        loadingNotice.hide();
-        if (fetchResult.failureType === "restricted") {
-          new Notice(RESTRICTED_ARTICLE_NOTICE);
-          // Mark the item for inline banner
-          item.restrictedReason = RESTRICTED_ARTICLE_REASON;
-        } else {
-          new Notice(
-            "Could not fetch full content. Saving with available content.",
-          );
+      const folder = this.resolveSavedNoteFolder(customFolder);
+      return await this.withSavedNoteLock(folder, async () => {
+        const itemId = this.resolveStableItemId(item);
+        const existing = await this.findNoteByStableId(folder, itemId);
+        if (existing) {
+          return await this.returnExistingNote(item, existing, itemId);
         }
-        const fallbackMarkdown = feedContent
-          ? this.htmlToMarkdown(feedContent)
-          : undefined;
-        const fallbackWithHero = fallbackMarkdown
-          ? this.prependFallbackHeroMarkdown(
-              item,
-              fallbackMarkdown,
-              feedContent,
-            )
-          : undefined;
-        return await this.saveArticle(
-          item,
-          customFolder,
-          customTemplate,
-          fallbackWithHero,
-        );
-      }
 
-      const fetchedTextLength = this.getReadableTextLength(fetchResult.content);
-      const feedTextLength = this.getReadableTextLength(feedContent);
-      const contentSource = this.shouldPreferFeedHtml(item, feedContent)
-        ? feedContent || fetchResult.content
-        : feedContent && feedTextLength > fetchedTextLength
+        if (isYouTubeItem(item)) {
+          const descriptionHtml = item.description || item.summary || "";
+          const description = descriptionHtml
+            ? this.htmlToMarkdown(descriptionHtml)
+            : "";
+          return await this.saveArticleUnlocked({
+            item,
+            folder,
+            customTemplate,
+            rawContent: description,
+            contentBasis: "title-description",
+            itemId,
+          });
+        }
+
+        if (isLikelyVideoItem(item)) {
+          return await this.saveArticleUnlocked({
+            item,
+            folder,
+            customTemplate,
+            contentBasis: "feed",
+            itemId,
+          });
+        }
+
+        const feedContent = this.getPreferredFeedHtml(item);
+        const fetchExplicitly = async (): Promise<FullArticleFetchResult> => {
+          const loadingNotice = new Notice(
+            "Fetching full article content...",
+            0,
+          );
+          try {
+            return await this.fetchArticleContentWithOutcome(item.link);
+          } catch {
+            return { content: "", failureType: "network" };
+          } finally {
+            loadingNotice.hide();
+          }
+        };
+        const fetchResult = this.collectionSettings
+          ? await this.getExplicitContentCoordinator().readOrFetch({
+              dataRoot: this.collectionSettings.dataFolder,
+              itemId,
+              sourceUrl: item.link || undefined,
+              fetch: fetchExplicitly,
+            })
+          : await fetchExplicitly();
+
+        if (!fetchResult.content) {
+          if (fetchResult.failureType === "restricted") {
+            new Notice(RESTRICTED_ARTICLE_NOTICE);
+            item.restrictedReason = RESTRICTED_ARTICLE_REASON;
+          } else {
+            new Notice(
+              "Could not fetch full content. Saving with available content.",
+            );
+          }
+          const fallbackMarkdown = feedContent
+            ? this.htmlToMarkdown(feedContent)
+            : undefined;
+          const fallbackWithHero = fallbackMarkdown
+            ? this.prependFallbackHeroMarkdown(
+                item,
+                fallbackMarkdown,
+                feedContent,
+              )
+            : undefined;
+          return await this.saveArticleUnlocked({
+            item,
+            folder,
+            customTemplate,
+            rawContent: fallbackWithHero,
+            contentBasis: "feed",
+            itemId,
+          });
+        }
+
+        const fetchedTextLength = this.getReadableTextLength(
+          fetchResult.content,
+        );
+        const feedTextLength = this.getReadableTextLength(feedContent);
+        const useFeedContent = this.shouldPreferFeedHtml(item, feedContent)
+          ? Boolean(feedContent)
+          : Boolean(feedContent && feedTextLength > fetchedTextLength);
+        const contentSource = useFeedContent
           ? feedContent
           : fetchResult.content;
-      const markdownContent = this.prependFallbackHeroMarkdown(
-        item,
-        this.htmlToMarkdown(contentSource),
-        contentSource,
-      );
-      loadingNotice.hide();
+        const markdownContent = this.prependFallbackHeroMarkdown(
+          item,
+          this.htmlToMarkdown(contentSource),
+          contentSource,
+        );
 
-      return await this.saveArticle(
-        item,
-        customFolder,
-        customTemplate,
-        markdownContent,
-      );
+        return await this.saveArticleUnlocked({
+          item,
+          folder,
+          customTemplate,
+          rawContent: markdownContent,
+          contentBasis: useFeedContent ? "feed" : "full-text",
+          itemId,
+        });
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       new Notice(`Error saving article with full content: ${message}`);
-      return await this.saveArticle(item, customFolder, customTemplate);
+      return null;
     }
   }
 
@@ -685,80 +805,315 @@ export class ArticleSaver {
     rawContent?: string,
   ): Promise<TFile | null> {
     try {
-      let folder = customFolder || this.settings.defaultFolder || "";
-      folder = this.normalizePath(folder);
-
-      if (folder && folder.trim() !== "") {
-        await this.ensureFolderExists(folder);
-      }
-
-      const filename = sanitizeFilename(item.title);
-      const filePath =
-        folder && folder.trim() !== ""
-          ? `${folder}/${filename}.md`
-          : `${filename}.md`;
-
-      const existingFile = this.app.vault.getAbstractFileByPath(filePath);
-      if (existingFile instanceof TFile) {
-        try {
-          await this.app.fileManager.trashFile(existingFile);
-        } catch (error) {
-          if (!this.isMissingPathError(error)) {
-            throw error;
-          }
-        }
-      } else if (existingFile !== null) {
-        throw new Error(
-          `Cannot save article because ${filePath} exists and is not a file.`,
-        );
-      }
-
-      const template =
-        customTemplate ||
-        this.settings.defaultTemplate ||
-        "# {{title}}\n\n{{content}}\n\n[Source]({{link}})";
-
-      let contentToWrite = "";
-      const templateHasFrontmatter = template.trim().startsWith("---");
-      if (this.settings.includeFrontmatter && !templateHasFrontmatter) {
-        contentToWrite += this.generateFrontmatter(item);
-      }
-
-      contentToWrite += this.applyTemplate(item, template, rawContent);
-
-      let file: TFile;
-      try {
-        file = await this.app.vault.create(filePath, contentToWrite);
-      } catch (error) {
-        if (!(folder && this.isMissingPathError(error))) {
-          throw error;
-        }
-
-        await this.ensureFolderExists(folder);
-        file = await this.app.vault.create(filePath, contentToWrite);
-      }
-
-      item.saved = true;
-      item.savedFilePath = filePath;
-
-      if (
-        this.settings.addSavedTag &&
-        (!item.tags || !item.tags.some((t) => t.name.toLowerCase() === "saved"))
-      ) {
-        const savedTag = { name: "Saved", color: "#3498db" };
-        if (!item.tags) item.tags = [savedTag];
-        else item.tags.push(savedTag);
-      }
-
-      new Notice(
-        "Article saved. Click/tap the icon again to open the article in your vault.",
+      const folder = this.resolveSavedNoteFolder(customFolder);
+      const youtube = isYouTubeItem(item);
+      const safeRawContent = youtube
+        ? this.htmlToMarkdown(item.description || item.summary || "")
+        : rawContent;
+      return await this.withSavedNoteLock(folder, async () =>
+        await this.saveArticleUnlocked({
+          item,
+          folder,
+          customTemplate,
+          rawContent: safeRawContent,
+          contentBasis: youtube ? "title-description" : "feed",
+          itemId: this.resolveStableItemId(item),
+        }),
       );
-      return file;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       new Notice(`Error saving article: ${message}`);
       return null;
     }
+  }
+
+  private async saveArticleUnlocked(input: {
+    item: FeedItem;
+    folder: string;
+    customTemplate?: string;
+    rawContent?: string;
+    contentBasis: ContentBasis;
+    itemId: string;
+  }): Promise<TFile> {
+    const existing = await this.findNoteByStableId(input.folder, input.itemId);
+    if (existing) {
+      return await this.returnExistingNote(input.item, existing, input.itemId);
+    }
+
+    if (input.folder) await this.ensureFolderExists(input.folder);
+    const filePath = await this.selectCollisionSafePath(
+      input.folder,
+      input.item.title,
+      input.itemId,
+    );
+    const template =
+      input.customTemplate ||
+      this.settings.defaultTemplate ||
+      "# {{title}}\n\n{{content}}\n\n[Source]({{link}})";
+    let contentToWrite = "";
+    const templateHasFrontmatter = template.trim().startsWith("---");
+    if (this.settings.includeFrontmatter && !templateHasFrontmatter) {
+      contentToWrite += this.generateFrontmatter(input.item);
+    }
+    contentToWrite += this.applyTemplate(
+      input.item,
+      template,
+      input.rawContent,
+    );
+    contentToWrite = this.addOwnedFrontmatter(contentToWrite, {
+      itemId: input.itemId,
+      item: input.item,
+      contentBasis: input.contentBasis,
+    });
+
+    let file: TFile;
+    try {
+      file = await this.app.vault.create(filePath, contentToWrite);
+    } catch (error) {
+      const raced = this.app.vault.getAbstractFileByPath(filePath);
+      if (
+        raced instanceof TFile &&
+        (await this.readOwnedStableId(raced)) === input.itemId
+      ) {
+        return await this.returnExistingNote(input.item, raced, input.itemId);
+      }
+      if (!(input.folder && this.isMissingPathError(error))) throw error;
+      await this.ensureFolderExists(input.folder);
+      file = await this.app.vault.create(filePath, contentToWrite);
+    }
+
+    this.applySavedState(input.item, file.path);
+    await this.syncSavedNoteMetadata(input.itemId, input.item, file.path);
+    new Notice(
+      "Article saved. Click/tap the icon again to open the article in your vault.",
+    );
+    return file;
+  }
+
+  private resolveSavedNoteFolder(customFolder?: string): string {
+    const configured =
+      customFolder ??
+      this.collectionSettings?.savedNoteFolder ??
+      this.settings.defaultFolder ??
+      "";
+    const trimmed = configured.trim();
+    if (!trimmed) return "";
+    if (
+      trimmed.includes("\\") ||
+      trimmed.includes("\0") ||
+      /^[A-Za-z]:/.test(trimmed)
+    ) {
+      throw new Error("Invalid saved-note folder path.");
+    }
+    const withoutEdgeSlashes = trimmed.replace(/^\/+|\/+$/g, "");
+    const segments = withoutEdgeSlashes.split("/");
+    if (
+      !withoutEdgeSlashes ||
+      segments.some(
+        (segment) => segment === "" || segment === "." || segment === "..",
+      )
+    ) {
+      throw new Error("Invalid saved-note folder path.");
+    }
+    const normalized = this.normalizePath(withoutEdgeSlashes);
+    if (!normalized) throw new Error("Invalid saved-note folder path.");
+    return normalized;
+  }
+
+  private resolveStableItemId(item: FeedItem): string {
+    if (item.rssDashboardId !== undefined) {
+      if (!STABLE_ITEM_ID.test(item.rssDashboardId)) {
+        throw new Error("Invalid RSS Dashboard item ID.");
+      }
+      return item.rssDashboardId;
+    }
+    const itemId = createCollectedItemId({
+      sourceId: item.feedUrl || item.feedTitle || "rss-dashboard",
+      guid: item.guid,
+      url: item.link,
+      title: item.title,
+      author: item.author,
+      publishedAt: item.pubDate,
+    });
+    item.rssDashboardId = itemId;
+    return itemId;
+  }
+
+  private async withSavedNoteLock<T>(
+    folder: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const queues =
+      savedNoteQueues.get(this.app.vault) ??
+      new Map<string, Promise<void>>();
+    savedNoteQueues.set(this.app.vault, queues);
+    const prior = queues.get(folder) ?? Promise.resolve();
+    const running = prior.catch(() => undefined).then(operation);
+    const settled = running.then(
+      () => undefined,
+      () => undefined,
+    );
+    queues.set(folder, settled);
+    try {
+      return await running;
+    } finally {
+      if (queues.get(folder) === settled) queues.delete(folder);
+      if (queues.size === 0) savedNoteQueues.delete(this.app.vault);
+    }
+  }
+
+  private async findNoteByStableId(
+    folder: string,
+    itemId: string,
+  ): Promise<TFile | null> {
+    const files = this.app.vault
+      .getFiles()
+      .filter(
+        (file) =>
+          file.extension === "md" && this.isPathInsideFolder(file.path, folder),
+      )
+      .sort((left, right) => left.path.localeCompare(right.path));
+    for (const file of files) {
+      if ((await this.readOwnedStableId(file)) === itemId) return file;
+    }
+    return null;
+  }
+
+  private isPathInsideFolder(path: string, folder: string): boolean {
+    if (!folder) return !path.startsWith("/");
+    return path.startsWith(`${folder}/`);
+  }
+
+  private async readOwnedStableId(file: TFile): Promise<string | null> {
+    const raw = await this.app.vault.read(file);
+    const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+    if (!match) return null;
+    for (const line of match[1].split(/\r?\n/)) {
+      const field = line.match(/^rssDashboardId:\s*(.+?)\s*$/);
+      if (!field) continue;
+      try {
+        const parsed: unknown = JSON.parse(field[1]);
+        return typeof parsed === "string" && STABLE_ITEM_ID.test(parsed)
+          ? parsed
+          : null;
+      } catch {
+        return STABLE_ITEM_ID.test(field[1]) ? field[1] : null;
+      }
+    }
+    return null;
+  }
+
+  private async selectCollisionSafePath(
+    folder: string,
+    title: string,
+    itemId: string,
+  ): Promise<string> {
+    const filename = sanitizeFilename(title);
+    const candidates = [
+      filename,
+      `${filename}-${itemId.slice(0, 8)}`,
+      `${filename}-${itemId.slice(0, 12)}`,
+    ];
+    for (const candidate of candidates) {
+      const path = folder ? `${folder}/${candidate}.md` : `${candidate}.md`;
+      const existing = this.app.vault.getAbstractFileByPath(path);
+      if (existing === null) return path;
+      if (
+        existing instanceof TFile &&
+        (await this.readOwnedStableId(existing)) === itemId
+      ) {
+        return existing.path;
+      }
+    }
+    throw new Error(
+      `Cannot save article: all deterministic filenames for item ${itemId} are already occupied.`,
+    );
+  }
+
+  private addOwnedFrontmatter(
+    content: string,
+    input: { itemId: string; item: FeedItem; contentBasis: ContentBasis },
+  ): string {
+    const ownedLines = [
+      `rssDashboardId: ${JSON.stringify(input.itemId)}`,
+      `source: ${JSON.stringify(input.item.feedTitle || "")}`,
+      `sourceUrl: ${JSON.stringify(input.item.link || "")}`,
+      `publishedAt: ${JSON.stringify(input.item.pubDate || "")}`,
+      `savedAt: ${JSON.stringify(new Date().toISOString())}`,
+      `contentBasis: ${JSON.stringify(input.contentBasis)}`,
+    ];
+    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+    if (!match) return `---\n${ownedLines.join("\n")}\n---\n\n${content}`;
+    const ownedKeys = new Set([
+      "rssDashboardId",
+      "source",
+      "sourceUrl",
+      "publishedAt",
+      "savedAt",
+      "contentBasis",
+    ]);
+    const retained = match[1].split(/\r?\n/).filter((line) => {
+      const key = line.match(/^\s*([A-Za-z][A-Za-z0-9]*):/)?.[1];
+      return !key || !ownedKeys.has(key);
+    });
+    const frontmatter = [...ownedLines, ...retained].join("\n");
+    return `---\n${frontmatter}\n---\n${content.slice(match[0].length)}`;
+  }
+
+  private applySavedState(item: FeedItem, filePath: string): void {
+    item.saved = true;
+    item.savedFilePath = filePath;
+    if (
+      this.settings.addSavedTag &&
+      (!item.tags || !item.tags.some((tag) => tag.name.toLowerCase() === "saved"))
+    ) {
+      const savedTag = { name: "Saved", color: "#3498db" };
+      if (!item.tags) item.tags = [savedTag];
+      else item.tags.push(savedTag);
+    }
+  }
+
+  private async returnExistingNote(
+    item: FeedItem,
+    file: TFile,
+    itemId: string,
+  ): Promise<TFile> {
+    this.applySavedState(item, file.path);
+    await this.syncSavedNoteMetadata(itemId, item, file.path);
+    const leaf = this.app.workspace.getLeaf(false) as unknown as {
+      openFile?: (target: TFile) => Promise<void>;
+    };
+    if (typeof leaf.openFile === "function") await leaf.openFile(file);
+    return file;
+  }
+
+  private async syncSavedNoteMetadata(
+    itemId: string,
+    item: FeedItem,
+    filePath: string,
+  ): Promise<void> {
+    if (!this.collectionSettings) return;
+    try {
+      await new CollectionRepository(
+        this.app.vault,
+        this.collectionSettings.dataFolder,
+        () => new Date(),
+      ).updateFlags(itemId, {
+        read: item.read ?? false,
+        starred: item.starred ?? false,
+        saved: true,
+        savedNotePath: filePath,
+      });
+    } catch {
+      console.warn(SAVED_NOTE_SYNC_WARNING);
+    }
+  }
+
+  private getExplicitContentCoordinator(): ExplicitContentCoordinator {
+    this.explicitContentCoordinator ??= new ExplicitContentCoordinator(
+      this.app.vault,
+    );
+    return this.explicitContentCoordinator;
   }
 
   async fixSavedFilePaths(articles: FeedItem[]): Promise<void> {

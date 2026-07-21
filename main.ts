@@ -385,7 +385,12 @@ export default class RssDashboardPlugin extends Plugin {
       () => this.settings.folders,
       () => this.settings.corsProxyEnabled,
     );
-    this.articleSaver = new ArticleSaver(this.app, this.settings.articleSaving);
+    this.articleSaver = new ArticleSaver(
+      this.app,
+      this.settings.articleSaving,
+      undefined,
+      this.settings.collection,
+    );
     this.importExportService = new ImportExportService({
       settings: this.settings,
       isMobile: Platform.isMobileApp,

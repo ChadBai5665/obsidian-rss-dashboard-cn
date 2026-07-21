@@ -30,16 +30,21 @@ export function normalizeFeedItem(
   const guid = nonEmpty(item.guid);
   const url = canonicalizeUrl(item.link);
 
+  const id = isStableItemId(item.rssDashboardId)
+    ? item.rssDashboardId
+    : createCollectedItemId({
+        sourceId,
+        guid,
+        url: item.link,
+        title: item.title,
+        author,
+        publishedAt,
+      });
+  item.rssDashboardId = id;
+
   return {
     schemaVersion: 1,
-    id: createCollectedItemId({
-      sourceId,
-      guid,
-      url: item.link,
-      title: item.title,
-      author,
-      publishedAt,
-    }),
+    id,
     sourceType,
     sourceId,
     sourceName: feed.title,
@@ -63,6 +68,10 @@ export function normalizeFeedItem(
     savedNotePath: nonEmpty(item.savedFilePath),
     collectionStatus: "collected",
   };
+}
+
+function isStableItemId(value: string | undefined): value is string {
+  return value !== undefined && /^[a-f0-9]{64}$/.test(value);
 }
 
 export function normalizeFeedItemExcerpt(
