@@ -26,10 +26,15 @@ interface PreparedRewrite {
 
 interface QuarantineJournal {
   schemaVersion: 1;
+  stage: "prepared" | "committed";
   sourceFingerprint: string;
-  sourceMtime: number | null;
+  sourceBackupPath: string;
   sidecarAfter: string;
   cleanedCollection: string;
+}
+
+interface AtomicWriteOptions {
+  retainedBackupPath?: string;
 }
 
 type FlagPatch = Pick<
@@ -321,6 +326,7 @@ export class CollectionRepository {
   }
 
   private async readCollection(path: string): Promise<ParsedCollection> {
+    await this.recoverQuarantineTransaction(path);
     await this.recoverAtomicTarget(path);
     if (!(await this.vault.adapter.exists(path))) {
       return { items: [], corruptLines: [] };
@@ -330,8 +336,7 @@ export class CollectionRepository {
     const parsed = parseCollection(raw);
 
     if (parsed.corruptLines.length > 0) {
-      const stat = await this.vault.adapter.stat(path);
-      await this.quarantineCorruptLines(path, raw, stat?.mtime ?? null, parsed);
+      await this.quarantineCorruptLines(path, raw, parsed);
       return { items: parsed.items, corruptLines: [] };
     }
 
@@ -342,7 +347,6 @@ export class CollectionRepository {
   private async quarantineCorruptLines(
     dailyPath: string,
     sourceRaw: string,
-    sourceMtime: number | null,
     parsed: ParsedCollection,
   ): Promise<void> {
     const sidecarPath = `${dailyPath}.corrupt`;
@@ -356,24 +360,37 @@ export class CollectionRepository {
     const sourceFingerprint = fingerprint(sourceRaw);
     const pending = await this.readQuarantineJournal(journalPath);
     const samePendingBatch =
-      pending?.sourceFingerprint === sourceFingerprint &&
-      pending.sourceMtime === sourceMtime;
+      pending?.stage === "prepared" &&
+      pending.sourceFingerprint === sourceFingerprint;
     const sidecarAfter = samePendingBatch
       ? pending.sidecarAfter
       : appendRawLines(existing, parsed.corruptLines);
     const cleanedCollection = serializeCollection(parsed.items);
-    const journal: QuarantineJournal = {
-      schemaVersion: 1,
-      sourceFingerprint,
-      sourceMtime,
-      sidecarAfter,
-      cleanedCollection,
-    };
+    const journal: QuarantineJournal = samePendingBatch
+      ? pending
+      : {
+          schemaVersion: 1,
+          stage: "prepared",
+          sourceFingerprint,
+          sourceBackupPath: `${dailyPath}.backup-quarantine-${this.nextWriteId()}`,
+          sidecarAfter,
+          cleanedCollection,
+        };
 
     await this.atomicWrite(journalPath, `${JSON.stringify(journal)}\n`);
     await this.atomicWrite(sidecarPath, sidecarAfter);
-    await this.atomicWrite(dailyPath, cleanedCollection);
+    await this.atomicWrite(dailyPath, cleanedCollection, {
+      retainedBackupPath: journal.sourceBackupPath,
+    });
+    const committed: QuarantineJournal = { ...journal, stage: "committed" };
+    try {
+      await this.atomicWrite(journalPath, `${JSON.stringify(committed)}\n`);
+    } catch {
+      // Canonical and sidecar are durable; topology allows later recovery.
+      return;
+    }
     await this.bestEffortRemove(journalPath);
+    await this.bestEffortRemove(journal.sourceBackupPath);
   }
 
   private async readQuarantineJournal(
@@ -390,15 +407,66 @@ export class CollectionRepository {
     }
   }
 
+  private async recoverQuarantineTransaction(dailyPath: string): Promise<void> {
+    const journalPath = `${dailyPath}.quarantine-journal.json`;
+    await this.recoverAtomicTarget(journalPath);
+    const journal = await this.readQuarantineJournal(journalPath);
+    if (!journal) {
+      return;
+    }
+
+    const canonicalExists = await this.vault.adapter.exists(dailyPath);
+    const backupExists = await this.vault.adapter.exists(
+      journal.sourceBackupPath,
+    );
+
+    if (journal.stage === "committed") {
+      await this.bestEffortRemove(journalPath);
+      await this.bestEffortRemove(journal.sourceBackupPath);
+      return;
+    }
+
+    if (!canonicalExists && backupExists) {
+      await this.restoreBackup(journal.sourceBackupPath, dailyPath);
+      return;
+    }
+
+    if (canonicalExists && backupExists) {
+      const committed: QuarantineJournal = {
+        ...journal,
+        stage: "committed",
+      };
+      await this.atomicWrite(journalPath, `${JSON.stringify(committed)}\n`);
+      await this.bestEffortRemove(journalPath);
+      await this.bestEffortRemove(journal.sourceBackupPath);
+    }
+  }
+
+  private async restoreBackup(backupPath: string, path: string): Promise<void> {
+    const adapter = this.vault.adapter as Partial<DataAdapter>;
+    if (typeof adapter.rename === "function") {
+      await adapter.rename.call(this.vault.adapter, backupPath, path);
+      return;
+    }
+
+    const content = await this.vault.adapter.read(backupPath);
+    await this.vault.adapter.write(path, content);
+    await this.bestEffortRemove(backupPath);
+  }
+
   private async cleanupQuarantineJournal(dailyPath: string): Promise<void> {
     const journalPath = `${dailyPath}.quarantine-journal.json`;
     await this.recoverAtomicTarget(journalPath);
     await this.bestEffortRemove(journalPath);
   }
 
-  private async atomicWrite(path: string, content: string): Promise<void> {
+  private async atomicWrite(
+    path: string,
+    content: string,
+    options: AtomicWriteOptions = {},
+  ): Promise<void> {
     await this.recoverAtomicTarget(path);
-    const writeId = `${this.clock().getTime()}-${this.tempSequence++}`;
+    const writeId = this.nextWriteId();
     const tempPath = `${path}.tmp-${writeId}`;
     await this.vault.adapter.write(tempPath, content);
 
@@ -413,7 +481,8 @@ export class CollectionRepository {
         throw new Error("Adapter remove is unavailable for atomic replacement");
       }
 
-      const backupPath = `${path}.backup-${writeId}`;
+      const backupPath =
+        options.retainedBackupPath ?? `${path}.backup-${writeId}`;
       await adapter.rename.call(this.vault.adapter, path, backupPath);
       try {
         await adapter.rename.call(this.vault.adapter, tempPath, path);
@@ -429,12 +498,30 @@ export class CollectionRepository {
         }
         throw replaceError;
       }
-      await this.bestEffortRemove(backupPath);
+      if (!options.retainedBackupPath) {
+        await this.bestEffortRemove(backupPath);
+      }
       return;
     }
 
-    await this.vault.adapter.write(path, content);
+    const targetExists = await this.vault.adapter.exists(path);
+    if (options.retainedBackupPath && targetExists) {
+      const previous = await this.vault.adapter.read(path);
+      await this.vault.adapter.write(options.retainedBackupPath, previous);
+    }
+    try {
+      await this.vault.adapter.write(path, content);
+    } catch (writeError) {
+      if (options.retainedBackupPath) {
+        await this.bestEffortRemove(options.retainedBackupPath);
+      }
+      throw writeError;
+    }
     await this.bestEffortRemove(tempPath);
+  }
+
+  private nextWriteId(): string {
+    return `${this.clock().getTime()}-${this.tempSequence++}`;
   }
 
   private async recoverAtomicTarget(path: string): Promise<void> {
@@ -478,6 +565,10 @@ export class CollectionRepository {
       }
       restored = backup;
       break;
+    }
+
+    if (!restored) {
+      return;
     }
 
     const staleSiblings = [...backups, ...temps].filter(
@@ -575,7 +666,7 @@ function parentPath(path: string): string {
 
 function isValidAtomicContent(path: string, content: string): boolean {
   if (/\/collections\/\d{4}-\d{2}-\d{2}\.jsonl$/.test(path)) {
-    return parseCollection(content).corruptLines.length === 0;
+    return true;
   }
   if (path.endsWith("/state/item-index.json")) {
     try {
@@ -631,8 +722,9 @@ function isQuarantineJournal(value: unknown): value is QuarantineJournal {
   return (
     isRecord(value) &&
     value.schemaVersion === 1 &&
+    (value.stage === "prepared" || value.stage === "committed") &&
     typeof value.sourceFingerprint === "string" &&
-    (value.sourceMtime === null || typeof value.sourceMtime === "number") &&
+    typeof value.sourceBackupPath === "string" &&
     typeof value.sidecarAfter === "string" &&
     typeof value.cleanedCollection === "string"
   );

@@ -15,6 +15,7 @@ class InMemoryAdapter {
   private nextRenameFailure: ((from: string, to: string) => boolean) | null =
     null;
   private nextRemoveFailure: ((path: string) => boolean) | null = null;
+  private statOverride: number | null | undefined;
 
   async exists(path: string): Promise<boolean> {
     return this.files.has(path) || this.directories.has(path);
@@ -37,6 +38,9 @@ class InMemoryAdapter {
   }
 
   async stat(path: string): Promise<{ mtime: number } | null> {
+    if (this.statOverride !== undefined) {
+      return this.statOverride === null ? null : { mtime: this.statOverride };
+    }
     const mtime = this.mtimes.get(path);
     return mtime === undefined ? null : { mtime };
   }
@@ -120,6 +124,10 @@ class InMemoryAdapter {
 
   failNextRemoveWhere(predicate: (path: string) => boolean): void {
     this.nextRemoveFailure = predicate;
+  }
+
+  setStatOverride(mtime: number | null): void {
+    this.statOverride = mtime;
   }
 
   hasDirectory(path: string): boolean {
@@ -731,5 +739,77 @@ describe("CollectionRepository", () => {
     );
     await expect(repository.listByDate("2026-07-21")).resolves.toHaveLength(1);
     expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\n");
+  });
+
+  it("restores a corrupt collection backup before quarantining its raw line", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const backupPath = `${dailyPath}.backup-200-1`;
+    const tempPath = `${dailyPath}.tmp-200-1`;
+    const valid = await adapter.read(dailyPath);
+    await adapter.write(dailyPath, `${valid}bad\n`);
+    await adapter.write(tempPath, valid);
+    await adapter.rename(dailyPath, backupPath);
+
+    const recovered = createRepository(adapter);
+    await expect(recovered.listByDate("2026-07-21")).resolves.toEqual([
+      createItem(),
+    ]);
+    expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\n");
+    expect(await adapter.read(dailyPath)).toBe(valid);
+    expect(await adapter.exists(backupPath)).toBe(false);
+    expect(await adapter.exists(tempPath)).toBe(false);
+  });
+
+  it.each([
+    ["constant", 7],
+    ["null", null],
+  ] as const)(
+    "records a later identical corrupt line when source mtime is %s",
+    async (_label, mtime) => {
+      const { adapter, repository } = createHarness();
+      adapter.setStatOverride(mtime);
+      await repository.upsertDaily([createItem()], "2026-07-21");
+      const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+      const journalPath = `${dailyPath}.quarantine-journal.json`;
+      const valid = await adapter.read(dailyPath);
+      await adapter.write(dailyPath, `${valid}bad\n`);
+      adapter.failNextRemoveWhere((path) => path === journalPath);
+      await repository.listByDate("2026-07-21");
+      expect(await adapter.exists(journalPath)).toBe(true);
+
+      await adapter.write(dailyPath, `${valid}bad\n`);
+      await repository.listByDate("2026-07-21");
+
+      expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\nbad\n");
+    },
+  );
+
+  it("uses retained source backup to finish a prepared journal before a later identical occurrence", async () => {
+    const { adapter, repository } = createHarness();
+    adapter.setStatOverride(null);
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const journalPath = `${dailyPath}.quarantine-journal.json`;
+    const valid = await adapter.read(dailyPath);
+    await adapter.write(dailyPath, `${valid}bad\n`);
+    let journalWrites = 0;
+    adapter.failNextWriteWhere((path) => {
+      if (!path.startsWith(`${journalPath}.tmp-`)) {
+        return false;
+      }
+      journalWrites += 1;
+      return journalWrites === 2;
+    });
+
+    await repository.listByDate("2026-07-21");
+    expect(await adapter.exists(journalPath)).toBe(true);
+    expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\n");
+
+    await adapter.write(dailyPath, `${valid}bad\n`);
+    await repository.listByDate("2026-07-21");
+
+    expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\nbad\n");
   });
 });
