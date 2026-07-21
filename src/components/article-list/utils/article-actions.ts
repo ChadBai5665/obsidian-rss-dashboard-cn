@@ -171,7 +171,6 @@ export function createStarToggle(
   const toggleStar = (e: Event) => {
     e.stopPropagation();
     const newStarState = !arg.article.starred;
-    arg.article.starred = newStarState;
     arg.callbacks.onArticleUpdate?.(
       arg.article,
       { starred: newStarState },

@@ -755,7 +755,7 @@ describe("refreshFeeds() pipeline behavior", () => {
 
   it("writes durable read/starred/saved cancellation flags by stable collection ID and refreshes every dashboard", async () => {
     const article = createItem({
-      rssDashboardId: "stable-item-id",
+      rssDashboardId: "a".repeat(64),
       read: true,
       starred: true,
       saved: false,
@@ -772,17 +772,50 @@ describe("refreshFeeds() pipeline behavior", () => {
     const updateFlags = vi
       .spyOn(CollectionRepository.prototype, "updateFlags")
       .mockResolvedValue(undefined);
+    vi.spyOn(CollectionRepository.prototype, "findById").mockResolvedValue({
+      read: false,
+      starred: false,
+      saved: true,
+      savedNotePath: "Information/Saved.md",
+    } as never);
     plugin.refreshDashboardViews = vi.fn().mockResolvedValue(undefined);
 
     await plugin.updateArticle(article.guid, source.url, { saved: false });
 
-    expect(updateFlags).toHaveBeenCalledWith("stable-item-id", {
+    expect(updateFlags).toHaveBeenCalledWith("a".repeat(64), {
       read: true,
       starred: true,
       saved: false,
       savedNotePath: undefined,
     });
     expect(plugin.refreshDashboardViews).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps feed state unchanged when durable collection status persistence fails", async () => {
+    const stableId = "b".repeat(64);
+    const article = createItem({ rssDashboardId: stableId, read: false });
+    const source = createFeed({ items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
+    };
+    vi.spyOn(CollectionRepository.prototype, "findById").mockResolvedValue({
+      read: false,
+      starred: false,
+      saved: false,
+    } as never);
+    vi.spyOn(CollectionRepository.prototype, "updateFlags").mockRejectedValue(
+      new Error("vault/private?token=secret"),
+    );
+
+    await expect(plugin.updateArticle(article.guid, source.url, { read: true })).resolves.toBe(false);
+
+    expect(source.items[0].read).toBe(false);
+    expect(plugin.saveData).not.toHaveBeenCalled();
+    expect(getNoticeMessages(consoleLogSpy).join(" ")).not.toContain("secret");
   });
 
   it("contains failed-source ledger errors without exposing raw source data", async () => {

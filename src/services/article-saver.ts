@@ -91,17 +91,25 @@ export class ArticleSaver {
   private corsProxyUrl: string | undefined;
   private collectionSettings: CollectionSettings | undefined;
   private explicitContentCoordinator: ExplicitContentCoordinator | undefined;
+  private collectionSyncCallbacks:
+    | { onMetadataSyncFailed?: () => void; onMetadataSyncSucceeded?: () => void }
+    | undefined;
 
   constructor(
     app: App,
     settings: ArticleSavingSettings,
     corsProxyUrl?: string,
     collectionSettings?: CollectionSettings,
+    collectionSyncCallbacks?: {
+      onMetadataSyncFailed?: () => void;
+      onMetadataSyncSucceeded?: () => void;
+    },
   ) {
     this.app = app;
     this.settings = settings;
     this.corsProxyUrl = corsProxyUrl;
     this.collectionSettings = collectionSettings;
+    this.collectionSyncCallbacks = collectionSyncCallbacks;
     this.turndownService = new TurndownService();
 
     this.turndownService.addRule("math", {
@@ -1528,8 +1536,13 @@ guid: "{{guid}}"
         trigger?: (name: string) => void;
       };
       workspace.trigger?.("rss-dashboard:collection-flags-updated");
+      this.collectionSyncCallbacks?.onMetadataSyncSucceeded?.();
     } catch {
       console.warn(SAVED_NOTE_SYNC_WARNING);
+      this.collectionSyncCallbacks?.onMetadataSyncFailed?.();
+      new Notice(
+        "Saved note metadata could not be updated. The note remains saved and will be repaired later.",
+      );
     }
   }
 

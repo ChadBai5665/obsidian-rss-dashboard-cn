@@ -127,6 +127,30 @@ type FeedRefreshFailureCode =
   | "collection-failed"
   | "state-failed";
 
+type CollectionFlagState = Pick<
+  CollectedItem,
+  "read" | "starred" | "saved" | "savedNotePath"
+>;
+
+function collectionFlagsFromItem(item: CollectedItem): CollectionFlagState {
+  return {
+    read: item.read,
+    starred: item.starred,
+    saved: item.saved,
+    savedNotePath: item.savedNotePath,
+  };
+}
+
+function applyCollectionFlags(
+  article: FeedItem,
+  flags: CollectionFlagState,
+): void {
+  article.read = flags.read;
+  article.starred = flags.starred;
+  article.saved = flags.saved;
+  article.savedFilePath = flags.savedNotePath;
+}
+
 class FeedRefreshPipelineError extends Error {
   constructor(
     readonly code: FeedRefreshFailureCode,
@@ -1309,7 +1333,6 @@ export default class RssDashboardPlugin extends Plugin {
             savedFilePath: originalItem.savedFilePath,
             tags: originalItem.tags ? [...originalItem.tags] : [],
           });
-          await this.refreshDashboardViews();
         }
       }
     }
@@ -1338,20 +1361,11 @@ export default class RssDashboardPlugin extends Plugin {
     const originalItem = resolvedFeed.items.find((i) => i.guid === item.guid);
     if (!originalItem) return;
 
-    // Reflect updates in open dashboard/reader views immediately, then persist.
-    Object.assign(originalItem, normalizedUpdates);
-    await this.syncDashboardArticleUpdate(
-      item.guid,
-      resolvedFeedUrl,
-      normalizedUpdates,
-      !!shouldRerender,
-    );
-    await this.syncReaderArticleUpdate(item.guid, normalizedUpdates);
     await this.updateArticle(
       item.guid,
       resolvedFeedUrl,
       normalizedUpdates,
-      false,
+      shouldRerender,
     );
   }
 
@@ -1523,6 +1537,7 @@ export default class RssDashboardPlugin extends Plugin {
 
   async refreshSelectedFeed(feed: Feed) {
     try {
+      this.cancelPendingStartupRefresh();
       if (!this.feedParser) {
         console.warn(
           "[RSS dashboard] Feed parser not initialized; skipping refresh.",
@@ -1539,6 +1554,7 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   async refreshFeedsInFolder(folderPath: string) {
+    this.cancelPendingStartupRefresh();
     const feedsInFolder = this.settings.feeds.filter((feed) => {
       if (!feed.folder) return false;
       return (
@@ -1558,50 +1574,145 @@ export default class RssDashboardPlugin extends Plugin {
     feedUrl: string,
     updates: Partial<FeedItem>,
     shouldRefreshView = true,
-  ) {
+    options?: {
+      suppressCollectionBroadcast?: boolean;
+      forceCollectionPathSync?: boolean;
+    },
+  ): Promise<boolean> {
     const feed = this.settings.feeds.find((f) => f.url === feedUrl);
-    if (!feed) return;
+    if (!feed) return false;
 
     const article = feed.items.find((item) => item.guid === articleGuid);
-    if (!article) return;
+    if (!article) return false;
 
-    Object.assign(article, updates);
-
-    await this.saveSettings();
-    if (
-      article.rssDashboardId &&
-      (updates.read !== undefined ||
-        updates.starred !== undefined ||
-        (updates.saved !== undefined && updates.saved !== true))
-    ) {
-      await this.syncCollectionFlags(article);
+    const isCollectionFlagMutation =
+      updates.read !== undefined ||
+      updates.starred !== undefined ||
+      (updates.saved !== undefined && updates.saved !== true) ||
+      options?.forceCollectionPathSync === true;
+    const transactionResult = isCollectionFlagMutation
+      ? await this.commitCollectionFlagTransaction(article, updates)
+      : (await this.commitFeedOnlyArticleUpdate(article, updates))
+        ? "feed-only"
+        : "failed";
+    if (transactionResult === "failed") {
+      return false;
     }
 
     if (shouldRefreshView) {
       await this.refreshDashboardViews();
     }
 
+    await this.syncDashboardArticleUpdate(articleGuid, feedUrl, updates, false);
     await this.syncReaderArticleUpdate(articleGuid, updates);
+    if (
+      transactionResult === "collection" &&
+      !options?.suppressCollectionBroadcast
+    ) {
+      this.emitCollectionFlagsUpdated();
+    }
+    return true;
   }
 
-  private async syncCollectionFlags(article: FeedItem): Promise<void> {
-    if (!article.rssDashboardId) return;
+  public async updateSavedNotePath(
+    articleGuid: string,
+    feedUrl: string,
+    savedFilePath: string,
+  ): Promise<boolean> {
+    return await this.updateArticle(
+      articleGuid,
+      feedUrl,
+      { saved: true, savedFilePath },
+      false,
+      { forceCollectionPathSync: true },
+    );
+  }
+
+  private async commitFeedOnlyArticleUpdate(
+    article: FeedItem,
+    updates: Partial<FeedItem>,
+  ): Promise<boolean> {
+    Object.assign(article, updates);
     try {
-      await new CollectionRepository(
-        this.app.vault,
-        this.settings.collection.dataFolder.trim(),
-        () => new Date(),
-      ).updateFlags(article.rssDashboardId, {
-        read: article.read ?? false,
-        starred: article.starred ?? false,
-        saved: article.saved ?? false,
-        savedNotePath: article.savedFilePath,
-      });
+      await this.saveSettings();
+      return true;
     } catch {
-      // Never put vault paths, URLs, or source content into a user-visible error.
-      console.warn("[RSS Dashboard] Collection status sync failed.");
-      new Notice("Collection status could not be saved. Please try again.");
+      new Notice("Article status could not be saved. Please try again.");
+      return false;
     }
+  }
+
+  private async commitCollectionFlagTransaction(
+    article: FeedItem,
+    updates: Partial<FeedItem>,
+  ): Promise<"failed" | "feed-only" | "collection"> {
+    const itemId = article.rssDashboardId;
+    if (!itemId || !/^[a-f0-9]{64}$/.test(itemId)) {
+      // Older feed-only entries remain supported, but are not represented as a
+      // collection update and therefore deliberately emit no collection event.
+      return (await this.commitFeedOnlyArticleUpdate(article, updates))
+        ? "feed-only"
+        : "failed";
+    }
+
+    const repository = new CollectionRepository(
+      this.app.vault,
+      this.settings.collection.dataFolder.trim(),
+      () => new Date(),
+    );
+    let previous;
+    try {
+      previous = await repository.findById(itemId);
+    } catch {
+      new Notice("Collection status could not be saved. Please try again.");
+      return "failed";
+    }
+    if (!previous) {
+      return (await this.commitFeedOnlyArticleUpdate(article, updates))
+        ? "feed-only"
+        : "failed";
+    }
+
+    const previousFeedState = collectionFlagsFromItem(previous);
+    const desired = {
+      read: updates.read ?? article.read ?? previous.read,
+      starred: updates.starred ?? article.starred ?? previous.starred,
+      saved: updates.saved ?? article.saved ?? previous.saved,
+      savedNotePath:
+        updates.saved === false
+          ? undefined
+          : updates.savedFilePath ?? article.savedFilePath ?? previous.savedNotePath,
+    };
+    try {
+      await repository.updateFlags(itemId, desired);
+    } catch {
+      applyCollectionFlags(article, previousFeedState);
+      new Notice("Collection status could not be saved. Please try again.");
+      return "failed";
+    }
+
+    Object.assign(article, updates);
+    try {
+      await this.saveSettings();
+      return "collection";
+    } catch {
+      applyCollectionFlags(article, previousFeedState);
+      try {
+        await repository.updateFlags(itemId, previousFeedState);
+      } catch {
+        new Notice("Collection status repair is required. Please try again.");
+        return "failed";
+      }
+      new Notice("Article status could not be saved. Please try again.");
+      return "failed";
+    }
+  }
+
+  private emitCollectionFlagsUpdated(): void {
+    const workspace = this.app.workspace as typeof this.app.workspace & {
+      trigger?: (name: string) => void;
+    };
+    workspace.trigger?.("rss-dashboard:collection-flags-updated");
   }
 
   importOpml(): void {
@@ -3265,27 +3376,28 @@ export default class RssDashboardPlugin extends Plugin {
         if (item.saved) {
           const fileExists = await this.articleSaver.checkSavedFileExists(item);
           if (!fileExists) {
-            item.saved = false;
-            item.savedFilePath = undefined;
-
-            if (item.tags) {
-              item.tags = item.tags.filter(
-                (tag) => tag.name.toLowerCase() !== "saved",
-              );
-            }
-            updatedCount++;
+            const updated = await this.updateArticle(
+              item.guid,
+              feed.url,
+              {
+                saved: false,
+                savedFilePath: undefined,
+                tags: item.tags?.filter(
+                  (tag) => tag.name.toLowerCase() !== "saved",
+                ),
+              },
+              false,
+              { suppressCollectionBroadcast: true },
+            );
+            if (updated) updatedCount++;
           }
         }
       }
     }
 
     if (updatedCount > 0) {
-      await this.saveSettings();
-
-      const view = await this.getActiveDashboardView();
-      if (view) {
-        view.render();
-      }
+      this.emitCollectionFlagsUpdated();
+      await this.refreshDashboardViews();
     }
   }
 

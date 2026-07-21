@@ -44,6 +44,7 @@
   gap: 6px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--background-modifier-border);
+  overflow: hidden;
 }
 
 .rss-dashboard-collection-controls,
@@ -51,6 +52,12 @@
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+
+.rss-dashboard-collection-filter-controls {
+  flex: 0 0 auto;
+  max-height: 6rem;
+  overflow: auto;
 }
 
 .rss-dashboard-collection-controls button,
@@ -67,6 +74,7 @@
 }
 
 .rss-dashboard-collection-results {
+  flex: 1 1 auto;
   min-height: 0;
   overflow: hidden;
 }

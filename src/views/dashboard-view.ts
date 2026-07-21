@@ -488,10 +488,9 @@ export class RssDashboardView extends ItemView {
    */
   public async actionToggleReadStatus(): Promise<void> {
     if (this.selectedArticle) {
-      this.selectedArticle.read = !this.selectedArticle.read;
       await this.handleArticleUpdate(
         this.selectedArticle,
-        { read: this.selectedArticle.read },
+        { read: !this.selectedArticle.read },
         false,
       );
     }
@@ -512,10 +511,9 @@ export class RssDashboardView extends ItemView {
    */
   public async actionToggleStarStatus(): Promise<void> {
     if (this.selectedArticle) {
-      this.selectedArticle.starred = !this.selectedArticle.starred;
       await this.handleArticleUpdate(
         this.selectedArticle,
-        { starred: this.selectedArticle.starred },
+        { starred: !this.selectedArticle.starred },
         false,
       );
     }
@@ -1105,6 +1103,14 @@ export class RssDashboardView extends ItemView {
         return;
       }
       this.collectionItems = items;
+      const availableTypes = new Set(items.map((item) => item.sourceType));
+      const availableTopics = new Set(items.flatMap((item) => item.topics));
+      this.collectionSourceTypes = new Set(
+        [...this.collectionSourceTypes].filter((type) => availableTypes.has(type)),
+      );
+      this.collectionTopics = new Set(
+        [...this.collectionTopics].filter((topic) => availableTopics.has(topic)),
+      );
     } catch {
       if (this.collectionViewDisposed || generation !== this.collectionLoadGeneration) {
         return;
@@ -2672,6 +2678,7 @@ export class RssDashboardView extends ItemView {
   }
 
   private async handleRefreshFeeds(): Promise<void> {
+    this.plugin.cancelPendingStartupRefresh();
     if (this.currentFeed) {
       await this.plugin.refreshSelectedFeed(this.currentFeed);
     } else if (
@@ -3043,20 +3050,19 @@ export class RssDashboardView extends ItemView {
 
     if (!originalArticle) return;
 
-    Object.assign(originalArticle, normalizedUpdates);
-    Object.assign(article, normalizedUpdates);
-
-    if (normalizedUpdates.tags) {
-      originalArticle.tags = normalizedUpdates.tags;
-      article.tags = normalizedUpdates.tags;
-    }
-
-    await this.plugin.updateArticle(
+    const didUpdate = await this.plugin.updateArticle(
       originalArticle.guid,
       feed.url,
       normalizedUpdates,
       false,
     );
+    if (didUpdate === false) {
+      Object.assign(article, originalArticle);
+      return;
+    }
+
+    Object.assign(article, normalizedUpdates);
+    if (normalizedUpdates.tags) article.tags = normalizedUpdates.tags;
 
     if (shouldRerender) {
       void this.render();
@@ -4583,21 +4589,28 @@ export class RssDashboardView extends ItemView {
   }
 
   private handleFileDeleted(file: TFile): void {
+    void this.reconcileDeletedSavedFile(file);
+  }
+
+  private async reconcileDeletedSavedFile(file: TFile): Promise<void> {
     const allArticles = this.getAllArticles();
     const affectedArticles = allArticles.filter(
       (article) => article.saved && article.savedFilePath === file.path,
     );
 
-    affectedArticles.forEach((article) => {
-      article.saved = false;
-      article.savedFilePath = undefined;
-
-      if (article.tags) {
-        article.tags = article.tags.filter(
-          (tag) => tag.name.toLowerCase() !== "saved",
-        );
-      }
-    });
+    for (const article of affectedArticles) {
+      await this.updateArticleStatus(
+        article,
+        {
+          saved: false,
+          savedFilePath: undefined,
+          tags: article.tags?.filter(
+            (tag) => tag.name.toLowerCase() !== "saved",
+          ),
+        },
+        false,
+      );
+    }
 
     if (affectedArticles.length > 0) {
       void this.render();
@@ -4605,21 +4618,27 @@ export class RssDashboardView extends ItemView {
   }
 
   private handleFileRenamed(file: TFile, oldPath: string): void {
+    void this.reconcileRenamedSavedFile(file, oldPath);
+  }
+
+  private async reconcileRenamedSavedFile(
+    file: TFile,
+    oldPath: string,
+  ): Promise<void> {
     const allArticles = this.getAllArticles();
     const affectedArticles = allArticles.filter(
       (article) => article.saved && article.savedFilePath === oldPath,
     );
 
-    affectedArticles.forEach((article) => {
-      article.saved = false;
-      article.savedFilePath = file.path;
-
-      if (article.tags) {
-        article.tags = article.tags.filter(
-          (tag) => tag.name.toLowerCase() !== "saved",
-        );
-      }
-    });
+    for (const article of affectedArticles) {
+      // ArticleSaver's strict ownership lookup has already established the
+      // saved-note identity; a rename changes only its durable path.
+      await this.plugin.updateSavedNotePath(
+        article.guid,
+        article.feedUrl,
+        file.path,
+      );
+    }
 
     if (affectedArticles.length > 0) {
       void this.render();
