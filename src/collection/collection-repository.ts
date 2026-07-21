@@ -294,7 +294,15 @@ export class CollectionRepository {
 
     let listed = await this.vault.adapter.list(this.collectionsPath);
     const interruptedTargets = new Set<string>();
+    const quarantineTargets = new Set<string>();
     for (const path of listed.files) {
+      const quarantineMatch = path.match(
+        /^(.*\/\d{4}-\d{2}-\d{2}\.jsonl)\.backup-quarantine-[^/]+$/,
+      );
+      if (quarantineMatch) {
+        quarantineTargets.add(quarantineMatch[1]);
+        continue;
+      }
       const match = path.match(
         /^(.*\/\d{4}-\d{2}-\d{2}\.jsonl)\.(?:backup|tmp)-[^/]+$/,
       );
@@ -302,10 +310,13 @@ export class CollectionRepository {
         interruptedTargets.add(match[1]);
       }
     }
+    for (const path of quarantineTargets) {
+      await this.recoverQuarantineTransaction(path);
+    }
     for (const path of interruptedTargets) {
       await this.recoverAtomicTarget(path);
     }
-    if (interruptedTargets.size > 0) {
+    if (quarantineTargets.size > 0 || interruptedTargets.size > 0) {
       listed = await this.vault.adapter.list(this.collectionsPath);
     }
 
@@ -532,14 +543,7 @@ export class CollectionRepository {
       const previous = await this.vault.adapter.read(path);
       await this.vault.adapter.write(options.retainedBackupPath, previous);
     }
-    try {
-      await this.vault.adapter.write(path, content);
-    } catch (writeError) {
-      if (options.retainedBackupPath) {
-        await this.bestEffortRemove(options.retainedBackupPath);
-      }
-      throw writeError;
-    }
+    await this.vault.adapter.write(path, content);
     await this.bestEffortRemove(tempPath);
   }
 
@@ -554,8 +558,13 @@ export class CollectionRepository {
     }
 
     const listed = await this.vault.adapter.list(parent);
+    const quarantineBackupPrefix = `${path}.backup-quarantine-`;
     const backups = listed.files
-      .filter((candidate) => candidate.startsWith(`${path}.backup-`))
+      .filter(
+        (candidate) =>
+          candidate.startsWith(`${path}.backup-`) &&
+          !candidate.startsWith(quarantineBackupPrefix),
+      )
       .sort()
       .reverse();
     const temps = listed.files.filter((candidate) =>

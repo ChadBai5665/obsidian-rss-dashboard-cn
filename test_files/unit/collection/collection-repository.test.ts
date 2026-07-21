@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import type { Vault } from "obsidian";
 import { describe, expect, it } from "vitest";
 import { CollectionRepository } from "../../../src/collection/collection-repository";
@@ -12,6 +13,7 @@ class InMemoryAdapter {
   private readonly directories = new Set<string>();
   private time = 0;
   private nextWriteFailure: ((path: string) => boolean) | null = null;
+  private nextPartialWriteFailure: ((path: string) => boolean) | null = null;
   private nextRenameFailure: ((from: string, to: string) => boolean) | null =
     null;
   private nextRemoveFailure: ((path: string) => boolean) | null = null;
@@ -49,6 +51,20 @@ class InMemoryAdapter {
     if (this.nextWriteFailure?.(path)) {
       this.nextWriteFailure = null;
       throw new Error(`Injected write failure: ${path}`);
+    }
+
+    if (this.nextPartialWriteFailure?.(path)) {
+      this.nextPartialWriteFailure = null;
+      const parent = parentPath(path);
+      if (parent && !this.directories.has(parent)) {
+        throw new Error(`Missing parent directory: ${parent}`);
+      }
+      this.files.set(
+        path,
+        content.slice(0, Math.max(1, Math.floor(content.length / 2))),
+      );
+      this.mtimes.set(path, ++this.time);
+      throw new Error(`Injected partial write failure: ${path}`);
     }
 
     const parent = parentPath(path);
@@ -118,6 +134,10 @@ class InMemoryAdapter {
     this.nextWriteFailure = predicate;
   }
 
+  partiallyWriteThenFailNextWhere(predicate: (path: string) => boolean): void {
+    this.nextPartialWriteFailure = predicate;
+  }
+
   failNextRenameWhere(predicate: (from: string, to: string) => boolean): void {
     this.nextRenameFailure = predicate;
   }
@@ -138,6 +158,10 @@ class InMemoryAdapter {
 function parentPath(path: string): string {
   const separator = path.lastIndexOf("/");
   return separator === -1 ? "" : path.slice(0, separator);
+}
+
+function fingerprint(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function createHarness(
@@ -843,6 +867,42 @@ describe("CollectionRepository", () => {
     expect(await adapter.read(unrelatedPath)).toBe(unrelatedContent);
   });
 
+  it("preserves quarantine evidence when findById encounters a third canonical generation", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const journalPath = `${dailyPath}.quarantine-journal.json`;
+    const backupPath = `${dailyPath}.backup-quarantine-123-4`;
+    const original = `${await adapter.read(dailyPath)}bad\n`;
+    const cleaned = await adapter.read(dailyPath);
+    const thirdGeneration = `${JSON.stringify(
+      createItem({ title: "Independent third generation" }),
+    )}\n`;
+    await adapter.write(backupPath, original);
+    await adapter.write(dailyPath, thirdGeneration);
+    await adapter.write(
+      journalPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        stage: "prepared",
+        sourceFingerprint: fingerprint(original),
+        transactionId: "123-4",
+        sidecarAfter: "bad\n",
+        cleanedCollection: cleaned,
+      })}\n`,
+    );
+
+    await expect(repository.findById("item-1")).rejects.toThrow(
+      "canonical content does not match",
+    );
+
+    expect({
+      journal: await adapter.exists(journalPath),
+      backup: await adapter.exists(backupPath),
+    }).toEqual({ journal: true, backup: true });
+    expect(await adapter.read(backupPath)).toBe(original);
+  });
+
   it("replays a no-rename quarantine interrupted after its backup copy without duplicating the sidecar", async () => {
     const { adapter, repository } = createHarness({ withoutRename: true });
     await repository.upsertDaily([createItem()], "2026-07-21");
@@ -871,6 +931,37 @@ describe("CollectionRepository", () => {
           path.endsWith(".quarantine-journal.json"),
       ),
     ).toBe(false);
+  });
+
+  it("preserves the original backup when a no-rename overwrite partially writes then fails", async () => {
+    const { adapter, repository } = createHarness({ withoutRename: true });
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const journalPath = `${dailyPath}.quarantine-journal.json`;
+    const original = `${await adapter.read(dailyPath)}bad\n`;
+    await adapter.write(dailyPath, original);
+    adapter.partiallyWriteThenFailNextWhere((path) => path === dailyPath);
+
+    await expect(repository.listByDate("2026-07-21")).rejects.toThrow(
+      "Injected partial write failure",
+    );
+
+    let listed = await adapter.list(`${DATA_ROOT}/collections`);
+    const backupPaths = listed.files.filter((path) =>
+      path.startsWith(`${dailyPath}.backup-quarantine-`),
+    );
+    expect(backupPaths).toHaveLength(1);
+    expect(await adapter.read(backupPaths[0])).toBe(original);
+    expect(await adapter.exists(journalPath)).toBe(true);
+
+    await expect(repository.listByDate("2026-07-21")).rejects.toThrow(
+      "canonical content does not match",
+    );
+
+    listed = await adapter.list(`${DATA_ROOT}/collections`);
+    expect(listed.files).toContain(backupPaths[0]);
+    expect(await adapter.read(backupPaths[0])).toBe(original);
+    expect(await adapter.exists(journalPath)).toBe(true);
   });
 
   it("cleans a committed no-rename quarantine journal and retained backup", async () => {
