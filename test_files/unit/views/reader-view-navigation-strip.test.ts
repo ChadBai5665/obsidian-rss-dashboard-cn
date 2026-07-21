@@ -80,6 +80,45 @@ describe("ReaderView full-article nav/breadcrumb stripping", () => {
     await readerView.onOpen();
   });
 
+  it("awaits durable read status before refreshing reader controls", async () => {
+    let resolveUpdate!: (value: boolean) => void;
+    const update = vi.fn(
+      () => new Promise<boolean>((resolve) => { resolveUpdate = resolve; }),
+    );
+    const mockApp = {
+      workspace: { getLeavesOfType: vi.fn().mockReturnValue([]) },
+      vault: { getAbstractFileByPath: vi.fn() },
+    };
+    const view = new ReaderView(
+      new MockLeaf(mockApp) as never,
+      { ...DEFAULT_SETTINGS, useWebViewer: false },
+      { saveArticle: vi.fn() } as never,
+      vi.fn(),
+      update,
+    );
+    const controls = vi.fn();
+    const internals = view as unknown as {
+      currentItem: FeedItem | null;
+      toggleReadStatus: () => Promise<void>;
+      updateToggleButtons: () => void;
+    };
+    internals.currentItem = makeItem({ read: false });
+    internals.updateToggleButtons = controls;
+
+    const pending = internals.toggleReadStatus();
+    expect(pending).toBeInstanceOf(Promise);
+    expect(controls).not.toHaveBeenCalled();
+    resolveUpdate(false);
+    await pending;
+
+    expect(update).toHaveBeenCalledWith(
+      internals.currentItem,
+      { read: true },
+      false,
+    );
+    expect(controls).not.toHaveBeenCalled();
+  });
+
   it("removes breadcrumb nav near the top but preserves article text", async () => {
     const html = `
       <nav data-testid="breadcrumb-container">

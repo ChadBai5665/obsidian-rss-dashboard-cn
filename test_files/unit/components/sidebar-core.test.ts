@@ -34,6 +34,10 @@ interface TestApp extends App {
 interface TestPlugin extends Partial<RssDashboardPlugin> {
   settings: RssDashboardSettings;
   saveSettings: Mock<() => Promise<void>>;
+  updateArticlesReadBatch: Mock<
+    (targets: Array<{ articleGuid: string; feedUrl: string }>, read: boolean) =>
+      Promise<boolean>
+  >;
   activeRefreshState?: Map<string, FeedRefreshState>;
   backgroundImportQueue?: FeedMetadata[];
 }
@@ -60,6 +64,10 @@ type TestSidebar = {
   jumpToPreviousFolder: () => void;
   openFocusedItem: () => void;
   focusedSidebarTarget: { type: string; path?: string; url?: string } | null;
+  markAllUnreadAsRead: () => Promise<void>;
+  markAllReadAsUnread: () => Promise<void>;
+  markSelectionReadStatus: (read: boolean) => Promise<void>;
+  markFeedsReadStatus: (feeds: Feed[], read: boolean) => Promise<number | null>;
 };
 
 describe("Sidebar Core", () => {
@@ -121,7 +129,111 @@ describe("Sidebar Core", () => {
     plugin = {
       settings,
       saveSettings: vi.fn().mockResolvedValue(undefined),
+      updateArticlesReadBatch: vi.fn().mockResolvedValue(true),
     };
+  });
+
+  it("routes all-feed read changes through the status transaction batch", async () => {
+    const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const unread = {
+      guid: "unread-guid",
+      feedUrl: "https://example.com/feed.xml",
+      read: false,
+    };
+    settings.feeds = [{
+      title: "Feed",
+      url: unread.feedUrl,
+      folder: "News",
+      items: [unread],
+      lastUpdated: 0,
+    }] as Feed[];
+    plugin.updateArticlesReadBatch.mockResolvedValue(false);
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await sidebar.markAllUnreadAsRead();
+
+    expect(plugin.updateArticlesReadBatch).toHaveBeenCalledWith(
+      [{ articleGuid: unread.guid, feedUrl: unread.feedUrl }],
+      true,
+    );
+    expect(unread.read).toBe(false);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+    expect(noticeSpy.mock.calls.flat().join(" ")).not.toContain("No unread");
+  });
+
+  it("routes selected-feed unread changes through the same status batch", async () => {
+    const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const readItem = {
+      guid: "read-guid",
+      feedUrl: "https://example.com/feed.xml",
+      read: true,
+    };
+    settings.feeds = [{
+      title: "Feed",
+      url: readItem.feedUrl,
+      folder: "News",
+      items: [readItem],
+      lastUpdated: 0,
+    }] as Feed[];
+    options.selectedFeeds = [readItem.feedUrl];
+    plugin.updateArticlesReadBatch.mockResolvedValue(false);
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await sidebar.markSelectionReadStatus(false);
+
+    expect(plugin.updateArticlesReadBatch).toHaveBeenCalledWith(
+      [{ articleGuid: readItem.guid, feedUrl: readItem.feedUrl }],
+      false,
+    );
+    expect(readItem.read).toBe(true);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+    expect(noticeSpy.mock.calls.flat().join(" ")).not.toContain("No items");
+  });
+
+  it("routes folder and feed context-menu read changes through the status batch", async () => {
+    const unread = {
+      guid: "context-guid",
+      feedUrl: "https://example.com/feed.xml",
+      read: false,
+    };
+    const feed = {
+      title: "Feed",
+      url: unread.feedUrl,
+      folder: "News",
+      items: [unread],
+      lastUpdated: 0,
+    } as Feed;
+    settings.feeds = [feed];
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.markFeedsReadStatus([feed], true)).resolves.toBe(1);
+
+    expect(plugin.updateArticlesReadBatch).toHaveBeenCalledWith(
+      [{ articleGuid: unread.guid, feedUrl: unread.feedUrl }],
+      true,
+    );
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
   });
 
   it("should initialize with correct properties", () => {

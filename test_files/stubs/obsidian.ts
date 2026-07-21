@@ -314,6 +314,14 @@ export class MockDataVault {
       write: async (path: string, content: string) => {
         this.adapterFiles.set(path, content);
       },
+      remove: async (path: string) => {
+        this.adapterFiles.delete(path);
+      },
+      rename: async (from: string, to: string) => {
+        const content = this.adapterFiles.get(from);
+        this.adapterFiles.delete(from);
+        if (content !== undefined) this.adapterFiles.set(to, content);
+      },
       mkdir: async (path: string) => {
         await this.createFolder(path);
       },

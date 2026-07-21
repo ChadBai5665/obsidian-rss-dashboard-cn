@@ -64,6 +64,13 @@ interface TestFeedParser {
   refreshAllFeeds: ReturnType<typeof vi.fn>;
 }
 
+interface AsyncVaultAdapter {
+  write(path: string, contents: string): Promise<void>;
+  read(path: string): Promise<string>;
+  exists(path: string): Promise<boolean>;
+  rename?: (from: string, to: string) => Promise<void>;
+}
+
 interface TestPlugin {
   app: App;
   settings: typeof DEFAULT_SETTINGS;
@@ -77,6 +84,7 @@ interface TestPlugin {
   getCollectionService: ReturnType<typeof vi.fn>;
   refreshFailedSources: () => Promise<void>;
   refreshSelectedFeed: (feed: Feed) => Promise<void>;
+  saveSettings: (options?: { forceAllShards?: boolean; forceMetadata?: boolean }) => Promise<void>;
 }
 
 function createPluginWithSettings(feeds: Feed[]): TestPlugin {
@@ -132,6 +140,53 @@ beforeEach(() => {
 });
 
 describe("refreshFeeds() pipeline behavior", () => {
+  it("restores vault metadata and its plugin pointer with feed files", async () => {
+    const source = createFeed({ feedId: "source-transaction" });
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.storageMode = "vault-shards-v2";
+    plugin.settings.storageFolder = "RSS Data/Feeds";
+    plugin.settings.metadataStorageMode = "vault-location";
+    plugin.settings.metadataStorageFolder = "RSS Metadata";
+    plugin.saveData = vi.fn(async (data: unknown) => {
+      await plugin.app.vault.adapter.write("data.json", JSON.stringify(data));
+    });
+    await plugin.saveSettings({ forceAllShards: true, forceMetadata: true });
+    const paths = [
+      "RSS Data/Feeds/source-transaction.json",
+      "RSS Metadata/user-state.json",
+      "RSS Metadata/data.json",
+      "data.json",
+    ];
+    const oldBytes = new Map<string, string>();
+    for (const path of paths) {
+      oldBytes.set(path, await plugin.app.vault.adapter.read(path));
+    }
+
+    source.title = "Changed source";
+    source.items[0].read = true;
+    const adapter = plugin.app.vault.adapter as unknown as AsyncVaultAdapter;
+    const originalWrite = adapter.write.bind(adapter);
+    vi.spyOn(adapter, "write").mockImplementation(async (path, contents) => {
+      if (
+        path === "RSS Metadata/user-state.json" &&
+        !contents.includes('"states": {}')
+      ) {
+        throw new Error("late user-state failure");
+      }
+      await originalWrite(path, contents);
+    });
+
+    await expect(
+      plugin.saveSettings({ forceAllShards: true, forceMetadata: true }),
+    ).rejects.toThrow("late user-state failure");
+
+    for (const path of paths) {
+      expect(await plugin.app.vault.adapter.read(path), path).toBe(
+        oldBytes.get(path),
+      );
+    }
+  });
+
   it("runs parser then the shared collection pipeline for a successful source", async () => {
     const source = createFeed({ feedId: "source-a" });
     const refreshed = {
@@ -818,6 +873,70 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(getNoticeMessages(consoleLogSpy).join(" ")).not.toContain("secret");
   });
 
+  it("returns durable success even when every post-commit UI observer fails", async () => {
+    const article = createItem({ read: false });
+    const source = createFeed({ items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
+      syncDashboardArticleUpdate: ReturnType<typeof vi.fn>;
+      syncReaderArticleUpdate: ReturnType<typeof vi.fn>;
+    };
+    plugin.syncDashboardArticleUpdate = vi.fn().mockRejectedValue(
+      new Error("dashboard observer failed"),
+    );
+    plugin.syncReaderArticleUpdate = vi.fn().mockRejectedValue(
+      new Error("reader observer failed"),
+    );
+
+    await expect(
+      plugin.updateArticle(article.guid, source.url, { read: true }),
+    ).resolves.toBe(true);
+
+    expect(article.read).toBe(true);
+    expect(plugin.syncDashboardArticleUpdate).toHaveBeenCalledTimes(1);
+    expect(plugin.syncReaderArticleUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("broadcasts one collection reload after validating multiple missing notes", async () => {
+    const first = createItem({
+      guid: "first",
+      rssDashboardId: "1".repeat(64),
+      saved: true,
+      savedFilePath: "Information/Saved/First.md",
+    });
+    const second = createItem({
+      guid: "second",
+      rssDashboardId: "2".repeat(64),
+      saved: true,
+      savedFilePath: "Information/Saved/Second.md",
+    });
+    const source = createFeed({ items: [first, second] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      articleSaver: { checkSavedFileExists: ReturnType<typeof vi.fn> };
+      updateArticle: ReturnType<typeof vi.fn>;
+      validateSavedArticles: () => Promise<void>;
+    };
+    plugin.articleSaver = {
+      checkSavedFileExists: vi.fn().mockResolvedValue(false),
+    };
+    plugin.updateArticle = vi.fn().mockResolvedValue(true);
+    delete (plugin as unknown as Record<string, unknown>).validateSavedArticles;
+    const collectionLoad = vi.fn();
+    const collectionEvent = vi
+      .spyOn(plugin as never, "emitCollectionFlagsUpdated" as never)
+      .mockImplementation(collectionLoad as never);
+
+    await plugin.validateSavedArticles();
+
+    expect(plugin.updateArticle).toHaveBeenCalledTimes(2);
+    expect(collectionEvent).toHaveBeenCalledTimes(1);
+    expect(collectionLoad).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a safe prepared journal when collection persistence fails", async () => {
     const stableId = "c".repeat(64);
     const article = createItem({ rssDashboardId: stableId, read: false });
@@ -848,6 +967,89 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(journal).toContain(stableId);
     expect(journal).not.toContain("https://example.com");
     expect(journal).not.toContain("Desc");
+  });
+
+  it("replays a prepared journal to the previous feed state before clearing it", async () => {
+    const stableId = "d".repeat(64);
+    const article = createItem({ rssDashboardId: stableId, read: true });
+    const source = createFeed({ items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<void>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const collectionState = { read: true, starred: false, saved: false };
+    vi.spyOn(CollectionRepository.prototype, "findById").mockImplementation(
+      async () => collectionState as never,
+    );
+    vi.spyOn(CollectionRepository.prototype, "updateFlags").mockImplementation(
+      async (_id, next) => { Object.assign(collectionState, next); },
+    );
+    const path = ".rss-dashboard-data/state/status-repair.json";
+    await plugin.app.vault.adapter.write(path, JSON.stringify({
+      version: 1, txId: "tx-safe", phase: "collection-written", items: [{
+        feedIndex: 0, itemIndex: 0, stableId,
+        previousFeed: [{ key: "read", exists: true, value: false }],
+        previousCollection: { read: false, starred: false, saved: false },
+      }],
+    }));
+    const clearSpy = vi.spyOn(plugin as never, "clearStatusJournal" as never);
+    await plugin.replayStatusRepairJournalIfNeeded();
+    expect(article.read).toBe(false);
+    expect(clearSpy).toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.exists(path)).toBe(false);
+  });
+
+  it("retains the journal when a replay record cannot be resolved", async () => {
+    const source = createFeed({ items: [createItem()] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<void>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const path = ".rss-dashboard-data/state/status-repair.json";
+    await plugin.app.vault.adapter.write(path, JSON.stringify({
+      version: 1,
+      txId: "tx-missing",
+      phase: "prepared",
+      items: [{
+        feedIndex: 9,
+        itemIndex: 9,
+        previousFeed: [{ key: "read", exists: true, value: false }],
+      }],
+    }));
+
+    await plugin.replayStatusRepairJournalIfNeeded();
+
+    expect(await plugin.app.vault.adapter.exists(path)).toBe(true);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("clears both journal files after success on an adapter without rename", async () => {
+    const article = createItem({ read: false });
+    const source = createFeed({ items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const adapter = plugin.app.vault.adapter as unknown as AsyncVaultAdapter;
+    adapter.rename = undefined;
+
+    await expect(
+      plugin.updateArticle(article.guid, source.url, { read: true }),
+    ).resolves.toBe(true);
+
+    expect(
+      await adapter.exists(".rss-dashboard-data/state/status-repair.json"),
+    ).toBe(false);
+    expect(
+      await adapter.exists(".rss-dashboard-data/state/status-repair.json.tmp"),
+    ).toBe(false);
   });
 
   it("contains failed-source ledger errors without exposing raw source data", async () => {

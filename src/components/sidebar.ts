@@ -1685,14 +1685,14 @@ export class Sidebar {
       item.setTitle("Mark selection as read")
         .setIcon("check-circle")
         .onClick(() => {
-          this.markSelectionReadStatus(true);
+          void this.markSelectionReadStatus(true);
         });
     });
     menu.addItem((item: MenuItem) => {
       item.setTitle("Mark selection as unread")
         .setIcon("circle")
         .onClick(() => {
-          this.markSelectionReadStatus(false);
+          void this.markSelectionReadStatus(false);
         });
     });
     menu.addSeparator();
@@ -1705,8 +1705,7 @@ export class Sidebar {
     });
   }
 
-  private markSelectionReadStatus(read: boolean): void {
-    let count = 0;
+  private async markSelectionReadStatus(read: boolean): Promise<void> {
     const { selectedFolders, selectedFeeds } = this.options;
     
     const feedsToUpdate = new Set<Feed>();
@@ -1729,18 +1728,11 @@ export class Sidebar {
       }
     }
     
-    for (const feed of feedsToUpdate) {
-      for (const item of feed.items) {
-        if (item.read !== read) {
-          item.read = read;
-          count++;
-        }
-      }
-    }
-    
+    const count = await this.markFeedsReadStatus([...feedsToUpdate], read);
+    if (count === null) return;
     if (count > 0) {
       new Notice(`Marked ${count} items as ${read ? 'read' : 'unread'}`);
-      void this.plugin.saveSettings().then(() => this.render());
+      this.render();
     } else {
       new Notice(`No items to mark as ${read ? 'read' : 'unread'}`);
     }
@@ -1871,14 +1863,12 @@ export class Sidebar {
         .setIcon("check-circle")
         .onClick(() => {
           const allPaths = this.getAllDescendantFolderPaths(fullPath);
-          this.settings.feeds.forEach((feed) => {
-            if (feed.folder && allPaths.includes(feed.folder)) {
-              feed.items.forEach((item) => {
-                item.read = true;
-              });
-            }
+          const feeds = this.settings.feeds.filter((feed) => {
+            return feed.folder && allPaths.includes(feed.folder);
           });
-          void this.plugin.saveSettings().then(() => this.render());
+          void this.markFeedsReadStatus(feeds, true).then((count) => {
+            if (count !== null && count > 0) this.render();
+          });
         });
     });
     menu.addItem((item: MenuItem) => {
@@ -2640,18 +2630,9 @@ export class Sidebar {
   }
 
   private async markAllUnreadAsRead(): Promise<void> {
-    let count = 0;
-    this.settings.feeds.forEach((feed) => {
-      feed.items.forEach((item) => {
-        if (!item.read) {
-          item.read = true;
-          count++;
-        }
-      });
-    });
-
+    const count = await this.markFeedsReadStatus(this.settings.feeds, true);
+    if (count === null) return;
     if (count > 0) {
-      await this.plugin.saveSettings();
       this.render();
       new Notice(`Marked ${count} items as read`);
     } else {
@@ -2660,23 +2641,29 @@ export class Sidebar {
   }
 
   private async markAllReadAsUnread(): Promise<void> {
-    let count = 0;
-    this.settings.feeds.forEach((feed) => {
-      feed.items.forEach((item) => {
-        if (item.read) {
-          item.read = false;
-          count++;
-        }
-      });
-    });
-
+    const count = await this.markFeedsReadStatus(this.settings.feeds, false);
+    if (count === null) return;
     if (count > 0) {
-      await this.plugin.saveSettings();
       this.render();
       new Notice(`Marked ${count} items as unread`);
     } else {
       new Notice("No read items found");
     }
+  }
+
+  private async markFeedsReadStatus(
+    feeds: Feed[],
+    read: boolean,
+  ): Promise<number | null> {
+    const targets = feeds.flatMap((feed) =>
+      feed.items
+        .filter((item) => item.read !== read)
+        .map((item) => ({ articleGuid: item.guid, feedUrl: feed.url })),
+    );
+    if (targets.length === 0) return 0;
+    return (await this.plugin.updateArticlesReadBatch(targets, read))
+      ? targets.length
+      : null;
   }
 
   public renderHeader(parentEl: HTMLElement = this.container): void {
@@ -3477,10 +3464,9 @@ export class Sidebar {
         .setTitle("Mark all as read")
         .setIcon("check-circle")
         .onClick(() => {
-          feed.items.forEach((item) => {
-            item.read = true;
+          void this.markFeedsReadStatus([feed], true).then((count) => {
+            if (count !== null && count > 0) this.render();
           });
-          void this.plugin.saveSettings().then(() => this.render());
         });
     });
 

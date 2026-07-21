@@ -39,7 +39,7 @@ export interface ArticleRendererOptions {
     item: FeedItem,
     updates: Partial<FeedItem>,
     shouldRerender?: boolean,
-  ) => void;
+  ) => Promise<boolean>;
   onOpenSavedArticle?: (file: TFile) => void;
   onPlaybackProgress?: (
     item: FeedItem,
@@ -57,7 +57,7 @@ export class ArticleRenderer {
     item: FeedItem,
     updates: Partial<FeedItem>,
     shouldRerender?: boolean,
-  ) => void;
+  ) => Promise<boolean>;
   private onOpenSavedArticle?: (file: TFile) => void;
   private onPlaybackProgress?: (
     item: FeedItem,
@@ -236,7 +236,7 @@ export class ArticleRenderer {
         ? this.formatNitterReaderTitle(selectedEpisode)
         : undefined;
       // We might need to bubble this up if the dashboard selection needs to sync
-      this.onArticleUpdate(selectedEpisode, { read: true }, false);
+      void this.onArticleUpdate(selectedEpisode, { read: true }, false);
     };
 
     if (item.audioUrl) {

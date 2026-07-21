@@ -178,6 +178,11 @@ type StatusRepairJournal = {
   items: StatusJournalItem[];
 };
 
+type MetadataPersistenceSnapshot = Array<{
+  path: string;
+  contents: string | null;
+}>;
+
 function captureArticleMutationSnapshot(
   article: FeedItem,
   updates: Partial<FeedItem>,
@@ -483,7 +488,68 @@ export default class RssDashboardPlugin extends Plugin {
     super(app, manifest);
     this.feedStorageRepository = new FeedStorageRepository(app, {
       writeWrapper: (fn) => this.writeWithWatcherSuppressed(fn),
+      metadataTransaction: {
+        capture: () => this.captureMetadataPersistenceSnapshot(),
+        restore: (snapshot) =>
+          this.restoreMetadataPersistenceSnapshot(
+            snapshot as MetadataPersistenceSnapshot,
+          ),
+      },
     });
+  }
+
+  private getMetadataPersistenceFilePaths(): string[] {
+    const paths = new Set<string>();
+    const pluginDirectory = this.manifest.dir
+      ?.trim()
+      .replace(/^\/+|\/+$/g, "");
+    if (pluginDirectory) {
+      paths.add(
+        pluginDirectory === "."
+          ? "data.json"
+          : `${pluginDirectory}/data.json`,
+      );
+    }
+    const vaultMetadataFolder = getMetadataPath(this.settings);
+    if (vaultMetadataFolder) {
+      paths.add(`${vaultMetadataFolder}/data.json`);
+    }
+    return [...paths];
+  }
+
+  private async captureMetadataPersistenceSnapshot(): Promise<MetadataPersistenceSnapshot> {
+    const snapshot: MetadataPersistenceSnapshot = [];
+    for (const path of this.getMetadataPersistenceFilePaths()) {
+      snapshot.push({
+        path,
+        contents: (await this.app.vault.adapter.exists(path))
+          ? await this.app.vault.adapter.read(path)
+          : null,
+      });
+    }
+    return snapshot;
+  }
+
+  private async restoreMetadataPersistenceSnapshot(
+    snapshot: MetadataPersistenceSnapshot,
+  ): Promise<void> {
+    const failures: unknown[] = [];
+    for (const { path, contents } of [...snapshot].reverse()) {
+      try {
+        if (contents === null) {
+          if (await this.app.vault.adapter.exists(path)) {
+            await this.app.vault.adapter.remove(path);
+          }
+        } else {
+          await this.app.vault.adapter.write(path, contents);
+        }
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error("Metadata rollback incomplete");
+    }
   }
 
   private initializeSettingsBackedServices(): void {
@@ -999,7 +1065,7 @@ export default class RssDashboardPlugin extends Plugin {
               updates: Partial<FeedItem>,
               shouldRerender?: boolean,
             ) => {
-              void this.updateArticleFromReader(item, updates, shouldRerender);
+              return this.updateArticleFromReader(item, updates, shouldRerender);
             },
             {
               onPlaybackProgress: (item, position, duration, flush) => {
@@ -1425,13 +1491,13 @@ export default class RssDashboardPlugin extends Plugin {
     item: FeedItem,
     updates: Partial<FeedItem>,
     shouldRerender?: boolean,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const resolvedFeed =
       this.settings.feeds.find((f) => f.url === item.feedUrl) ||
       this.settings.feeds.find((f) =>
         f.items.some((candidate) => candidate.guid === item.guid),
       );
-    if (!resolvedFeed) return;
+    if (!resolvedFeed) return false;
 
     const resolvedFeedUrl = resolvedFeed.url;
     item.feedUrl = resolvedFeedUrl;
@@ -1442,9 +1508,9 @@ export default class RssDashboardPlugin extends Plugin {
       this.settings,
     );
     const originalItem = resolvedFeed.items.find((i) => i.guid === item.guid);
-    if (!originalItem) return;
+    if (!originalItem) return false;
 
-    await this.updateArticle(
+    return await this.updateArticle(
       item.guid,
       resolvedFeedUrl,
       normalizedUpdates,
@@ -1691,9 +1757,22 @@ export default class RssDashboardPlugin extends Plugin {
     // The collection event is the cross-dashboard invalidation signal. Avoid
     // a second full reload here; regular dashboard cards get a targeted sync.
     if (shouldRefreshView) {
-      await this.syncDashboardArticleUpdate(articleGuid, feedUrl, updates, false);
+      try {
+        await this.syncDashboardArticleUpdate(
+          articleGuid,
+          feedUrl,
+          updates,
+          false,
+        );
+      } catch {
+        // UI observers are best-effort after both durable stores commit.
+      }
     }
-    await this.syncReaderArticleUpdate(articleGuid, updates);
+    try {
+      await this.syncReaderArticleUpdate(articleGuid, updates);
+    } catch {
+      // UI observers are best-effort after both durable stores commit.
+    }
     return true;
   }
 
@@ -2014,12 +2093,26 @@ export default class RssDashboardPlugin extends Plugin {
     const adapter = this.app.vault.adapter as typeof this.app.vault.adapter & {
       remove?: (path: string) => Promise<void>;
     };
-    if (typeof adapter.remove === "function") {
-      await adapter.remove(STATUS_REPAIR_JOURNAL_PATH);
-    } else {
-      await (this.app.vault as unknown as {
-        delete: (path: string) => Promise<void>;
-      }).delete(STATUS_REPAIR_JOURNAL_PATH);
+    let failed = false;
+    for (const path of [
+      STATUS_REPAIR_JOURNAL_PATH,
+      `${STATUS_REPAIR_JOURNAL_PATH}.tmp`,
+    ]) {
+      try {
+        if (!(await adapter.exists(path))) continue;
+        if (typeof adapter.remove === "function") {
+          await adapter.remove(path);
+        } else {
+          await (this.app.vault as unknown as {
+            delete: (target: string) => Promise<void>;
+          }).delete(path);
+        }
+      } catch {
+        failed = true;
+      }
+    }
+    if (failed) {
+      throw new Error("Status journal cleanup incomplete");
     }
   }
 

@@ -83,7 +83,7 @@ export class ReaderView extends ItemView {
     item: FeedItem,
     updates: Partial<FeedItem>,
     shouldRerender?: boolean,
-  ) => void;
+  ) => Promise<boolean>;
   private webViewerIntegration: WebViewerIntegration | null = null;
   private podcastPlayer: PodcastPlayer | null = null;
   private videoPlayer: VideoPlayer | null = null;
@@ -179,7 +179,7 @@ export class ReaderView extends ItemView {
       item: FeedItem,
       updates: Partial<FeedItem>,
       shouldRerender?: boolean,
-    ) => void,
+    ) => Promise<boolean>,
     options?: {
       onPlaybackProgress?: (
         item: FeedItem,
@@ -526,7 +526,7 @@ export class ReaderView extends ItemView {
    */
   public actionToggleReadStatus(): void {
     if (this.currentItem) {
-      this.toggleReadStatus();
+      void this.toggleReadStatus();
     }
   }
 
@@ -545,7 +545,7 @@ export class ReaderView extends ItemView {
    */
   public actionToggleStarStatus(): void {
     if (this.currentItem) {
-      this.toggleStarStatus();
+      void this.toggleStarStatus();
     }
   }
 
@@ -597,7 +597,7 @@ export class ReaderView extends ItemView {
       this.currentItem.savedFilePath = file.path;
       this.onArticleSave(this.currentItem);
 
-      this.updateSavedLabel(true);
+      void this.updateSavedLabel(true);
     }
   }
 
@@ -855,7 +855,7 @@ export class ReaderView extends ItemView {
     setIcon(this.readToggleButton, "circle");
     this.readToggleButton.addEventListener("click", () => {
       if (this.currentItem) {
-        this.toggleReadStatus();
+        void this.toggleReadStatus();
       }
     });
 
@@ -867,7 +867,7 @@ export class ReaderView extends ItemView {
     setIcon(this.starToggleButton, "star-off");
     this.starToggleButton.addEventListener("click", () => {
       if (this.currentItem) {
-        this.toggleStarStatus();
+        void this.toggleStarStatus();
       }
     });
 
@@ -1099,7 +1099,7 @@ export class ReaderView extends ItemView {
             item.savedFilePath = file.path;
             this.onArticleSave(item);
 
-            this.updateSavedLabel(true);
+            void this.updateSavedLabel(true);
           }
         });
     });
@@ -1215,7 +1215,7 @@ export class ReaderView extends ItemView {
           item.savedFilePath = file.path;
           this.onArticleSave(item);
 
-          this.updateSavedLabel(true);
+          void this.updateSavedLabel(true);
         }
 
         activeDocument.body.removeChild(modal);
@@ -2935,10 +2935,15 @@ export class ReaderView extends ItemView {
     return this.currentFullContentFailureType === "restricted";
   }
 
-  private toggleReadStatus(): void {
+  private async toggleReadStatus(): Promise<void> {
     if (!this.currentItem) return;
     const nextRead = !this.currentItem.read;
-    this.onArticleUpdate(this.currentItem, { read: nextRead }, false);
+    const didUpdate = await this.onArticleUpdate(
+      this.currentItem,
+      { read: nextRead },
+      false,
+    );
+    if (!didUpdate) return;
     this.updateToggleButtons();
   }
 
@@ -2981,16 +2986,21 @@ export class ReaderView extends ItemView {
     }
   }
 
-  private toggleStarStatus(): void {
+  private async toggleStarStatus(): Promise<void> {
     if (!this.currentItem) return;
     const nextStarred = !this.currentItem.starred;
-    this.onArticleUpdate(this.currentItem, { starred: nextStarred });
+    const didUpdate = await this.onArticleUpdate(
+      this.currentItem,
+      { starred: nextStarred },
+    );
+    if (!didUpdate) return;
     this.updateToggleButtons();
   }
 
-  private updateSavedLabel(saved: boolean): void {
+  private async updateSavedLabel(saved: boolean): Promise<void> {
     if (!this.currentItem) return;
-    this.onArticleUpdate(this.currentItem, { saved });
+    const didUpdate = await this.onArticleUpdate(this.currentItem, { saved });
+    if (!didUpdate) return;
 
     if (this.saveButton) {
       this.saveButton.toggleClass("saved", saved);
@@ -3385,7 +3395,7 @@ export class ReaderView extends ItemView {
     }
 
     // Notify parent to persist the change
-    this.onArticleUpdate(item, { tags: [...item.tags] }, false);
+    void this.onArticleUpdate(item, { tags: [...item.tags] }, false);
 
     if (this.currentItem?.guid === item.guid) {
       this.refreshReaderHeaderTags();

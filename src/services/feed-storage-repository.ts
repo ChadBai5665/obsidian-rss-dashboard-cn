@@ -32,6 +32,11 @@ export interface PersistSettingsOptions {
   forceAllShards?: boolean;
 }
 
+export interface FeedStorageMetadataTransaction {
+  capture(): Promise<unknown>;
+  restore(snapshot: unknown): Promise<void>;
+}
+
 export interface RevertToLegacyJsonOptions {
   deleteShardFolder?: boolean;
 }
@@ -193,11 +198,16 @@ export class FeedStorageRepository {
   private lastStorageFolderPath: string | null = null;
   private lastRepairResult = "Not yet run";
   private writeWrapper?: <T>(fn: () => Promise<T>) => Promise<T>;
+  private metadataTransaction?: FeedStorageMetadataTransaction;
   private app: App;
 
-  constructor(app: App, options?: { writeWrapper?: <T>(fn: () => Promise<T>) => Promise<T> }) {
+  constructor(app: App, options?: {
+    writeWrapper?: <T>(fn: () => Promise<T>) => Promise<T>;
+    metadataTransaction?: FeedStorageMetadataTransaction;
+  }) {
     this.app = app;
     this.writeWrapper = options?.writeWrapper;
+    this.metadataTransaction = options?.metadataTransaction;
   }
 
   public ensureFeedIds(settings: RssDashboardSettings): boolean {
@@ -404,6 +414,11 @@ export class FeedStorageRepository {
     const rollbackFileBytes = new Map<string, string | null>();
     const previousShardCache = new Map(this.lastPersistedShardJsonByFeedId);
     const previousMetadataCache = this.lastPersistedMetadataJson;
+    const previousStorageFolderCache = this.lastStorageFolderPath;
+    const metadataSnapshot = this.metadataTransaction
+      ? await this.metadataTransaction.capture()
+      : undefined;
+    let metadataWriteStarted = false;
     const captureRollbackFile = async (path: string): Promise<void> => {
       if (rollbackFileBytes.has(path)) return;
       rollbackFileBytes.set(
@@ -540,6 +555,7 @@ export class FeedStorageRepository {
       options.forceMetadata || this.lastPersistedMetadataJson !== metadataJson;
 
     if (shouldSaveMetadata) {
+      metadataWriteStarted = true;
       await saveData(withSyncNonce(persistedSettings));
       this.lastPersistedMetadataJson = metadataJson;
       storageLog("Saved shard metadata to data.json", {
@@ -565,16 +581,19 @@ export class FeedStorageRepository {
       shardDeleteCount,
     };
     } catch (error) {
-      let didRestore = false;
-      try {
-        didRestore = await restoreRollbackFiles();
-        if (previousMetadataCache !== null) {
-          await saveData(withSyncNonce(JSON.parse(previousMetadataCache)));
+      let didRestore = await restoreRollbackFiles();
+      if (metadataWriteStarted) {
+        try {
+          if (this.metadataTransaction) {
+            await this.metadataTransaction.restore(metadataSnapshot);
+          } else if (previousMetadataCache !== null) {
+            await saveData(withSyncNonce(JSON.parse(previousMetadataCache)));
+          }
+        } catch {
+          // The caller records a repair marker. Never include vault paths or
+          // source data in the user-visible failure message.
+          didRestore = false;
         }
-      } catch {
-        // The caller records a repair marker. Never include vault paths or
-        // source data in the user-visible failure message.
-        didRestore = false;
       }
       if (!didRestore) {
         // A cache that still claims the failed generation was written could
@@ -586,6 +605,7 @@ export class FeedStorageRepository {
       }
       this.lastPersistedShardJsonByFeedId = previousShardCache;
       this.lastPersistedMetadataJson = previousMetadataCache;
+      this.lastStorageFolderPath = previousStorageFolderCache;
       throw error;
     }
   }

@@ -62,6 +62,21 @@ describe("article-actions utils", () => {
       const toggle = actionToolbar.querySelector(".rss-dashboard-read-toggle");
       expect(toggle?.classList.contains("read")).toBe(true);
     });
+
+    it("keeps card state unchanged when the durable callback returns false", async () => {
+      const onArticleUpdate = vi.fn().mockResolvedValue(false);
+      createReadToggle(baseArgs({ callbacks: { onArticleUpdate } }));
+      const toggle = actionToolbar.querySelector(
+        ".rss-dashboard-read-toggle",
+      ) as HTMLElement;
+
+      toggle.click();
+      await vi.waitFor(() => expect(onArticleUpdate).toHaveBeenCalled());
+
+      expect(article.read).toBe(false);
+      expect(toggle.classList.contains("unread")).toBe(true);
+      expect(toggle.classList.contains("pending")).toBe(false);
+    });
   });
 
   describe("createStarToggle", () => {
@@ -79,6 +94,21 @@ describe("article-actions utils", () => {
 
       const toggle = actionToolbar.querySelector(".rss-dashboard-star-toggle");
       expect(toggle?.classList.contains("starred")).toBe(true);
+    });
+
+    it("keeps star state unchanged when the durable callback returns false", async () => {
+      const onArticleUpdate = vi.fn().mockResolvedValue(false);
+      createStarToggle(baseArgs({ callbacks: { onArticleUpdate } }));
+      const toggle = actionToolbar.querySelector(
+        ".rss-dashboard-star-toggle",
+      ) as HTMLElement;
+
+      toggle.click();
+      await vi.waitFor(() => expect(onArticleUpdate).toHaveBeenCalled());
+
+      expect(article.starred).toBe(false);
+      expect(toggle.classList.contains("unstarred")).toBe(true);
+      expect(toggle.classList.contains("pending")).toBe(false);
     });
   });
 

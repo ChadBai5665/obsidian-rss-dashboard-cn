@@ -623,7 +623,7 @@ export class RssDashboardView extends ItemView {
         void this.render();
       },
       onArticleUpdate: (item, updates, shouldRerender) => {
-        void this.updateArticleStatus(item, updates, shouldRerender);
+        return this.updateArticleStatus(item, updates, shouldRerender);
       },
       onOpenSavedArticle: (file) => {
         void this.app.workspace.getLeaf().openFile(file);

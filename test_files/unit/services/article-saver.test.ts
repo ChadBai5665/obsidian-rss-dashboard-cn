@@ -1137,6 +1137,38 @@ describe("ArticleSaver.saveArticle", () => {
     );
   });
 
+  it("keeps a successful save when workspace and callback observers throw", async () => {
+    const app = App.createMock();
+    (app.workspace as typeof app.workspace & { trigger: () => void }).trigger =
+      vi.fn(() => {
+        throw new Error("workspace observer failed");
+      });
+    vi.spyOn(CollectionRepository.prototype, "updateFlags").mockResolvedValue(
+      undefined,
+    );
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      undefined,
+      collectionSettings,
+      {
+        onMetadataSyncSucceeded: () => {
+          throw new Error("callback observer failed");
+        },
+      },
+    );
+
+    const file = await saver.saveArticle(
+      createItem({ rssDashboardId: FIRST_ITEM_ID }),
+      undefined,
+      undefined,
+      "BODY",
+    );
+
+    expect(file).toBeInstanceOf(TFile);
+    expect(await app.vault.read(file!)).toContain("BODY");
+  });
+
   it("retries metadata repair when an owned note already exists", async () => {
     const app = App.createMock();
     const saver = new ArticleSaver(
