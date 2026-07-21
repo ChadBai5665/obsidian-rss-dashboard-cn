@@ -753,7 +753,7 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(getNoticeMessages(consoleLogSpy)).toEqual([]);
   });
 
-  it("writes durable read/starred/saved cancellation flags by stable collection ID and refreshes every dashboard", async () => {
+  it("writes durable read/starred/saved cancellation flags by stable collection ID without a duplicate dashboard reload", async () => {
     const article = createItem({
       rssDashboardId: "a".repeat(64),
       read: true,
@@ -788,7 +788,7 @@ describe("refreshFeeds() pipeline behavior", () => {
       saved: false,
       savedNotePath: undefined,
     });
-    expect(plugin.refreshDashboardViews).toHaveBeenCalledTimes(1);
+    expect(plugin.refreshDashboardViews).not.toHaveBeenCalled();
   });
 
   it("keeps feed state unchanged when durable collection status persistence fails", async () => {

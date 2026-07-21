@@ -1532,17 +1532,33 @@ guid: "{{guid}}"
         saved: true,
         savedNotePath: filePath,
       });
+    } catch {
+      console.warn(SAVED_NOTE_SYNC_WARNING);
+      try {
+        this.collectionSyncCallbacks?.onMetadataSyncFailed?.();
+      } catch {
+        // A UI callback cannot change the durable metadata outcome.
+      }
+      new Notice(
+        "Saved note metadata could not be updated. The note remains saved and will be repaired later.",
+      );
+      return;
+    }
+
+    // Notifications are deliberately outside the persistence failure scope:
+    // a throwing workspace listener must not report the saved note as broken.
+    try {
       const workspace = this.app.workspace as typeof this.app.workspace & {
         trigger?: (name: string) => void;
       };
       workspace.trigger?.("rss-dashboard:collection-flags-updated");
+    } catch {
+      // best-effort observer
+    }
+    try {
       this.collectionSyncCallbacks?.onMetadataSyncSucceeded?.();
     } catch {
-      console.warn(SAVED_NOTE_SYNC_WARNING);
-      this.collectionSyncCallbacks?.onMetadataSyncFailed?.();
-      new Notice(
-        "Saved note metadata could not be updated. The note remains saved and will be repaired later.",
-      );
+      // best-effort observer
     }
   }
 

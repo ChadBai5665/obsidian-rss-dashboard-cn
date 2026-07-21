@@ -31,7 +31,7 @@ export type CreateActionButtonArgs = {
       article: FeedItem,
       updates: Partial<FeedItem>,
       shouldRerender?: boolean,
-    ) => void;
+    ) => Promise<boolean> | boolean | void;
     onArticleSave?: (article: FeedItem) => Promise<void> | void;
     onOpenSavedArticle?: (article: FeedItem) => Promise<void> | void;
     onOpenInReaderView?: (article: FeedItem) => void;
@@ -59,17 +59,30 @@ export function createReadToggle(
   });
   setIcon(readToggle, arg.article.read ? "check-circle" : "circle");
 
-  const toggleRead = (e: Event) => {
+  const toggleRead = async (e: Event) => {
     e.stopPropagation();
+    if (readToggle.classList.contains("pending")) return;
     const newReadState = !arg.article.read;
-    arg.article.read = newReadState;
-    arg.callbacks.onArticleUpdate?.(arg.article, { read: newReadState }, false);
-    readToggle.classList.toggle("read", newReadState);
-    readToggle.classList.toggle("unread", !newReadState);
-    setIcon(readToggle, newReadState ? "check-circle" : "circle");
+    readToggle.classList.add("pending");
+    readToggle.setAttribute("aria-disabled", "true");
+    try {
+      const didUpdate = await arg.callbacks.onArticleUpdate?.(
+        arg.article,
+        { read: newReadState },
+        false,
+      );
+      if (didUpdate === false) return;
+      arg.article.read = newReadState;
+      readToggle.classList.toggle("read", newReadState);
+      readToggle.classList.toggle("unread", !newReadState);
+      setIcon(readToggle, newReadState ? "check-circle" : "circle");
+    } finally {
+      readToggle.classList.remove("pending");
+      readToggle.removeAttribute("aria-disabled");
+    }
   };
 
-  toggleClickableIcon(readToggle, toggleRead);
+  toggleClickableIcon(readToggle, (event) => void toggleRead(event));
   return readToggle;
 }
 
@@ -168,26 +181,36 @@ export function createStarToggle(
     starIcon.textContent = arg.article.starred ? "*" : "o";
   }
 
-  const toggleStar = (e: Event) => {
+  const toggleStar = async (e: Event) => {
     e.stopPropagation();
+    if (starToggle.classList.contains("pending")) return;
     const newStarState = !arg.article.starred;
-    arg.callbacks.onArticleUpdate?.(
-      arg.article,
-      { starred: newStarState },
-      false,
-    );
-    starToggle.classList.toggle("starred", newStarState);
-    starToggle.classList.toggle("unstarred", !newStarState);
-    const iconEl = starToggle.querySelector(".rss-dashboard-star-icon");
-    if (iconEl) {
-      setIcon(iconEl as HTMLElement, newStarState ? "star" : "star-off");
-      if (!iconEl.querySelector("svg")) {
-        iconEl.textContent = newStarState ? "*" : "o";
+    starToggle.classList.add("pending");
+    starToggle.setAttribute("aria-disabled", "true");
+    try {
+      const didUpdate = await arg.callbacks.onArticleUpdate?.(
+        arg.article,
+        { starred: newStarState },
+        false,
+      );
+      if (didUpdate === false) return;
+      arg.article.starred = newStarState;
+      starToggle.classList.toggle("starred", newStarState);
+      starToggle.classList.toggle("unstarred", !newStarState);
+      const iconEl = starToggle.querySelector(".rss-dashboard-star-icon");
+      if (iconEl) {
+        setIcon(iconEl as HTMLElement, newStarState ? "star" : "star-off");
+        if (!iconEl.querySelector("svg")) {
+          iconEl.textContent = newStarState ? "*" : "o";
+        }
       }
+    } finally {
+      starToggle.classList.remove("pending");
+      starToggle.removeAttribute("aria-disabled");
     }
   };
 
-  toggleClickableIcon(starToggle, toggleStar);
+  toggleClickableIcon(starToggle, (event) => void toggleStar(event));
   return starToggle;
 }
 

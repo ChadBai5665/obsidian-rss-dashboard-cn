@@ -300,6 +300,35 @@ describe("FeedStorageRepository", () => {
     expect(saveData).not.toHaveBeenCalled();
   });
 
+  it("restores the prior shard generation when metadata persistence fails", async () => {
+    const settings = cloneSettings();
+    settings.storageMode = "vault-shards";
+    settings.storageFolder = "RSS Data/Feeds";
+    settings.feeds = [makeFeed({ feedId: "feed-rollback" })];
+
+    await repository.persistSettings(settings, saveData, {
+      forceAllShards: true,
+      forceMetadata: true,
+    });
+    const oldShard = await vaultAdapter(app).read(
+      "RSS Data/Feeds/feed-rollback.json",
+    );
+
+    settings.feeds[0].items[0].read = true;
+    saveData.mockRejectedValueOnce(new Error("metadata unavailable"));
+
+    await expect(
+      repository.persistSettings(settings, saveData, {
+        forceAllShards: true,
+        forceMetadata: true,
+      }),
+    ).rejects.toThrow("metadata unavailable");
+
+    expect(
+      await vaultAdapter(app).read("RSS Data/Feeds/feed-rollback.json"),
+    ).toBe(oldShard);
+  });
+
   it("migrates legacy settings to shard storage and strips items from persisted metadata", async () => {
     const settings = cloneSettings();
     settings.storageMode = "legacy-json";

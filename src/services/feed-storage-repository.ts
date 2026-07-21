@@ -391,6 +391,30 @@ export class FeedStorageRepository {
     }
 
     const normalizedStorageFolder = normalizeFolderPath(settings.storageFolder);
+    // A shard write followed by a metadata/user-state failure used to leave a
+    // restart with a mixed generation. Keep the old bytes for every touched
+    // vault file and compensate them as one persistence attempt on failure.
+    const rollbackFileBytes = new Map<string, string | null>();
+    const previousShardCache = new Map(this.lastPersistedShardJsonByFeedId);
+    const previousMetadataCache = this.lastPersistedMetadataJson;
+    const captureRollbackFile = async (path: string): Promise<void> => {
+      if (rollbackFileBytes.has(path)) return;
+      rollbackFileBytes.set(
+        path,
+        (await this.app.vault.adapter.exists(path))
+          ? await this.app.vault.adapter.read(path)
+          : null,
+      );
+    };
+    const restoreRollbackFiles = async (): Promise<void> => {
+      for (const [path, contents] of [...rollbackFileBytes.entries()].reverse()) {
+        if (contents !== null) {
+          await this.app.vault.adapter.write(path, contents);
+        } else {
+          await this.app.vault.adapter.remove(path);
+        }
+      }
+    };
     const storageFolderChanged =
       this.lastStorageFolderPath !== null &&
       this.lastStorageFolderPath !== normalizedStorageFolder;
@@ -405,7 +429,8 @@ export class FeedStorageRepository {
       });
     }
 
-    await this.ensureStorageFolderExists(normalizedStorageFolder);
+    try {
+      await this.ensureStorageFolderExists(normalizedStorageFolder);
 
     let shardWriteCount = 0;
     let shardDeleteCount = 0;
@@ -428,6 +453,7 @@ export class FeedStorageRepository {
           normalizedStorageFolder,
           feed.feedId,
         );
+        await captureRollbackFile(shardPath);
         await this.app.vault.adapter.write(shardPath, shardJson);
         this.lastPersistedShardJsonByFeedId.set(
           feed.feedId,
@@ -450,6 +476,7 @@ export class FeedStorageRepository {
         const previousShard =
           this.app.vault.getAbstractFileByPath(previousShardPath);
         if (previousShard) {
+          await captureRollbackFile(previousShardPath);
           await this.app.fileManager.trashFile(previousShard);
           storageLog("Deleted shard from previous storage folder", {
             feedId: feed.feedId,
@@ -472,6 +499,7 @@ export class FeedStorageRepository {
       );
       const existing = this.app.vault.getAbstractFileByPath(shardPath);
       if (existing) {
+        await captureRollbackFile(shardPath);
         await this.app.fileManager.trashFile(existing);
         storageLog("Deleted shard for removed feed", {
           feedId: previousFeedId,
@@ -496,6 +524,7 @@ export class FeedStorageRepository {
     }
 
     if (settings.storageMode === "vault-shards-v2") {
+      await captureRollbackFile(this.getUserStatePath(settings));
       await this.saveUserStateFromFeeds(settings);
     }
 
@@ -511,6 +540,20 @@ export class FeedStorageRepository {
       shardWriteCount,
       shardDeleteCount,
     };
+    } catch (error) {
+      try {
+        await restoreRollbackFiles();
+        if (previousMetadataCache !== null) {
+          await saveData(withSyncNonce(JSON.parse(previousMetadataCache)));
+        }
+      } catch {
+        // The caller records a repair marker. Never include vault paths or
+        // source data in the user-visible failure message.
+      }
+      this.lastPersistedShardJsonByFeedId = previousShardCache;
+      this.lastPersistedMetadataJson = previousMetadataCache;
+      throw error;
+    }
   }
 
   public async migrateToVaultShards(

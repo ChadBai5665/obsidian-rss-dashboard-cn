@@ -48,6 +48,7 @@ import { FolderService } from "./src/services/folder-service";
 import {
   FeedStorageRepository,
   type FeedLocalStorageAddress,
+  type PersistSettingsOptions,
   type FeedStorageStatus,
   ShardFolderDeletionError,
 } from "./src/services/feed-storage-repository";
@@ -141,14 +142,37 @@ function collectionFlagsFromItem(item: CollectedItem): CollectionFlagState {
   };
 }
 
-function applyCollectionFlags(
+type ArticleMutationSnapshot = Map<keyof FeedItem, {
+  exists: boolean;
+  value: FeedItem[keyof FeedItem];
+}>;
+
+function captureArticleMutationSnapshot(
   article: FeedItem,
-  flags: CollectionFlagState,
+  updates: Partial<FeedItem>,
+): ArticleMutationSnapshot {
+  const snapshot: ArticleMutationSnapshot = new Map();
+  for (const key of Object.keys(updates) as Array<keyof FeedItem>) {
+    const value = article[key];
+    snapshot.set(key, {
+      exists: Object.prototype.hasOwnProperty.call(article, key),
+      value: Array.isArray(value) ? [...value] : value,
+    });
+  }
+  return snapshot;
+}
+
+function restoreArticleMutationSnapshot(
+  article: FeedItem,
+  snapshot: ArticleMutationSnapshot,
 ): void {
-  article.read = flags.read;
-  article.starred = flags.starred;
-  article.saved = flags.saved;
-  article.savedFilePath = flags.savedNotePath;
+  for (const [key, previous] of snapshot) {
+    if (previous.exists) {
+      (article as unknown as Record<string, unknown>)[key] = previous.value;
+    } else {
+      delete (article as unknown as Record<string, unknown>)[key];
+    }
+  }
 }
 
 class FeedRefreshPipelineError extends Error {
@@ -393,6 +417,10 @@ export default class RssDashboardPlugin extends Plugin {
     | null = null;
   private progressSaveDebounce: number | null = null;
   private suppressWatcherUntil = 0;
+  // Status changes touch both the feed store and the collection store. A single
+  // queue keeps their read/modify/write cycle serial, so read/star clicks cannot
+  // overwrite one another while either backing store is slow.
+  private statusTransactionQueue: Promise<void> = Promise.resolve();
   private static readonly FEED_REFRESH_RENDER_THROTTLE_MS = 250;
   private readonly feedStorageRepository: FeedStorageRepository;
 
@@ -1579,39 +1607,53 @@ export default class RssDashboardPlugin extends Plugin {
       forceCollectionPathSync?: boolean;
     },
   ): Promise<boolean> {
-    const feed = this.settings.feeds.find((f) => f.url === feedUrl);
-    if (!feed) return false;
-
-    const article = feed.items.find((item) => item.guid === articleGuid);
-    if (!article) return false;
-
     const isCollectionFlagMutation =
       updates.read !== undefined ||
       updates.starred !== undefined ||
       (updates.saved !== undefined && updates.saved !== true) ||
       options?.forceCollectionPathSync === true;
-    const transactionResult = isCollectionFlagMutation
-      ? await this.commitCollectionFlagTransaction(article, updates)
-      : (await this.commitFeedOnlyArticleUpdate(article, updates))
-        ? "feed-only"
-        : "failed";
+    const transactionResult = await this.enqueueStatusTransaction(async () => {
+      const feed = this.settings.feeds.find((f) => f.url === feedUrl);
+      if (!feed) return "failed" as const;
+      const article = feed.items.find((item) => item.guid === articleGuid);
+      if (!article) return "failed" as const;
+      return isCollectionFlagMutation
+        ? await this.commitCollectionFlagTransaction(article, updates)
+        : (await this.commitFeedOnlyArticleUpdate(article, updates))
+          ? "feed-only"
+          : "failed";
+    });
     if (transactionResult === "failed") {
       return false;
     }
 
-    if (shouldRefreshView) {
-      await this.refreshDashboardViews();
-    }
-
-    await this.syncDashboardArticleUpdate(articleGuid, feedUrl, updates, false);
-    await this.syncReaderArticleUpdate(articleGuid, updates);
     if (
       transactionResult === "collection" &&
       !options?.suppressCollectionBroadcast
     ) {
       this.emitCollectionFlagsUpdated();
     }
+    // The collection event is the cross-dashboard invalidation signal. Avoid
+    // a second full reload here; regular dashboard cards get a targeted sync.
+    if (shouldRefreshView) {
+      await this.syncDashboardArticleUpdate(articleGuid, feedUrl, updates, false);
+    }
+    await this.syncReaderArticleUpdate(articleGuid, updates);
     return true;
+  }
+
+  private async enqueueStatusTransaction<T>(work: () => Promise<T>): Promise<T> {
+    const previous = this.statusTransactionQueue;
+    let release!: () => void;
+    this.statusTransactionQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous.catch(() => undefined);
+    try {
+      return await work();
+    } finally {
+      release();
+    }
   }
 
   public async updateSavedNotePath(
@@ -1632,11 +1674,14 @@ export default class RssDashboardPlugin extends Plugin {
     article: FeedItem,
     updates: Partial<FeedItem>,
   ): Promise<boolean> {
+    const snapshot = captureArticleMutationSnapshot(article, updates);
     Object.assign(article, updates);
     try {
       await this.saveSettings();
       return true;
     } catch {
+      restoreArticleMutationSnapshot(article, snapshot);
+      await this.tryPersistRestoredStatus();
       new Notice("Article status could not be saved. Please try again.");
       return false;
     }
@@ -1673,11 +1718,11 @@ export default class RssDashboardPlugin extends Plugin {
         : "failed";
     }
 
-    const previousFeedState = collectionFlagsFromItem(previous);
+    const previousCollectionState = collectionFlagsFromItem(previous);
     const desired = {
-      read: updates.read ?? article.read ?? previous.read,
-      starred: updates.starred ?? article.starred ?? previous.starred,
-      saved: updates.saved ?? article.saved ?? previous.saved,
+      read: updates.read ?? article.read ?? false,
+      starred: updates.starred ?? article.starred ?? false,
+      saved: updates.saved ?? article.saved ?? false,
       savedNotePath:
         updates.saved === false
           ? undefined
@@ -1686,25 +1731,47 @@ export default class RssDashboardPlugin extends Plugin {
     try {
       await repository.updateFlags(itemId, desired);
     } catch {
-      applyCollectionFlags(article, previousFeedState);
       new Notice("Collection status could not be saved. Please try again.");
       return "failed";
     }
 
+    const feedSnapshot = captureArticleMutationSnapshot(article, updates);
     Object.assign(article, updates);
     try {
       await this.saveSettings();
       return "collection";
     } catch {
-      applyCollectionFlags(article, previousFeedState);
+      restoreArticleMutationSnapshot(article, feedSnapshot);
       try {
-        await repository.updateFlags(itemId, previousFeedState);
+        await repository.updateFlags(itemId, previousCollectionState);
       } catch {
+        await this.writeStatusRepairJournal();
         new Notice("Collection status repair is required. Please try again.");
         return "failed";
       }
+      await this.tryPersistRestoredStatus();
       new Notice("Article status could not be saved. Please try again.");
       return "failed";
+    }
+  }
+
+  private async tryPersistRestoredStatus(): Promise<void> {
+    try {
+      await this.saveSettings({ forceAllShards: true, forceMetadata: true });
+    } catch {
+      await this.writeStatusRepairJournal();
+    }
+  }
+
+  private async writeStatusRepairJournal(): Promise<void> {
+    try {
+      await this.app.vault.adapter.write(
+        ".rss-dashboard-data/status-repair-required.json",
+        JSON.stringify({ version: 1, repairRequiredAt: Date.now() }),
+      );
+    } catch {
+      // The warning below intentionally remains content-free even when a
+      // damaged vault adapter cannot accept the recovery marker.
     }
   }
 
@@ -1712,7 +1779,12 @@ export default class RssDashboardPlugin extends Plugin {
     const workspace = this.app.workspace as typeof this.app.workspace & {
       trigger?: (name: string) => void;
     };
-    workspace.trigger?.("rss-dashboard:collection-flags-updated");
+    try {
+      workspace.trigger?.("rss-dashboard:collection-flags-updated");
+    } catch {
+      // Workspace observers are best-effort. Their failure must not turn a
+      // fully durable status transaction into a failed user action.
+    }
   }
 
   importOpml(): void {
@@ -2551,6 +2623,8 @@ export default class RssDashboardPlugin extends Plugin {
           didNormalizeAndDedupeItems ||
           JSON.stringify(this.settings) !== originalSettingsJson);
 
+      await this.replayStatusRepairJournalIfNeeded();
+
       if (shouldSave) {
         await this.saveSettings();
       }
@@ -2562,6 +2636,18 @@ export default class RssDashboardPlugin extends Plugin {
         }`,
       );
       this.settings = DEFAULT_SETTINGS;
+    }
+  }
+
+  private async replayStatusRepairJournalIfNeeded(): Promise<void> {
+    const repairPath = ".rss-dashboard-data/status-repair-required.json";
+    try {
+      if (!(await this.app.vault.adapter.exists(repairPath))) return;
+      await this.saveSettings({ forceAllShards: true, forceMetadata: true });
+      await this.app.vault.adapter.remove(repairPath);
+    } catch {
+      // Keep the marker for the next startup. No source metadata belongs in
+      // this recovery path or its user-visible diagnostics.
     }
   }
 
@@ -2853,7 +2939,7 @@ export default class RssDashboardPlugin extends Plugin {
     };
   }
 
-  async saveSettings() {
+  async saveSettings(options: PersistSettingsOptions = {}) {
     storageLog("saveSettings invoked", {
       mode: this.settings.storageMode,
       folder: this.settings.storageFolder,
@@ -2865,6 +2951,7 @@ export default class RssDashboardPlugin extends Plugin {
       const result = await this.feedStorageRepository.persistSettings(
         this.settings,
         this.getMetadataSaveCallback(),
+        options,
       );
       storageLog("saveSettings completed", result);
     } catch (error) {
