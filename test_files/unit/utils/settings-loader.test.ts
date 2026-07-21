@@ -82,6 +82,30 @@ describe("settings-loader", () => {
       expect(result.refreshInterval).toBe(DEFAULT_SETTINGS.refreshInterval);
     });
 
+    it("defaults the locale to Chinese for settings saved before localization", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+
+      expect(loadAndNormalizeSettings({}).locale).toBe("zh-CN");
+    });
+
+    it("preserves a stored English locale", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+
+      expect(loadAndNormalizeSettings({ locale: "en" }).locale).toBe("en");
+    });
+
+    it("falls back to Chinese for an invalid stored locale", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+
+      expect(
+        loadAndNormalizeSettings({ locale: "fr" } as unknown as Partial<RssDashboardSettings>)
+          .locale,
+      ).toBe("zh-CN");
+    });
+
     it("adds RSS Dashboard CN defaults to upstream settings without replacing feeds", async () => {
       const { loadAndNormalizeSettings } =
         await import("../../../src/utils/settings-loader");

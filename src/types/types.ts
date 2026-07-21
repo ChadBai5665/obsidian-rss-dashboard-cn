@@ -1,3 +1,5 @@
+import type { Locale } from "../i18n/types";
+
 export interface FeedItem {
   /** Stable collection identity once the item has entered the collection layer. */
   rssDashboardId?: string;
@@ -437,6 +439,7 @@ export interface CollectionSettings {
 export interface RssDashboardSettings {
   feeds: Feed[];
   folders: Folder[];
+  locale: Locale;
   refreshMode: RefreshMode;
   refreshInterval: number;
   lastRefreshTimestamp: number;
@@ -592,6 +595,7 @@ export const DEFAULT_SETTINGS: RssDashboardSettings = {
       modifiedAt: Date.now(),
     },
   ],
+  locale: "zh-CN",
   refreshMode: "daily-on-open",
   refreshInterval: 60,
   lastRefreshTimestamp: 0,

@@ -75,6 +75,10 @@ export function loadAndNormalizeSettings(
 ): RssDashboardSettings {
   const settings = Object.assign({}, DEFAULT_SETTINGS, rawData ?? {});
 
+  if (settings.locale !== "zh-CN" && settings.locale !== "en") {
+    settings.locale = DEFAULT_SETTINGS.locale;
+  }
+
   if (!rawData?.storageMode) {
     const hasFeeds = Array.isArray(rawData?.feeds) && rawData.feeds.length > 0;
     const hasRefreshHistory =

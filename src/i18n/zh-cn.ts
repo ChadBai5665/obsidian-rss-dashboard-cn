@@ -1,0 +1,46 @@
+import type { TranslationCatalog } from "./types";
+
+export const zhCN = {
+  "common.refresh": "刷新",
+  "common.save": "保存",
+  "common.cancel": "取消",
+  "common.delete": "删除",
+  "common.edit": "编辑",
+  "common.close": "关闭",
+  "common.search": "搜索",
+  "common.loading": "正在加载…",
+  "common.retry": "重试",
+  "common.confirm": "确认",
+  "common.settings": "设置",
+  "common.today": "今天",
+  "common.yesterday": "昨天",
+  "common.all": "全部",
+  "common.unread": "未读",
+  "common.read": "已读",
+  "common.starred": "已加星标",
+  "common.saved": "已保存",
+  "common.noItems": "暂无内容",
+  "common.error": "发生错误，请稍后重试。",
+
+  "command.refreshAll": "刷新全部订阅",
+  "command.refreshCurrent": "刷新当前订阅",
+  "command.openDashboard": "打开 RSS 仪表盘",
+
+  "notice.refreshStarted": "正在刷新订阅…",
+  "notice.refreshedCount": "已从 {source} 刷新 {count} 条内容",
+  "notice.refreshFailed": "无法刷新 {source}",
+  "notice.noApiKey": "尚未配置有效的 API 密钥。",
+  "notice.savedToVault": "已保存到知识库",
+
+  "navigation.dashboard": "仪表盘",
+  "navigation.todayCollection": "今日采集",
+  "navigation.subscriptions": "我的订阅",
+  "navigation.topicDiscovery": "主题发现",
+  "navigation.starred": "已加星标",
+  "navigation.saved": "已保存",
+  "navigation.settings": "设置",
+
+  "settings.language": "界面语言",
+  "settings.languageChinese": "简体中文",
+  "settings.languageEnglish": "English",
+} satisfies TranslationCatalog;
