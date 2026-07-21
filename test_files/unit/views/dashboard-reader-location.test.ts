@@ -225,6 +225,33 @@ describe("Dashboard reader location", () => {
     expect(mainLeaf.view.focusReaderView).toHaveBeenCalledTimes(1);
   }, 10000);
 
+  it("passes persisted collection content context into the real reader handoff", async () => {
+    const settings = cloneSettings();
+    const stableId = "a".repeat(64);
+    const feed = makeFeed("https://example.com/feed", [{ rssDashboardId: stableId }]);
+    settings.feeds = [feed];
+    settings.readerViewLocation = "main";
+    const mainLeaf = createReaderLeaf(new App(), "main");
+    const { view, plugin } = await createDashboardView(settings, {
+      getLeavesOfType: vi.fn(() => []),
+      getLeaf: vi.fn(() => mainLeaf),
+      getLeftLeaf: vi.fn(),
+      getRightLeaf: vi.fn(),
+      revealLeaf: vi.fn(async () => {}),
+    });
+    (plugin as { getCollectedItemById?: ReturnType<typeof vi.fn> }).getCollectedItemById = vi.fn(async () => ({
+      id: stableId,
+      contentBasis: "linked-page",
+    }));
+
+    await view.handleArticleClick(feed.items[0]);
+
+    expect(mainLeaf.view.displayItem).toHaveBeenCalledWith(feed.items[0], [], {
+      contentBasis: "linked-page",
+    });
+    expect(feed.items[0]).not.toHaveProperty("contentBasis");
+  });
+
   it("relocks the selected card after split open in card view", async () => {
     const settings = cloneSettings();
     const feed = makeFeed("https://example.com/feed", [{}]);

@@ -60,6 +60,11 @@ import { createTranslator } from "../i18n";
 
 export const RSS_READER_VIEW_TYPE = "rss-reader-view";
 
+/** Durable collection metadata supplied separately from legacy FeedItem data. */
+export interface ReaderContentContext {
+  contentBasis: ContentBasis;
+}
+
 const RAW_SUBSTACK_FETCH_URL_RE =
   /https:\/\/substackcdn\.com\/image\/fetch\//gi;
 const ENCODED_SUBSTACK_S3_URL_RE =
@@ -657,7 +662,7 @@ export class ReaderView extends ItemView {
       // Best-effort check only; continue and inject hero if parsing fails.
     }
 
-    return `<p><img src="${fallbackHeroUrl}" alt="Hero image" /></p>${html}`;
+    return `<p><img src="${fallbackHeroUrl}" alt="${this.t("reader.heroImage")}" /></p>${html}`;
   }
 
   private normalizeBlockLinksForSavedMarkdown(html: string): string {
@@ -1251,6 +1256,7 @@ export class ReaderView extends ItemView {
   async displayItem(
     item: FeedItem,
     relatedItems: FeedItem[] = [],
+    contentContext?: ReaderContentContext,
   ): Promise<void> {
     if (this.disposed) return;
     const displayRequest = ++this.displayRequestSequence;
@@ -1310,8 +1316,14 @@ export class ReaderView extends ItemView {
 
     if (item.mediaType === "video" && item.videoId) {
       await this.displayVideo(item);
+      this.renderContentBasis(
+        contentContext?.contentBasis ?? "title-description",
+      );
     } else if (item.mediaType === "video" && item.videoUrl) {
       await this.displayVideoPodcast(item);
+      this.renderContentBasis(
+        contentContext?.contentBasis ?? "title-description",
+      );
     } else if (
       item.mediaType === "podcast" &&
       (item.audioUrl || MediaService.extractPodcastAudio(item.description))
@@ -1321,6 +1333,7 @@ export class ReaderView extends ItemView {
         if (aud) item.audioUrl = aud;
       }
       await this.displayPodcast(item);
+      this.renderContentBasis(contentContext?.contentBasis ?? "feed");
     } else {
       const fullTextResult = this.shouldSkipFullArticleFetch(item)
         ? { content: "", failureType: "none" as const }
@@ -1355,11 +1368,12 @@ export class ReaderView extends ItemView {
       this.syncReaderTitle();
       await this.displayArticle(item, fullContent);
       this.renderContentBasis(
-        hasFullArticleContent
-          ? "full-text"
-          : item.mediaType === "video"
-            ? "title-description"
-            : "feed",
+        contentContext?.contentBasis ??
+          (hasFullArticleContent
+            ? "full-text"
+            : item.mediaType === "video"
+              ? "title-description"
+              : "feed"),
       );
     }
   }
@@ -1929,7 +1943,10 @@ export class ReaderView extends ItemView {
           if (heroUrl) {
             heroSlot.createEl("img", {
               cls: "rss-reader-fallback-hero",
-              attr: { src: heroUrl, alt: title || "Hero image" },
+              attr: {
+                src: heroUrl,
+                alt: title || this.t("reader.heroImage"),
+              },
             });
 
             // Remove the first image from the body if it's the hero image to avoid duplication
@@ -3067,7 +3084,7 @@ export class ReaderView extends ItemView {
       this.saveButton.toggleClass("saved", saved);
       this.saveButton.setAttr(
         "title",
-        saved ? "Click to open saved article" : "Save article",
+        saved ? this.t("article.openSaved") : this.t("article.save"),
       );
     }
   }
@@ -3555,7 +3572,7 @@ export class ReaderView extends ItemView {
           type: "video/mp4",
         },
       });
-      video.appendText("Your browser does not support the video tag.");
+      video.appendText(this.t("reader.videoUnsupported"));
 
       const progressEnabled = this.settings.media.rememberPlaybackProgress;
 

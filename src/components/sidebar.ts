@@ -608,7 +608,7 @@ export class Sidebar {
           });
 
           if (!result.ok || !result.newPath) {
-            new Notice(result.error || "Unable to move folder.");
+            new Notice(result.error || this.t("sidebar.unableMoveFolder"));
             return;
           }
 
@@ -655,7 +655,7 @@ export class Sidebar {
             destinationFolderPath: "",
           });
           if (!result.ok) {
-            new Notice(result.error || "Unable to move feed.");
+            new Notice(result.error || this.t("sidebar.unableMoveFeed"));
             return;
           }
 
@@ -1033,7 +1033,9 @@ export class Sidebar {
     });
     toggleButton.setAttr(
       "aria-label",
-      isCollapsed ? "Expand folder" : "Collapse folder",
+      this.t(
+        isCollapsed ? "sidebar.expandFolder" : "sidebar.collapseFolder",
+      ),
     );
     setIcon(toggleButton, isCollapsed ? "chevron-right" : "chevron-down");
 
@@ -1083,7 +1085,11 @@ export class Sidebar {
 
         toggleButton.setAttr(
           "aria-label",
-          isNowCollapsed ? "Expand folder" : "Collapse folder",
+          this.t(
+            isNowCollapsed
+              ? "sidebar.expandFolder"
+              : "sidebar.collapseFolder",
+          ),
         );
 
         this.callbacks.onToggleFolderCollapse(fullPath, false);
@@ -1211,7 +1217,7 @@ export class Sidebar {
         });
 
         if (!result.ok || !result.newPath) {
-          new Notice(result.error || "Unable to move folder.");
+          new Notice(result.error || this.t("sidebar.unableMoveFolder"));
           return;
         }
 
@@ -1259,7 +1265,7 @@ export class Sidebar {
         destinationFolderPath: fullPath,
       });
       if (!op.ok) {
-        new Notice(op.error || "Unable to move feed.");
+        new Notice(op.error || this.t("sidebar.unableMoveFeed"));
         return;
       }
 
@@ -1306,7 +1312,7 @@ export class Sidebar {
             destinationFolderPath: fullPath,
           });
           if (!result.ok) {
-            new Notice(result.error || "Unable to move feed.");
+            new Notice(result.error || this.t("sidebar.unableMoveFeed"));
             return;
           }
 
@@ -1540,7 +1546,10 @@ export class Sidebar {
         cls: "rss-dashboard-feed-processing-indicator",
         text: "⏳",
       });
-      processingIndicator.setAttribute("title", this.t("sidebar.backgroundFetch"));
+      processingIndicator.setAttribute(
+        "title",
+        this.t("sidebar.queuedForRefresh"),
+      );
     }
 
     feedEl.addEventListener("click", (e) => {
@@ -1628,7 +1637,7 @@ export class Sidebar {
       });
 
       if (!result.ok) {
-        new Notice(result.error || "Unable to move feed.");
+        new Notice(result.error || this.t("sidebar.unableMoveFeed"));
         return;
       }
 
@@ -1775,13 +1784,16 @@ export class Sidebar {
 
     if (folderCount === 0 && feedCount === 0) return;
 
-    let msg = `Are you sure you want to delete the selected items? This action cannot be undone.`;
+    let msg = this.t("sidebar.deleteSelectionDefault");
     if (folderCount > 0 && feedCount === 0) {
-      msg = `Are you sure you want to delete ${folderCount} selected folder(s) and all their subfolders and feeds?`;
+      msg = this.t("sidebar.deleteSelectedFolders", { folders: folderCount });
     } else if (feedCount > 0 && folderCount === 0) {
-      msg = `Are you sure you want to delete ${feedCount} selected feed(s)?`;
+      msg = this.t("sidebar.deleteSelectedFeeds", { feeds: feedCount });
     } else {
-      msg = `Are you sure you want to delete ${folderCount} folder(s) and ${feedCount} feed(s)?`;
+      msg = this.t("sidebar.deleteSelectedMixed", {
+        folders: folderCount,
+        feeds: feedCount,
+      });
     }
 
     this.showConfirmModal(msg, () => {
@@ -1903,7 +1915,7 @@ export class Sidebar {
     });
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle(`Refresh feeds in folder`)
+        .setTitle(this.t("sidebar.refreshFolder"))
         .setIcon("refresh-cw")
         .onClick(() => {
           void this.plugin.refreshFeedsInFolder(fullPath);
@@ -1929,7 +1941,9 @@ export class Sidebar {
     menu.addItem((item: MenuItem) => {
       const isPinned = folderObj.pinned;
       item
-        .setTitle(isPinned ? "Unpin folder" : "Pin folder")
+        .setTitle(
+          this.t(isPinned ? "sidebar.unpinFolder" : "sidebar.pinFolder"),
+        )
         .setIcon(isPinned ? "unlock" : "lock")
         .onClick(() => {
           folderObj.pinned = !isPinned;
@@ -1943,7 +1957,7 @@ export class Sidebar {
         .setIcon("trash")
         .onClick(() => {
           this.showConfirmModal(
-            `Are you sure you want to delete the folder '${folderName}' and all its subfolders and feeds?`,
+            this.t("sidebar.deleteFolderConfirm", { folder: folderName }),
             () => {
               const allPaths = this.getAllDescendantFolderPaths(fullPath);
               this.settings.feeds = this.settings.feeds.filter(
@@ -2089,7 +2103,7 @@ export class Sidebar {
 
     if (row.target.type === "feed" && row.feed) {
       this.showConfirmModal(
-        `Are you sure you want to delete the feed "${row.feed.title}"?`,
+        this.t("sidebar.deleteFeedConfirm", { feed: row.feed.title }),
         () => {
           this.callbacks.onDeleteFeed(row.feed!);
         },
@@ -2099,7 +2113,7 @@ export class Sidebar {
 
     if (row.target.type === "folder" && row.folderPath && row.folderName) {
       this.showConfirmModal(
-        `Are you sure you want to delete the folder '${row.folderName}' and all its subfolders and feeds?`,
+        this.t("sidebar.deleteFolderConfirm", { folder: row.folderName }),
         () => {
           const allPaths = this.getAllDescendantFolderPaths(row.folderPath!);
           this.settings.feeds = this.settings.feeds.filter(
@@ -2126,7 +2140,7 @@ export class Sidebar {
     if (row.target.type === "folder" && row.folderPath && row.folderName) {
       const { folderPath, folderName } = row;
       this.showFolderNameModal({
-        title: "Rename folder",
+        title: this.t("sidebar.renameFolder"),
         defaultValue: folderName,
         existingNames: (() => {
           const parentPath = folderPath.includes("/")
@@ -2419,7 +2433,7 @@ export class Sidebar {
     const { contentEl } = confirmModal;
     contentEl.empty();
 
-    new Setting(contentEl).setName("Confirm").setHeading();
+    new Setting(contentEl).setName(this.t("sidebar.confirmTitle")).setHeading();
     contentEl.createDiv({ cls: "rss-sidebar-confirm-message", text: message });
 
     const buttonContainer = contentEl.createDiv({
@@ -2430,7 +2444,7 @@ export class Sidebar {
     okButton.addClass("rss-folder-name-modal-ok");
     const okIcon = okButton.createSpan();
     setIcon(okIcon, "check");
-    okButton.createSpan({ text: "OK" });
+    okButton.createSpan({ text: this.t("sidebar.ok") });
     okButton.onclick = () => {
       confirmModal.close();
       onConfirm();
@@ -2440,7 +2454,7 @@ export class Sidebar {
     cancelButton.addClass("rss-folder-name-modal-cancel");
     const cancelIcon = cancelButton.createSpan();
     setIcon(cancelIcon, "x");
-    cancelButton.createSpan({ text: "Cancel" });
+    cancelButton.createSpan({ text: this.t("sidebar.cancel") });
     cancelButton.onclick = () => confirmModal.close();
 
     confirmModal.open();
@@ -2454,7 +2468,9 @@ export class Sidebar {
     const { contentEl } = modal;
     contentEl.empty();
 
-    new Setting(contentEl).setName(`Feed Error: ${feedTitle}`).setHeading();
+    new Setting(contentEl)
+      .setName(this.t("sidebar.feedErrorTitle", { feed: feedTitle }))
+      .setHeading();
 
     contentEl.createDiv({
       text: error,
@@ -2469,7 +2485,7 @@ export class Sidebar {
     okButton.addClass("rss-folder-name-modal-ok");
     const okIcon = okButton.createSpan();
     setIcon(okIcon, "check");
-    okButton.createSpan({ text: "OK" });
+    okButton.createSpan({ text: this.t("sidebar.ok") });
     okButton.onclick = () => modal.close();
 
     modal.open();
@@ -2485,7 +2501,7 @@ export class Sidebar {
       cls: "rss-dashboard-modal-content",
     });
 
-    new Setting(modalContent).setName("Add new tag").setHeading();
+    new Setting(modalContent).setName(this.t("sidebar.addTagTitle")).setHeading();
 
     const formContainer = modalContent.createDiv({
       cls: "rss-dashboard-tag-modal-form",
@@ -2502,7 +2518,7 @@ export class Sidebar {
     const nameInput = formContainer.createEl("input", {
       attr: {
         type: "text",
-        placeholder: "Enter tag name",
+        placeholder: this.t("sidebar.tagNamePlaceholder"),
         autocomplete: "off",
       },
       cls: "rss-dashboard-tag-modal-name-input",
@@ -2514,14 +2530,14 @@ export class Sidebar {
     });
 
     const cancelButton = buttonContainer.createEl("button", {
-      text: "Cancel",
+      text: this.t("sidebar.cancel"),
     });
     cancelButton.addEventListener("click", () => {
       modal.remove();
     });
 
     const addButton = buttonContainer.createEl("button", {
-      text: "Add tag",
+      text: this.t("sidebar.addTagButton"),
       cls: "rss-dashboard-primary-button",
     });
     addButton.addEventListener("click", () => {
@@ -2534,7 +2550,7 @@ export class Sidebar {
             (tag) => tag.name.toLowerCase() === tagName.toLowerCase(),
           )
         ) {
-          new Notice("A tag with this name already exists!");
+          new Notice(this.t("sidebar.tagExists"));
           return;
         }
 
@@ -2550,9 +2566,9 @@ export class Sidebar {
 
         modal.remove();
 
-        new Notice(`Tag "${tagName}" added successfully!`);
+        new Notice(this.t("sidebar.tagAdded", { tag: tagName }));
       } else {
-        new Notice("Please enter a tag name!");
+        new Notice(this.t("sidebar.tagRequired"));
       }
     });
     buttonContainer.appendChild(addButton);
@@ -2571,7 +2587,7 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Edit tag")
+        .setTitle(this.t("sidebar.editTag"))
         .setIcon("pencil")
         .onClick(() => {
           this.showEditTagModal(tag);
@@ -2580,11 +2596,11 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Delete tag")
+        .setTitle(this.t("sidebar.deleteTag"))
         .setIcon("trash")
         .onClick(() => {
           this.showConfirmModal(
-            `Are you sure you want to delete the tag "${tag.name}"? This will remove the tag from all articles.`,
+            this.t("sidebar.deleteTagConfirm", { tag: tag.name }),
             () => {
               this.deleteTag(tag);
             },
@@ -2629,7 +2645,7 @@ export class Sidebar {
 
     this.render();
 
-    new Notice(`Tag "${tag.name}" deleted successfully!`);
+    new Notice(this.t("sidebar.tagDeleted", { tag: tag.name }));
   }
 
   private showUnreadItemsContextMenu(event: MouseEvent): void {
@@ -2637,7 +2653,7 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Mark all unread as read")
+        .setTitle(this.t("sidebar.markAllUnreadRead"))
         .setIcon("check-circle")
         .onClick(() => {
           void this.markAllUnreadAsRead();
@@ -2652,7 +2668,7 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Mark all read as unread")
+        .setTitle(this.t("sidebar.markAllReadUnread"))
         .setIcon("circle")
         .onClick(() => {
           void this.markAllReadAsUnread();
@@ -2667,9 +2683,9 @@ export class Sidebar {
     if (count === null) return;
     if (count > 0) {
       this.render();
-      new Notice(`Marked ${count} items as read`);
+      new Notice(this.t("dashboard.markedRead", { count }));
     } else {
-      new Notice("No unread items found");
+      new Notice(this.t("sidebar.noUnread"));
     }
   }
 
@@ -2678,9 +2694,9 @@ export class Sidebar {
     if (count === null) return;
     if (count > 0) {
       this.render();
-      new Notice(`Marked ${count} items as unread`);
+      new Notice(this.t("dashboard.markedUnread", { count }));
     } else {
-      new Notice("No read items found");
+      new Notice(this.t("sidebar.noRead"));
     }
   }
 
@@ -2837,7 +2853,7 @@ export class Sidebar {
         case "addFolder": {
           const action = () => {
             this.showFolderNameModal({
-              title: "Add folder",
+              title: this.t("sidebar.addFolder"),
               existingNames: this.settings.folders.map((f) => f.name),
               onSubmit: (folderName) => {
                 void this.addTopLevelFolder(folderName).then(() =>
@@ -3072,32 +3088,32 @@ export class Sidebar {
       );
       menu.addItem((item) =>
         item
-          .setTitle("Folder name (a to z)")
+          .setTitle(this.t("sidebar.sortFolderNameAsc"))
           .onClick(() => void this.sortFolders("name", true)),
       );
       menu.addItem((item) =>
         item
-          .setTitle("Folder name (z to a)")
+          .setTitle(this.t("sidebar.sortFolderNameDesc"))
           .onClick(() => void this.sortFolders("name", false)),
       );
       menu.addItem((item) =>
         item
-          .setTitle("Modified time (new to old)")
+          .setTitle(this.t("sidebar.sortModifiedDesc"))
           .onClick(() => void this.sortFolders("modified", false)),
       );
       menu.addItem((item) =>
         item
-          .setTitle("Modified time (old to new)")
+          .setTitle(this.t("sidebar.sortModifiedAsc"))
           .onClick(() => void this.sortFolders("modified", true)),
       );
       menu.addItem((item) =>
         item
-          .setTitle("Created time (new to old)")
+          .setTitle(this.t("sidebar.sortCreatedDesc"))
           .onClick(() => void this.sortFolders("created", false)),
       );
       menu.addItem((item) =>
         item
-          .setTitle("Created time (old to new)")
+          .setTitle(this.t("sidebar.sortCreatedAsc"))
           .onClick(() => void this.sortFolders("created", true)),
       );
       if (e) {
@@ -3203,13 +3219,14 @@ export class Sidebar {
     const addFolderButton = sidebarToolbar.createDiv({
       cls: "rss-dashboard-toolbar-button",
       attr: {
-        title: "Add folder",
+        title: this.t("sidebar.addFolder"),
+        "aria-label": this.t("sidebar.addFolder"),
       },
     });
     setIcon(addFolderButton, "folder-plus");
     addFolderButton.addEventListener("click", () => {
       this.showFolderNameModal({
-        title: "Add folder",
+        title: this.t("sidebar.addFolder"),
         existingNames: this.settings.folders.map((f) => f.name),
         onSubmit: (folderName) => {
           void this.addTopLevelFolder(folderName).then(() => this.render());
@@ -3220,7 +3237,8 @@ export class Sidebar {
     const sortButton = sidebarToolbar.createDiv({
       cls: "rss-dashboard-toolbar-button",
       attr: {
-        title: "Sort folders",
+        title: this.t("sidebar.sortFolders"),
+        "aria-label": this.t("sidebar.sortFolders"),
       },
     });
     setIcon(sortButton, "sort-asc");
@@ -3228,52 +3246,52 @@ export class Sidebar {
       const menu = new Menu();
 
       menu.addItem((item) =>
-        item.setTitle("Feed name (a to z)").onClick(() => {
+        item.setTitle(this.t("sidebar.sortNameAsc")).onClick(() => {
           void this.sortAllFeeds("name", true);
         }),
       );
       menu.addItem((item) =>
-        item.setTitle("Feed name (z to a)").onClick(() => {
+        item.setTitle(this.t("sidebar.sortNameDesc")).onClick(() => {
           void this.sortAllFeeds("name", false);
         }),
       );
       menu.addItem((item) =>
-        item.setTitle("Unread count (high to low)").onClick(() => {
+        item.setTitle(this.t("sidebar.sortUnreadDesc")).onClick(() => {
           void this.sortAllFeeds("unreadCount", false);
         }),
       );
       menu.addItem((item) =>
-        item.setTitle("Unread count (low to high)").onClick(() => {
+        item.setTitle(this.t("sidebar.sortUnreadAsc")).onClick(() => {
           void this.sortAllFeeds("unreadCount", true);
         }),
       );
       menu.addItem((item) =>
-        item.setTitle("Folder name (a to z)").onClick(() => {
+        item.setTitle(this.t("sidebar.sortFolderNameAsc")).onClick(() => {
           void this.sortFolders("name", true);
         }),
       );
       menu.addItem((item) =>
-        item.setTitle("Folder name (z to a)").onClick(() => {
+        item.setTitle(this.t("sidebar.sortFolderNameDesc")).onClick(() => {
           void this.sortFolders("name", false);
         }),
       );
       menu.addItem((item) =>
-        item.setTitle("Modified time (new to old)").onClick(() => {
+        item.setTitle(this.t("sidebar.sortModifiedDesc")).onClick(() => {
           void this.sortFolders("modified", false);
         }),
       );
       menu.addItem((item) =>
-        item.setTitle("Modified time (old to new)").onClick(() => {
+        item.setTitle(this.t("sidebar.sortModifiedAsc")).onClick(() => {
           void this.sortFolders("modified", true);
         }),
       );
       menu.addItem((item) =>
-        item.setTitle("Created time (new to old)").onClick(() => {
+        item.setTitle(this.t("sidebar.sortCreatedDesc")).onClick(() => {
           void this.sortFolders("created", false);
         }),
       );
       menu.addItem((item) =>
-        item.setTitle("Created time (old to new)").onClick(() => {
+        item.setTitle(this.t("sidebar.sortCreatedAsc")).onClick(() => {
           void this.sortFolders("created", true);
         }),
       );
@@ -3284,7 +3302,8 @@ export class Sidebar {
     const collapseAllButton = sidebarToolbar.createDiv({
       cls: "rss-dashboard-toolbar-button",
       attr: {
-        title: "Collapse/Expand all Folders",
+        title: this.t("sidebar.toggleAllFolders"),
+        "aria-label": this.t("sidebar.toggleAllFolders"),
       },
     });
 
@@ -3317,8 +3336,8 @@ export class Sidebar {
     const searchButton = sidebarToolbar.createDiv({
       cls: "rss-dashboard-toolbar-button",
       attr: {
-        title: "Search feeds",
-        "aria-label": "Search feeds",
+        title: this.t("sidebar.searchFeeds"),
+        "aria-label": this.t("sidebar.searchFeeds"),
         role: "button",
         tabindex: "0",
       },
@@ -3399,7 +3418,7 @@ export class Sidebar {
   private showFolderAutoTagModal(folderPath: string): void {
     const folder = this.findFolderByPath(folderPath);
     if (!folder) {
-      new Notice("Folder not found");
+      new Notice(this.t("sidebar.folderNotFound"));
       return;
     }
 
@@ -3456,11 +3475,11 @@ export class Sidebar {
 
             if (existingArticlesAction === "remove_all") {
               new Notice(
-                `Removed all tags from ${articlesUpdated} article${articlesUpdated === 1 ? "" : "s"}`,
+                this.t("sidebar.removedTags", { count: articlesUpdated }),
               );
             } else {
               new Notice(
-                `Updated ${articlesUpdated} article${articlesUpdated === 1 ? "" : "s"} with folder auto-tags`,
+                this.t("sidebar.updatedAutoTags", { count: articlesUpdated }),
               );
             }
           })();
@@ -3575,7 +3594,7 @@ export class Sidebar {
         .setIcon("trash")
         .onClick(() => {
           this.showConfirmModal(
-            `Are you sure you want to delete the feed "${feed.title}"?`,
+            this.t("sidebar.deleteFeedConfirm", { feed: feed.title }),
             () => {
               this.callbacks.onDeleteFeed(feed);
             },
@@ -3603,7 +3622,7 @@ export class Sidebar {
           feed.folder = "";
           void this.plugin.saveSettings().then(() => {
             this.render();
-            new Notice(`Moved "${feed.title}" to root`);
+            new Notice(this.t("sidebar.movedToRoot", { feed: feed.title }));
           });
         });
     });
@@ -3634,7 +3653,12 @@ export class Sidebar {
 
                 void this.plugin.saveSettings().then(() => {
                   this.render();
-                  new Notice(`Moved "${feed.title}" to "${folderPath}"`);
+                  new Notice(
+                    this.t("sidebar.movedToFolder", {
+                      feed: feed.title,
+                      folder: folderPath,
+                    }),
+                  );
                 });
               }
             });
@@ -3662,7 +3686,10 @@ export class Sidebar {
                 await this.plugin.saveSettings();
                 this.render();
                 new Notice(
-                  `Created folder "${folderName}" and moved "${feed.title}" to it`,
+                  this.t("sidebar.createdAndMoved", {
+                    folder: folderName,
+                    feed: feed.title,
+                  }),
                 );
               })();
             },
@@ -3755,22 +3782,22 @@ export class Sidebar {
       }),
     );
     menu.addItem((item) =>
-      item.setTitle("Created time (new to old)").onClick(() => {
+      item.setTitle(this.t("sidebar.sortCreatedDesc")).onClick(() => {
         void this.sortFeedsInFolder(folderPath, "created", false);
       }),
     );
     menu.addItem((item) =>
-      item.setTitle("Created time (old to new)").onClick(() => {
+      item.setTitle(this.t("sidebar.sortCreatedAsc")).onClick(() => {
         void this.sortFeedsInFolder(folderPath, "created", true);
       }),
     );
     menu.addItem((item) =>
-      item.setTitle("Number of items (high to low)").onClick(() => {
+      item.setTitle(this.t("sidebar.sortItemCountDesc")).onClick(() => {
         void this.sortFeedsInFolder(folderPath, "itemCount", false);
       }),
     );
     menu.addItem((item) =>
-      item.setTitle("Number of items (low to high)").onClick(() => {
+      item.setTitle(this.t("sidebar.sortItemCountAsc")).onClick(() => {
         void this.sortFeedsInFolder(folderPath, "itemCount", true);
       }),
     );
@@ -3848,8 +3875,20 @@ export class Sidebar {
 
     await this.plugin.saveSettings();
 
+    const fieldKey =
+      by === "name"
+        ? "sidebar.sortFieldName"
+        : by === "created"
+          ? "sidebar.sortFieldCreated"
+          : "sidebar.sortFieldItemCount";
     new Notice(
-      `Feeds in "${folderPath || "root"}" sorted by ${by} (${ascending ? "ascending" : "descending"})`,
+      this.t("sidebar.sortedFeeds", {
+        folder: folderPath || this.t("sidebar.root"),
+        field: this.t(fieldKey),
+        direction: this.t(
+          ascending ? "sidebar.ascending" : "sidebar.descending",
+        ),
+      }),
     );
     this.render();
   }

@@ -527,7 +527,10 @@ export class ArticleRenderer {
           if (heroUrl) {
             heroSlot.createEl("img", {
               cls: "rss-reader-fallback-hero",
-              attr: { src: heroUrl, alt: title || "Hero image" },
+              attr: {
+                src: heroUrl,
+                alt: title || this.t("reader.heroImage"),
+              },
             });
             if (
               firstImg &&

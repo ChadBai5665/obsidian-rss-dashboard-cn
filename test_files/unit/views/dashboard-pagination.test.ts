@@ -85,7 +85,10 @@ vi.mock("../../../src/services/article-saver", () => ({
 }));
 
 function cloneSettings(): RssDashboardSettings {
-  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+  return {
+    ...(JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings),
+    locale: "en",
+  };
 }
 
 function makeFeedItems(

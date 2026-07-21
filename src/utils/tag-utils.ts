@@ -5,6 +5,7 @@ import type {
   Tag,
   Folder,
 } from "../types/types";
+import { createTranslator } from "../i18n";
 
 const AUTO_TAG_DEFINITIONS = {
   saved: { name: "Saved", fallbackColor: "#3498db" },
@@ -165,13 +166,14 @@ export function showEditTagModal({
   settings,
   tag,
   onSave,
-  submitLabel = "Save Changes",
+  submitLabel,
 }: {
   settings: Readonly<RssDashboardSettings>;
   tag: Readonly<Tag>;
   onSave?: () => Promise<void> | void;
   submitLabel?: string;
 }): void {
+  const t = createTranslator(settings.locale ?? "zh-CN");
   const modal = activeDocument.body.createDiv({
     cls: "rss-dashboard-modal rss-dashboard-modal-container",
   });
@@ -180,7 +182,7 @@ export function showEditTagModal({
     cls: "rss-dashboard-modal-content",
   });
 
-  new Setting(modalContent).setName("Edit tag").setHeading();
+  new Setting(modalContent).setName(t("sidebar.editTag")).setHeading();
 
   const formContainer = modalContent.createDiv({
     cls: "rss-dashboard-tag-modal-form",
@@ -198,7 +200,7 @@ export function showEditTagModal({
     attr: {
       type: "text",
       value: tag.name,
-      placeholder: "Enter tag name",
+      placeholder: t("sidebar.tagNamePlaceholder"),
       autocomplete: "off",
     },
     cls: "rss-dashboard-tag-modal-name-input",
@@ -216,12 +218,12 @@ export function showEditTagModal({
   };
 
   const cancelButton = buttonContainer.createEl("button", {
-    text: "Cancel",
+    text: t("sidebar.cancel"),
   });
   cancelButton.addEventListener("click", closeModal);
 
   const saveButton = buttonContainer.createEl("button", {
-    text: submitLabel,
+    text: submitLabel ?? t("sidebar.saveChanges"),
     cls: "rss-dashboard-primary-button",
   });
 
@@ -231,7 +233,7 @@ export function showEditTagModal({
       const newTagColor = colorInput.value;
 
       if (!newTagName) {
-        new Notice("Please enter a tag name!");
+        new Notice(t("sidebar.tagRequired"));
         return;
       }
 
@@ -242,7 +244,7 @@ export function showEditTagModal({
             existingTag.name.toLowerCase() === newTagName.toLowerCase(),
         )
       ) {
-        new Notice("A tag with this name already exists!");
+        new Notice(t("sidebar.tagExists"));
         return;
       }
 
@@ -256,7 +258,7 @@ export function showEditTagModal({
       }
       closeModal();
 
-      new Notice(`Tag "${newTagName}" updated successfully!`);
+      new Notice(t("sidebar.tagUpdated", { tag: newTagName }));
     })();
   });
 

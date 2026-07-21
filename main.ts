@@ -903,6 +903,16 @@ export default class RssDashboardPlugin extends Plugin {
     return await repository.listByDate(localDate);
   }
 
+  /** Resolves durable reader metadata without copying it onto legacy feed items. */
+  public async getCollectedItemById(itemId: string): Promise<CollectedItem | null> {
+    const repository = new CollectionRepository(
+      this.app.vault,
+      this.settings.collection.dataFolder.trim(),
+      () => new Date(),
+    );
+    return await repository.findById(itemId);
+  }
+
   private scheduleAutomaticRefresh(): void {
     if (this.settings.refreshMode === "off") {
       return;

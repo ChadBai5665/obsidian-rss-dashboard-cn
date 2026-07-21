@@ -4,6 +4,17 @@ import { DEFAULT_SETTINGS } from "../../../src/types/types";
 import type { FeedItem } from "../../../src/types/types";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 
+type ReaderInternals = {
+  contentEl: HTMLElement;
+  readingContainer: HTMLElement;
+  readOrFetchExplicitArticleContent(item: FeedItem): Promise<{
+    content: string;
+    failureType: "none";
+  }>;
+  displayVideo(item: FeedItem): Promise<void>;
+  prependFallbackHeroForSavedMarkdown(item: FeedItem, html: string): string;
+};
+
 describe("Reader Chinese localization", () => {
   beforeEach(() => installObsidianDomPolyfills());
 
@@ -100,9 +111,101 @@ describe("Reader Chinese localization", () => {
       pubDate: "2026-07-22T00:00:00.000Z", read: false, starred: false, saved: false,
       tags: [], feedTitle: "来源", feedUrl: "https://example.com/rss", coverImage: "", mediaType: "article",
     };
-    await view.displayItem(item);
+    await view.displayItem(item, [], { contentBasis: "feed" });
     expect((view as unknown as { readingContainer: HTMLElement }).readingContainer
       .querySelector(".rss-reader-content-basis")?.textContent).toBe("订阅源正文");
-    expect("feed").toBe("feed");
+    expect(item).not.toHaveProperty("contentBasis");
+  });
+
+  it.each([
+    ["x-post", "X 帖子", "article"],
+    ["linked-page", "链接页面", "article"],
+    ["full-text", "已取得全文", "article"],
+    ["title-description", "标题和摘要", "video"],
+  ] as const)("renders persisted %s context across reader media branches", async (contentBasis, label, mediaType) => {
+    const app = { workspace: { getLeavesOfType: vi.fn(() => []) }, vault: {} };
+    const view = new ReaderView(
+      { app } as never,
+      { ...DEFAULT_SETTINGS, locale: "zh-CN", useWebViewer: false },
+      { saveArticle: vi.fn() } as never,
+      vi.fn(), vi.fn(),
+    );
+    const internal = view as unknown as ReaderInternals;
+    (view as unknown as { contentEl: HTMLElement }).contentEl = document.body.createDiv();
+    await view.onOpen();
+    const item: FeedItem = {
+      guid: `basis-${contentBasis}`, title: "External title", link: "", description: "<p>External description</p>", content: "",
+      pubDate: "2026-07-22T00:00:00.000Z", read: false, starred: false, saved: false,
+      tags: [], feedTitle: "External source", feedUrl: "https://example.com/rss", coverImage: "", mediaType,
+      ...(mediaType === "video" ? { videoId: "external-video-id" } : {}),
+    };
+    vi.spyOn(internal, "readOrFetchExplicitArticleContent").mockResolvedValue({
+      content: contentBasis === "full-text" ? `<article><p>${"External full text ".repeat(30)}</p></article>` : "",
+      failureType: "none",
+    });
+    if (mediaType === "video") {
+      vi.spyOn(internal, "displayVideo").mockImplementation(() => {
+        internal.readingContainer.createDiv({ text: "External video" });
+        return Promise.resolve();
+      });
+    }
+    const context = { contentBasis };
+
+    await view.displayItem(item, [], context);
+
+    expect(internal.readingContainer.querySelector(".rss-reader-content-basis")?.textContent).toBe(label);
+    expect(context.contentBasis).toBe(contentBasis);
+    expect(item).not.toHaveProperty("contentBasis");
+  });
+
+  it("localizes video-podcast fallback, related heading, and empty state", async () => {
+    const app = { workspace: { getLeavesOfType: vi.fn(() => []) }, vault: {} };
+    const view = new ReaderView(
+      { app } as never,
+      { ...DEFAULT_SETTINGS, locale: "zh-CN", useWebViewer: false, feeds: [] },
+      { saveArticle: vi.fn() } as never,
+      vi.fn(), vi.fn(),
+    );
+    (view as unknown as { contentEl: HTMLElement }).contentEl = document.body.createDiv();
+    await view.onOpen();
+    const item: FeedItem = {
+      guid: "video-podcast", title: "External video", link: "", description: "", content: "",
+      pubDate: "2026-07-22T00:00:00.000Z", read: false, starred: false, saved: false,
+      tags: [], feedTitle: "External source", feedUrl: "https://example.com/rss", coverImage: "",
+      mediaType: "video", videoUrl: "https://example.com/video.mp4",
+    };
+
+    await view.displayItem(item, [], { contentBasis: "title-description" });
+
+    const root = (view as unknown as ReaderInternals).readingContainer;
+    expect(root.querySelector("video")?.textContent).toContain("您的浏览器不支持视频播放。");
+    expect(root.querySelector("h4")?.textContent).toBe("来自同一频道");
+    expect(root.querySelector(".rss-video-related-empty")?.textContent).toBe("未找到相关视频");
+  });
+
+  it("uses the active locale for injected and rendered hero-image alt text", async () => {
+    const app = { workspace: { getLeavesOfType: vi.fn(() => []) }, vault: {} };
+    const view = new ReaderView(
+      { app } as never,
+      { ...DEFAULT_SETTINGS, locale: "zh-CN", useWebViewer: false },
+      { saveArticle: vi.fn() } as never,
+      vi.fn(), vi.fn(),
+    );
+    const internal = view as unknown as ReaderInternals;
+    const item: FeedItem = {
+      guid: "hero", title: "", link: "", description: "<p>External body</p>", content: "",
+      pubDate: "2026-07-22T00:00:00.000Z", read: false, starred: false, saved: false,
+      tags: [], feedTitle: "External source", feedUrl: "https://example.com/rss",
+      coverImage: "https://example.com/hero.jpg", mediaType: "article",
+    };
+
+    const injected = internal.prependFallbackHeroForSavedMarkdown(item, "<p>External body</p>");
+    expect(injected).toContain('alt="主图"');
+
+    internal.contentEl = document.body.createDiv();
+    await view.onOpen();
+    vi.spyOn(internal, "readOrFetchExplicitArticleContent").mockResolvedValue({ content: "", failureType: "none" });
+    await view.displayItem(item, [], { contentBasis: "feed" });
+    expect(internal.readingContainer.querySelector(".rss-reader-fallback-hero")?.getAttribute("alt")).toBe("主图");
   });
 });

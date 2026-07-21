@@ -19,6 +19,7 @@ type TestTag = { name: string; color?: string };
 
 function makeSettings(tags: TestTag[]): RssDashboardSettings {
   return {
+    locale: "en",
     availableTags: [...tags],
     feeds: [
       {
@@ -113,7 +114,7 @@ describe("tag-utils.showEditTagModal", () => {
     saveButton!.click();
     expect(consoleSpy).toHaveBeenCalledWith(
       "[Stub Notice]",
-      "A tag with this name already exists!",
+      "Tag already exists",
     );
     expect(document.querySelector(".rss-dashboard-modal")).not.toBeNull();
 

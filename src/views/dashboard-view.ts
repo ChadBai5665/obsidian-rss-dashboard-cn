@@ -27,7 +27,11 @@ import { Sidebar } from "../components/sidebar";
 import { ArticleList } from "../components/article-list";
 import { ArticleSaver } from "../services/article-saver";
 import { ArticleRenderer } from "../components/article-renderer";
-import { ReaderView, RSS_READER_VIEW_TYPE } from "./reader-view";
+import {
+  ReaderView,
+  RSS_READER_VIEW_TYPE,
+  type ReaderContentContext,
+} from "./reader-view";
 import { FeedManagerModal } from "../modals/feed-manager-modal";
 import { MobileNavigationModal } from "../modals/mobile-navigation-modal";
 import { ShortcutHelpModal } from "../modals/shortcut-help-modal";
@@ -47,6 +51,7 @@ import {
   type CollectionQueryInput,
 } from "../collection/collection-query-service";
 import type { CollectedItem } from "../collection/collected-item";
+import { getContentBasisLabel } from "../collection/content-basis-display";
 import { toLocalCalendarDate } from "../refresh/local-calendar-day";
 import { createTranslator } from "../i18n";
 
@@ -131,6 +136,7 @@ export class RssDashboardView extends ItemView {
   private mobileSidebarModal: MobileNavigationModal | null = null;
   private lastViewportMobileSidebarMode: boolean | null = null;
   private inlineArticle: FeedItem | null = null;
+  private inlineArticleContentContext: ReaderContentContext | undefined;
   private readonly inlineActionPendingKeys = new Set<string>();
   private articleRenderer: ArticleRenderer | null = null;
   private lastClickAnchorKey: string | null = null;
@@ -1407,6 +1413,13 @@ export class RssDashboardView extends ItemView {
         cls: "rss-dashboard-collection-item-title",
         text: item.title,
       });
+      row.createSpan({
+        cls: "rss-dashboard-collection-content-basis",
+        text: getContentBasisLabel(
+          item.contentBasis,
+          this.settings.locale ?? "zh-CN",
+        ),
+      });
       const source = row.createEl("button", {
         cls: "rss-dashboard-collection-source-refresh",
         text: item.sourceName,
@@ -2246,7 +2259,7 @@ export class RssDashboardView extends ItemView {
       }
 
       result.push({
-        feedTitle: feed.title || "Untitled feed",
+        feedTitle: feed.title || this.t("dashboard.untitledFeed"),
         includeLogic: feed.keywordRules?.includeLogic || "AND",
         rules,
       });
@@ -2272,12 +2285,16 @@ export class RssDashboardView extends ItemView {
     const lines: string[] = [];
 
     if (bypassAll) {
-      lines.push("Bypass keyword rules is enabled.");
+      lines.push(this.t("dashboard.keywordBypassEnabled"));
       lines.push("");
     }
 
     if (globalRules.length > 0) {
-      lines.push(`Global rules (include logic: ${globalIncludeLogic}):`);
+      lines.push(
+        this.t("dashboard.keywordGlobalRules", {
+          logic: globalIncludeLogic,
+        }),
+      );
       globalRules.forEach((rule) => {
         lines.push(`- ${this.formatRuleForTooltip(rule)}`);
       });
@@ -2285,10 +2302,13 @@ export class RssDashboardView extends ItemView {
     }
 
     if (feedRules.length > 0) {
-      lines.push("Feed rules:");
+      lines.push(this.t("dashboard.keywordFeedRules"));
       feedRules.forEach((entry) => {
         lines.push(
-          `- ${entry.feedTitle} (include logic: ${entry.includeLogic})`,
+          `- ${this.t("dashboard.keywordFeedRule", {
+            feed: entry.feedTitle,
+            logic: entry.includeLogic,
+          })}`,
         );
         entry.rules.forEach((rule) => {
           lines.push(`  - ${this.formatRuleForTooltip(rule)}`);
@@ -2300,22 +2320,35 @@ export class RssDashboardView extends ItemView {
   }
 
   private formatRuleForTooltip(rule: KeywordFilterRule): string {
-    return `${rule.type.toUpperCase()} "${rule.keyword.trim()}" (${rule.matchMode}) [${this.formatRuleLocations(rule)}]`;
+    return this.t("dashboard.keywordRule", {
+      type: this.t(
+        rule.type === "include"
+          ? "dashboard.keywordTypeInclude"
+          : "dashboard.keywordTypeExclude",
+      ),
+      keyword: rule.keyword.trim(),
+      mode: this.t(
+        rule.matchMode === "exact"
+          ? "dashboard.keywordModeExact"
+          : "dashboard.keywordModePartial",
+      ),
+      locations: this.formatRuleLocations(rule),
+    });
   }
 
   private formatRuleLocations(rule: KeywordFilterRule): string {
     const parts: string[] = [];
     if (rule.applyToTitle) {
-      parts.push("title");
+      parts.push(this.t("dashboard.keywordLocationTitle"));
     }
     if (rule.applyToSummary) {
-      parts.push("summary");
+      parts.push(this.t("dashboard.keywordLocationSummary"));
     }
     if (rule.applyToContent) {
-      parts.push("content");
+      parts.push(this.t("dashboard.keywordLocationContent"));
     }
     if (rule.applyToURL) {
-      parts.push("url");
+      parts.push(this.t("dashboard.keywordLocationUrl"));
     }
     return parts.join(", ");
   }
@@ -3020,7 +3053,12 @@ export class RssDashboardView extends ItemView {
     }
   }
 
-  private async openArticleInNewTab(article: FeedItem): Promise<WorkspaceLeaf> {
+  private async openArticleInNewTab(
+    article: FeedItem,
+    contentContext?: ReaderContentContext,
+  ): Promise<WorkspaceLeaf> {
+    const resolvedContext =
+      contentContext ?? (await this.resolveReaderContentContext(article));
     const { workspace } = this.app;
     const leaf = workspace.getLeaf(Platform.isMobile ? "tab" : "split");
     if (leaf) {
@@ -3035,7 +3073,11 @@ export class RssDashboardView extends ItemView {
         const view = leaf.view;
         view.setReturnLeaf(this.leaf);
         const relatedItems = this.getRelatedItems(article);
-        await view.displayItem(article, relatedItems);
+        if (resolvedContext) {
+          await view.displayItem(article, relatedItems, resolvedContext);
+        } else {
+          await view.displayItem(article, relatedItems);
+        }
         view.focusReaderView();
       }
     }
@@ -3045,6 +3087,7 @@ export class RssDashboardView extends ItemView {
   private async openArticleInSpecificLeaf(
     article: FeedItem,
     leaf: WorkspaceLeaf,
+    contentContext?: ReaderContentContext,
   ): Promise<void> {
     if (leaf) {
       await leaf.setViewState({
@@ -3058,7 +3101,13 @@ export class RssDashboardView extends ItemView {
         const view = leaf.view;
         view.setReturnLeaf(this.leaf);
         const relatedItems = this.getRelatedItems(article);
-        await view.displayItem(article, relatedItems);
+        const resolvedContext =
+          contentContext ?? (await this.resolveReaderContentContext(article));
+        if (resolvedContext) {
+          await view.displayItem(article, relatedItems, resolvedContext);
+        } else {
+          await view.displayItem(article, relatedItems);
+        }
         view.focusReaderView();
       }
     }
@@ -3067,7 +3116,7 @@ export class RssDashboardView extends ItemView {
   private openArticleInExternalBrowser(article: FeedItem): void {
     const url = resolveItemExternalUrl(article);
     if (!url) {
-      new Notice("No external URL available for this item.");
+      new Notice(this.t("dashboard.noExternalUrl"));
       return;
     }
 
@@ -3088,6 +3137,28 @@ export class RssDashboardView extends ItemView {
         (a, b) => new Date(b.pubDate).getTime() - new Date(a.pubDate).getTime(),
       )
       .slice(0, 5);
+  }
+
+  private async resolveReaderContentContext(
+    article: FeedItem,
+  ): Promise<ReaderContentContext | undefined> {
+    const itemId = article.rssDashboardId;
+    if (!itemId) return undefined;
+
+    try {
+      const collected = await this.plugin.getCollectedItemById(itemId);
+      if (collected) {
+        return { contentBasis: collected.contentBasis };
+      }
+    } catch {
+      // The already-loaded daily snapshot remains a durable read fallback if
+      // a fresh repository lookup is temporarily unavailable.
+    }
+
+    const visibleRecord = this.collectionItems.find((item) => item.id === itemId);
+    return visibleRecord
+      ? { contentBasis: visibleRecord.contentBasis }
+      : undefined;
   }
 
   private handleToggleViewStyle(style: "list" | "card" | "feed"): void {
@@ -3346,7 +3417,7 @@ export class RssDashboardView extends ItemView {
     });
 
     if (updatedArticles.length === 0) {
-      new Notice("No unread items on current page");
+      new Notice(this.t("dashboard.noUnreadPage"));
       return;
     }
 
@@ -3396,7 +3467,9 @@ export class RssDashboardView extends ItemView {
         this.articleList.updateArticleInPlace(article);
       });
       this.refreshFilterStatusBarOnly();
-      new Notice(`Marked ${updatedArticles.length} items as read`);
+      new Notice(
+        this.t("dashboard.markedRead", { count: updatedArticles.length }),
+      );
       return;
     }
 
@@ -3414,7 +3487,9 @@ export class RssDashboardView extends ItemView {
       filtered.length,
     );
     this.refreshFilterStatusBarOnly();
-    new Notice(`Marked ${updatedArticles.length} items as read`);
+    new Notice(
+      this.t("dashboard.markedRead", { count: updatedArticles.length }),
+    );
   }
 
   private async markCurrentPageAsRead(): Promise<void> {
@@ -3494,12 +3569,12 @@ export class RssDashboardView extends ItemView {
 
   private getViewFilterReasonLabel(): string | null {
     const specialFolderLabels: Record<string, string> = {
-      unread: "the Unread view filter",
-      read: "the Read view filter",
-      starred: "the Starred view filter",
-      saved: "the Saved view filter",
-      videos: "the Videos view filter",
-      podcasts: "the Podcasts view filter",
+      unread: this.t("dashboard.filterReasonUnread"),
+      read: this.t("dashboard.filterReasonRead"),
+      starred: this.t("dashboard.filterReasonStarred"),
+      saved: this.t("dashboard.filterReasonSaved"),
+      videos: this.t("dashboard.filterReasonVideos"),
+      podcasts: this.t("dashboard.filterReasonPodcasts"),
     };
 
     if (this.currentFolder && specialFolderLabels[this.currentFolder]) {
@@ -3511,9 +3586,15 @@ export class RssDashboardView extends ItemView {
       this.activeTagFilters.size === 0
     ) {
       const [statusFilter] = Array.from(this.activeStatusFilters);
-      const statusLabel =
-        statusFilter.charAt(0).toUpperCase() + statusFilter.slice(1);
-      return `the ${statusLabel} view filter`;
+      const statusLabels: Record<string, string> = {
+        unread: this.t("common.unread"),
+        read: this.t("common.read"),
+        starred: this.t("navigation.starred"),
+        saved: this.t("navigation.saved"),
+      };
+      return this.t("dashboard.filterReasonStatus", {
+        status: statusLabels[statusFilter] ?? statusFilter,
+      });
     }
 
     if (
@@ -3521,19 +3602,21 @@ export class RssDashboardView extends ItemView {
       this.activeTagFilters.size === 1
     ) {
       const [tagFilter] = Array.from(this.activeTagFilters);
-      return `the "${tagFilter}" tag filter`;
+      return this.t("dashboard.filterReasonTag", { tag: tagFilter });
     }
 
     if (this.activeStatusFilters.size > 0 || this.activeTagFilters.size > 0) {
-      return "the current view filters";
+      return this.t("dashboard.filterReasonCurrent");
     }
 
     if (this.selectedTags.length === 1) {
-      return `the "${this.selectedTags[0]}" tag filter`;
+      return this.t("dashboard.filterReasonTag", {
+        tag: this.selectedTags[0],
+      });
     }
 
     if (this.selectedTags.length > 1) {
-      return "the current tag filters";
+      return this.t("dashboard.filterReasonCurrentTags");
     }
 
     return null;
@@ -3954,7 +4037,13 @@ export class RssDashboardView extends ItemView {
       new Notice(this.t("dashboard.updateFeedSuccess", { feed: feed.title }));
     } catch (error) {
       new Notice(
-        this.t("dashboard.updateFeedFailed", { feed: feed.title, error: error instanceof Error ? error.message : "Unknown error" }),
+        this.t("dashboard.updateFeedFailed", {
+          feed: feed.title,
+          error:
+            error instanceof Error
+              ? error.message
+              : this.t("dashboard.unknownError"),
+        }),
       );
     }
   }
@@ -3963,10 +4052,12 @@ export class RssDashboardView extends ItemView {
   private updateRefreshButtonText(): void {
     if (!this.articleList) return;
 
-    let refreshText = "Refresh all feeds";
+    let refreshText = this.t("dashboard.refreshAllFeeds");
 
     if (this.currentFeed) {
-      refreshText = `Refresh feed: "${this.currentFeed.title}"`;
+      refreshText = this.t("dashboard.refreshFeed", {
+        feed: this.currentFeed.title,
+      });
     } else if (
       this.currentFolder &&
       !["read", "unread", "starred", "saved", "videos", "podcasts"].includes(
@@ -3980,7 +4071,10 @@ export class RssDashboardView extends ItemView {
           feed.folder.startsWith(this.currentFolder + "/")
         );
       });
-      refreshText = `Refresh ${feedsInFolder.length} feed${feedsInFolder.length !== 1 ? "s" : ""} in folder: "${this.currentFolder}"`;
+      refreshText = this.t("dashboard.refreshFeedsInFolder", {
+        count: feedsInFolder.length,
+        folder: this.currentFolder,
+      });
     } else if (this.selectedTags.length > 0) {
       const mode = (this.settings.sidebarTagFilterMode || "or").toUpperCase();
       const feedsWithTags = this.settings.feeds.filter((feed) =>
@@ -3989,9 +4083,15 @@ export class RssDashboardView extends ItemView {
           return this.selectedTags.some((tag) => itemTags.includes(tag));
         }),
       );
-      refreshText = `Refresh ${feedsWithTags.length} feed${feedsWithTags.length !== 1 ? "s" : ""} with tags (${mode}): "${this.selectedTags.join(", ")}"`;
+      refreshText = this.t("dashboard.refreshFeedsWithTags", {
+        count: feedsWithTags.length,
+        mode,
+        tags: this.selectedTags.join(", "),
+      });
     } else {
-      refreshText = `Refresh all ${this.settings.feeds.length} feeds`;
+      refreshText = this.t("dashboard.refreshAllFeedCount", {
+        count: this.settings.feeds.length,
+      });
     }
 
     this.articleList.updateRefreshButtonText(refreshText);
@@ -4384,6 +4484,8 @@ export class RssDashboardView extends ItemView {
       return;
     }
 
+    const contentContext = await this.resolveReaderContentContext(article);
+
     const readerLeaves =
       this.app.workspace.getLeavesOfType(RSS_READER_VIEW_TYPE);
     const podcastPlayingLeaves = await this.getPodcastPlayingReaderLeaves();
@@ -4400,17 +4502,21 @@ export class RssDashboardView extends ItemView {
         reusablePodcastLeaf &&
         !podcastPlayingLeaves.includes(reusablePodcastLeaf)
       ) {
-        await this.openArticleInSpecificLeaf(article, reusablePodcastLeaf);
+        await this.openArticleInSpecificLeaf(
+          article,
+          reusablePodcastLeaf,
+          contentContext,
+        );
         return;
       }
 
       if (targetLeaf && !podcastPlayingLeaves.includes(targetLeaf)) {
         this.articleReaderLeafWhilePodcast = targetLeaf;
-        await this.openArticleInSpecificLeaf(article, targetLeaf);
+        await this.openArticleInSpecificLeaf(article, targetLeaf, contentContext);
         return;
       }
 
-      const newLeaf = await this.openArticleInNewTab(article);
+      const newLeaf = await this.openArticleInNewTab(article, contentContext);
       this.articleReaderLeafWhilePodcast = newLeaf;
       return;
     }
@@ -4419,16 +4525,17 @@ export class RssDashboardView extends ItemView {
 
     if (readerLocation === "inline") {
       this.inlineArticle = article;
+      this.inlineArticleContentContext = contentContext;
       void this.render();
       return;
     }
 
     if (targetLeaf) {
-      await this.openArticleInSpecificLeaf(article, targetLeaf);
+      await this.openArticleInSpecificLeaf(article, targetLeaf, contentContext);
       return;
     }
 
-    await this.openArticleInNewTab(article);
+    await this.openArticleInNewTab(article, contentContext);
   }
 
   private getInlineActionKey(
@@ -4489,6 +4596,7 @@ export class RssDashboardView extends ItemView {
     setIcon(backButton, "arrow-left");
     backButton.addEventListener("click", () => {
       this.inlineArticle = null;
+      this.inlineArticleContentContext = undefined;
       void this.render();
     });
 
@@ -4608,7 +4716,10 @@ export class RssDashboardView extends ItemView {
 
       const browserButton = actions.createDiv({
         cls: "rss-reader-action-button",
-        attr: { title: "Open in Browser" },
+        attr: {
+          title: this.t("reader.openBrowser"),
+          "aria-label": this.t("reader.openBrowser"),
+        },
       });
       setIcon(browserButton, "external-link");
       browserButton.addEventListener("click", () => {
@@ -4624,6 +4735,16 @@ export class RssDashboardView extends ItemView {
     const body = container.createDiv({
       cls: "rss-reader-content inline-reader-content",
     });
+
+    if (this.inlineArticleContentContext) {
+      body.createDiv({
+        cls: "rss-reader-content-basis",
+        text: getContentBasisLabel(
+          this.inlineArticleContentContext.contentBasis,
+          this.settings.locale ?? "zh-CN",
+        ),
+      });
+    }
 
     if (this.articleRenderer && this.inlineArticle) {
       const related = this.getRelatedItems(this.inlineArticle);
@@ -4789,7 +4910,7 @@ export class RssDashboardView extends ItemView {
 
       const leaf = this.getConfiguredSavedArticleLeaf(location);
       if (!leaf) {
-        throw new Error("No workspace leaf available for saved article");
+        throw new Error(this.t("reader.noSavedLeaf"));
       }
 
       await leaf.openFile(file);

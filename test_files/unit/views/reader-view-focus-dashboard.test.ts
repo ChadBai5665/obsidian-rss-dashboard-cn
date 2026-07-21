@@ -42,7 +42,7 @@ describe("ReaderView dashboard refocus", () => {
     const leaf = new MockLeaf(app);
     const view = new ReaderView(
       leaf as never,
-      { ...DEFAULT_SETTINGS, useWebViewer: false },
+      { ...DEFAULT_SETTINGS, locale: "en", useWebViewer: false },
       { saveArticle: saveArticleSpy } as never,
       vi.fn(),
       vi.fn(),
