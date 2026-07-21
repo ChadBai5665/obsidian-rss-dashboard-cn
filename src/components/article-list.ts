@@ -1252,7 +1252,10 @@ export class ArticleList {
           cls: "rss-dashboard-article-group-toggle",
           attr: {
             type: "button",
-            "aria-label": `Toggle ${groupName} group`,
+            "aria-label": createTranslator(this.settings.locale ?? "zh-CN")(
+              "article.toggleGroup",
+              { group: groupName },
+            ),
             "aria-expanded": String(!isInitiallyCollapsed),
           },
         });
@@ -1420,7 +1423,15 @@ export class ArticleList {
       } else {
         const tempIndicator = activeDocument.body.createDiv({
           cls: "rss-dashboard-tag-change-notification",
-          text: `Tag "${tag.name}" ${checked ? "added" : "removed"}`,
+          text: createTranslator(this.settings.locale ?? "zh-CN")(
+            "article.tagChanged",
+            {
+              tag: tag.name,
+              action: createTranslator(this.settings.locale ?? "zh-CN")(
+                checked ? "article.tagAdded" : "article.tagRemoved",
+              ),
+            },
+          ),
         });
         window.setTimeout(() => {
           if (tempIndicator.parentNode) {

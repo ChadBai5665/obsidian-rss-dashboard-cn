@@ -84,4 +84,25 @@ describe("Reader Chinese localization", () => {
       "在来源处打开视频",
     );
   });
+
+  it("shows a localized content-basis label while keeping its stored enum stable", async () => {
+    const app = { workspace: { getLeavesOfType: vi.fn(() => []) }, vault: {} };
+    const view = new ReaderView(
+      { app } as never,
+      { ...DEFAULT_SETTINGS, locale: "zh-CN", useWebViewer: false },
+      { saveArticle: vi.fn() } as never,
+      vi.fn(), vi.fn(),
+    );
+    (view as unknown as { contentEl: HTMLElement }).contentEl = document.body.createDiv();
+    await view.onOpen();
+    const item: FeedItem = {
+      guid: "basis", title: "文章", link: "", description: "<p>订阅源正文</p>", content: "",
+      pubDate: "2026-07-22T00:00:00.000Z", read: false, starred: false, saved: false,
+      tags: [], feedTitle: "来源", feedUrl: "https://example.com/rss", coverImage: "", mediaType: "article",
+    };
+    await view.displayItem(item);
+    expect((view as unknown as { readingContainer: HTMLElement }).readingContainer
+      .querySelector(".rss-reader-content-basis")?.textContent).toBe("订阅源正文");
+    expect("feed").toBe("feed");
+  });
 });

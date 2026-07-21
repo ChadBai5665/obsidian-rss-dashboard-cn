@@ -583,6 +583,10 @@ export class ArticleHeader {
   private createRefreshButton(parent: HTMLElement, cls: string) {
     const btn = parent.createEl("button", {
       cls: "rss-dashboard-refresh-button " + cls,
+      attr: {
+        title: this.t("dashboard.refreshAll"),
+        "aria-label": this.t("dashboard.refreshAll"),
+      },
     });
     setIcon(btn.createDiv({ cls: "rss-dashboard-refresh-icon" }), "refresh-cw");
     btn.onclick = () => this.callbacks.onRefreshFeeds();
@@ -627,19 +631,19 @@ export class ArticleHeader {
 
   private getAgeOptions() {
     return {
-      All: "0",
-      "1 hour": "3600000",
-      "2 hours": "7200000",
-      "4 hours": "14400000",
-      "8 hours": "28800000",
-      "24 hours": "86400000",
-      "48 hours": "172800000",
-      "3 days": "259200000",
-      "1 week": "604800000",
-      "2 weeks": "1209600000",
-      "1 month": "2592000000",
-      "6 months": "15552000000",
-      "1 year": "31536000000",
+      [this.t("dashboard.timeAll")]: "0",
+      [this.t("dashboard.timeHours", { count: 1 })]: "3600000",
+      [this.t("dashboard.timeHours", { count: 2 })]: "7200000",
+      [this.t("dashboard.timeHours", { count: 4 })]: "14400000",
+      [this.t("dashboard.timeHours", { count: 8 })]: "28800000",
+      [this.t("dashboard.timeHours", { count: 24 })]: "86400000",
+      [this.t("dashboard.timeHours", { count: 48 })]: "172800000",
+      [this.t("settings.general.days", { count: 3 })]: "259200000",
+      [this.t("settings.general.weeks", { count: 1 })]: "604800000",
+      [this.t("settings.general.weeks", { count: 2 })]: "1209600000",
+      [this.t("settings.general.months", { count: 1 })]: "2592000000",
+      [this.t("settings.general.months", { count: 6 })]: "15552000000",
+      [this.t("settings.general.year")]: "31536000000",
     };
   }
 

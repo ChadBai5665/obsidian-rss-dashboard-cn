@@ -946,7 +946,7 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Mark all as read")
+        .setTitle(this.t("sidebar.markAllRead"))
         .setIcon("check-circle")
         .onClick(() => {
           void this.markAllUnreadAsRead();
@@ -955,7 +955,7 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Refresh all feeds")
+        .setTitle(this.t("sidebar.refreshAll"))
         .setIcon("refresh-cw")
         .onClick(() => {
           void this.callbacks.onRefreshFeeds();
@@ -1513,7 +1513,9 @@ export class Sidebar {
         cls: "rss-dashboard-feed-error-badge",
         attr: {
           title: feed.lastFetchError,
-          "aria-label": `Feed error: ${feed.lastFetchError}`,
+          "aria-label": this.t("sidebar.feedError", {
+            error: feed.lastFetchError,
+          }),
         },
       });
       setIcon(errorBadge, "alert-circle");
@@ -1526,7 +1528,7 @@ export class Sidebar {
       });
       processingIndicator.setAttribute(
         "title",
-        "Articles being fetched in background",
+        this.t("sidebar.backgroundFetch"),
       );
     } else if (
       isQueuedForRefresh &&
@@ -1538,7 +1540,7 @@ export class Sidebar {
         cls: "rss-dashboard-feed-processing-indicator",
         text: "⏳",
       });
-      processingIndicator.setAttribute("title", "Feed queued for refresh");
+      processingIndicator.setAttribute("title", this.t("sidebar.backgroundFetch"));
     }
 
     feedEl.addEventListener("click", (e) => {
@@ -1817,7 +1819,7 @@ export class Sidebar {
     }
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Add feed")
+        .setTitle(this.t("sidebar.addFeed"))
         .setIcon("rss")
         .onClick(() => {
           this.showAddFeedModal(fullPath);
@@ -1825,11 +1827,11 @@ export class Sidebar {
     });
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Add subfolder")
+        .setTitle(this.t("sidebar.addSubfolder"))
         .setIcon("folder-plus")
         .onClick(() => {
           this.showFolderNameModal({
-            title: "Add subfolder",
+            title: this.t("sidebar.addSubfolder"),
             existingNames:
               this.findFolderByPath(fullPath)?.subfolders.map((f) => f.name) ??
               [],
@@ -1843,11 +1845,11 @@ export class Sidebar {
     });
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Rename folder")
+        .setTitle(this.t("sidebar.renameFolder"))
         .setIcon("edit")
         .onClick(() => {
           this.showFolderNameModal({
-            title: "Rename folder",
+            title: this.t("sidebar.renameFolder"),
             defaultValue: folderName,
             existingNames: (() => {
               const parentPath = fullPath.includes("/")
@@ -1871,7 +1873,7 @@ export class Sidebar {
     });
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Sort feeds (a to z)")
+        .setTitle(this.t("sidebar.sortFeedsAsc"))
         .setIcon("sort-asc")
         .onClick(() => {
           void this.sortFeedsInFolder(fullPath, "name", true);
@@ -1879,7 +1881,7 @@ export class Sidebar {
     });
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Sort feeds (z to a)")
+        .setTitle(this.t("sidebar.sortFeedsDesc"))
         .setIcon("sort-desc")
         .onClick(() => {
           void this.sortFeedsInFolder(fullPath, "name", false);
@@ -1887,7 +1889,7 @@ export class Sidebar {
     });
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Mark all as read")
+        .setTitle(this.t("sidebar.markAllRead"))
         .setIcon("check-circle")
         .onClick(() => {
           const allPaths = this.getAllDescendantFolderPaths(fullPath);
@@ -1909,7 +1911,7 @@ export class Sidebar {
     });
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Auto tag feeds in folder...")
+        .setTitle(this.t("sidebar.autoTagFolder"))
         .setIcon("tags")
         .onClick(() => {
           this.showFolderAutoTagModal(fullPath);
@@ -1917,7 +1919,7 @@ export class Sidebar {
     });
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Refresh all feeds")
+        .setTitle(this.t("sidebar.refreshAll"))
         .setIcon("refresh-cw")
         .onClick(() => {
           this.plugin.cancelPendingStartupRefresh();
@@ -1937,7 +1939,7 @@ export class Sidebar {
     });
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Delete folder")
+        .setTitle(this.t("sidebar.deleteFolder"))
         .setIcon("trash")
         .onClick(() => {
           this.showConfirmModal(
@@ -3042,7 +3044,7 @@ export class Sidebar {
       const menu = new Menu();
 
       menu.addItem((item) =>
-        item.setTitle("Custom").onClick(() => {
+        item.setTitle(this.t("sidebar.customSort")).onClick(() => {
           void this.setAllSidebarSortModesCustom();
         }),
       );
@@ -3050,22 +3052,22 @@ export class Sidebar {
 
       menu.addItem((item) =>
         item
-          .setTitle("Feed name (a to z)")
+          .setTitle(this.t("sidebar.sortNameAsc"))
           .onClick(() => void this.sortAllFeeds("name", true)),
       );
       menu.addItem((item) =>
         item
-          .setTitle("Feed name (z to a)")
+          .setTitle(this.t("sidebar.sortNameDesc"))
           .onClick(() => void this.sortAllFeeds("name", false)),
       );
       menu.addItem((item) =>
         item
-          .setTitle("Unread count (high to low)")
+          .setTitle(this.t("sidebar.sortUnreadDesc"))
           .onClick(() => void this.sortAllFeeds("unreadCount", false)),
       );
       menu.addItem((item) =>
         item
-          .setTitle("Unread count (low to high)")
+          .setTitle(this.t("sidebar.sortUnreadAsc"))
           .onClick(() => void this.sortAllFeeds("unreadCount", true)),
       );
       menu.addItem((item) =>
@@ -3479,7 +3481,7 @@ export class Sidebar {
     if (feed.lastFetchError) {
       menu.addItem((item: MenuItem) => {
         item
-          .setTitle("View fetch error")
+          .setTitle(this.t("sidebar.viewFetchError"))
           .setIcon("alert-circle")
           .onClick(() => {
             this.showErrorDetailModal(feed.lastFetchError!, feed.title);
@@ -3490,7 +3492,7 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Update feed")
+        .setTitle(this.t("sidebar.updateFeed"))
         .setIcon("refresh-cw")
         .onClick(() => {
           void this.callbacks.onUpdateFeed(feed);
@@ -3499,7 +3501,7 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Edit feed")
+        .setTitle(this.t("sidebar.editFeed"))
         .setIcon("edit")
         .onClick(() => {
           this.showEditFeedModal(feed);
@@ -3508,7 +3510,7 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Mark all as read")
+        .setTitle(this.t("sidebar.markAllRead"))
         .setIcon("check-circle")
         .onClick(() => {
           void this.markFeedsReadStatus([feed], true).then((count) => {
@@ -3519,7 +3521,7 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Change media type")
+        .setTitle(this.t("sidebar.changeMediaType"))
         .setIcon("circle-gauge")
         .onClick((evt) => {
           const typeMenu = new Menu();
@@ -3558,7 +3560,7 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Move to folder")
+        .setTitle(this.t("sidebar.moveToFolder"))
         .setIcon("folder-open")
         .onClick((evt) => {
           if (evt instanceof MouseEvent) {
@@ -3569,7 +3571,7 @@ export class Sidebar {
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Delete feed")
+        .setTitle(this.t("sidebar.deleteFeed"))
         .setIcon("trash")
         .onClick(() => {
           this.showConfirmModal(
@@ -3591,7 +3593,7 @@ export class Sidebar {
     menu.addItem((item: MenuItem) => {
       const isInRoot = !feed.folder;
       item
-        .setTitle("Root (no folder)")
+        .setTitle(this.t("sidebar.rootFolder"))
         .setIcon(isInRoot ? "check" : "folder")
         .onClick(() => {
           if (feed.folder) {
@@ -3644,11 +3646,11 @@ export class Sidebar {
     menu.addSeparator();
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Create new folder...")
+        .setTitle(this.t("sidebar.createFolder"))
         .setIcon("folder-plus")
         .onClick(() => {
           this.showFolderNameModal({
-            title: "Create new folder",
+            title: this.t("sidebar.createFolder"),
             existingNames: this.settings.folders.map((f) => f.name),
             onSubmit: (folderName) => {
               void (async () => {
@@ -3736,19 +3738,19 @@ export class Sidebar {
     const menu = new Menu();
 
     menu.addItem((item) =>
-      item.setTitle("Custom").onClick(() => {
+      item.setTitle(this.t("sidebar.customSort")).onClick(() => {
         void this.setFolderFeedSortModeCustom(folderPath);
       }),
     );
     menu.addSeparator();
 
     menu.addItem((item) =>
-      item.setTitle("Feed name (a to z)").onClick(() => {
+      item.setTitle(this.t("sidebar.sortNameAsc")).onClick(() => {
         void this.sortFeedsInFolder(folderPath, "name", true);
       }),
     );
     menu.addItem((item) =>
-      item.setTitle("Feed name (z to a)").onClick(() => {
+      item.setTitle(this.t("sidebar.sortNameDesc")).onClick(() => {
         void this.sortFeedsInFolder(folderPath, "name", false);
       }),
     );
@@ -3817,7 +3819,7 @@ export class Sidebar {
     }
 
     if (feedsInFolder.length === 0) {
-      new Notice("No feeds found in this folder");
+      new Notice(this.t("sidebar.noFeedsInFolder"));
       return;
     }
 
@@ -3928,12 +3930,12 @@ export class Sidebar {
       const foldersToExpand = allFolderPaths;
       const foldersToCollapse: string[] = [];
       this.callbacks.onBatchToggleFolders?.(foldersToCollapse, foldersToExpand);
-      new Notice("All folders expanded");
+      new Notice(this.t("sidebar.allFoldersExpanded"));
     } else {
       const foldersToExpand: string[] = [];
       const foldersToCollapse = allFolderPaths;
       this.callbacks.onBatchToggleFolders?.(foldersToCollapse, foldersToExpand);
-      new Notice("All folders collapsed");
+      new Notice(this.t("sidebar.allFoldersCollapsed"));
     }
 
     // Trigger immediate re-render for UI update

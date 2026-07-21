@@ -586,7 +586,7 @@ export class RssDashboardView extends ItemView {
       );
       if (!updated) return;
       this.scheduleRender();
-      new Notice(`Marked ${unread.length} items as read`);
+      new Notice(this.t("dashboard.markedRead", { count: unread.length }));
     } else {
       new Notice(this.t("dashboard.noUnreadCurrent"));
     }
@@ -1046,7 +1046,9 @@ export class RssDashboardView extends ItemView {
               .then((updated) => {
                 if (!updated) return;
                 this.scheduleRender();
-                new Notice(`Marked ${read.length} items as unread`);
+                new Notice(
+                  this.t("dashboard.markedUnread", { count: read.length }),
+                );
               });
           },
         },
@@ -1517,8 +1519,14 @@ export class RssDashboardView extends ItemView {
 
       // Keyword rules stats text
       const statusText = keywordFilterStats.bypassActive
-        ? `Keyword rules bypassed - showing all ${keywordFilterStats.articlesRetrieved} articles`
-        : `Articles retrieved: ${keywordFilterStats.articlesRetrieved} | Excluded by global keyword rules: ${keywordFilterStats.globalExcluded} | Excluded by per-feed keyword rules: ${keywordFilterStats.feedExcluded}`;
+        ? this.t("dashboard.keywordBypassed", {
+            count: keywordFilterStats.articlesRetrieved,
+          })
+        : this.t("dashboard.keywordStats", {
+            retrieved: keywordFilterStats.articlesRetrieved,
+            global: keywordFilterStats.globalExcluded,
+            feed: keywordFilterStats.feedExcluded,
+          });
       filterStatsRow.createSpan({
         cls: "rss-dashboard-filter-stats-text",
         text: statusText,
@@ -1746,7 +1754,10 @@ export class RssDashboardView extends ItemView {
       return this.t("filter.podcasts");
     } else if (this.selectedTags.length > 0) {
       const mode = (this.settings.sidebarTagFilterMode || "or").toUpperCase();
-      const tagsPart = `Tags (${mode}): ${this.selectedTags.join(", ")}`;
+      const tagsPart = this.t("dashboard.tagsTitle", {
+        mode,
+        tags: this.selectedTags.join(", "),
+      });
       if (
         (this.selectedFolders && this.selectedFolders.length > 0) ||
         (this.selectedFeeds && this.selectedFeeds.length > 0)
@@ -1755,11 +1766,11 @@ export class RssDashboardView extends ItemView {
         const parts = [];
         const totalFeeds = this.getTotalFeedsInSelection();
         if (this.selectedFolders && this.selectedFolders.length > 0) {
-          parts.push(
-            `Folders: ${this.selectedFolders.join(", ")} (Feeds: ${totalFeeds})`,
-          );
+          parts.push(this.t("dashboard.foldersTitle", {
+            folders: this.selectedFolders.join(", "), count: totalFeeds,
+          }));
         } else {
-          parts.push(`${totalFeeds} feeds`);
+          parts.push(this.t("dashboard.feedsTitle", { count: totalFeeds }));
         }
         const selectionPart = parts.join(" & ");
         return `${selectionPart} & ${tagsPart}`;
@@ -1772,11 +1783,11 @@ export class RssDashboardView extends ItemView {
       const totalFeeds = this.getTotalFeedsInSelection();
       const parts = [];
       if (this.selectedFolders && this.selectedFolders.length > 0) {
-        parts.push(
-          `Folders: ${this.selectedFolders.join(", ")} (Feeds: ${totalFeeds})`,
-        );
+        parts.push(this.t("dashboard.foldersTitle", {
+          folders: this.selectedFolders.join(", "), count: totalFeeds,
+        }));
       } else {
-        parts.push(`${totalFeeds} feeds`);
+        parts.push(this.t("dashboard.feedsTitle", { count: totalFeeds }));
       }
       return parts.join(" & ");
     } else if (this.currentFolder) {
@@ -1802,7 +1813,9 @@ export class RssDashboardView extends ItemView {
     let effectiveBaseTitle = baseTitle;
     if (this.currentFeed !== null) {
       // When viewing a single feed, use "Latest from [Feed Name]" as the base
-      effectiveBaseTitle = `Latest from ${this.currentFeed.title}`;
+      effectiveBaseTitle = this.t("dashboard.latestFrom", {
+        feed: this.currentFeed.title,
+      });
     }
 
     // Format the filter text (works for both All Feeds and individual feeds)

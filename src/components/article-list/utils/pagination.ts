@@ -71,6 +71,7 @@ export function renderPagination(args: RenderPaginationArgs): void {
   const prevButton = pagesRow.createEl("button", {
     cls: "rss-dashboard-pagination-btn prev",
     text: "<",
+    attr: { title: t("article.previousPage"), "aria-label": t("article.previousPage") },
   });
   prevButton.disabled = currentPage === 1;
   prevButton.onclick = () => {
@@ -118,6 +119,7 @@ export function renderPagination(args: RenderPaginationArgs): void {
   const nextButton = pagesRow.createEl("button", {
     cls: "rss-dashboard-pagination-btn next",
     text: ">",
+    attr: { title: t("article.nextPage"), "aria-label": t("article.nextPage") },
   });
   nextButton.disabled = currentPage === totalPages;
   nextButton.onclick = () => {

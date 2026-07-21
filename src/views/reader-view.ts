@@ -53,6 +53,8 @@ import {
   resolveFeedItemStableId,
 } from "../collection/item-identity";
 import { ExplicitContentCoordinator } from "../collection/explicit-content-coordinator";
+import { getContentBasisLabel } from "../collection/content-basis-display";
+import type { ContentBasis } from "../collection/collected-item";
 import { isYouTubeItem } from "../utils/youtube-detection";
 import { createTranslator } from "../i18n";
 
@@ -1352,7 +1354,24 @@ export class ReaderView extends ItemView {
       this.currentContentIsFullArticle = hasFullArticleContent;
       this.syncReaderTitle();
       await this.displayArticle(item, fullContent);
+      this.renderContentBasis(
+        hasFullArticleContent
+          ? "full-text"
+          : item.mediaType === "video"
+            ? "title-description"
+            : "feed",
+      );
     }
+  }
+
+  private renderContentBasis(contentBasis: ContentBasis): void {
+    this.readingContainer.createDiv({
+      cls: "rss-reader-content-basis",
+      text: getContentBasisLabel(
+        contentBasis,
+        this.settings.locale ?? "zh-CN",
+      ),
+    });
   }
 
   private async displayVideo(item: FeedItem): Promise<void> {
