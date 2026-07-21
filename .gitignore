@@ -20,6 +20,7 @@ release/
 *.zip
 
 # agent
+.worktrees/
 docs/archive
 CLAUDE.md
 .kilo/
