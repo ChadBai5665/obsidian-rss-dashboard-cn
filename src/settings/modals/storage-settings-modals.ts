@@ -1,5 +1,6 @@
 import { App, Modal, Setting } from "obsidian";
 import type { FeedStorageMode } from "../../types/types";
+import { createTranslator, type Locale } from "../../i18n";
 
 export type StorageTransitionAction =
   | "cancel"
@@ -32,7 +33,11 @@ export class StorageTransitionModal extends Modal {
   private resolvePromise: ((value: StorageTransitionAction) => void) | null =
     null;
 
-  constructor(app: App, options: StorageTransitionOptions) {
+  constructor(
+    app: App,
+    options: StorageTransitionOptions,
+    private readonly locale: Locale = "zh-CN",
+  ) {
     super(app);
     this.currentMode = options.currentMode;
     this.targetMode = options.targetMode;
@@ -68,25 +73,26 @@ export class StorageTransitionModal extends Modal {
   }
 
   private renderLegacyToShardsModal(contentEl: HTMLElement): void {
-    contentEl.createEl("h2", { text: "Apply storage change?" });
+    const t = createTranslator(this.locale);
+    contentEl.createEl("h2", { text: t("settings.modal.storageChangeTitle") });
     if (this.currentMode === "legacy-json") {
       contentEl.createEl("p", {
-        text: "You are switching from legacy data.json storage to shard storage v1.",
+        text: t("settings.modal.legacyToV1"),
       });
       contentEl.createEl("p", {
-        text: "Before continuing, back up your current data.json file. You can use the existing export action here first, then come back and apply the change.",
+        text: t("settings.modal.backupBeforeStorage"),
       });
     } else if (this.targetMode === "vault-shards-v2") {
       contentEl.createEl("p", {
-        text: "You are upgrading to shard storage v2 (split user state).",
+        text: t("settings.modal.upgradeV2"),
       });
     } else {
       contentEl.createEl("p", {
-        text: "You are switching to shard storage v1.",
+        text: t("settings.modal.switchV1"),
       });
     }
     contentEl.createEl("p", {
-      text: `Shard files will be written into: ${this.storageFolder}`,
+      text: t("settings.modal.shardWrittenTo", { folder: this.storageFolder }),
     });
 
     const buttonsSetting = new Setting(contentEl);
@@ -94,20 +100,20 @@ export class StorageTransitionModal extends Modal {
     buttonsSetting.controlEl.addClass("rss-storage-transition-buttons");
     buttonsSetting
       .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => {
+        btn.setButtonText(t("common.cancel")).onClick(() => {
           this.action = "cancel";
           this.close();
         }),
       )
       .addButton((btn) =>
-        btn.setButtonText("Export data.json").onClick(() => {
+        btn.setButtonText(t("settings.modal.exportData")).onClick(() => {
           this.action = "export-data-json";
           this.close();
         }),
       )
       .addButton((btn) =>
         btn
-          .setButtonText("Apply")
+          .setButtonText(t("settings.storage.apply"))
           .setCta()
           .onClick(() => {
             this.action = "apply";
@@ -117,15 +123,16 @@ export class StorageTransitionModal extends Modal {
   }
 
   private renderShardsToLegacyModal(contentEl: HTMLElement): void {
-    contentEl.createEl("h2", { text: "Apply storage change?" });
+    const t = createTranslator(this.locale);
+    contentEl.createEl("h2", { text: t("settings.modal.storageChangeTitle") });
     contentEl.createEl("p", {
-      text: "You are switching from shard storage v1 back to legacy data.json storage.",
+      text: t("settings.modal.v1ToLegacy"),
     });
     contentEl.createEl("p", {
-      text: `All feeds will be stored in data.json again. If you choose cleanup, the shard folder "${this.storageFolder}" will be deleted.`,
+      text: t("settings.modal.legacyDeleteWarning", { folder: this.storageFolder }),
     });
     contentEl.createEl("p", {
-      text: "You can also leave the shard folder in place if you want to keep it as a manual backup.",
+      text: t("settings.modal.keepShardBackup"),
     });
 
     const buttonsSetting = new Setting(contentEl);
@@ -133,20 +140,20 @@ export class StorageTransitionModal extends Modal {
     buttonsSetting.controlEl.addClass("rss-storage-transition-buttons");
     buttonsSetting
       .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => {
+        btn.setButtonText(t("common.cancel")).onClick(() => {
           this.action = "cancel";
           this.close();
         }),
       )
       .addButton((btn) =>
-        btn.setButtonText("Leave shard folder").onClick(() => {
+        btn.setButtonText(t("settings.modal.leaveShard")).onClick(() => {
           this.action = "apply";
           this.close();
         }),
       )
       .addButton((btn) =>
         btn
-          .setButtonText("Delete shard folder")
+          .setButtonText(t("settings.modal.deleteShard"))
           .setWarning()
           .onClick(() => {
             this.action = "apply-delete-shards";
@@ -162,44 +169,49 @@ export class ShardDeletionFailureModal extends Modal {
   private resolvePromise: ((value: ShardDeletionFailureAction) => void) | null =
     null;
 
-  constructor(app: App, storageFolder: string) {
+  constructor(
+    app: App,
+    storageFolder: string,
+    private readonly locale: Locale = "zh-CN",
+  ) {
     super(app);
     this.storageFolder = storageFolder;
   }
 
   onOpen(): void {
+    const t = createTranslator(this.locale);
     const { contentEl } = this;
     contentEl.empty();
 
     this.modalEl.addClass("rss-dashboard-modal");
     this.modalEl.addClass("rss-dashboard-modal-container");
 
-    contentEl.createEl("h2", { text: "Shard folder could not be deleted" });
+    contentEl.createEl("h2", { text: t("settings.modal.shardDeleteTitle") });
     contentEl.createEl("p", {
-      text: `The shard folder "${this.storageFolder}" still exists, so the switch back to legacy JSON has been paused.`,
+      text: t("settings.modal.shardDeleteDesc", { folder: this.storageFolder }),
     });
     contentEl.createEl("p", {
-      text: "You can open the folder and delete it manually, continue anyway and keep using data.json, or cancel without changing storage modes.",
+      text: t("settings.modal.shardDeleteHelp"),
     });
 
     const buttonsSetting = new Setting(contentEl);
     buttonsSetting.controlEl.addClass("rss-dashboard-modal-buttons");
     buttonsSetting
       .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => {
+        btn.setButtonText(t("common.cancel")).onClick(() => {
           this.action = "cancel";
           this.close();
         }),
       )
       .addButton((btn) =>
-        btn.setButtonText("Open shard folder").onClick(() => {
+        btn.setButtonText(t("settings.modal.openShard")).onClick(() => {
           this.action = "open-folder";
           this.close();
         }),
       )
       .addButton((btn) =>
         btn
-          .setButtonText("Apply anyway")
+          .setButtonText(t("settings.modal.applyAnyway"))
           .setWarning()
           .onClick(() => {
             this.action = "apply-anyway";
@@ -227,41 +239,46 @@ export class MetadataCleanupModal extends Modal {
   private resolvePromise: ((value: MetadataCleanupAction) => void) | null =
     null;
 
-  constructor(app: App, options: MetadataCleanupOptions) {
+  constructor(
+    app: App,
+    options: MetadataCleanupOptions,
+    private readonly locale: Locale = "zh-CN",
+  ) {
     super(app);
     this.previousLocationLabel = options.previousLocationLabel;
   }
 
   onOpen(): void {
+    const t = createTranslator(this.locale);
     const { contentEl } = this;
     contentEl.empty();
 
     this.modalEl.addClass("rss-dashboard-modal");
     this.modalEl.addClass("rss-dashboard-modal-container");
 
-    contentEl.createEl("h2", { text: "Delete previous metadata copy?" });
+    contentEl.createEl("h2", { text: t("settings.modal.deletePreviousMetadata") });
     contentEl.createEl("p", {
-      text: "Metadata migration completed successfully.",
+      text: t("settings.modal.metadataMigrated"),
     });
     contentEl.createEl("p", {
-      text: `A previous data.json copy still exists at: ${this.previousLocationLabel}`,
+      text: t("settings.modal.previousMetadata", { path: this.previousLocationLabel }),
     });
     contentEl.createEl("p", {
-      text: "Do you want to delete the previous copy, or keep it as a backup?",
+      text: t("settings.modal.metadataCleanupHelp"),
     });
 
     const buttonsSetting = new Setting(contentEl);
     buttonsSetting.controlEl.addClass("rss-dashboard-modal-buttons");
     buttonsSetting
       .addButton((btn) =>
-        btn.setButtonText("Keep previous copy").onClick(() => {
+        btn.setButtonText(t("settings.modal.keepPrevious")).onClick(() => {
           this.action = "keep";
           this.close();
         }),
       )
       .addButton((btn) =>
         btn
-          .setButtonText("Delete previous copy")
+          .setButtonText(t("settings.modal.deletePrevious"))
           .setWarning()
           .onClick(() => {
             this.action = "delete";

@@ -1152,7 +1152,7 @@ export default class RssDashboardPlugin extends Plugin {
       setting.open();
       setting.openTabById(this.manifest.id);
       if (this.settingTab) {
-        this.settingTab.activateTab("Tags");
+        this.settingTab.activateTab("tags");
       }
     }
   }

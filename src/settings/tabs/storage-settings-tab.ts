@@ -28,6 +28,7 @@ import type {
   FeedStorageStatus,
   ShardFolderDeletionError,
 } from "../../services/feed-storage-repository";
+import { createTranslator, type Translator } from "../../i18n";
 
 interface StorageSettingsPlugin {
   app: App;
@@ -73,6 +74,7 @@ type MediaFolderSettingKey =
 function renderFolderSetting(
   containerEl: HTMLElement,
   plugin: StorageSettingsPlugin,
+  t: Translator,
   name: string,
   desc: string,
   key: MediaFolderSettingKey,
@@ -96,7 +98,8 @@ export function renderStorageSettingsTab(
   containerEl: HTMLElement,
   plugin: StorageSettingsPlugin,
 ): void {
-  new Setting(containerEl).setName("Storage").setHeading();
+  const t = createTranslator(plugin.settings.locale);
+  new Setting(containerEl).setName(t("settings.storage.heading")).setHeading();
 
   let pendingStorageMode = plugin.settings.storageMode;
   let pendingStorageFolder = plugin.settings.storageFolder;
@@ -127,6 +130,7 @@ export function renderStorageSettingsTab(
       const failureModal = new ShardDeletionFailureModal(
         plugin.app,
         storageFolder,
+        plugin.settings.locale,
       );
       failureModal.open();
       const action: ShardDeletionFailureAction =
@@ -184,7 +188,7 @@ export function renderStorageSettingsTab(
 
     const cleanupModal = new MetadataCleanupModal(plugin.app, {
       previousLocationLabel: previousDataFilePath,
-    });
+    }, plugin.settings.locale);
     cleanupModal.open();
     const cleanupAction: MetadataCleanupAction =
       await cleanupModal.waitForClose();
@@ -298,13 +302,13 @@ export function renderStorageSettingsTab(
   descFragment.appendChild(v2Div);
 
   new Setting(containerEl)
-    .setName("Storage mode")
+    .setName(t("settings.storage.mode"))
     .setDesc(descFragment)
     .addDropdown((dropdown) =>
       dropdown
-        .addOption("legacy-json", "Legacy JSON")
-        .addOption("vault-shards", "Shard storage v1")
-        .addOption("vault-shards-v2", "Shard storage v2")
+        .addOption("legacy-json", t("settings.storage.legacy"))
+        .addOption("vault-shards", t("settings.storage.shardsV1"))
+        .addOption("vault-shards-v2", t("settings.storage.shardsV2"))
         .setValue(pendingStorageMode)
         .onChange((value) => {
           storageLog("Storage mode dropdown changed", {
@@ -317,10 +321,8 @@ export function renderStorageSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Storage folder")
-    .setDesc(
-      "Vault folder for per-feed shard files. Adding a '.' prefix to the path will hide the folder. The '.' must be removed for Obsidian sync to work properly.",
-    )
+    .setName(t("settings.storage.folder"))
+    .setDesc(t("settings.storage.folderDesc"))
     .addText((text) =>
       text
         .setPlaceholder(".rss-dashboard-data/feeds")
@@ -335,11 +337,11 @@ export function renderStorageSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Storage status")
+    .setName(t("settings.storage.status"))
     .setDesc(renderStorageStatus());
 
   new Setting(containerEl)
-    .setName("Repair/rebuild storage")
+    .setName(t("settings.storage.repair"))
     .setDesc(
       "Use this when shard storage seems out of sync, incomplete, or after manual folder moves. This will: 1. Re-check and normalize your storage folder path. 2. Force-rewrite all shard files from current feed data. 3. Force-save storage metadata. 4. Refresh storage status. Think of this as a safe 're-generate all shard files' action.'",
     );
@@ -347,15 +349,13 @@ export function renderStorageSettingsTab(
   const storageActions = new Setting(containerEl);
   storageActions.settingEl.addClass("rss-dashboard-storage-actions");
   storageActions
-    .setName("Storage actions")
-    .setDesc(
-      "Apply the selected storage mode, repair shard files, or export a portable bundle for desktop/mobile transfer workflows.",
-    )
+    .setName(t("settings.storage.actions"))
+    .setDesc(t("settings.storage.actionsDesc"))
     .addButton((button) =>
       button
-        .setButtonText("Apply")
+        .setButtonText(t("settings.storage.apply"))
         .setCta()
-        .setTooltip("Apply the selected storage mode and/or folder location")
+        .setTooltip(t("settings.storage.applyTooltip"))
         .onClick(() => {
           void (async () => {
             const modeChanged =
@@ -416,7 +416,7 @@ export function renderStorageSettingsTab(
                 plugin.settings.storageFolder.trim() ||
                 ".rss-dashboard-data/feeds",
             };
-            const modal = new StorageTransitionModal(plugin.app, modalOptions);
+            const modal = new StorageTransitionModal(plugin.app, modalOptions, plugin.settings.locale);
             modal.open();
             const action: StorageTransitionAction = await modal.waitForClose();
 
@@ -507,7 +507,7 @@ export function renderStorageSettingsTab(
         }),
     )
     .addButton((button) =>
-      button.setButtonText("Repair/rebuild storage").onClick(() => {
+      button.setButtonText(t("settings.storage.repair")).onClick(() => {
         void (async () => {
           storageLog("Clicked repair/rebuild storage", {
             currentMode: plugin.settings.storageMode,
@@ -533,7 +533,7 @@ export function renderStorageSettingsTab(
       }),
     )
     .addButton((button) =>
-      button.setButtonText("Import shard data").onClick(() => {
+      button.setButtonText(t("settings.storage.import")).onClick(() => {
         const input = activeDocument.body.createEl("input", {
           attr: { type: "file", accept: ".json,.backup,application/json" },
         });
@@ -564,7 +564,7 @@ export function renderStorageSettingsTab(
       }),
     )
     .addButton((button) =>
-      button.setButtonText("Export shard data").onClick(() => {
+      button.setButtonText(t("settings.storage.export")).onClick(() => {
         void (async () => {
           storageLog("Clicked export shard data", {
             currentMode: plugin.settings.storageMode,
@@ -589,7 +589,7 @@ export function renderStorageSettingsTab(
 
   const applyButton = Array.from(
     storageActions.controlEl.querySelectorAll("button"),
-  ).find((button) => button.textContent === "Apply");
+  ).find((button) => button.textContent === t("settings.storage.apply"));
   if (applyButton instanceof HTMLButtonElement) {
     setCssProps(applyButton, {
       "background-color": "#7c5cff",
@@ -598,13 +598,11 @@ export function renderStorageSettingsTab(
     });
   }
 
-  new Setting(containerEl).setName("Metadata storage").setHeading();
+  new Setting(containerEl).setName(t("settings.storage.metadata")).setHeading();
 
   new Setting(containerEl)
-    .setName("Metadata data.json location")
-    .setDesc(
-      "Optional vault folder for metadata data.json. Leave empty to keep metadata in the plugin directory.",
-    )
+    .setName(t("settings.storage.metadataLocation"))
+    .setDesc(t("settings.storage.metadataLocationDesc"))
     .addText((text) => {
       text
         .setPlaceholder(".rss-dashboard-data")
@@ -615,14 +613,12 @@ export function renderStorageSettingsTab(
     });
 
   new Setting(containerEl)
-    .setName("Metadata actions")
-    .setDesc(
-      "Apply metadata location changes independently from feed storage mode.",
-    )
+    .setName(t("settings.storage.metadataActions"))
+    .setDesc(t("settings.storage.metadataActionsDesc"))
     .addButton((button) =>
       button
-        .setButtonText("Apply metadata location")
-        .setTooltip("Apply metadata data.json location change")
+        .setButtonText(t("settings.storage.applyMetadata"))
+        .setTooltip(t("settings.storage.applyMetadataTooltip"))
         .onClick(() => {
           void (async () => {
             const metadataChanged =
@@ -641,56 +637,62 @@ export function renderStorageSettingsTab(
         }),
     );
 
-  new Setting(containerEl).setName("Default folders").setHeading();
+  new Setting(containerEl).setName(t("settings.storage.defaultFolders")).setHeading();
 
   renderFolderSetting(
     containerEl,
     plugin,
-    "Default Twitter folder",
-    "Default folder for Twitter/X/Nitter feeds",
+    t,
+    t("settings.storage.defaultTwitter"),
+    t("settings.storage.defaultTwitterDesc"),
     "defaultTwitterFolder",
   );
   renderFolderSetting(
     containerEl,
     plugin,
-    "Default Mastodon folder",
-    "Default folder for Mastodon feeds",
+    t,
+    t("settings.storage.defaultMastodon"),
+    t("settings.storage.defaultMastodonDesc"),
     "defaultMastodonFolder",
   );
   renderFolderSetting(
     containerEl,
     plugin,
-    "Default YouTube folder",
-    "Default folder for YouTube feeds",
+    t,
+    t("settings.storage.defaultYoutube"),
+    t("settings.storage.defaultYoutubeDesc"),
     "defaultYouTubeFolder",
   );
   renderFolderSetting(
     containerEl,
     plugin,
-    "Default podcast folder",
-    "Default folder for podcast feeds",
+    t,
+    t("settings.storage.defaultPodcast"),
+    t("settings.storage.defaultPodcastDesc"),
     "defaultPodcastFolder",
   );
   renderFolderSetting(
     containerEl,
     plugin,
-    "Default RSS folder",
-    "Default folder for RSS feeds",
+    t,
+    t("settings.storage.defaultRss"),
+    t("settings.storage.defaultRssDesc"),
     "defaultRssFolder",
   );
   renderFolderSetting(
     containerEl,
     plugin,
-    "Default smallweb folder",
-    "Default folder for smallweb feeds",
+    t,
+    t("settings.storage.defaultSmallweb"),
+    t("settings.storage.defaultSmallwebDesc"),
     "defaultSmallwebFolder",
   );
 
   new Setting(containerEl)
-    .setName("Reset folder names")
-    .setDesc("Restore all folder names to their out-of-the-box defaults.")
+    .setName(t("settings.storage.resetFolders"))
+    .setDesc(t("settings.storage.resetFoldersDesc"))
     .addButton((button) => {
-      button.setButtonText("Default folder names").onClick(async () => {
+      button.setButtonText(t("settings.storage.defaultFolderNames")).onClick(async () => {
         const d = DEFAULT_SETTINGS.media;
         plugin.settings.media.defaultTwitterFolder = d.defaultTwitterFolder;
         plugin.settings.media.defaultMastodonFolder = d.defaultMastodonFolder;

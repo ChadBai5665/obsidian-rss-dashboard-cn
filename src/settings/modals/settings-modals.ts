@@ -9,6 +9,7 @@ import {
   setCssProps,
   shouldUseMobileSidebarLayout,
 } from "../../utils/platform-utils";
+import { createTranslator, type Locale } from "../../i18n";
 
 // ── TemplateNameModal ───────────────────────────────────────────────────────
 
@@ -272,13 +273,18 @@ export class ApplyMaxItemsToExistingFeedsModal extends Modal {
   private action: ApplyMaxItemsAction = "cancel";
   private resolvePromise: ((value: ApplyMaxItemsAction) => void) | null = null;
 
-  constructor(app: App, options: { newLimit: number; increased: boolean }) {
+  constructor(
+    app: App,
+    options: { newLimit: number; increased: boolean },
+    private readonly locale: Locale = "zh-CN",
+  ) {
     super(app);
     this.newLimit = options.newLimit;
     this.increased = options.increased;
   }
 
   onOpen() {
+    const t = createTranslator(this.locale);
     const { contentEl } = this;
     contentEl.empty();
 
@@ -289,13 +295,13 @@ export class ApplyMaxItemsToExistingFeedsModal extends Modal {
       this.modalEl.addClass("rss-mobile-apply-max-items-modal");
     }
 
-    contentEl.createEl("h2", { text: "Apply max item limit to all feeds?" });
+    contentEl.createEl("h2", { text: t("settings.modal.applyMaxTitle") });
     contentEl.createEl("p", {
-      text: `You changed the default max item limit to ${this.newLimit}. Do you want to apply this to ALL existing feeds? This will overwrite any custom per-feed max item settings.`,
+      text: t("settings.modal.applyMaxDesc", { count: this.newLimit }),
     });
     if (this.increased) {
       contentEl.createEl("p", {
-        text: "After applying a higher limit, you must refresh all feeds to fetch additional items.",
+        text: t("settings.modal.applyMaxWarning"),
       });
     }
 
@@ -310,7 +316,7 @@ export class ApplyMaxItemsToExistingFeedsModal extends Modal {
     }
     buttonsSetting
       .addButton((btn) => {
-        btn.setButtonText("Cancel");
+        btn.setButtonText(t("common.cancel"));
         if (isMobile) setCssProps(btn.buttonEl, { width: "100%" });
         btn.onClick(() => {
           this.action = "cancel";
@@ -318,7 +324,7 @@ export class ApplyMaxItemsToExistingFeedsModal extends Modal {
         });
       })
       .addButton((btn) => {
-        btn.setButtonText("Apply to all feeds").setWarning();
+        btn.setButtonText(t("settings.modal.applyAll")).setWarning();
         if (isMobile) setCssProps(btn.buttonEl, { width: "100%" });
         btn.onClick(() => {
           this.action = "apply";
@@ -326,7 +332,7 @@ export class ApplyMaxItemsToExistingFeedsModal extends Modal {
         });
       })
       .addButton((btn) => {
-        btn.setButtonText("Apply & refresh all").setWarning();
+        btn.setButtonText(t("settings.modal.applyRefresh")).setWarning();
         if (isMobile) setCssProps(btn.buttonEl, { width: "100%" });
         btn.onClick(() => {
           this.action = "apply-refresh";

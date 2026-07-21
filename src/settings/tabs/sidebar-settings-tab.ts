@@ -22,6 +22,7 @@ import {
   showDomainIconToggleConfirm,
 } from "../../utils/domain-icon-helpers";
 import { FeedItem, Feed } from "../../types/types";
+import { createTranslator } from "../../i18n";
 
 // ── Pure helpers (exported for unit tests) ────────────────────────────────────
 
@@ -84,11 +85,12 @@ export function renderSidebarSettingsTab(
   onRefresh: () => void,
   targetSection?: string,
 ): void {
-  new Setting(containerEl).setName("Sidebar").setHeading();
+  const t = createTranslator(plugin.settings.locale);
+  new Setting(containerEl).setName(t("settings.sidebar.heading")).setHeading();
 
   new Setting(containerEl)
-    .setName("Show sidebar scrollbar")
-    .setDesc("Show the scrollbar in the sidebar feed list")
+    .setName(t("settings.sidebar.scrollbar"))
+    .setDesc(t("settings.sidebar.scrollbarDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.display.showSidebarScrollbar ?? true)
@@ -104,8 +106,8 @@ export function renderSidebarSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Hide default RSS icon")
-    .setDesc("Hide the default RSS icon for regular feeds in the sidebar")
+    .setName(t("settings.sidebar.hideRss"))
+    .setDesc(t("settings.sidebar.hideRssDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(!!plugin.settings.display.hideDefaultRssIcon)
@@ -143,7 +145,7 @@ export function renderSidebarSettingsTab(
 
     new Setting(containerEl)
       .setName(label)
-      .setDesc("Enabled | color picker | hex input")
+      .setDesc(t("settings.sidebar.badgeControls"))
       .setClass("rss-dashboard-settings-two-row")
       .setClass("rss-dashboard-sidebar-badge-setting")
       .addToggle((toggle) =>
@@ -190,29 +192,27 @@ export function renderSidebarSettingsTab(
   };
 
   renderBadgeSetting(
-    "All feeds badge",
+    t("settings.sidebar.allBadge"),
     "showAllFeedsUnreadBadges",
     "allFeedsUnreadBadgeColor",
     "#8e44ad",
   );
   renderBadgeSetting(
-    "Folders badge",
+    t("settings.sidebar.folderBadge"),
     "showFolderUnreadBadges",
     "folderUnreadBadgeColor",
     "#d85b9f",
   );
   renderBadgeSetting(
-    "Feeds badge",
+    t("settings.sidebar.feedBadge"),
     "showFeedUnreadBadges",
     "feedUnreadBadgeColor",
     "#8e44ad",
   );
 
   new Setting(containerEl)
-    .setName("Hide empty feeds/no unread articles")
-    .setDesc(
-      "Hide feeds in the sidebar if they have zero articles or zero unread articles",
-    )
+    .setName(t("settings.sidebar.hideEmpty"))
+    .setDesc(t("settings.sidebar.hideEmptyDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.display.hideEmptyFeeds ?? false)
@@ -228,8 +228,8 @@ export function renderSidebarSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Show feed fetch error badges")
-    .setDesc("Show a warning icon in the sidebar for feeds that failed to fetch")
+    .setName(t("settings.sidebar.errorBadges"))
+    .setDesc(t("settings.sidebar.errorBadgesDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(!plugin.settings.display.hideFeedFetchErrorBadges)
@@ -246,7 +246,7 @@ export function renderSidebarSettingsTab(
 
   // ── Icon Visibility & Order ───────────────────────────────────────────────
   const iconHeading = new Setting(containerEl)
-    .setName("Icon visibility")
+    .setName(t("settings.sidebar.iconVisibility"))
     .setHeading();
   iconHeading.settingEl.dataset.rssSettingsSection = "icon-visibility";
   if (targetSection === "Icon visibility") {
@@ -261,8 +261,8 @@ export function renderSidebarSettingsTab(
   const iconToggleSettings: Setting[] = [];
 
   new Setting(containerEl)
-    .setName("Hide toolbar entirely")
-    .setDesc("Hide all icons in the sidebar header")
+    .setName(t("settings.sidebar.hideToolbar"))
+    .setDesc(t("settings.sidebar.hideToolbarDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.display.hideToolbarEntirely ?? false)
@@ -491,9 +491,9 @@ export function renderSidebarSettingsTab(
   renderIconRows();
 
   new Setting(containerEl)
-    .setName("Reset icon order & visibility")
+    .setName(t("settings.sidebar.resetIconOrder"))
     .addButton((btn) =>
-      btn.setButtonText("Reset").onClick(() => {
+      btn.setButtonText(t("settings.display.reset")).onClick(() => {
         void (async () => {
           plugin.settings.display.iconOrder = [...SIDEBAR_ICON_IDS];
           plugin.settings.display.hideToolbarEntirely = false;
@@ -512,7 +512,7 @@ export function renderSidebarSettingsTab(
 
   // ── Sidebar padding ───────────────────────────────────────────────────────
   const paddingHeading = new Setting(containerEl)
-    .setName("Sidebar padding")
+    .setName(t("settings.sidebar.padding"))
     .setHeading();
   paddingHeading.settingEl.dataset.rssSettingsSection = "sidebar-padding";
   if (targetSection === "Sidebar padding") {
@@ -585,21 +585,21 @@ export function renderSidebarSettingsTab(
   };
 
   renderPaddingSetting(
-    "Left padding",
-    "Adjust left padding for sidebar rows",
+    t("settings.sidebar.leftPadding"),
+    t("settings.sidebar.leftPaddingDesc"),
     "sidebarItemPaddingLeft",
     2,
   );
   renderPaddingSetting(
-    "Right padding",
-    "Adjust right padding for sidebar rows",
+    t("settings.sidebar.rightPadding"),
+    t("settings.sidebar.rightPaddingDesc"),
     "sidebarItemPaddingRight",
     2,
   );
 
   // ── Row spacing ───────────────────────────────────────────────────────────
   const spacingHeading = new Setting(containerEl)
-    .setName("Row spacing")
+    .setName(t("settings.sidebar.rowSpacing"))
     .setHeading();
   spacingHeading.settingEl.dataset.rssSettingsSection = "row-spacing";
   if (targetSection === "Row spacing") {
@@ -671,16 +671,16 @@ export function renderSidebarSettingsTab(
   };
 
   renderSpacingSetting(
-    "Sidebar row spacing",
-    "Adjust the height between rows in the sidebar feed list",
+    t("settings.sidebar.feedRowSpacing"),
+    t("settings.sidebar.feedRowSpacingDesc"),
     "sidebarRowSpacing",
     0,
     44,
     10,
   );
   renderSpacingSetting(
-    "Sidebar row indentation",
-    "Adjust the indentation of nested items in the sidebar",
+    t("settings.sidebar.rowIndentation"),
+    t("settings.sidebar.rowIndentationDesc"),
     "sidebarRowIndentation",
     0,
     50,
@@ -688,13 +688,13 @@ export function renderSidebarSettingsTab(
   );
 
   // ── Feed icons ───────────────────────────────────────────────────────────
-  new Setting(containerEl).setName("Feed icons").setHeading();
+  new Setting(containerEl).setName(t("settings.sidebar.feedIcons")).setHeading();
 
   // YouTube info message
   new Setting(containerEl)
-    .setName("YouTube profile images")
+    .setName(t("settings.sidebar.youtubeImages"))
     .setDesc(
-      "YouTube RSS feeds do not provide channel profile images. Videos will always use the default video play icon.",
+      t("settings.sidebar.youtubeImagesDesc"),
     );
 
   // Helper for domain icon toggles

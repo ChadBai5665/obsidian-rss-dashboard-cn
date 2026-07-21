@@ -13,6 +13,7 @@ import {
   computePopoverPosition,
   computeSubmenuPosition,
 } from "../../utils/popover-position";
+import { createTranslator } from "../../i18n";
 
 // Re-export pure helpers from sidebar-settings-tab for backward compatibility
 export { moveIconOrder, normalizeHexColor } from "./sidebar-settings-tab";
@@ -30,6 +31,7 @@ export function renderDisplaySettingsTab(
   onRefresh: () => void,
   targetSection?: string,
 ): void {
+  const t = createTranslator(plugin.settings.locale);
   const rerenderActiveReaderView = async (): Promise<void> => {
     const readerView = await plugin.getActiveReaderView?.();
     if (!readerView) {
@@ -51,11 +53,11 @@ export function renderDisplaySettingsTab(
     await rerenderActiveReaderView();
   };
 
-  new Setting(containerEl).setName("Dashboard").setHeading();
+  new Setting(containerEl).setName(t("settings.display.dashboard")).setHeading();
 
   new Setting(containerEl)
-    .setName("Show cover images")
-    .setDesc("Display cover images for articles in reader view")
+    .setName(t("settings.display.showCover"))
+    .setDesc(t("settings.display.showCoverDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.display.showCoverImage)
@@ -66,8 +68,8 @@ export function renderDisplaySettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Show summary")
-    .setDesc("Display content summary in card view")
+    .setName(t("settings.display.showSummary"))
+    .setDesc(t("settings.display.showSummaryDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.display.showSummary)
@@ -84,8 +86,8 @@ export function renderDisplaySettingsTab(
 
   // Cards per row (slider + text input, synced)
   const cardsPerRowSetting = new Setting(containerEl)
-    .setName("Cards per row")
-    .setDesc("Set card columns in dashboard card view (0 = auto)");
+    .setName(t("settings.display.cardsPerRow"))
+    .setDesc(t("settings.display.cardsPerRowDesc"));
   const cardsPerRowMin = 0;
   const cardsPerRowMax = 6;
   const cardsPerRowStep = 1;
@@ -145,8 +147,8 @@ export function renderDisplaySettingsTab(
 
   // Card spacing (slider + text input, synced)
   const cardSpacingSetting = new Setting(containerEl)
-    .setName("Card spacing")
-    .setDesc("Adjust the spacing between cards in dashboard card view");
+    .setName(t("settings.display.cardSpacing"))
+    .setDesc(t("settings.display.cardSpacingDesc"));
   const cardSpacingMin = 0;
   const cardSpacingMax = 40;
   const cardSpacingStep = 1;
@@ -205,10 +207,8 @@ export function renderDisplaySettingsTab(
   cardSpacingSetting.settingEl.addClass("rss-dashboard-settings-two-row");
 
   new Setting(containerEl)
-    .setName("Show filter status bar")
-    .setDesc(
-      "Show the dashboard status bar with retrieved and filtered article counts",
-    )
+    .setName(t("settings.display.filterStatus"))
+    .setDesc(t("settings.display.filterStatusDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.display.showFilterStatusBar ?? true)
@@ -224,10 +224,8 @@ export function renderDisplaySettingsTab(
     );
 
   new Setting(containerEl)
-    .setName('Automatically mark article "read" upon opening')
-    .setDesc(
-      "When an article is opened, it will be automatically marked as read",
-    )
+    .setName(t("settings.display.autoMarkRead"))
+    .setDesc(t("settings.display.autoMarkReadDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(!!plugin.settings.display.autoMarkReadOnOpen)
@@ -238,14 +236,12 @@ export function renderDisplaySettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Article date display")
-    .setDesc(
-      "Choose whether article dates are shown as relative ('2 days ago') or absolute ('may 9, 2026').",
-    )
+    .setName(t("settings.display.articleDate"))
+    .setDesc(t("settings.display.articleDateDesc"))
     .addDropdown((dropdown) =>
       dropdown
-        .addOption("relative", "Relative (e.g. '2 days ago')")
-        .addOption("absolute", "Absolute (e.g. 'may 9, 2026, 11:39 am')")
+        .addOption("relative", t("settings.display.relative"))
+        .addOption("absolute", t("settings.display.absolute"))
         .setValue(plugin.settings.display.articleDateStyle ?? "relative")
         .onChange(async (value: string) => {
           plugin.settings.display.articleDateStyle = value as
@@ -274,8 +270,8 @@ export function renderDisplaySettingsTab(
   };
 
   new Setting(containerEl)
-    .setName("Startup filters")
-    .setDesc("Choose which filters to apply when opening the dashboard.")
+    .setName(t("settings.display.startupFilters"))
+    .setDesc(t("settings.display.startupFiltersDesc"))
     .addButton((btn) => {
       btn.buttonEl.addClass("rss-dashboard-startup-filters-button");
       const initial = formatStartupFiltersButton();
@@ -399,13 +395,13 @@ export function renderDisplaySettingsTab(
           cls:
             "rss-dashboard-filter-logic-btn" +
             (pendingFilterLogic === "AND" ? " active" : ""),
-          text: "And",
+          text: t("settings.display.and"),
         });
         const orBtn = logicToggles.createEl("button", {
           cls:
             "rss-dashboard-filter-logic-btn" +
             (pendingFilterLogic === "OR" ? " active" : ""),
-          text: "Or",
+          text: t("settings.display.or"),
         });
 
         andBtn.addEventListener("click", () => {
@@ -440,7 +436,7 @@ export function renderDisplaySettingsTab(
 
         allItem.createDiv({
           cls: "rss-dashboard-filter-menu-text",
-          text: "All",
+          text: t("common.all"),
         });
 
         const filterCheckboxes: Map<string, HTMLInputElement> = new Map();
@@ -492,7 +488,7 @@ export function renderDisplaySettingsTab(
           if (plugin.settings.availableTags.length === 0) {
             subMenu.createDiv({
               cls: "rss-dashboard-filter-menu-item empty",
-              text: "No tags available",
+              text: t("settings.display.noTags"),
             });
           }
 
@@ -650,7 +646,7 @@ export function renderDisplaySettingsTab(
 
         const applyBtn = menuPortal.createEl("button", {
           cls: "rss-dashboard-filter-apply-btn",
-          text: "Apply",
+          text: t("settings.display.apply"),
         });
         applyBtn.addEventListener("click", (e) => {
           e.stopPropagation();
@@ -740,7 +736,7 @@ export function renderDisplaySettingsTab(
     });
 
   // ── Reader ───────────────────────────────────────────────────────────────
-  const readerHeading = new Setting(containerEl).setName("Reader").setHeading();
+  const readerHeading = new Setting(containerEl).setName(t("settings.display.reader")).setHeading();
   readerHeading.settingEl.dataset.rssSettingsSection = "reader";
   if (targetSection === "Reader") {
     window.setTimeout(() => {
@@ -752,8 +748,8 @@ export function renderDisplaySettingsTab(
   }
 
   new Setting(containerEl)
-    .setName("Font size")
-    .setDesc("Choose the reader body font size preset")
+    .setName(t("settings.display.fontSize"))
+    .setDesc(t("settings.display.fontSizeDesc"))
     .addDropdown((dropdown) =>
       dropdown
         .addOption("80", "80%")
@@ -776,8 +772,8 @@ export function renderDisplaySettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Line height")
-    .setDesc("Choose the reader line height preset")
+    .setName(t("settings.display.lineHeight"))
+    .setDesc(t("settings.display.lineHeightDesc"))
     .addDropdown((dropdown) =>
       dropdown
         .addOption("100", "100%")
@@ -800,8 +796,8 @@ export function renderDisplaySettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Font")
-    .setDesc("Choose the reader font family")
+    .setName(t("settings.display.font"))
+    .setDesc(t("settings.display.fontDesc"))
     .addDropdown((dropdown) =>
       dropdown
         .addOption("default", "Theme default")
@@ -820,8 +816,8 @@ export function renderDisplaySettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Alignment")
-    .setDesc("Choose how reader paragraphs align")
+    .setName(t("settings.display.alignment"))
+    .setDesc(t("settings.display.alignmentDesc"))
     .addDropdown((dropdown) =>
       dropdown
         .addOption("justify", "Justify")
@@ -834,8 +830,8 @@ export function renderDisplaySettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Paragraph spacing")
-    .setDesc("Choose the spacing between reader paragraphs")
+    .setName(t("settings.display.paragraphSpacing"))
+    .setDesc(t("settings.display.paragraphSpacingDesc"))
     .addDropdown((dropdown) =>
       dropdown
         .addOption("default", "Theme default")
@@ -854,10 +850,10 @@ export function renderDisplaySettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Reset reader format")
-    .setDesc("Restore the reader format defaults")
+    .setName(t("settings.display.resetReader"))
+    .setDesc(t("settings.display.resetReaderDesc"))
     .addButton((btn) =>
-      btn.setButtonText("Reset").onClick(() => {
+      btn.setButtonText(t("settings.display.reset")).onClick(() => {
         void (async () => {
           plugin.settings.readerFormat = { ...DEFAULT_SETTINGS.readerFormat };
           await persistReaderFormat();
@@ -870,7 +866,7 @@ export function renderDisplaySettingsTab(
 
   // ── Mobile toolbar ────────────────────────────────────────────────────────
   const mobileHeading = new Setting(containerEl)
-    .setName("Mobile toolbar")
+    .setName(t("settings.display.mobileToolbar"))
     .setHeading();
   mobileHeading.settingEl.dataset.rssSettingsSection = "mobile-toolbar";
   if (targetSection === "Mobile toolbar") {
@@ -883,8 +879,8 @@ export function renderDisplaySettingsTab(
   }
 
   new Setting(containerEl)
-    .setName("Show toolbar in card view (mobile)")
-    .setDesc("Show per-article action buttons in card view on mobile")
+    .setName(t("settings.display.mobileCardToolbar"))
+    .setDesc(t("settings.display.mobileCardToolbarDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(!!plugin.settings.display.mobileShowCardToolbar)
@@ -900,8 +896,8 @@ export function renderDisplaySettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Show toolbar in list view (mobile)")
-    .setDesc("Show per-article action buttons in list view on mobile")
+    .setName(t("settings.display.mobileListToolbar"))
+    .setDesc(t("settings.display.mobileListToolbarDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(!!plugin.settings.display.mobileShowListToolbar)
@@ -917,8 +913,8 @@ export function renderDisplaySettingsTab(
     );
 
   const mobileListToolbarStyleSetting = new Setting(containerEl)
-    .setName("List toolbar style (mobile)")
-    .setDesc("Choose how action buttons are laid out in mobile list view")
+    .setName(t("settings.display.mobileListStyle"))
+    .setDesc(t("settings.display.mobileListStyleDesc"))
     .addDropdown((dropdown) =>
       dropdown
         .addOption("left-grid", "Left grid (2x2)")

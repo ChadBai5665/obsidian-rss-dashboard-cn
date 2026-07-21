@@ -10,7 +10,10 @@ import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import type RssDashboardPlugin from "../../../main";
 
 function cloneSettings(): RssDashboardSettings {
-  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+  return {
+    ...(JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings),
+    locale: "en",
+  };
 }
 
 function flushPromises(): Promise<void> {

@@ -23,6 +23,7 @@ import {
 import { ApplyMaxItemsToExistingFeedsModal } from "../modals/settings-modals";
 import type { RssDashboardSettings } from "../../types/types";
 import { PREDEFINED_PROXIES } from "../../utils/proxy-utils";
+import { createTranslator } from "../../i18n";
 
 export interface GeneralSettingsPlugin {
   app: App;
@@ -58,14 +59,30 @@ export function renderGeneralSettingsTab(
   containerEl: HTMLElement,
   plugin: GeneralSettingsPlugin,
 ): void {
+  const t = createTranslator(plugin.settings.locale);
   new Setting(containerEl)
-    .setName("View style")
-    .setDesc("Choose between list, card, and feed view for articles")
+    .setName(t("settings.language"))
+    .setDesc(t("settings.language"))
     .addDropdown((dropdown) =>
       dropdown
-        .addOption("list", "List view")
-        .addOption("card", "Card view")
-        .addOption("feed", "Feed view")
+        .addOption("zh-CN", t("settings.languageChinese"))
+        .addOption("en", t("settings.languageEnglish"))
+        .setValue(plugin.settings.locale)
+        .onChange(async (value) => {
+          plugin.settings.locale = value === "en" ? "en" : "zh-CN";
+          await plugin.saveSettings();
+          plugin.settingTab?.display();
+        }),
+    );
+
+  new Setting(containerEl)
+    .setName(t("settings.general.viewStyle"))
+    .setDesc(t("settings.general.viewStyleDesc"))
+    .addDropdown((dropdown) =>
+      dropdown
+        .addOption("list", t("settings.general.listView"))
+        .addOption("card", t("settings.general.cardView"))
+        .addOption("feed", t("settings.general.feedView"))
         .setValue(plugin.settings.viewStyle)
         .onChange(async (value: string) => {
           plugin.settings.viewStyle = value as "list" | "card" | "feed";
@@ -79,13 +96,13 @@ export function renderGeneralSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Dashboard view location")
-    .setDesc("Choose where to open the RSS dashboard")
+    .setName(t("settings.general.dashboardLocation"))
+    .setDesc(t("settings.general.dashboardLocationDesc"))
     .addDropdown((dropdown) =>
       dropdown
-        .addOption("main", "Main view")
-        .addOption("right-sidebar", "Right sidebar")
-        .addOption("left-sidebar", "Left sidebar")
+        .addOption("main", t("settings.general.mainView"))
+        .addOption("right-sidebar", t("settings.general.rightSidebar"))
+        .addOption("left-sidebar", t("settings.general.leftSidebar"))
         .setValue(plugin.settings.viewLocation)
         .onChange(async (value: string) => {
           plugin.settings.viewLocation =
@@ -95,15 +112,15 @@ export function renderGeneralSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Reader view location")
-    .setDesc("Choose where to open articles/media when clicked")
+    .setName(t("settings.general.readerLocation"))
+    .setDesc(t("settings.general.readerLocationDesc"))
     .addDropdown((dropdown) =>
       dropdown
-        .addOption("main", "Main view (split)")
-        .addOption("right-sidebar", "Right sidebar")
-        .addOption("left-sidebar", "Left sidebar")
-        .addOption("inline", "Inline (inside dashboard)")
-        .addOption("external-browser", "External browser")
+        .addOption("main", t("settings.general.mainViewSplit"))
+        .addOption("right-sidebar", t("settings.general.rightSidebar"))
+        .addOption("left-sidebar", t("settings.general.leftSidebar"))
+        .addOption("inline", t("settings.general.inline"))
+        .addOption("external-browser", t("settings.general.externalBrowser"))
         .setValue(plugin.settings.readerViewLocation || "main")
         .onChange(async (value: string) => {
           plugin.settings.readerViewLocation =
@@ -113,14 +130,14 @@ export function renderGeneralSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Saved article open location")
-    .setDesc("Choose where to open saved article files")
+    .setName(t("settings.general.savedLocation"))
+    .setDesc(t("settings.general.savedLocationDesc"))
     .addDropdown((dropdown) =>
       dropdown
-        .addOption("main", "Main view (split)")
-        .addOption("right-sidebar", "Right sidebar")
-        .addOption("left-sidebar", "Left sidebar")
-        .addOption("inline", "Inline (inside dashboard)")
+        .addOption("main", t("settings.general.mainViewSplit"))
+        .addOption("right-sidebar", t("settings.general.rightSidebar"))
+        .addOption("left-sidebar", t("settings.general.leftSidebar"))
+        .addOption("inline", t("settings.general.inline"))
         .setValue(plugin.settings.savedArticleOpenLocation || "main")
         .onChange(async (value: string) => {
           plugin.settings.savedArticleOpenLocation =
@@ -130,8 +147,8 @@ export function renderGeneralSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Use web viewer")
-    .setDesc("Use web viewer core plugin for articles when available")
+    .setName(t("settings.general.webViewer"))
+    .setDesc(t("settings.general.webViewerDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.useWebViewer || false)
@@ -142,8 +159,8 @@ export function renderGeneralSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Results shown per page")
-    .setDesc("Controls pagination page size across all dashboard views.")
+    .setName(t("settings.general.pageSize"))
+    .setDesc(t("settings.general.pageSizeDesc"))
     .addDropdown((dropdown) => {
       const pageSizes = [
         plugin.settings.allArticlesPageSize,
@@ -156,19 +173,19 @@ export function renderGeneralSettingsTab(
       const isMixed = uniqueSizes.size > 1;
 
       if (isMixed) {
-        dropdown.addOption("mixed", "Mixed (previous per-view values)");
+        dropdown.addOption("mixed", t("settings.general.mixedPageSize"));
       }
 
       const options = getPageSizeOptions(plugin.settings.allArticlesPageSize);
       for (const size of options) {
         const label =
           size === 0
-            ? "All"
+            ? t("settings.general.all")
             : PAGE_SIZE_OPTIONS.includes(
                   size as (typeof PAGE_SIZE_OPTIONS)[number],
                 )
               ? String(size)
-              : `Current (${size})`;
+              : t("settings.general.currentPageSize", { size });
         dropdown.addOption(String(size), label);
       }
 
@@ -200,30 +217,30 @@ export function renderGeneralSettingsTab(
       });
     });
 
-  new Setting(containerEl).setName("Global feeds").setHeading();
+  new Setting(containerEl).setName(t("settings.general.globalFeeds")).setHeading();
 
   // ── Refresh interval ──────────────────────────────────────────────────────
   const refreshIntervalSetting = new Setting(containerEl)
-    .setName("Auto-refresh interval")
-    .setDesc("How often to auto-refresh feeds (in minutes)");
+    .setName(t("settings.general.refreshInterval"))
+    .setDesc(t("settings.general.refreshIntervalDesc"));
 
   let refreshInterval = plugin.settings.refreshInterval;
   let refreshIntervalCustomInput: HTMLInputElement | null = null;
 
   refreshIntervalSetting.addDropdown((dropdown) => {
     dropdown
-      .addOption("0", "Off")
-      .addOption("5", "5 minutes")
-      .addOption("10", "10 minutes")
-      .addOption("15", "15 minutes")
-      .addOption("30", "30 minutes")
-      .addOption("60", "1 hour")
-      .addOption("120", "2 hours")
-      .addOption("240", "4 hours")
-      .addOption("480", "8 hours")
-      .addOption("720", "12 hours")
-      .addOption("1440", "24 hours")
-      .addOption("custom", "Custom...")
+      .addOption("0", t("settings.general.off"))
+      .addOption("5", t("settings.general.minutes", { count: 5 }))
+      .addOption("10", t("settings.general.minutes", { count: 10 }))
+      .addOption("15", t("settings.general.minutes", { count: 15 }))
+      .addOption("30", t("settings.general.minutes", { count: 30 }))
+      .addOption("60", t("settings.general.hours", { count: 1, plural: "" }))
+      .addOption("120", t("settings.general.hours", { count: 2, plural: "s" }))
+      .addOption("240", t("settings.general.hours", { count: 4, plural: "s" }))
+      .addOption("480", t("settings.general.hours", { count: 8, plural: "s" }))
+      .addOption("720", t("settings.general.hours", { count: 12, plural: "s" }))
+      .addOption("1440", t("settings.general.hours", { count: 24, plural: "s" }))
+      .addOption("custom", t("settings.general.custom"))
       .setValue(
         isPresetRefreshInterval(refreshInterval)
           ? refreshInterval.toString()
@@ -235,7 +252,7 @@ export function renderGeneralSettingsTab(
             refreshIntervalCustomInput =
               refreshIntervalSetting.controlEl.createEl("input", {
                 type: "number",
-                placeholder: "Enter minutes",
+                placeholder: t("settings.general.enterMinutes"),
                 cls: "rss-custom-input",
               });
             refreshIntervalCustomInput.min = "0";
@@ -274,10 +291,8 @@ export function renderGeneralSettingsTab(
   });
 
   new Setting(containerEl)
-    .setName("Startup refresh delay")
-    .setDesc(
-      "Delay before the initial refresh when Obsidian opens, in seconds. ",
-    )
+    .setName(t("settings.general.startupDelay"))
+    .setDesc(t("settings.general.startupDelayDesc"))
     .addText((text) =>
       text
         .setValue(String(plugin.settings.startupRefreshDelaySeconds))
@@ -288,6 +303,58 @@ export function renderGeneralSettingsTab(
           await plugin.saveSettings();
         }),
     );
+
+  new Setting(containerEl).setName(t("settings.general.dailyCollection")).setHeading();
+
+  new Setting(containerEl)
+    .setName(t("settings.general.dailyCollection"))
+    .setDesc(t("settings.general.dailyCollectionDesc"))
+    .addToggle((toggle) =>
+      toggle.setValue(plugin.settings.collection.enabled).onChange(async (value) => {
+        plugin.settings.collection.enabled = value;
+        await plugin.saveSettings();
+      }),
+    );
+
+  const renderCollectionFolder = (
+    nameKey:
+      | "settings.general.collectionDataFolder"
+      | "settings.general.dailyIndexFolder"
+      | "settings.general.savedNotesFolder",
+    descKey:
+      | "settings.general.collectionDataFolderDesc"
+      | "settings.general.dailyIndexFolderDesc"
+      | "settings.general.savedNotesFolderDesc",
+    settingKey: "dataFolder" | "dailyIndexFolder" | "savedNoteFolder",
+  ) => {
+    new Setting(containerEl)
+      .setName(t(nameKey))
+      .setDesc(t(descKey))
+      .addText((text) =>
+        text
+          .setValue(plugin.settings.collection[settingKey])
+          .onChange(async (value) => {
+            plugin.settings.collection[settingKey] = value.trim();
+            await plugin.saveSettings();
+          }),
+      );
+  };
+
+  renderCollectionFolder(
+    "settings.general.collectionDataFolder",
+    "settings.general.collectionDataFolderDesc",
+    "dataFolder",
+  );
+  renderCollectionFolder(
+    "settings.general.dailyIndexFolder",
+    "settings.general.dailyIndexFolderDesc",
+    "dailyIndexFolder",
+  );
+  renderCollectionFolder(
+    "settings.general.savedNotesFolder",
+    "settings.general.savedNotesFolderDesc",
+    "savedNoteFolder",
+  );
 
   // ── Max items ─────────────────────────────────────────────────────────────
   let maxItemsPromptTimer: number | null = null;
@@ -313,7 +380,7 @@ export function renderGeneralSettingsTab(
         const modal = new ApplyMaxItemsToExistingFeedsModal(plugin.app, {
           newLimit: change.newValue,
           increased: change.newValue > change.oldValue,
-        });
+        }, plugin.settings.locale);
         modal.open();
         const action = await modal.waitForClose();
         maxItemsPromptOpen = false;
@@ -330,7 +397,7 @@ export function renderGeneralSettingsTab(
           await plugin.refreshFeeds();
         } else if (change.newValue > change.oldValue) {
           new Notice(
-            "Max item limit applied to all feeds. Refresh all feeds to fetch additional items.",
+            t("settings.general.maxItemsApplied"),
           );
         }
       })();
@@ -355,25 +422,23 @@ export function renderGeneralSettingsTab(
   };
 
   const maxItemsSetting = new Setting(containerEl)
-    .setName("Max item limit")
-    .setDesc(
-      "Default max item limit for new feeds (and fallback when a feed has no override).",
-    );
+    .setName(t("settings.general.maxItems"))
+    .setDesc(t("settings.general.maxItemsDesc"));
 
   let maxItemsLimit = plugin.settings.maxItems;
   let maxItemsCustomInput: HTMLInputElement | null = null;
 
   maxItemsSetting.addDropdown((dropdown) => {
     dropdown
-      .addOption("0", "Unlimited")
-      .addOption("10", "10 items")
-      .addOption("25", "25 items")
-      .addOption("50", "50 items")
-      .addOption("100", "100 items")
-      .addOption("200", "200 items")
-      .addOption("500", "500 items")
-      .addOption("1000", "1000 items")
-      .addOption("custom", "Custom...")
+      .addOption("0", t("settings.general.unlimited"))
+      .addOption("10", t("settings.general.items", { count: 10 }))
+      .addOption("25", t("settings.general.items", { count: 25 }))
+      .addOption("50", t("settings.general.items", { count: 50 }))
+      .addOption("100", t("settings.general.items", { count: 100 }))
+      .addOption("200", t("settings.general.items", { count: 200 }))
+      .addOption("500", t("settings.general.items", { count: 500 }))
+      .addOption("1000", t("settings.general.items", { count: 1000 }))
+      .addOption("custom", t("settings.general.custom"))
       .setValue(
         isPresetMaxItems(maxItemsLimit) ? maxItemsLimit.toString() : "custom",
       )
@@ -382,7 +447,7 @@ export function renderGeneralSettingsTab(
           if (!maxItemsCustomInput) {
             maxItemsCustomInput = maxItemsSetting.controlEl.createEl("input", {
               type: "number",
-              placeholder: "Enter number",
+              placeholder: t("settings.general.enterNumber"),
               cls: "rss-custom-input",
             });
             maxItemsCustomInput.min = "1";
@@ -408,27 +473,25 @@ export function renderGeneralSettingsTab(
 
   // ── Auto-delete duration ──────────────────────────────────────────────────
   const defaultAutoDeleteSetting = new Setting(containerEl)
-    .setName("Default auto delete duration (new feeds)")
-    .setDesc(
-      "Default days to keep read articles before auto-delete for new feeds (per-feed override available). This will also limit the timeframe window for shown articles.",
-    );
+    .setName(t("settings.general.autoDelete"))
+    .setDesc(t("settings.general.autoDeleteDesc"));
 
   let defaultDuration = plugin.settings.defaultAutoDeleteDuration;
   let autoDeleteCustomInput: HTMLInputElement | null = null;
 
   defaultAutoDeleteSetting.addDropdown((dropdown) => {
     dropdown
-      .addOption("0", "Disabled")
-      .addOption("1", "1 day")
-      .addOption("3", "3 days")
-      .addOption("7", "1 week")
-      .addOption("14", "2 weeks")
-      .addOption("30", "1 month")
-      .addOption("60", "2 months")
-      .addOption("90", "3 months")
-      .addOption("180", "6 months")
-      .addOption("365", "1 year")
-      .addOption("custom", "Custom...")
+      .addOption("0", t("settings.general.disabled"))
+      .addOption("1", t("settings.general.days", { count: 1 }))
+      .addOption("3", t("settings.general.days", { count: 3 }))
+      .addOption("7", t("settings.general.weeks", { count: 1 }))
+      .addOption("14", t("settings.general.weeks", { count: 2 }))
+      .addOption("30", t("settings.general.months", { count: 1 }))
+      .addOption("60", t("settings.general.months", { count: 2 }))
+      .addOption("90", t("settings.general.months", { count: 3 }))
+      .addOption("180", t("settings.general.months", { count: 6 }))
+      .addOption("365", t("settings.general.year"))
+      .addOption("custom", t("settings.general.custom"))
       .setValue(
         isPresetAutoDeleteDuration(defaultDuration)
           ? defaultDuration.toString()
@@ -441,7 +504,7 @@ export function renderGeneralSettingsTab(
               "input",
               {
                 type: "number",
-                placeholder: "Enter days",
+                placeholder: t("settings.general.enterDays"),
                 cls: "rss-custom-input",
               },
             );
@@ -474,13 +537,11 @@ export function renderGeneralSettingsTab(
   });
 
   // ── Proxy ─────────────────────────────────────────────────────────────────
-  new Setting(containerEl).setName("Proxy").setHeading();
+  new Setting(containerEl).setName(t("settings.general.proxy")).setHeading();
 
   new Setting(containerEl)
-    .setName("Enable CORS proxy")
-    .setDesc(
-      "When enabled, article fetches that are blocked by a firewall (e.g. On iOS) will be retried through the proxy URL below",
-    )
+    .setName(t("settings.general.enableCors"))
+    .setDesc(t("settings.general.enableCorsDesc"))
     .addToggle((toggle) => {
       toggle
         .setValue(plugin.settings.corsProxyEnabled ?? false)
@@ -495,8 +556,8 @@ export function renderGeneralSettingsTab(
 
   if (plugin.settings.corsProxyEnabled) {
     const proxySetting = new Setting(containerEl)
-      .setName("Proxy URL")
-      .setDesc("Base URL of the CORS proxy.");
+      .setName(t("settings.general.proxyUrl"))
+      .setDesc(t("settings.general.proxyUrlDesc"));
     proxySetting.settingEl.addClass("rss-proxy-setting-item");
 
     let textComponent: import("obsidian").TextComponent;
@@ -521,7 +582,7 @@ export function renderGeneralSettingsTab(
       if (!validation.valid) {
         pendingProxyUrl = lastSavedProxyUrl;
         textComponent.setValue(lastSavedProxyUrl);
-        new Notice(validation.error || "Invalid URL");
+        new Notice(validation.error || t("settings.general.invalidUrl"));
         return;
       }
 
@@ -533,12 +594,12 @@ export function renderGeneralSettingsTab(
 
     proxySetting
       .addDropdown((dropdown) => {
-        dropdown.addOption("", "Select a proxy...");
-        dropdown.addOption("auto", "Auto-cycle (try all proxies on failure)");
+        dropdown.addOption("", t("settings.general.selectProxy"));
+        dropdown.addOption("auto", t("settings.general.autoCycleProxy"));
         PREDEFINED_PROXIES.forEach((proxy) => {
           dropdown.addOption(proxy.url, proxy.label);
         });
-        dropdown.addOption("custom", "Add new proxy URL...");
+        dropdown.addOption("custom", t("settings.general.addProxy"));
 
         const currentUrl = plugin.settings.corsProxyUrl || "";
         const isPredefined = PREDEFINED_PROXIES.some(
@@ -602,7 +663,7 @@ export function renderGeneralSettingsTab(
 
         proxySetting.addExtraButton((cb) => {
           cb.setIcon("x")
-            .setTooltip("Clear")
+            .setTooltip(t("settings.general.clear"))
             .onClick(async () => {
               text.setValue("");
               plugin.settings.corsProxyUrl = "";
@@ -616,7 +677,7 @@ export function renderGeneralSettingsTab(
         saveButton = btn;
         btn
           .setIcon("save")
-          .setTooltip("Save to list")
+          .setTooltip(t("settings.general.saveToList"))
           .onClick(async () => {
             const customUrl = textComponent.getValue().trim();
             const { isValidUrl } = await import("../../utils/validation");
@@ -626,12 +687,12 @@ export function renderGeneralSettingsTab(
               lastSavedProxyUrl = customUrl;
               pendingProxyUrl = customUrl;
               await plugin.saveSettings();
-              new Notice("Proxy URL saved");
+              new Notice(t("settings.general.proxySaved"));
               containerEl.dispatchEvent(
                 new CustomEvent("rss-settings-refresh"),
               );
             } else {
-              new Notice(validation.error || "Invalid URL");
+              new Notice(validation.error || t("settings.general.invalidUrl"));
             }
           });
 

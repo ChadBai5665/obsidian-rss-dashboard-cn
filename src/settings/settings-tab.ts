@@ -15,8 +15,13 @@
 import { App, PluginSettingTab } from "obsidian";
 import RssDashboardPlugin from "./../../main";
 // Re-export pure helpers for backwards compatibility with any external imports.
-export { SETTINGS_TAB_NAMES, isValidSettingsTab, getInitialTab } from "./tab-names";
-export type { SettingsTabName } from "./tab-names";
+export {
+  SETTINGS_TAB_IDS,
+  getInitialTab,
+  getSettingsTabLabel,
+  isValidSettingsTab,
+} from "./tab-names";
+export type { SettingsTabId } from "./tab-names";
 
 // Tab renderer imports
 import { renderGeneralSettingsTab } from "./tabs/general-settings-tab";
@@ -31,17 +36,19 @@ import { renderImportExportSettingsTab } from "./tabs/import-export-settings-tab
 import { renderTagsSettingsTab } from "./tabs/tags-settings-tab";
 import { renderAboutTab } from "./tabs/about-settings-tab";
 import {
-  SETTINGS_TAB_NAMES,
-  SettingsTabName,
+  SETTINGS_TAB_IDS,
+  SettingsTabId,
+  getSettingsTabLabel,
   isValidSettingsTab,
   getInitialTab,
 } from "./tab-names";
+import { createTranslator } from "../i18n";
 
 // ── Main class ────────────────────────────────────────────────────────────────
 
 export class RssDashboardSettingTab extends PluginSettingTab {
   plugin: RssDashboardPlugin;
-  private currentTab: SettingsTabName = getInitialTab();
+  private currentTab: SettingsTabId = getInitialTab();
   private pendingSection: string | null = null;
 
   constructor(app: App, plugin: RssDashboardPlugin) {
@@ -64,9 +71,10 @@ export class RssDashboardSettingTab extends PluginSettingTab {
 
     // ── Tab bar ──────────────────────────────────────────────────────────────
     const tabBar = containerEl.createDiv("rss-dashboard-settings-tab-bar");
-    SETTINGS_TAB_NAMES.forEach((tab) => {
+    const t = createTranslator(this.plugin.settings.locale);
+    SETTINGS_TAB_IDS.forEach((tab) => {
       const tabBtn = tabBar.createEl("button", {
-        text: tab,
+        text: getSettingsTabLabel(tab, t),
         cls:
           "rss-dashboard-settings-tab-btn" +
           (this.currentTab === tab ? " active" : ""),
@@ -90,15 +98,15 @@ export class RssDashboardSettingTab extends PluginSettingTab {
     tabContent.addEventListener("rss-settings-refresh", onRefresh);
 
     switch (this.currentTab) {
-      case "General":
+      case "general":
         renderGeneralSettingsTab(tabContent, this.plugin);
         this.pendingSection = null;
         break;
-      case "Storage":
+      case "storage":
         renderStorageSettingsTab(tabContent, this.plugin);
         this.pendingSection = null;
         break;
-      case "Display":
+      case "display":
         renderDisplaySettingsTab(
           tabContent,
           this.plugin,
@@ -107,7 +115,7 @@ export class RssDashboardSettingTab extends PluginSettingTab {
         );
         this.pendingSection = null;
         break;
-      case "Sidebar":
+      case "sidebar":
         renderSidebarSettingsTab(
           tabContent,
           this.plugin,
@@ -116,31 +124,31 @@ export class RssDashboardSettingTab extends PluginSettingTab {
         );
         this.pendingSection = null;
         break;
-      case "Media":
+      case "media":
         renderMediaSettingsTab(tabContent, this.plugin);
         this.pendingSection = null;
         break;
-      case "Article saving":
+      case "article-saving":
         renderArticleSavingSettingsTab(tabContent, this.plugin, onRefresh);
         this.pendingSection = null;
         break;
-      case "Rules":
+      case "rules":
         renderRulesSettingsTab(tabContent, this.plugin, onRefresh);
         this.pendingSection = null;
         break;
-      case "Highlights":
+      case "highlights":
         renderHighlightsSettingsTab(tabContent, this.plugin, onRefresh);
         this.pendingSection = null;
         break;
-      case "Import/Export":
+      case "import-export":
         renderImportExportSettingsTab(tabContent, this.plugin);
         this.pendingSection = null;
         break;
-      case "Tags":
+      case "tags":
         renderTagsSettingsTab(tabContent, this.plugin, onRefresh);
         this.pendingSection = null;
         break;
-      case "About":
+      case "about":
         renderAboutTab(tabContent, this.plugin);
         this.pendingSection = null;
         break;

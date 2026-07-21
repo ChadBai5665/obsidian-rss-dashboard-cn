@@ -1,33 +1,69 @@
 /**
- * Settings tab name constants and pure helpers.
- *
- * Extracted into a separate zero-dependency module so tests can import these
- * without pulling in the Obsidian PluginSettingTab class.
+ * Stable settings-tab identities. Labels are intentionally resolved only by
+ * the renderer, so changing the interface language never changes control flow.
  */
+import type { TranslationKey, Translator } from "../i18n";
 
-/** The ordered list of settings tab names. */
-export const SETTINGS_TAB_NAMES = [
-  "General",
-  "Storage",
-  "Display",
-  "Sidebar",
-  "Media",
-  "Article saving",
-  "Rules",
-  "Highlights",
-  "Import/Export",
-  "Tags",
-  "About",
-] as const;
+export type SettingsTabId =
+  | "general"
+  | "sources"
+  | "topic-discovery"
+  | "tikhub"
+  | "ai"
+  | "storage"
+  | "display"
+  | "sidebar"
+  | "media"
+  | "article-saving"
+  | "rules"
+  | "highlights"
+  | "import-export"
+  | "tags"
+  | "about";
 
-export type SettingsTabName = (typeof SETTINGS_TAB_NAMES)[number];
+/** Tabs that exist in this version of the settings UI, in display order. */
+export const SETTINGS_TAB_IDS = [
+  "general",
+  "storage",
+  "display",
+  "sidebar",
+  "media",
+  "article-saving",
+  "rules",
+  "highlights",
+  "import-export",
+  "tags",
+  "about",
+] as const satisfies readonly SettingsTabId[];
 
-/** Returns true if @param name is a known settings tab name. */
-export function isValidSettingsTab(name: string): name is SettingsTabName {
-  return (SETTINGS_TAB_NAMES as readonly string[]).includes(name);
+const TAB_LABEL_KEYS: Record<SettingsTabId, TranslationKey> = {
+  general: "settings.tab.general",
+  sources: "navigation.subscriptions",
+  "topic-discovery": "navigation.topicDiscovery",
+  tikhub: "settings.tab.tikhub",
+  ai: "settings.tab.ai",
+  storage: "settings.tab.storage",
+  display: "settings.tab.display",
+  sidebar: "settings.tab.sidebar",
+  media: "settings.tab.media",
+  "article-saving": "settings.tab.article-saving",
+  rules: "settings.tab.rules",
+  highlights: "settings.tab.highlights",
+  "import-export": "settings.tab.import-export",
+  tags: "settings.tab.tags",
+  about: "settings.tab.about",
+};
+
+export function getSettingsTabLabel(tab: SettingsTabId, t: Translator): string {
+  return t(TAB_LABEL_KEYS[tab]);
+}
+
+/** Returns true only for tabs rendered by the current settings UI. */
+export function isValidSettingsTab(name: string): name is SettingsTabId {
+  return (SETTINGS_TAB_IDS as readonly string[]).includes(name);
 }
 
 /** Returns the default tab shown when the settings panel is first opened. */
-export function getInitialTab(): SettingsTabName {
-  return SETTINGS_TAB_NAMES[0];
+export function getInitialTab(): SettingsTabId {
+  return SETTINGS_TAB_IDS[0];
 }

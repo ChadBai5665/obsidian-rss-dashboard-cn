@@ -52,7 +52,10 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
     const general = await import("../../../src/settings/tabs/general-settings-tab");
 
     const app = obsidian.App.createMock();
-    const plugin = { app } as unknown as RssDashboardPlugin;
+    const plugin = {
+      app,
+      settings: { locale: "zh-CN" },
+    } as unknown as RssDashboardPlugin;
     const tab = new RssDashboardSettingTab(app, plugin);
 
     tab.containerEl = document.body.appendChild(document.createElement("div"));
@@ -62,7 +65,7 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
       tab.containerEl.querySelectorAll(".rss-dashboard-settings-tab-btn"),
     );
     expect(tabButtons).toHaveLength(11);
-    expect(tabButtons[0].textContent).toBe("General");
+    expect(tabButtons[0].textContent).toBe("常规");
 
     expect(vi.mocked(general.renderGeneralSettingsTab)).toHaveBeenCalledTimes(1);
   });
@@ -75,7 +78,10 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
     const about = await import("../../../src/settings/tabs/about-settings-tab");
 
     const app = obsidian.App.createMock();
-    const plugin = { app } as unknown as RssDashboardPlugin;
+    const plugin = {
+      app,
+      settings: { locale: "zh-CN" },
+    } as unknown as RssDashboardPlugin;
     const tab = new RssDashboardSettingTab(app, plugin);
     tab.containerEl = document.body.appendChild(document.createElement("div"));
 
@@ -83,15 +89,15 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
 
     const aboutBtn = Array.from(
       tab.containerEl.querySelectorAll("button"),
-    ).find((b) => b.textContent === "About") as HTMLButtonElement;
+    ).find((b) => b.textContent === "关于") as HTMLButtonElement;
     aboutBtn.click();
     expect(vi.mocked(about.renderAboutTab)).toHaveBeenCalledTimes(1);
 
-    tab.activateTab("Rules");
+    tab.activateTab("rules");
     expect(vi.mocked(rules.renderRulesSettingsTab)).toHaveBeenCalledTimes(1);
 
     const display = await import("../../../src/settings/tabs/display-settings-tab");
-    tab.activateTab("Display", "Reader");
+    tab.activateTab("display", "Reader");
     expect(vi.mocked(display.renderDisplaySettingsTab)).toHaveBeenLastCalledWith(
       expect.any(HTMLDivElement),
       plugin,
@@ -112,7 +118,10 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
     const general = await import("../../../src/settings/tabs/general-settings-tab");
 
     const app = obsidian.App.createMock();
-    const plugin = { app } as unknown as RssDashboardPlugin;
+    const plugin = {
+      app,
+      settings: { locale: "zh-CN" },
+    } as unknown as RssDashboardPlugin;
     const tab = new RssDashboardSettingTab(app, plugin);
     tab.containerEl = document.body.appendChild(document.createElement("div"));
 
@@ -127,5 +136,31 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
     contentEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
     expect(vi.mocked(general.renderGeneralSettingsTab)).toHaveBeenCalledTimes(2);
   });
-});
 
+  it("keeps the stable active tab when the locale is changed and re-rendered", async () => {
+    const { RssDashboardSettingTab } = await import(
+      "../../../src/settings/settings-tab"
+    );
+    const display = await import("../../../src/settings/tabs/display-settings-tab");
+
+    const app = obsidian.App.createMock();
+    const plugin = {
+      app,
+      settings: { locale: "zh-CN" },
+    } as unknown as RssDashboardPlugin;
+    const tab = new RssDashboardSettingTab(app, plugin);
+    tab.containerEl = document.body.appendChild(document.createElement("div"));
+
+    tab.activateTab("display");
+    plugin.settings.locale = "en";
+    tab.display();
+
+    expect(tab.containerEl.querySelector("button")?.textContent).toBe("General");
+    expect(vi.mocked(display.renderDisplaySettingsTab)).toHaveBeenLastCalledWith(
+      expect.any(HTMLDivElement),
+      plugin,
+      expect.any(Function),
+      undefined,
+    );
+  });
+});

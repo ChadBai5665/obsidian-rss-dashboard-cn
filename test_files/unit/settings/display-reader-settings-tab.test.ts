@@ -5,7 +5,10 @@ import { renderDisplaySettingsTab } from "../../../src/settings/tabs/display-set
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 
 function cloneSettings(): typeof DEFAULT_SETTINGS {
-  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as typeof DEFAULT_SETTINGS;
+  return {
+    ...(JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as typeof DEFAULT_SETTINGS),
+    locale: "en",
+  };
 }
 
 function flushPromises(): Promise<void> {

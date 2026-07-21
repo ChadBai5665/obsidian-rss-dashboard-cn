@@ -55,7 +55,7 @@ function createPlugin() {
     settingTab: {
       display: vi.fn(),
     },
-    settings: cloneSettings(),
+    settings: { ...cloneSettings(), locale: "en" },
     saveSettings: vi.fn(async () => {}),
     getActiveDashboardView: vi.fn(async () => null),
     getStorageStatus: vi.fn(
@@ -95,6 +95,31 @@ beforeEach(() => {
 });
 
 describe("General settings storage section", () => {
+  it("renders storage controls in Chinese by default without changing storage identifiers", () => {
+    const containerEl = createTestContainer();
+    const plugin = createPlugin();
+    plugin.settings.locale = "zh-CN";
+
+    renderStorageSettingsTab(containerEl, plugin as never);
+
+    expect(containerEl.textContent).toContain("本地存储");
+    expect(containerEl.textContent).toContain("存储模式");
+    expect(containerEl.textContent).toContain("存储状态");
+    const select = getSettingByName(containerEl, "存储模式").querySelector("select");
+    expect(select?.querySelector('option[value="legacy-json"]')?.textContent).toBe("旧版 JSON");
+  });
+
+  it("keeps English storage wording available when English is selected", () => {
+    const containerEl = createTestContainer();
+    const plugin = createPlugin();
+    plugin.settings.locale = "en";
+
+    renderStorageSettingsTab(containerEl, plugin as never);
+
+    expect(containerEl.textContent).toContain("Storage");
+    expect(containerEl.textContent).toContain("Storage mode");
+  });
+
   it("marks the storage transition modal for mobile safe-area positioning", () => {
     const app = obsidian.App.createMock();
     const modal = new StorageTransitionModal(app, {

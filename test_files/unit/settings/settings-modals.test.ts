@@ -144,7 +144,7 @@ describe("ApplyMaxItemsToExistingFeedsModal", () => {
     const modal = new ApplyMaxItemsToExistingFeedsModal(app, {
       newLimit: 123,
       increased: true,
-    });
+    }, "en");
     const resultPromise = modal.waitForClose();
 
     modal.open();
@@ -178,7 +178,7 @@ describe("ApplyMaxItemsToExistingFeedsModal", () => {
     const modal = new ApplyMaxItemsToExistingFeedsModal(app, {
       newLimit: 10,
       increased: false,
-    });
+    }, "en");
     const resultPromise = modal.waitForClose();
 
     modal.open();

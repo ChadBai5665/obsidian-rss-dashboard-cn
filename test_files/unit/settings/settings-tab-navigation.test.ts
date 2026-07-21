@@ -2,55 +2,55 @@
  * Tests for tab-orchestration helpers extracted from RssDashboardSettingTab.
  *
  * Functions under test:
- *   - SETTINGS_TAB_NAMES — the canonical list of tab names
- *   - isValidSettingsTab(name) — returns true only for known tab names
- *   - getInitialTab() — returns the first (default) tab name
+ *   - SETTINGS_TAB_IDS — the canonical list of stable tab identities
+ *   - isValidSettingsTab(id) — returns true only for known tab identities
+ *   - getInitialTab() — returns the first (default) tab identity
  *
  * These are pure, zero-dependency exports from the settings-tab module.
  */
 import { describe, it, expect } from "vitest";
 import {
-  SETTINGS_TAB_NAMES,
+  SETTINGS_TAB_IDS,
   isValidSettingsTab,
   getInitialTab,
 } from "../../../src/settings/tab-names";
 
 // ── SETTINGS_TAB_NAMES ───────────────────────────────────────────────────────
 
-describe("SETTINGS_TAB_NAMES", () => {
+describe("SETTINGS_TAB_IDS", () => {
   it("contains exactly 11 tabs", () => {
-    expect(SETTINGS_TAB_NAMES).toHaveLength(11);
+    expect(SETTINGS_TAB_IDS).toHaveLength(11);
   });
 
-  it("includes all expected tab names", () => {
+  it("includes all expected stable tab ids", () => {
     const expected = [
-      "General",
-      "Storage",
-      "Display",
-      "Sidebar",
-      "Media",
-      "Article saving",
-      "Rules",
-      "Highlights",
-      "Import/Export",
-      "Tags",
-      "About",
+      "general",
+      "storage",
+      "display",
+      "sidebar",
+      "media",
+      "article-saving",
+      "rules",
+      "highlights",
+      "import-export",
+      "tags",
+      "about",
     ];
     for (const name of expected) {
-      expect(SETTINGS_TAB_NAMES, `missing tab "${name}"`).toContain(name);
+      expect(SETTINGS_TAB_IDS, `missing tab "${name}"`).toContain(name);
     }
   });
 
-  it("has 'General' as the first tab (default on open)", () => {
-    expect(SETTINGS_TAB_NAMES[0]).toBe("General");
+  it("has 'general' as the first tab (default on open)", () => {
+    expect(SETTINGS_TAB_IDS[0]).toBe("general");
   });
 });
 
 // ── isValidSettingsTab ───────────────────────────────────────────────────────
 
 describe("isValidSettingsTab()", () => {
-  it("returns true for every known tab name", () => {
-    for (const name of SETTINGS_TAB_NAMES) {
+  it("returns true for every known tab id", () => {
+    for (const name of SETTINGS_TAB_IDS) {
       expect(isValidSettingsTab(name), `"${name}" should be valid`).toBe(true);
     }
   });
@@ -64,23 +64,23 @@ describe("isValidSettingsTab()", () => {
   });
 
   it("is case-sensitive — wrong case returns false", () => {
-    expect(isValidSettingsTab("general")).toBe(false);
+    expect(isValidSettingsTab("General")).toBe(false);
     expect(isValidSettingsTab("DISPLAY")).toBe(false);
   });
 
   it("returns false for a name with trailing space", () => {
-    expect(isValidSettingsTab("General ")).toBe(false);
+    expect(isValidSettingsTab("general ")).toBe(false);
   });
 });
 
 // ── getInitialTab ────────────────────────────────────────────────────────────
 
 describe("getInitialTab()", () => {
-  it("returns 'General'", () => {
-    expect(getInitialTab()).toBe("General");
+  it("returns 'general'", () => {
+    expect(getInitialTab()).toBe("general");
   });
 
-  it("is always the first entry in SETTINGS_TAB_NAMES", () => {
-    expect(getInitialTab()).toBe(SETTINGS_TAB_NAMES[0]);
+  it("is always the first entry in SETTINGS_TAB_IDS", () => {
+    expect(getInitialTab()).toBe(SETTINGS_TAB_IDS[0]);
   });
 });

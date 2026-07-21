@@ -9,7 +9,8 @@
  * These helpers power the dropdown "setValue" logic that decides whether to
  * display "Custom..." vs a named preset option.
  */
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+import * as obsidian from "obsidian";
 import {
   isPresetRefreshInterval,
   isPresetMaxItems,
@@ -18,6 +19,99 @@ import {
   MAX_ITEMS_PRESETS,
   AUTO_DELETE_PRESETS,
 } from "../../../src/settings/tabs/general-settings-tab";
+import { renderGeneralSettingsTab } from "../../../src/settings/tabs/general-settings-tab";
+import { DEFAULT_SETTINGS, type RssDashboardSettings } from "../../../src/types/types";
+import { installObsidianDomPolyfills } from "../test-dom-polyfills";
+
+function createPlugin(locale: "zh-CN" | "en") {
+  return {
+    app: obsidian.App.createMock(),
+    settingTab: { display: vi.fn() },
+    settings: {
+      ...JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
+      locale,
+    } as RssDashboardSettings,
+    saveSettings: vi.fn(async () => {}),
+    getActiveDashboardView: vi.fn(async () => null),
+    importPortableDataBundleFromFile: vi.fn(async () => {}),
+    exportPortableDataBundle: vi.fn(async () => {}),
+    applyFeedLimitsToAllFeeds: vi.fn(async () => {}),
+    refreshFeeds: vi.fn(async () => {}),
+  };
+}
+
+function renderGeneral(locale: "zh-CN" | "en") {
+  const containerEl = document.body.createDiv();
+  const plugin = createPlugin(locale);
+  renderGeneralSettingsTab(containerEl, plugin);
+  return { containerEl, plugin };
+}
+
+beforeEach(() => {
+  installObsidianDomPolyfills();
+  document.body.empty();
+  vi.restoreAllMocks();
+  vi.clearAllMocks();
+  const settingPrototype = obsidian.Setting.prototype as unknown as {
+    addExtraButton: (callback: (button: {
+      setIcon: () => { setTooltip: () => { onClick: () => unknown } };
+    }) => void) => unknown;
+  };
+  settingPrototype.addExtraButton = function addExtraButton(callback) {
+    callback({
+      setIcon: () => ({
+        setTooltip: () => ({
+          onClick: () => undefined,
+        }),
+      }),
+    });
+    return this;
+  };
+});
+
+describe("General settings localization", () => {
+  it("renders core controls, language selector, and refresh collection controls in Chinese by default", () => {
+    const { containerEl } = renderGeneral("zh-CN");
+    expect(containerEl.textContent).toContain("视图样式");
+    expect(containerEl.textContent).toContain("界面语言");
+    expect(containerEl.textContent).toContain("自动刷新间隔");
+    expect(containerEl.textContent).toContain("启动刷新延迟");
+    expect(containerEl.textContent).toContain("每日采集");
+    expect(containerEl.textContent).toContain("采集数据文件夹");
+
+    const languageSetting = Array.from(containerEl.querySelectorAll(".setting-item")).find(
+      (setting) => setting.querySelector(".setting-item-name")?.textContent === "界面语言",
+    ) as HTMLElement;
+    expect(languageSetting.querySelector('option[value="zh-CN"]')?.textContent).toBe("简体中文");
+    expect(languageSetting.querySelector('option[value="en"]')?.textContent).toBe("English");
+  });
+
+  it("keeps English wording available when English is selected", () => {
+    const { containerEl } = renderGeneral("en");
+    expect(containerEl.textContent).toContain("View style");
+    expect(containerEl.textContent).toContain("Language");
+    expect(containerEl.textContent).toContain("Auto-refresh interval");
+    expect(containerEl.textContent).toContain("Startup refresh delay");
+    expect(containerEl.textContent).toContain("Daily collection");
+    expect(containerEl.textContent).toContain("Collection data folder");
+  });
+
+  it("saves a language selection then immediately asks the settings tab to redraw", async () => {
+    const { containerEl, plugin } = renderGeneral("zh-CN");
+    const languageSetting = Array.from(containerEl.querySelectorAll(".setting-item")).find(
+      (setting) => setting.querySelector(".setting-item-name")?.textContent === "界面语言",
+    ) as HTMLElement;
+    const select = languageSetting.querySelector("select") as HTMLSelectElement;
+
+    select.value = "en";
+    select.dispatchEvent(new Event("change"));
+    await Promise.resolve();
+
+    expect(plugin.settings.locale).toBe("en");
+    expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
+    expect(plugin.settingTab.display).toHaveBeenCalledTimes(1);
+  });
+});
 
 // ── isPresetRefreshInterval ──────────────────────────────────────────────────
 
