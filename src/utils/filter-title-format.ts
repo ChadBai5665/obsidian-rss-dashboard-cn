@@ -109,10 +109,12 @@ export function formatDashboardMultiFiltersSummary(options: {
   locale?: Locale;
 }): { text: string; tooltip: string | null } {
   const t = translatorFor(options);
-  const { title, tooltip } = formatDashboardMultiFiltersTitle({
+  const status = normalizeStringSet(options.statusFilters);
+  const tags = normalizeStringSet(options.tagFilters);
+  const { tooltip } = formatDashboardMultiFiltersTitle({
     baseTitle: t("filter.all"),
-    statusFilters: options.statusFilters,
-    tagFilters: options.tagFilters,
+    statusFilters: status,
+    tagFilters: tags,
     logic: options.logic,
     t,
   });
@@ -122,14 +124,21 @@ export function formatDashboardMultiFiltersSummary(options: {
     return { text: t("filter.all"), tooltip: null };
   }
 
-  const normalized = title.startsWith("All ") ? title.slice(4) : title;
-  const text = normalized.endsWith(" articles")
-    ? normalized.slice(0, -" articles".length)
-    : normalized.endsWith(" items")
-      ? normalized.slice(0, -" items".length)
-      : normalized;
+  if (tags.size > 0) {
+    status.delete("tagged");
+    status.delete("untagged");
+  }
+  const parts: string[] = [];
+  for (const id of STATUS_ORDER) {
+    if (!status.has(id)) continue;
+    const key = STATUS_LABEL_KEYS[id as keyof typeof STATUS_LABEL_KEYS];
+    if (key) parts.push(t(key));
+  }
+  if (tags.size > 0) {
+    parts.push(t("filter.tagsNamed", { tags: getSortedTagNames(tags).join(", ") }));
+  }
 
-  return { text: text.trim(), tooltip };
+  return { text: parts.join(` ${getLogicWord(options.logic, t)} `), tooltip };
 }
 
 export function formatDashboardMultiFiltersSummaryCompact(options: {

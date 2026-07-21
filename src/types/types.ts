@@ -1,4 +1,4 @@
-import type { Locale } from "../i18n/types";
+import type { Locale, TranslationKey } from "../i18n/types";
 
 export interface FeedItem {
   /** Stable collection identity once the item has entered the collection layer. */
@@ -320,7 +320,7 @@ export interface DisplaySettings {
 export interface SidebarIconConfig {
   id: string;
   label: string;
-  labelKey: string;
+  labelKey: TranslationKey;
   lucideIcon: string;
   settingKey: keyof DisplaySettings;
   neverCollapses?: boolean;

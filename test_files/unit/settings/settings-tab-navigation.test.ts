@@ -22,10 +22,15 @@ import {
 describe("SETTINGS_TAB_IDS", () => {
   it("keeps the deprecated public aliases compatible", () => {
     // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility contract
-    const oldName: import("../../../src/settings/tab-names").SettingsTabName = "general";
+    const oldName: import("../../../src/settings/tab-names").SettingsTabName = "General";
     // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility contract
-    expect(SETTINGS_TAB_NAMES).toBe(SETTINGS_TAB_IDS);
-    expect(oldName).toBe("general");
+    expect(SETTINGS_TAB_NAMES).toEqual([
+      "General", "Storage", "Display", "Sidebar", "Media", "Article saving",
+      "Rules", "Highlights", "Import/Export", "Tags", "About",
+    ]);
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility contract
+    expect(SETTINGS_TAB_NAMES).not.toBe(SETTINGS_TAB_IDS);
+    expect(oldName).toBe("General");
   });
   it("contains exactly 11 tabs", () => {
     expect(SETTINGS_TAB_IDS).toHaveLength(11);
@@ -56,6 +61,10 @@ describe("SETTINGS_TAB_IDS", () => {
 });
 
 describe("normalizeSettingsTabId()", () => {
+  it("accepts both stable IDs and exact legacy display names", () => {
+    expect(normalizeSettingsTabId("display")).toBe("display");
+    expect(normalizeSettingsTabId("Display")).toBe("display");
+  });
   it.each(["__proto__", "constructor", "prototype", "toString"])(
     "rejects unsafe or inherited legacy name %s",
     (name) => {

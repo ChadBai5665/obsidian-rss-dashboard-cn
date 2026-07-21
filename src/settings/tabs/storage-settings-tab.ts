@@ -63,6 +63,45 @@ function storageError(
   _details?: unknown,
 ): void {}
 
+export type StorageRepairResult =
+  | { kind: "not-yet-run" }
+  | { kind: "migration-v1" }
+  | { kind: "migration-v2" }
+  | { kind: "reverted-to-legacy" }
+  | { kind: "repair-succeeded"; time: string }
+  | { kind: "legacy"; value: string };
+
+/** Parses persisted service results while retaining unknown legacy text safely. */
+export function parseStorageRepairResult(value: string): StorageRepairResult {
+  if (value === "Not yet run") return { kind: "not-yet-run" };
+  if (value === "Migration completed") return { kind: "migration-v1" };
+  if (value === "Migration completed (v2)") return { kind: "migration-v2" };
+  if (value === "Reverted to legacy JSON") return { kind: "reverted-to-legacy" };
+  const repairPrefix = "Last repair succeeded at ";
+  if (value.startsWith(repairPrefix) && value.length > repairPrefix.length) {
+    return { kind: "repair-succeeded", time: value.slice(repairPrefix.length) };
+  }
+  return { kind: "legacy", value };
+}
+
+export function formatStorageRepairResult(value: string, t: Translator): string {
+  const result = parseStorageRepairResult(value);
+  switch (result.kind) {
+    case "not-yet-run":
+      return t("settings.storage.resultNotYetRun");
+    case "migration-v1":
+      return t("settings.storage.resultMigrationComplete");
+    case "migration-v2":
+      return t("settings.storage.resultMigrationV2Complete");
+    case "reverted-to-legacy":
+      return t("settings.storage.resultRevertedToLegacy");
+    case "repair-succeeded":
+      return t("settings.storage.resultRepairSucceededAt", { time: result.time });
+    case "legacy":
+      return t("settings.storage.resultUnknown", { result: result.value });
+  }
+}
+
 type MediaFolderSettingKey =
   | "defaultTwitterFolder"
   | "defaultMastodonFolder"
@@ -125,14 +164,7 @@ export function renderStorageSettingsTab(
       feedCount: status.feedCount,
       shardCount: status.shardCount,
       state: `${migrationState} • ${t("settings.storage.lastResult", {
-        result:
-          status.lastRepairResult === "Migration completed"
-            ? t("settings.storage.resultMigrationComplete")
-            : status.lastRepairResult === "Storage repair completed"
-              ? t("settings.storage.resultRepairComplete")
-              : status.lastRepairResult === "Not yet run"
-                ? t("settings.storage.resultNotYetRun")
-                : status.lastRepairResult,
+        result: formatStorageRepairResult(status.lastRepairResult, t),
       })}`,
     });
   };

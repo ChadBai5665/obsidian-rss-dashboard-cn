@@ -25,6 +25,20 @@ describe("i18n", () => {
     expect(createTranslator("en")("common.refresh")).toBe("Refresh");
   });
 
+  it("uses natural Chinese spacing and word order for localized filter and icon text", () => {
+    const translate = createTranslator("zh-CN");
+    expect(
+      translate("filter.allWithPhrase", { phrase: "未读", noun: "文章" }),
+    ).toBe("全部未读文章");
+    expect(
+      translate("settings.sidebar.clearIconExistingDescription", {
+        count: 2,
+        domain: "RSS",
+        plural: "s",
+      }),
+    ).toBe("要清除 2 个 RSS 订阅源的缓存图标吗？");
+  });
+
   it("interpolates string and number parameters as plain text", () => {
     const translate = createTranslator("en");
 

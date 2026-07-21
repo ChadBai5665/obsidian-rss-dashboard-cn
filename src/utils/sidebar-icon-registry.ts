@@ -89,7 +89,7 @@ export function getIconById(id: string): SidebarIconConfig | undefined {
 }
 
 export function getSidebarIconLabel(icon: SidebarIconConfig, t?: Translator): string {
-  return t ? t(icon.labelKey as Parameters<Translator>[0]) : icon.label;
+  return t ? t(icon.labelKey) : icon.label;
 }
 
 /**

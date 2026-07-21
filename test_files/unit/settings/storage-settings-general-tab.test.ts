@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as obsidian from "obsidian";
-import { renderStorageSettingsTab } from "../../../src/settings/tabs/storage-settings-tab";
+import {
+  formatStorageRepairResult,
+  parseStorageRepairResult,
+  renderStorageSettingsTab,
+} from "../../../src/settings/tabs/storage-settings-tab";
+import { createTranslator } from "../../../src/i18n";
 import {
   ShardDeletionFailureModal,
   StorageTransitionModal,
@@ -95,6 +100,27 @@ beforeEach(() => {
 });
 
 describe("General settings storage section", () => {
+  it.each([
+    ["Migration completed (v2)", "已迁移到分片存储 v2", "Migration to Shard Storage v2 completed"],
+    ["Reverted to legacy JSON", "已恢复为旧版 JSON", "Reverted to Legacy JSON"],
+    ["Last repair succeeded at 2026/7/22 09:30", "上次修复成功时间：2026/7/22 09:30", "Last repair succeeded at 2026/7/22 09:30"],
+    ["Not yet run", "尚未执行", "Not yet run"],
+    ["Legacy result from v1", "历史结果：Legacy result from v1", "Previous result: Legacy result from v1"],
+  ])("formats persisted result %s in both locales", (result, zh, en) => {
+    expect(formatStorageRepairResult(result, createTranslator("zh-CN"))).toBe(zh);
+    expect(formatStorageRepairResult(result, createTranslator("en"))).toBe(en);
+  });
+
+  it("parses service repair timestamps and preserves unknown legacy values", () => {
+    expect(parseStorageRepairResult("Last repair succeeded at 2026-07-22")).toEqual({
+      kind: "repair-succeeded",
+      time: "2026-07-22",
+    });
+    expect(parseStorageRepairResult("historic repair result")).toEqual({
+      kind: "legacy",
+      value: "historic repair result",
+    });
+  });
   it("renders storage controls in Chinese by default without changing storage identifiers", () => {
     const containerEl = createTestContainer();
     const plugin = createPlugin();

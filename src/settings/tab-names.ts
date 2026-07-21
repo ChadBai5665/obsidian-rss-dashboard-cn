@@ -36,10 +36,23 @@ export const SETTINGS_TAB_IDS = [
   "about",
 ] as const satisfies readonly SettingsTabId[];
 
-/** @deprecated Use SETTINGS_TAB_IDS. Kept for third-party settings integrations. */
-export const SETTINGS_TAB_NAMES = SETTINGS_TAB_IDS;
-/** @deprecated Use SettingsTabId. */
-export type SettingsTabName = SettingsTabId;
+const LEGACY_TAB_NAME_VALUES = [
+  "General",
+  "Storage",
+  "Display",
+  "Sidebar",
+  "Media",
+  "Article saving",
+  "Rules",
+  "Highlights",
+  "Import/Export",
+  "Tags",
+  "About",
+] as const;
+/** @deprecated Ordered legacy display names kept for third-party integrations. */
+export const SETTINGS_TAB_NAMES = LEGACY_TAB_NAME_VALUES;
+/** @deprecated Use SettingsTabId for new code. */
+export type SettingsTabName = (typeof LEGACY_TAB_NAME_VALUES)[number];
 
 const TAB_LABEL_KEYS: Record<SettingsTabId, TranslationKey> = {
   general: "settings.tab.general",
@@ -63,7 +76,7 @@ export function getSettingsTabLabel(tab: SettingsTabId, t: Translator): string {
   return t(TAB_LABEL_KEYS[tab]);
 }
 
-const LEGACY_TAB_NAMES: Readonly<Record<string, SettingsTabId>> = Object.freeze({
+const LEGACY_TAB_NAMES: Readonly<Record<(typeof LEGACY_TAB_NAME_VALUES)[number], SettingsTabId>> = Object.freeze({
   General: "general",
   Storage: "storage",
   Display: "display",
@@ -83,8 +96,9 @@ export function normalizeSettingsTabId(name: string): SettingsTabId | null {
     return name;
   }
 
-  return Object.prototype.hasOwnProperty.call(LEGACY_TAB_NAMES, name)
-    ? LEGACY_TAB_NAMES[name] ?? null
+  const legacyName = name as (typeof LEGACY_TAB_NAME_VALUES)[number];
+  return Object.prototype.hasOwnProperty.call(LEGACY_TAB_NAMES, legacyName)
+    ? LEGACY_TAB_NAMES[legacyName]
     : null;
 }
 

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   formatDashboardMultiFiltersTitle,
+  formatDashboardMultiFiltersSummary,
   formatDashboardMultiFiltersSummaryCompact,
 } from "../../../src/utils/filter-title-format";
 import { createTranslator } from "../../../src/i18n";
@@ -112,5 +113,21 @@ describe("formatDashboardMultiFiltersSummaryCompact()", () => {
     expect(result.tooltip).toBe(
       "Active filters (OR): Unread, Podcasts, Videos, Tags: Home, Work",
     );
+  });
+});
+
+describe("formatDashboardMultiFiltersSummary()", () => {
+  it("does not rely on English title suffixes for Chinese output", () => {
+    expect(
+      formatDashboardMultiFiltersSummary({
+        statusFilters: new Set(["unread"]),
+        tagFilters: new Set(["AI"]),
+        logic: "OR",
+        t: createTranslator("zh-CN"),
+      }),
+    ).toEqual({
+      text: "未读 或 标签：AI",
+      tooltip: "当前筛选（OR）：未读, 标签：AI",
+    });
   });
 });
