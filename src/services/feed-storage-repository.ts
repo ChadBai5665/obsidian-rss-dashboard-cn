@@ -245,12 +245,13 @@ export class FeedStorageRepository {
       feedCount: settings.feeds.length,
     });
     const didAssignFeedIds = this.ensureFeedIds(settings);
+    let didChange = didAssignFeedIds;
     let shardCount = 0;
 
     if (settings.storageMode !== "vault-shards" && settings.storageMode !== "vault-shards-v2") {
       storageLog("Skipping shard hydration because legacy JSON mode is active");
       this.capturePersistedState(settings);
-      return { didChange: didAssignFeedIds, shardCount };
+      return { didChange, shardCount };
     }
 
     const feedsById = new Map<string, Feed>();
@@ -350,8 +351,14 @@ export class FeedStorageRepository {
       }
     }
 
-    this.capturePersistedState(settings);
-    return { didChange: didAssignFeedIds, shardCount, userStateLoaded };
+    for (const feed of settings.feeds) {
+      didChange = bindFeedItemsToSourceIdentity(feed) || didChange;
+    }
+
+    if (!didChange) {
+      this.capturePersistedState(settings);
+    }
+    return { didChange, shardCount, userStateLoaded };
   }
 
   public async persistSettings(

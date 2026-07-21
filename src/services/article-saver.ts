@@ -483,6 +483,8 @@ guid: "{{guid}}"
         if (
           isScalar(child) &&
           typeof child.value === "string" &&
+          child.type !== "BLOCK_LITERAL" &&
+          child.type !== "BLOCK_FOLDED" &&
           tagTokens.has(child.value)
         ) {
           node.items.splice(
@@ -1301,6 +1303,102 @@ guid: "{{guid}}"
     return `${this.stringifyFrontmatter(yamlDocument)}${extracted?.body ?? `\n${content}`}`;
   }
 
+  private injectLegacyOwnedFrontmatter(
+    content: string,
+    input: { itemId: string; item: FeedItem; contentBasis: ContentBasis },
+  ): string {
+    const boundary = content.match(
+      /^(\uFEFF?---[ \t]*(\r\n|\n))([\s\S]*?)(\r\n|\n)(---[ \t]*)(\r\n|\n|$)/,
+    );
+    if (!boundary) {
+      throw new Error("Invalid legacy saved-note frontmatter boundary.");
+    }
+    const yamlDocument = this.parseYamlMapping(
+      boundary[3],
+      "legacy saved-note frontmatter",
+    );
+    if (!isMap(yamlDocument.contents)) {
+      throw new Error("Invalid legacy saved-note frontmatter.");
+    }
+
+    const ownedValues: Record<(typeof OWNED_FRONTMATTER_KEYS)[number], string> = {
+      rssDashboardId: input.itemId,
+      source: input.item.feedTitle || "",
+      sourceUrl: input.item.link || "",
+      publishedAt: input.item.pubDate || "",
+      savedAt: new Date().toISOString(),
+      contentBasis: input.contentBasis,
+    };
+    const allowedLegacySources = new Set(
+      [input.item.feedTitle, input.item.feedUrl, input.item.rssDashboardSourceId]
+        .map((value) => value?.trim())
+        .filter((value): value is string => Boolean(value)),
+    );
+    const linesToInject: string[] = [];
+    for (const key of OWNED_FRONTMATTER_KEYS) {
+      const matches = yamlDocument.contents.items.filter(
+        (pair) =>
+          isScalar(pair.key) &&
+          pair.key.value === key,
+      );
+      if (matches.length === 0) {
+        linesToInject.push(`${key}: ${JSON.stringify(ownedValues[key])}`);
+        continue;
+      }
+      if (
+        matches.length !== 1 ||
+        !isScalar(matches[0].value) ||
+        typeof matches[0].value.value !== "string"
+      ) {
+        throw new Error(`Invalid legacy owned frontmatter field: ${key}.`);
+      }
+      const existingValue = matches[0].value.value;
+      if (key === "source") {
+        if (!allowedLegacySources.has(existingValue.trim())) {
+          throw new Error("Legacy source provenance does not match.");
+        }
+        continue;
+      }
+      if (key === "sourceUrl") {
+        const existingUrl = canonicalizeUrl(existingValue);
+        const expectedUrl = canonicalizeUrl(ownedValues.sourceUrl);
+        if (
+          existingUrl && expectedUrl
+            ? existingUrl !== expectedUrl
+            : existingValue !== ownedValues.sourceUrl
+        ) {
+          throw new Error("Legacy source URL provenance does not match.");
+        }
+        continue;
+      }
+      if (
+        key === "publishedAt" &&
+        existingValue === ownedValues.publishedAt
+      ) {
+        continue;
+      }
+      throw new Error(`Legacy note already contains owned field: ${key}.`);
+    }
+
+    const newline = boundary[4];
+    const insertedBlock = linesToInject.join(newline);
+    if (!insertedBlock) {
+      throw new Error("Legacy note has no safe ownership fields to inject.");
+    }
+    const migratedFrontmatter = `${boundary[1]}${boundary[3]}${newline}${insertedBlock}${newline}${boundary[5]}${boundary[6]}`;
+    const migrated = `${migratedFrontmatter}${content.slice(boundary[0].length)}`;
+    const extracted = this.extractFrontmatter(migrated);
+    if (!extracted) {
+      throw new Error("Failed to preserve legacy frontmatter boundary.");
+    }
+    const verified = this.parseYamlMapping(
+      extracted.yaml,
+      "migrated saved-note frontmatter",
+    );
+    this.verifyOwnedFrontmatter(verified);
+    return migrated;
+  }
+
   private extractFrontmatter(
     content: string,
   ): { yaml: string; body: string } | null {
@@ -1384,6 +1482,7 @@ guid: "{{guid}}"
   private applySavedState(item: FeedItem, filePath: string): void {
     item.saved = true;
     item.savedFilePath = filePath;
+    item.savedNoteMigrationPending = undefined;
     if (
       this.settings.addSavedTag &&
       (!item.tags || !item.tags.some((tag) => tag.name.toLowerCase() === "saved"))
@@ -1477,7 +1576,7 @@ guid: "{{guid}}"
             return;
           }
 
-          const migrated = this.addOwnedFrontmatter(raw, {
+          const migrated = this.injectLegacyOwnedFrontmatter(raw, {
             itemId,
             item: article,
             contentBasis: "feed",
@@ -1528,39 +1627,43 @@ guid: "{{guid}}"
         ? value.trim()
         : undefined;
     };
-    const evidence: boolean[] = [];
+    let guidMatches = false;
     const legacyGuid = scalar("guid");
     if (legacyGuid && item.guid?.trim()) {
-      evidence.push(legacyGuid === item.guid.trim());
+      guidMatches = legacyGuid === item.guid.trim();
+      if (!guidMatches) return false;
     }
+    const urlEvidence: boolean[] = [];
     for (const key of ["link", "sourceUrl", "url"]) {
       const legacyUrl = scalar(key);
       if (!legacyUrl || !item.link?.trim()) continue;
       const canonicalLegacy = canonicalizeUrl(legacyUrl);
       const canonicalItem = canonicalizeUrl(item.link);
-      evidence.push(
-        canonicalLegacy && canonicalItem
-          ? canonicalLegacy === canonicalItem
-          : legacyUrl === item.link.trim(),
-      );
+      if (canonicalLegacy && canonicalItem) {
+        urlEvidence.push(canonicalLegacy === canonicalItem);
+      } else if (canonicalLegacy || canonicalItem) {
+        urlEvidence.push(false);
+      }
     }
-    if (evidence.length === 0 || evidence.some((matches) => !matches)) {
-      return false;
-    }
+    if (urlEvidence.some((matches) => !matches)) return false;
 
     const allowedSources = new Set(
       [item.feedTitle, item.feedUrl, item.rssDashboardSourceId]
         .map((value) => value?.trim())
         .filter((value): value is string => Boolean(value)),
     );
-    for (const key of ["source", "feedTitle"]) {
+    let matchingSourceCount = 0;
+    for (const key of ["source", "feedTitle", "feedUrl"]) {
       const source = scalar(key);
       if (source && !allowedSources.has(source)) return false;
+      if (source) matchingSourceCount += 1;
     }
-    return true;
+    if (urlEvidence.some(Boolean)) return true;
+    return guidMatches && matchingSourceCount > 0;
   }
 
   private markLegacyMigrationPending(article: FeedItem): void {
+    if (article.savedNoteMigrationPending) return;
     article.savedNoteMigrationPending = true;
     console.warn(LEGACY_NOTE_MIGRATION_WARNING);
   }

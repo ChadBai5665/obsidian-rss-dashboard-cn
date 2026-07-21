@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { App } from "obsidian";
 import { FeedStorageRepository } from "../../../src/services/feed-storage-repository";
+import { ArticleSaver } from "../../../src/services/article-saver";
+import { normalizeFeedItem } from "../../../src/collection/feed-normalizer";
 import {
   DEFAULT_SETTINGS,
   type Feed,
@@ -163,6 +165,95 @@ describe("FeedStorageRepository", () => {
       "https://example.com/articles/1",
     );
   });
+
+  it.each(["vault-shards", "vault-shards-v2"] as const)(
+    "binds final %s shard items to feedId before startup saved-note repair",
+    async (storageMode) => {
+      const settings = cloneSettings();
+      settings.storageMode = storageMode;
+      settings.storageFolder = "RSS Data/Feeds";
+      settings.metadataStorageFolder = "RSS Metadata";
+      settings.collection.savedNoteFolder = "Information/Saved";
+      const feed = makeFeed({ feedId: "durable-feed-id", items: [] });
+      settings.feeds = [feed];
+      const shardItem = {
+        ...makeFeed().items[0],
+        link: "not-a-valid-url",
+        guid: "offline-guid",
+        saved: storageMode === "vault-shards",
+        savedFilePath:
+          storageMode === "vault-shards"
+            ? "Information/Saved/Offline.md"
+            : undefined,
+      };
+      delete shardItem.rssDashboardSourceId;
+      await vaultAdapter(app).write(
+        "RSS Data/Feeds/durable-feed-id.json",
+        JSON.stringify({
+          version: 1,
+          feedId: "durable-feed-id",
+          feedUrl: feed.url,
+          updatedAt: Date.now(),
+          items: [shardItem],
+        }),
+      );
+      if (storageMode === "vault-shards-v2") {
+        await vaultAdapter(app).write(
+          "RSS Metadata/user-state.json",
+          JSON.stringify({
+            version: 1,
+            states: {
+              "offline-guid": {
+                saved: true,
+                savedFilePath: "Information/Saved/Offline.md",
+              },
+            },
+          }),
+        );
+      }
+
+      const result = await repository.hydrateSettings(settings);
+      const hydrated = feed.items[0];
+      expect(result.didChange).toBe(true);
+      expect(hydrated.rssDashboardSourceId).toBe("durable-feed-id");
+      expect(hydrated.saved).toBe(true);
+      const persisted = await repository.persistSettings(settings, saveData);
+      expect(persisted.shardWriteCount).toBe(1);
+      const rewrittenShard = JSON.parse(
+        await vaultAdapter(app).read(
+          "RSS Data/Feeds/durable-feed-id.json",
+        ),
+      ) as { items: Array<{ rssDashboardSourceId?: string }> };
+      expect(rewrittenShard.items[0].rssDashboardSourceId).toBe(
+        "durable-feed-id",
+      );
+
+      const normalizedClone = JSON.parse(JSON.stringify(hydrated));
+      delete normalizedClone.rssDashboardId;
+      const expectedId = normalizeFeedItem(
+        feed,
+        normalizedClone,
+        new Date("2026-07-22T00:00:00.000Z"),
+      ).id;
+      await app.vault.createFolder("Information/Saved");
+      await app.vault.create(
+        "Information/Saved/Offline.md",
+        `---\nrssDashboardId: ${JSON.stringify(expectedId)}\n---\n\nBODY`,
+      );
+      const saver = new ArticleSaver(
+        app,
+        settings.articleSaving,
+        undefined,
+        settings.collection,
+      );
+
+      await saver.fixSavedFilePaths([hydrated]);
+
+      expect(hydrated.rssDashboardId).toBe(expectedId);
+      expect(hydrated.saved).toBe(true);
+      expect(hydrated.savedFilePath).toBe("Information/Saved/Offline.md");
+    },
+  );
 
   it("writes only the changed feed shard for item-state updates", async () => {
     const settings = cloneSettings();

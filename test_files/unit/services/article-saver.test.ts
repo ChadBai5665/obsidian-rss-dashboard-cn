@@ -462,6 +462,30 @@ describe("ArticleSaver.saveArticle", () => {
     expect(flagsSpy).not.toHaveBeenCalled();
   });
 
+  it("clears a legacy migration-pending marker after a new owned save succeeds", async () => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      undefined,
+      collectionSettings,
+    );
+    const item = createItem({
+      rssDashboardId: FIRST_ITEM_ID,
+      savedNoteMigrationPending: true,
+    });
+
+    const saved = await saver.saveArticle(
+      item,
+      undefined,
+      undefined,
+      "NEW OWNED BODY",
+    );
+
+    expect(saved).toBeInstanceOf(TFile);
+    expect(item.savedNoteMigrationPending).toBeUndefined();
+  });
+
   it("uses deterministic ID suffixes without overwriting unrelated same-title notes", async () => {
     const app = App.createMock();
     const settings = createSettings({
@@ -704,7 +728,7 @@ describe("ArticleSaver.saveArticle", () => {
       app,
       createSettings({
         defaultTemplate:
-          "---\nlabel: 'Topics: {{tags}}'\ntagBlock: |-\n  {{tags}}\n---\nBODY",
+          "---\nlabel: 'Topics: {{tags}}'\ntagBlock: |-\n  {{tags}}\ntagList:\n  - |-\n    {{tags}}\n---\nBODY",
       }),
       undefined,
       collectionSettings,
@@ -722,6 +746,7 @@ describe("ArticleSaver.saveArticle", () => {
     const { value } = parseSavedFrontmatter(await app.vault.read(file!));
     expect(value.label).toBe("Topics: alpha, beta: value");
     expect(value.tagBlock).toBe("alpha, beta: value");
+    expect(value.tagList).toEqual(["alpha, beta: value"]);
   });
 
   it("renders an empty complete tags placeholder as an empty sequence", async () => {
@@ -1983,6 +2008,168 @@ describe("ArticleSaver.fixSavedFilePaths", () => {
     );
   });
 
+  it.each([
+    {
+      name: "LF with comments, quotes, spacing, and a block scalar",
+      newline: "\n",
+      bom: true,
+      frontmatter: [
+        "title : 'Quoted # title' # keep comment",
+        'source: "Test Feed" # keep source bytes',
+        "guid: guid-1",
+        "notes: |-",
+        "  line: one",
+        "  line two",
+      ],
+    },
+    {
+      name: "CRLF with single and double quoted scalars",
+      newline: "\r\n",
+      bom: false,
+      frontmatter: [
+        'title: "Double quoted" # comment',
+        "source: 'Test Feed'",
+        "guid: 'guid-1'",
+        "notes: >-",
+        "  folded value",
+      ],
+    },
+  ])("injects legacy ownership byte-safely: $name", async ({ newline, frontmatter, bom }) => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultFolder: "RSS articles" }),
+      undefined,
+      collectionSettings,
+    );
+    const item = createItem({
+      rssDashboardId: undefined,
+      saved: true,
+      savedFilePath: "RSS articles/Byte Safe.md",
+    });
+    const original = [
+      `${bom ? "\uFEFF" : ""}---`,
+      ...frontmatter,
+      "---",
+      "",
+      "BODY byte-for-byte\t  ",
+      "final line",
+    ].join(newline);
+    await app.vault.create(item.savedFilePath!, original);
+
+    await saver.fixSavedFilePaths([item]);
+
+    const migrated = await app.vault.read(item.savedFilePath!);
+    const insertionStart = migrated.indexOf(`${newline}rssDashboardId:`);
+    const closingStart = migrated.indexOf(`${newline}---`, insertionStart + 1);
+    expect(insertionStart).toBeGreaterThan(0);
+    expect(closingStart).toBeGreaterThan(insertionStart);
+    expect(
+      migrated.slice(0, insertionStart) + migrated.slice(closingStart),
+    ).toBe(original);
+    expect(migrated.startsWith(bom ? "\uFEFF---" : "---")).toBe(true);
+    expect(migrated.slice(insertionStart, closingStart)).toContain(
+      `rssDashboardId: ${JSON.stringify(item.rssDashboardId)}`,
+    );
+    expect(migrated.slice(insertionStart, closingStart)).toContain(
+      "contentBasis: \"feed\"",
+    );
+    if (newline === "\r\n") {
+      expect(migrated.replace(/\r\n/g, "")).not.toContain("\n");
+    }
+  });
+
+  it("leaves a verified legacy candidate untouched when owned-line injection is unsafe", async () => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultFolder: "RSS articles" }),
+      undefined,
+      collectionSettings,
+    );
+    const item = createItem({
+      rssDashboardId: undefined,
+      saved: true,
+      savedFilePath: "RSS articles/Partial Owned.md",
+    });
+    const original = [
+      "---",
+      'guid: "guid-1"',
+      'source: "Test Feed"',
+      'savedAt: "user-defined-existing-value" # do not rewrite',
+      "---",
+      "",
+      "ORIGINAL BODY",
+    ].join("\n");
+    await app.vault.create(item.savedFilePath!, original);
+    const modifySpy = vi.spyOn(app.vault, "modify");
+    const renameSpy = vi.spyOn(app.fileManager, "renameFile");
+
+    await saver.fixSavedFilePaths([item]);
+
+    expect(item.savedNoteMigrationPending).toBe(true);
+    expect(modifySpy).not.toHaveBeenCalled();
+    expect(renameSpy).not.toHaveBeenCalled();
+    expect(await app.vault.read(item.savedFilePath!)).toBe(original);
+  });
+
+  it.each([
+    {
+      name: "common GUID without an independent source",
+      yaml: 'guid: "1"\nlink: "not-a-valid-url"',
+      item: { guid: "1", link: "not-a-valid-url" },
+      migrates: false,
+    },
+    {
+      name: "matching GUID with the wrong source",
+      yaml: 'guid: "guid-1"\nsource: "Another Feed"',
+      item: { link: "not-a-valid-url" },
+      migrates: false,
+    },
+    {
+      name: "matching GUID with an exact source",
+      yaml: 'guid: "guid-1"\nsource: "Test Feed"',
+      item: { link: "not-a-valid-url" },
+      migrates: true,
+    },
+    {
+      name: "canonical article URL match",
+      yaml: 'link: "https://example.com/article?utm_source=old"',
+      item: { link: "https://example.com/article" },
+      migrates: true,
+    },
+  ])("applies the legacy evidence threshold: $name", async ({ yaml, item: overrides, migrates }) => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultFolder: "RSS articles" }),
+      undefined,
+      collectionSettings,
+    );
+    const item = createItem({
+      ...overrides,
+      rssDashboardId: undefined,
+      saved: true,
+      savedFilePath: "RSS articles/Evidence.md",
+    });
+    const original = `---\n${yaml}\n---\n\nORIGINAL`;
+    await app.vault.create(item.savedFilePath!, original);
+
+    await saver.fixSavedFilePaths([item]);
+
+    expect(item.saved).toBe(true);
+    expect(Boolean(item.savedNoteMigrationPending)).toBe(!migrates);
+    if (migrates) {
+      expect(item.savedFilePath).toBe("Information/Saved/Test Article.md");
+      expect(await app.vault.read(item.savedFilePath!)).toContain(
+        `rssDashboardId: ${JSON.stringify(item.rssDashboardId)}`,
+      );
+    } else {
+      expect(item.savedFilePath).toBe("RSS articles/Evidence.md");
+      expect(await app.vault.read(item.savedFilePath!)).toBe(original);
+    }
+  });
+
   it("keeps an unconfirmed exact legacy note pending without clearing, renaming, or claiming it", async () => {
     const app = App.createMock();
     const settings = createSettings();
@@ -2004,7 +2191,9 @@ describe("ArticleSaver.fixSavedFilePaths", () => {
       { name: "saved", color: "#3498db" },
       { name: "keep", color: "#000" },
     ];
+    const warningCountBefore = vi.mocked(console.warn).mock.calls.length;
 
+    await saver.fixSavedFilePaths([item]);
     await saver.fixSavedFilePaths([item]);
 
     expect(item.saved).toBe(true);
@@ -2022,6 +2211,9 @@ describe("ArticleSaver.fixSavedFilePaths", () => {
     );
     expect(console.warn).toHaveBeenCalledWith(
       "[RSS Dashboard] Saved note ownership could not be verified; the existing path was left unchanged for manual review.",
+    );
+    expect(vi.mocked(console.warn).mock.calls.length - warningCountBefore).toBe(
+      1,
     );
   });
 
