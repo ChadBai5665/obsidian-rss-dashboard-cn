@@ -243,12 +243,13 @@ function assertSafeDataRoot(folder: string): void {
 }
 
 function sanitizeErrorMessage(message: string): string {
-  const withoutAbsoluteUrlQueries = message.replace(
+  const unfoldedHeaders = message.replace(/\r?\n[ \t]+/g, " ");
+  const withoutAbsoluteUrlQueries = unfoldedHeaders.replace(
     /https?:\/\/[^\s]+/gi,
     (rawUrl) => redactUrlQuery(rawUrl),
   );
   const withoutAnyUrlQueries = withoutAbsoluteUrlQueries.replace(
-    /[^\s#;,)]+\?[^\s#;,)]+/g,
+    /[^\s?#,)]*\?[^\s#,)]*/g,
     (rawUrl) => redactUrlQuery(rawUrl),
   );
   const sensitiveHeaderNames =

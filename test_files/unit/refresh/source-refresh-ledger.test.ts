@@ -44,6 +44,17 @@ function createLedger(): { adapter: InMemoryAdapter; ledger: SourceRefreshLedger
   };
 }
 
+async function persistErrorMessage(message: string): Promise<string> {
+  const { adapter, ledger } = createLedger();
+  await ledger.recordError("feed-1", new Date(2026, 6, 21, 9, 0, 0), {
+    code: "request-failed",
+    message,
+  });
+  return adapter.files.get(
+    ".rss-dashboard-data/state/source-refresh.json",
+  ) ?? "";
+}
+
 describe("SourceRefreshLedger", () => {
   it("stores source attempts and advances the local success date only on success", async () => {
     const { adapter, ledger } = createLedger();
@@ -132,6 +143,53 @@ describe("SourceRefreshLedger", () => {
       expect(persisted).not.toContain(secret);
     }
     expect(persisted).not.toContain("/feed?");
+  });
+
+  it("redacts folded Authorization header continuations", async () => {
+    const persisted = await persistErrorMessage(
+      "Authorization: Digest realm=one,\n nonce=continuation-secret",
+    );
+
+    expect(persisted).not.toContain("continuation-secret");
+    expect(persisted).toContain("Authorization: [redacted]");
+  });
+
+  it("redacts every query component from an absolute URL", async () => {
+    const persisted = await persistErrorMessage(
+      "Request https://example.com/feed?absolute-secret=1;absolute-continuation=2 failed",
+    );
+
+    expect(persisted).not.toContain("absolute-secret");
+    expect(persisted).not.toContain("absolute-continuation");
+    expect(persisted).toContain("https://example.com/feed");
+  });
+
+  it("redacts every query component from a root-relative URL", async () => {
+    const persisted = await persistErrorMessage(
+      "Request /feed?root-secret=1;root-continuation=2 failed",
+    );
+
+    expect(persisted).not.toContain("root-secret");
+    expect(persisted).not.toContain("root-continuation");
+    expect(persisted).toContain("Request /feed failed");
+  });
+
+  it("redacts a query from a path-relative URL", async () => {
+    const persisted = await persistErrorMessage(
+      "Request feed?path-secret=1 failed",
+    );
+
+    expect(persisted).not.toContain("path-secret");
+    expect(persisted).toContain("Request feed failed");
+  });
+
+  it("redacts a query-only reference", async () => {
+    const persisted = await persistErrorMessage(
+      "Request ?query-only-secret=1 failed",
+    );
+
+    expect(persisted).not.toContain("query-only-secret");
+    expect(persisted).toContain("Request failed");
   });
 
   it("does not lose a source state when independent refreshes finish together", async () => {
