@@ -51,15 +51,15 @@ describe("moveFeedAndInsert", () => {
 
     expect(
       moveFeedAndInsert(settings, { draggedUrl: "", targetUrl: "b", placement: "before" }),
-    ).toEqual({ ok: false, error: "Missing feed urls." });
+    ).toEqual({ ok: false, reason: "missing-drag-source" });
 
     expect(
       moveFeedAndInsert(settings, { draggedUrl: "a", targetUrl: "", placement: "before" }),
-    ).toEqual({ ok: false, error: "Missing feed urls." });
+    ).toEqual({ ok: false, reason: "missing-drop-target" });
 
     expect(
       moveFeedAndInsert(settings, { draggedUrl: "a", targetUrl: "a", placement: "before" }),
-    ).toEqual({ ok: false, error: "No-op drop." });
+    ).toEqual({ ok: false, reason: "no-op-drop" });
   });
 
   it("rejects when dragged or target feed is missing", () => {
@@ -68,11 +68,11 @@ describe("moveFeedAndInsert", () => {
 
     expect(
       moveFeedAndInsert(settings, { draggedUrl: "missing", targetUrl: "a", placement: "before" }),
-    ).toEqual({ ok: false, error: "Dragged feed not found." });
+    ).toEqual({ ok: false, reason: "dragged-feed-not-found" });
 
     expect(
       moveFeedAndInsert(settings, { draggedUrl: "a", targetUrl: "missing", placement: "before" }),
-    ).toEqual({ ok: false, error: "Target feed not found." });
+    ).toEqual({ ok: false, reason: "target-feed-not-found" });
   });
 
   it("moves the dragged feed into the target folder and inserts before/after", () => {
@@ -130,11 +130,11 @@ describe("moveFeedToFolderAppend", () => {
 
     expect(
       moveFeedToFolderAppend(settings, { draggedUrl: "", destinationFolderPath: "Work" }),
-    ).toEqual({ ok: false, error: "Missing dragged feed url." });
+    ).toEqual({ ok: false, reason: "missing-drag-source" });
 
     expect(
       moveFeedToFolderAppend(settings, { draggedUrl: "missing", destinationFolderPath: "Work" }),
-    ).toEqual({ ok: false, error: "Dragged feed not found." });
+    ).toEqual({ ok: false, reason: "dragged-feed-not-found" });
   });
 
   it("moves and appends after the last feed in the destination folder", () => {
@@ -166,17 +166,17 @@ describe("moveFolder", () => {
 
     expect(
       moveFolder(settings, { draggedPath: "", targetPath: "Alpha", placement: "before" }),
-    ).toEqual({ ok: false, error: "Missing dragged folder path." });
+    ).toEqual({ ok: false, reason: "missing-drag-source" });
 
     expect(
       moveFolder(settings, { draggedPath: "Alpha", targetPath: "", placement: "before" }),
-    ).toEqual({ ok: false, error: "Missing target folder path." });
+    ).toEqual({ ok: false, reason: "missing-drop-target" });
 
     expect(
       moveFolder(settings, { draggedPath: "Alpha", targetPath: "Alpha/Child", placement: "nest" }),
     ).toEqual({
       ok: false,
-      error: "Cannot move a folder into itself or a descendant.",
+      reason: "invalid-descendant-move",
     });
   });
 
@@ -187,11 +187,11 @@ describe("moveFolder", () => {
 
     expect(
       moveFolder(settings, { draggedPath: "Missing", targetPath: "Beta", placement: "nest" }),
-    ).toEqual({ ok: false, error: "Dragged folder not found." });
+    ).toEqual({ ok: false, reason: "dragged-folder-not-found" });
 
     expect(
       moveFolder(settings, { draggedPath: "Alpha", targetPath: "Missing", placement: "nest" }),
-    ).toEqual({ ok: false, error: "Target folder not found." });
+    ).toEqual({ ok: false, reason: "target-folder-not-found" });
   });
 
   it("rejects duplicate sibling names at destination", () => {
@@ -209,7 +209,7 @@ describe("moveFolder", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.error).toContain('A folder named "Alpha" already exists');
+    expect(result).toEqual({ ok: false, reason: "duplicate-folder-target" });
   });
 
   it("moves within root and adjusts insertion index when moving forward", () => {
@@ -259,4 +259,3 @@ describe("moveFolder", () => {
     expect(settings.folderSortOrder?.by).toBe("custom");
   });
 });
-

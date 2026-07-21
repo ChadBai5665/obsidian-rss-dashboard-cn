@@ -56,6 +56,19 @@ describe("ArticleRenderer explicit content cache", () => {
     expect(metadataMock).toHaveBeenCalled();
   });
 
+  it("returns the content basis of the content rendered by the current request", async () => {
+    const view = renderer();
+    const container = document.createElement("div");
+
+    await expect(view.render(container, item())).resolves.toBe("full-text");
+    expect(writeMock).toHaveBeenCalledTimes(1);
+    expect(metadataMock).toHaveBeenCalledTimes(1);
+
+    fetchMock.mockResolvedValueOnce({ content: "", failureType: "network" });
+    await expect(view.render(container, item({ guid: "fallback", link: "https://example.com/fallback" })))
+      .resolves.toBe("feed");
+  });
+
   it("keeps a bounded renderer-session result when durable cache writing fails", async () => {
     writeMock.mockRejectedValueOnce(new Error("disk unavailable"));
     const view = renderer(); const container = document.createElement("div"); const article = item();

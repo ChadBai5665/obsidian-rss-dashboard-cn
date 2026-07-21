@@ -20,7 +20,10 @@ type DashboardInternals = {
     bypass: boolean,
   ): string;
   inlineArticle: FeedItem | null;
+  inlineArticleContentContext: { contentBasis: CollectedItem["contentBasis"] } | undefined;
+  articleRenderer: { render: ReturnType<typeof vi.fn> } | null;
   renderInlineArticle(container: HTMLElement): void;
+  openSavedArticleFile(file: { basename: string }, article?: FeedItem): Promise<void>;
   resolveReaderContentContext(article: FeedItem): Promise<{ contentBasis: CollectedItem["contentBasis"] } | undefined>;
   currentFolder: string | null;
   activeStatusFilters: Set<string>;
@@ -263,6 +266,117 @@ describe("Dashboard Chinese localization", () => {
     const button = root.querySelector<HTMLElement>(".rss-reader-action-button[title='在浏览器中打开']");
     expect(button?.getAttribute("aria-label")).toBe("在浏览器中打开");
     expect(root.textContent).toContain("External article title");
+  });
+
+  it("synchronizes the inline label to the basis actually rendered without duplicating it", async () => {
+    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const view = new RssDashboardView(
+      { app: new App() } as never,
+      { settings: { ...DEFAULT_SETTINGS, locale: "zh-CN" } } as never,
+    ) as unknown as DashboardInternals;
+    view.inlineArticle = article();
+    view.inlineArticleContentContext = { contentBasis: "feed" };
+    view.articleRenderer = { render: vi.fn(async () => "full-text") };
+    const root = document.body.createDiv();
+
+    view.renderInlineArticle(root);
+    await vi.waitFor(() => expect(root.querySelector(".rss-reader-content-basis")?.textContent).toBe("已取得全文"));
+
+    expect(root.querySelectorAll(".rss-reader-content-basis")).toHaveLength(1);
+    expect(view.inlineArticleContentContext).toEqual({ contentBasis: "full-text" });
+  });
+
+  it("does not let a completed render from the previous inline article overwrite the current article context", async () => {
+    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const view = new RssDashboardView(
+      { app: new App() } as never,
+      { settings: { ...DEFAULT_SETTINGS, locale: "zh-CN" } } as never,
+    ) as unknown as DashboardInternals;
+    const first = article({ rssDashboardId: "1".repeat(64), guid: "first" });
+    const second = article({ rssDashboardId: "2".repeat(64), guid: "second" });
+    let finishFirst!: (basis: "full-text") => void;
+    view.inlineArticle = first;
+    view.inlineArticleContentContext = { contentBasis: "feed" };
+    view.articleRenderer = {
+      render: vi.fn(() => new Promise((resolve) => { finishFirst = resolve; })),
+    };
+    const root = document.body.createDiv();
+    view.renderInlineArticle(root);
+
+    view.inlineArticle = second;
+    view.inlineArticleContentContext = { contentBasis: "x-post" };
+    finishFirst("full-text");
+    await Promise.resolve();
+
+    expect(view.inlineArticleContentContext).toEqual({ contentBasis: "x-post" });
+  });
+
+  it("resolves saved inline article context again for each stable id", async () => {
+    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const firstStored = collected("1".repeat(64), "subscribed");
+    firstStored.contentBasis = "x-post";
+    const secondStored = collected("2".repeat(64), "subscribed");
+    secondStored.contentBasis = "linked-page";
+    const plugin = {
+      settings: {
+        ...DEFAULT_SETTINGS,
+        locale: "zh-CN",
+        savedArticleOpenLocation: "inline",
+      },
+      getCollectedItemById: vi.fn(async (id: string) =>
+        id === firstStored.id ? firstStored : secondStored),
+    };
+    const view = new RssDashboardView(
+      { app: new App() } as never,
+      plugin as never,
+    ) as unknown as DashboardInternals;
+    view.render = vi.fn(async () => undefined);
+    const first = article({ rssDashboardId: firstStored.id, guid: "saved-first" });
+    const second = article({ rssDashboardId: secondStored.id, guid: "saved-second" });
+
+    await view.openSavedArticleFile({ basename: "First" }, first);
+    expect(view.inlineArticleContentContext).toEqual({ contentBasis: "x-post" });
+    await view.openSavedArticleFile({ basename: "Second" }, second);
+
+    expect(plugin.getCollectedItemById).toHaveBeenNthCalledWith(1, firstStored.id);
+    expect(plugin.getCollectedItemById).toHaveBeenNthCalledWith(2, secondStored.id);
+    expect(view.inlineArticle).toBe(second);
+    expect(view.inlineArticleContentContext).toEqual({ contentBasis: "linked-page" });
+  });
+
+  it("ignores a late saved-context lookup after switching to another stable id", async () => {
+    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const firstStored = collected("3".repeat(64), "subscribed");
+    firstStored.contentBasis = "x-post";
+    const secondStored = collected("4".repeat(64), "subscribed");
+    secondStored.contentBasis = "linked-page";
+    let finishFirst!: (item: CollectedItem) => void;
+    const firstLookup = new Promise<CollectedItem>((resolve) => { finishFirst = resolve; });
+    const plugin = {
+      settings: {
+        ...DEFAULT_SETTINGS,
+        locale: "zh-CN",
+        savedArticleOpenLocation: "inline",
+      },
+      getCollectedItemById: vi.fn((id: string) =>
+        id === firstStored.id ? firstLookup : Promise.resolve(secondStored)),
+    };
+    const view = new RssDashboardView(
+      { app: new App() } as never,
+      plugin as never,
+    ) as unknown as DashboardInternals;
+    view.render = vi.fn(async () => undefined);
+    const first = article({ rssDashboardId: firstStored.id, guid: "late-first" });
+    const second = article({ rssDashboardId: secondStored.id, guid: "current-second" });
+
+    const openingFirst = view.openSavedArticleFile({ basename: "First" }, first);
+    await vi.waitFor(() => expect(plugin.getCollectedItemById).toHaveBeenCalledWith(firstStored.id));
+    await view.openSavedArticleFile({ basename: "Second" }, second);
+    finishFirst(firstStored);
+    await openingFirst;
+
+    expect(view.inlineArticle).toBe(second);
+    expect(view.inlineArticleContentContext).toEqual({ contentBasis: "linked-page" });
   });
 
   it("resolves reader content context from the collected record by stable id", async () => {

@@ -23,6 +23,7 @@ import {
 } from "../collection/item-identity";
 import { isYouTubeItem } from "../utils/youtube-detection";
 import { createTranslator } from "../i18n";
+import type { ContentBasis } from "../collection/collected-item";
 
 const MAX_SESSION_CONTENT_ITEMS = 12;
 
@@ -102,8 +103,9 @@ export class ArticleRenderer {
     container: HTMLElement,
     item: FeedItem,
     relatedItems: FeedItem[] = [],
-  ): Promise<void> {
-    if (this.disposed) return;
+    contentBasis?: ContentBasis,
+  ): Promise<ContentBasis | null> {
+    if (this.disposed) return null;
     const renderRequest = ++this.renderRequestSequence;
     if (this.currentItem?.guid !== item.guid) {
       this.lastRestrictedNoticeGuid = null;
@@ -126,8 +128,10 @@ export class ArticleRenderer {
 
     if (item.mediaType === "video" && item.videoId) {
       await this.displayVideo(container, item);
-    } else if (item.mediaType === "video" && item.videoUrl) {
+      return "title-description";
+    } else if (this.isVideoPodcastItem(item)) {
       await this.displayVideoPodcast(container, item);
+      return "title-description";
     } else if (
       item.mediaType === "podcast" &&
       (item.audioUrl || MediaService.extractPodcastAudio(item.description))
@@ -137,6 +141,7 @@ export class ArticleRenderer {
         if (aud) item.audioUrl = aud;
       }
       await this.displayPodcast(container, item);
+      return "feed";
     } else {
       const fullTextResult = this.shouldSkipFullArticleFetch(item)
         ? { content: "", failureType: "none" as const }
@@ -145,7 +150,7 @@ export class ArticleRenderer {
         renderRequest !== this.renderRequestSequence ||
         this.currentItem !== item
       ) {
-        return;
+        return null;
       }
       const fetchedContent = fullTextResult.content;
       this.currentFullContentFailureType = fullTextResult.failureType;
@@ -169,7 +174,39 @@ export class ArticleRenderer {
       this.currentDisplayTitle = displayTitle || undefined;
       this.currentContentIsFullArticle = hasFullArticleContent;
       await this.displayArticle(container, item, fullContent);
+      return this.resolveActualContentBasis(
+        item,
+        contentBasis,
+        hasFullArticleContent,
+      );
     }
+  }
+
+  private isVideoPodcastItem(item: FeedItem): boolean {
+    return (
+      item.mediaType === "video" &&
+      !item.videoId &&
+      (Boolean(item.videoUrl) ||
+        item.enclosure?.type?.startsWith("video/") === true ||
+        item.mediaContentType?.startsWith("video/") === true ||
+        item.mediaContentMedium === "video")
+    );
+  }
+
+  private resolveActualContentBasis(
+    item: FeedItem,
+    suppliedBasis: ContentBasis | undefined,
+    hasFullArticleContent: boolean,
+  ): ContentBasis {
+    if (hasFullArticleContent) return "full-text";
+    if (
+      suppliedBasis === "x-post" ||
+      suppliedBasis === "linked-page" ||
+      suppliedBasis === "title-description"
+    ) {
+      return suppliedBasis;
+    }
+    return item.mediaType === "video" ? "title-description" : "feed";
   }
 
   private async displayVideo(

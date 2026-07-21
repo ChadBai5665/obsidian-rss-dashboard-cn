@@ -3,10 +3,26 @@ import type { Folder, RssDashboardSettings } from "../types/types";
 export type FeedInsertPlacement = "before" | "after";
 export type FolderDropPlacement = "before" | "after" | "nest" | "rootAppend";
 
-export interface OperationResult {
-  ok: boolean;
-  error?: string;
-}
+export type OrderingFailureReason =
+  | "missing-drag-source"
+  | "missing-drop-target"
+  | "no-op-drop"
+  | "dragged-feed-not-found"
+  | "target-feed-not-found"
+  | "dragged-folder-not-found"
+  | "target-folder-not-found"
+  | "invalid-descendant-move"
+  | "duplicate-folder-target"
+  | "target-location-drifted"
+  | "unknown";
+
+export type OperationResult =
+  | { ok: true }
+  | { ok: false; reason: OrderingFailureReason };
+
+export type FolderOperationResult =
+  | { ok: true; newPath: string }
+  | { ok: false; reason: OrderingFailureReason };
 
 function normalizeFolderPath(folderPath: string | null | undefined): string {
   return folderPath ? folderPath : "";
@@ -40,20 +56,21 @@ export function moveFeedAndInsert(
 ): OperationResult {
   const draggedUrl = opts.draggedUrl;
   const targetUrl = opts.targetUrl;
-  if (!draggedUrl || !targetUrl) return { ok: false, error: "Missing feed urls." };
-  if (draggedUrl === targetUrl) return { ok: false, error: "No-op drop." };
+  if (!draggedUrl) return { ok: false, reason: "missing-drag-source" };
+  if (!targetUrl) return { ok: false, reason: "missing-drop-target" };
+  if (draggedUrl === targetUrl) return { ok: false, reason: "no-op-drop" };
 
   const dragged = settings.feeds.find((f) => f.url === draggedUrl);
   const target = settings.feeds.find((f) => f.url === targetUrl);
-  if (!dragged) return { ok: false, error: "Dragged feed not found." };
-  if (!target) return { ok: false, error: "Target feed not found." };
+  if (!dragged) return { ok: false, reason: "dragged-feed-not-found" };
+  if (!target) return { ok: false, reason: "target-feed-not-found" };
 
   const destinationFolderPath = normalizeFolderPath(target.folder);
   dragged.folder = destinationFolderPath;
 
   const withoutDragged = settings.feeds.filter((f) => f.url !== draggedUrl);
   const targetIndex = withoutDragged.findIndex((f) => f.url === targetUrl);
-  if (targetIndex === -1) return { ok: false, error: "Target feed not found after removal." };
+  if (targetIndex === -1) return { ok: false, reason: "target-feed-not-found" };
 
   const insertIndex = opts.placement === "before" ? targetIndex : targetIndex + 1;
   const next = [...withoutDragged];
@@ -74,10 +91,10 @@ export function moveFeedToFolderAppend(
 ): OperationResult {
   const draggedUrl = opts.draggedUrl;
   const destinationFolderPath = normalizeFolderPath(opts.destinationFolderPath);
-  if (!draggedUrl) return { ok: false, error: "Missing dragged feed url." };
+  if (!draggedUrl) return { ok: false, reason: "missing-drag-source" };
 
   const dragged = settings.feeds.find((f) => f.url === draggedUrl);
-  if (!dragged) return { ok: false, error: "Dragged feed not found." };
+  if (!dragged) return { ok: false, reason: "dragged-feed-not-found" };
 
   dragged.folder = destinationFolderPath;
 
@@ -175,27 +192,27 @@ export function moveFolder(
     targetPath: string;
     placement: FolderDropPlacement;
   },
-): OperationResult & { newPath?: string } {
+): FolderOperationResult {
   const draggedPath = opts.draggedPath;
   const targetPath = opts.targetPath;
   const placement = opts.placement;
 
-  if (!draggedPath) return { ok: false, error: "Missing dragged folder path." };
+  if (!draggedPath) return { ok: false, reason: "missing-drag-source" };
   if (placement !== "rootAppend" && !targetPath) {
-    return { ok: false, error: "Missing target folder path." };
+    return { ok: false, reason: "missing-drop-target" };
   }
 
   if (placement !== "rootAppend" && isSameOrDescendant(draggedPath, targetPath)) {
-    return { ok: false, error: "Cannot move a folder into itself or a descendant." };
+    return { ok: false, reason: "invalid-descendant-move" };
   }
 
   const draggedLoc = findFolderLocation(settings.folders, draggedPath);
-  if (!draggedLoc) return { ok: false, error: "Dragged folder not found." };
+  if (!draggedLoc) return { ok: false, reason: "dragged-folder-not-found" };
 
   const targetLoc =
     placement === "rootAppend" ? null : findFolderLocation(settings.folders, targetPath);
   if (placement !== "rootAppend" && !targetLoc) {
-    return { ok: false, error: "Target folder not found." };
+    return { ok: false, reason: "target-folder-not-found" };
   }
 
   const draggedFolder = draggedLoc.folder;
@@ -222,7 +239,7 @@ export function moveFolder(
       targetLoc!.folder,
       targetLoc!.folder.name,
     );
-    if (targetIndex === -1) return { ok: false, error: "Target folder location drifted." };
+    if (targetIndex === -1) return { ok: false, reason: "target-location-drifted" };
     insertIndex = placement === "before" ? targetIndex : targetIndex + 1;
   }
 
@@ -234,7 +251,7 @@ export function moveFolder(
   ) {
     return {
       ok: false,
-      error: `A folder named "${draggedName}" already exists at the destination level.`,
+      reason: "duplicate-folder-target",
     };
   }
 

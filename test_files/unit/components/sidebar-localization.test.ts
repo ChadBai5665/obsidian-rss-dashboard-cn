@@ -3,6 +3,7 @@ import { Menu } from "obsidian";
 import { Sidebar } from "../../../src/components/sidebar";
 import { DEFAULT_SETTINGS } from "../../../src/types/types";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
+import type { OrderingFailureReason } from "../../../src/services/sidebar-ordering-controller";
 
 type SidebarInternals = {
   plugin: { activeRefreshState?: Map<string, { status: string; startedAt: number }> };
@@ -17,6 +18,11 @@ type SidebarInternals = {
   showErrorDetailModal(error: string, feedTitle: string): void;
   deleteSelection(): void;
   sortFeedsInFolder(folder: string, by: "name", ascending: boolean): Promise<void>;
+  showOrderingFailure(
+    kind: "folder" | "feed",
+    reason: OrderingFailureReason,
+    names: { dragged: string; target?: string },
+  ): void;
 };
 
 describe("Sidebar Chinese localization", () => {
@@ -313,5 +319,40 @@ describe("Sidebar Chinese localization", () => {
     sidebar.render();
 
     expect(root.querySelector(".rss-dashboard-feed-processing-indicator")?.getAttribute("title")).toBe("订阅源已加入刷新队列");
+  });
+
+  it.each([
+    ["zh-CN", "folder", "dragged-folder-not-found", "未找到要移动的文件夹“External dragged”。"],
+    ["en", "folder", "dragged-folder-not-found", "Could not find the folder “External dragged” to move."],
+    ["zh-CN", "folder", "invalid-descendant-move", "不能将文件夹“External dragged”移动到其自身或子文件夹中。"],
+    ["en", "folder", "invalid-descendant-move", "Cannot move folder “External dragged” into itself or one of its descendants."],
+    ["zh-CN", "folder", "duplicate-folder-target", "目标位置已存在名为“External dragged”的文件夹。"],
+    ["en", "folder", "duplicate-folder-target", "A folder named “External dragged” already exists at the destination."],
+  ] as const)("maps %s %s drag failure %s to a localized real Notice", (locale, kind, reason, expected) => {
+    const { sidebar } = makeSidebar(locale);
+    const notices: string[] = [];
+    vi.spyOn(console, "debug").mockImplementation((_prefix, message) => notices.push(String(message)));
+
+    (sidebar as unknown as SidebarInternals).showOrderingFailure(kind, reason, {
+      dragged: "External dragged",
+      target: "External target",
+    });
+
+    expect(notices).toContain(expected);
+  });
+
+  it("uses a localized generic Notice for unknown failures and never exposes internal English", () => {
+    const { sidebar } = makeSidebar("zh-CN");
+    const notices: string[] = [];
+    vi.spyOn(console, "debug").mockImplementation((_prefix, message) => notices.push(String(message)));
+
+    (sidebar as unknown as SidebarInternals).showOrderingFailure(
+      "feed",
+      "unknown",
+      { dragged: "External feed" },
+    );
+
+    expect(notices).toEqual(["无法移动订阅源。"]);
+    expect(notices.join(" ")).not.toContain("Dragged feed not found");
   });
 });

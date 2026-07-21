@@ -44,6 +44,7 @@ import {
   moveFolder,
   setFolderFeedSortCustom,
   setFolderSortCustom,
+  type OrderingFailureReason,
 } from "../services/sidebar-ordering-controller";
 
 export interface SidebarOptions {
@@ -304,6 +305,37 @@ export class Sidebar {
     key: Parameters<ReturnType<typeof createTranslator>>[0],
     params?: Record<string, string | number>,
   ): string => createTranslator(this.settings.locale ?? "zh-CN")(key, params);
+
+  private showOrderingFailure(
+    kind: "folder" | "feed",
+    reason: OrderingFailureReason,
+    names: { dragged: string; target?: string },
+  ): void {
+    const key = (() => {
+      switch (reason) {
+        case "dragged-folder-not-found":
+          return "sidebar.draggedFolderNotFound" as const;
+        case "target-folder-not-found":
+          return "sidebar.targetFolderNotFound" as const;
+        case "invalid-descendant-move":
+          return "sidebar.invalidDescendantMove" as const;
+        case "duplicate-folder-target":
+          return "sidebar.duplicateFolderTarget" as const;
+        case "dragged-feed-not-found":
+          return "sidebar.draggedFeedNotFound" as const;
+        case "target-feed-not-found":
+          return "sidebar.targetFeedNotFound" as const;
+        default:
+          return kind === "folder"
+            ? ("sidebar.unableMoveFolder" as const)
+            : ("sidebar.unableMoveFeed" as const);
+      }
+    })();
+    const name = reason.startsWith("target-")
+      ? names.target ?? names.dragged
+      : names.dragged;
+    new Notice(this.t(key, { name }));
+  }
 
   private renderFallbackFeedIcon(feedIcon: HTMLElement): void {
     feedIcon.empty();
@@ -607,8 +639,10 @@ export class Sidebar {
             placement: "rootAppend",
           });
 
-          if (!result.ok || !result.newPath) {
-            new Notice(result.error || this.t("sidebar.unableMoveFolder"));
+          if (!result.ok) {
+            this.showOrderingFailure("folder", result.reason, {
+              dragged: draggedFolderPath.split("/").pop() ?? draggedFolderPath,
+            });
             return;
           }
 
@@ -655,7 +689,9 @@ export class Sidebar {
             destinationFolderPath: "",
           });
           if (!result.ok) {
-            new Notice(result.error || this.t("sidebar.unableMoveFeed"));
+            this.showOrderingFailure("feed", result.reason, {
+              dragged: feed.title || feedUrl,
+            });
             return;
           }
 
@@ -1216,8 +1252,11 @@ export class Sidebar {
           placement,
         });
 
-        if (!result.ok || !result.newPath) {
-          new Notice(result.error || this.t("sidebar.unableMoveFolder"));
+        if (!result.ok) {
+          this.showOrderingFailure("folder", result.reason, {
+            dragged: draggedFolderPath.split("/").pop() ?? draggedFolderPath,
+            target: fullPath.split("/").pop() ?? fullPath,
+          });
           return;
         }
 
@@ -1265,7 +1304,10 @@ export class Sidebar {
         destinationFolderPath: fullPath,
       });
       if (!op.ok) {
-        new Notice(op.error || this.t("sidebar.unableMoveFeed"));
+        this.showOrderingFailure("feed", op.reason, {
+          dragged: feed.title || feedUrl,
+          target: fullPath.split("/").pop() ?? fullPath,
+        });
         return;
       }
 
@@ -1312,7 +1354,10 @@ export class Sidebar {
             destinationFolderPath: fullPath,
           });
           if (!result.ok) {
-            new Notice(result.error || this.t("sidebar.unableMoveFeed"));
+            this.showOrderingFailure("feed", result.reason, {
+              dragged: feed.title || feedUrl,
+              target: fullPath.split("/").pop() ?? fullPath,
+            });
             return;
           }
 
@@ -1637,7 +1682,10 @@ export class Sidebar {
       });
 
       if (!result.ok) {
-        new Notice(result.error || this.t("sidebar.unableMoveFeed"));
+        this.showOrderingFailure("feed", result.reason, {
+          dragged: dragged?.title || draggedUrl,
+          target: feed.title || feed.url,
+        });
         return;
       }
 

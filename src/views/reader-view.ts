@@ -108,6 +108,7 @@ export class ReaderView extends ItemView {
   private displayRequestSequence = 0;
   private readonly explicitContentCoordinator: ExplicitContentCoordinator;
   private disposed = false;
+  private actualContentBasis: ContentBasis | null = null;
 
   private readerFormatPortal: { close: (flushSave: boolean) => void } | null =
     null;
@@ -1277,6 +1278,7 @@ export class ReaderView extends ItemView {
     this.currentContentIsFullArticle = false;
     this.currentFullContentFailureType = "none";
     this.currentFullContent = undefined;
+    this.actualContentBasis = null;
     this.syncReaderTitle();
 
     // Update toggle button states
@@ -1316,14 +1318,10 @@ export class ReaderView extends ItemView {
 
     if (item.mediaType === "video" && item.videoId) {
       await this.displayVideo(item);
-      this.renderContentBasis(
-        contentContext?.contentBasis ?? "title-description",
-      );
-    } else if (item.mediaType === "video" && item.videoUrl) {
+      this.setActualContentBasis("title-description");
+    } else if (this.isVideoPodcastItem(item)) {
       await this.displayVideoPodcast(item);
-      this.renderContentBasis(
-        contentContext?.contentBasis ?? "title-description",
-      );
+      this.setActualContentBasis("title-description");
     } else if (
       item.mediaType === "podcast" &&
       (item.audioUrl || MediaService.extractPodcastAudio(item.description))
@@ -1333,7 +1331,7 @@ export class ReaderView extends ItemView {
         if (aud) item.audioUrl = aud;
       }
       await this.displayPodcast(item);
-      this.renderContentBasis(contentContext?.contentBasis ?? "feed");
+      this.setActualContentBasis("feed");
     } else {
       const fullTextResult = this.shouldSkipFullArticleFetch(item)
         ? { content: "", failureType: "none" as const }
@@ -1367,24 +1365,59 @@ export class ReaderView extends ItemView {
       this.currentContentIsFullArticle = hasFullArticleContent;
       this.syncReaderTitle();
       await this.displayArticle(item, fullContent);
-      this.renderContentBasis(
-        contentContext?.contentBasis ??
-          (hasFullArticleContent
-            ? "full-text"
-            : item.mediaType === "video"
-              ? "title-description"
-              : "feed"),
+      this.setActualContentBasis(
+        this.resolveActualContentBasis(
+          item,
+          contentContext?.contentBasis,
+          hasFullArticleContent,
+        ),
       );
     }
   }
 
-  private renderContentBasis(contentBasis: ContentBasis): void {
+  private isVideoPodcastItem(item: FeedItem): boolean {
+    return (
+      item.mediaType === "video" &&
+      !item.videoId &&
+      (Boolean(item.videoUrl) ||
+        item.enclosure?.type?.startsWith("video/") === true ||
+        item.mediaContentType?.startsWith("video/") === true ||
+        item.mediaContentMedium === "video")
+    );
+  }
+
+  private resolveActualContentBasis(
+    item: FeedItem,
+    suppliedBasis: ContentBasis | undefined,
+    hasFullArticleContent: boolean,
+  ): ContentBasis {
+    if (hasFullArticleContent) return "full-text";
+    if (
+      suppliedBasis === "x-post" ||
+      suppliedBasis === "linked-page" ||
+      suppliedBasis === "title-description"
+    ) {
+      return suppliedBasis;
+    }
+    return item.mediaType === "video" ? "title-description" : "feed";
+  }
+
+  private setActualContentBasis(contentBasis: ContentBasis): void {
+    this.actualContentBasis = contentBasis;
+    const label = getContentBasisLabel(
+      contentBasis,
+      this.settings.locale ?? "zh-CN",
+    );
+    const existing = this.readingContainer.querySelector<HTMLElement>(
+      ".rss-reader-content-basis",
+    );
+    if (existing) {
+      existing.setText(label);
+      return;
+    }
     this.readingContainer.createDiv({
       cls: "rss-reader-content-basis",
-      text: getContentBasisLabel(
-        contentBasis,
-        this.settings.locale ?? "zh-CN",
-      ),
+      text: label,
     });
   }
 

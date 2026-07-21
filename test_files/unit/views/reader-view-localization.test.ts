@@ -15,6 +15,27 @@ type ReaderInternals = {
   prependFallbackHeroForSavedMarkdown(item: FeedItem, html: string): string;
 };
 
+function makeReader(locale: "zh-CN" | "en" = "zh-CN"): ReaderView {
+  const app = { workspace: { getLeavesOfType: vi.fn(() => []) }, vault: {} };
+  const view = new ReaderView(
+    { app } as never,
+    { ...DEFAULT_SETTINGS, locale, useWebViewer: false },
+    { saveArticle: vi.fn() } as never,
+    vi.fn(), vi.fn(),
+  );
+  (view as unknown as { contentEl: HTMLElement }).contentEl = document.body.createDiv();
+  return view;
+}
+
+function makeArticle(overrides: Partial<FeedItem> = {}): FeedItem {
+  return {
+    guid: "basis-current", title: "External title", link: "https://example.com/article",
+    description: "<p>Feed fallback</p>", content: "", pubDate: "2026-07-22T00:00:00.000Z",
+    read: false, starred: false, saved: false, tags: [], feedTitle: "External source",
+    feedUrl: "https://example.com/rss", coverImage: "", mediaType: "article", ...overrides,
+  };
+}
+
 describe("Reader Chinese localization", () => {
   beforeEach(() => installObsidianDomPolyfills());
 
@@ -117,6 +138,36 @@ describe("Reader Chinese localization", () => {
     expect(item).not.toHaveProperty("contentBasis");
   });
 
+  it("updates a feed snapshot label to full text when the current open fetch succeeds", async () => {
+    const view = makeReader();
+    const internal = view as unknown as ReaderInternals;
+    await view.onOpen();
+    vi.spyOn(internal, "readOrFetchExplicitArticleContent").mockResolvedValue({
+      content: `<article><p>${"Fetched current full text ".repeat(24)}</p></article>`,
+      failureType: "none",
+    });
+
+    await view.displayItem(makeArticle(), [], { contentBasis: "feed" });
+
+    expect(internal.readingContainer.querySelectorAll(".rss-reader-content-basis")).toHaveLength(1);
+    expect(internal.readingContainer.querySelector(".rss-reader-content-basis")?.textContent).toBe("已取得全文");
+  });
+
+  it("downgrades a stale full-text snapshot when the current open renders the feed fallback", async () => {
+    const view = makeReader();
+    const internal = view as unknown as ReaderInternals;
+    await view.onOpen();
+    vi.spyOn(internal, "readOrFetchExplicitArticleContent").mockResolvedValue({
+      content: "",
+      failureType: "none",
+    });
+
+    await view.displayItem(makeArticle(), [], { contentBasis: "full-text" });
+
+    expect(internal.readingContainer.querySelectorAll(".rss-reader-content-basis")).toHaveLength(1);
+    expect(internal.readingContainer.querySelector(".rss-reader-content-basis")?.textContent).toBe("订阅源正文");
+  });
+
   it.each([
     ["x-post", "X 帖子", "article"],
     ["linked-page", "链接页面", "article"],
@@ -181,6 +232,27 @@ describe("Reader Chinese localization", () => {
     expect(root.querySelector("video")?.textContent).toContain("您的浏览器不支持视频播放。");
     expect(root.querySelector("h4")?.textContent).toBe("来自同一频道");
     expect(root.querySelector(".rss-video-related-empty")?.textContent).toBe("未找到相关视频");
+  });
+
+  it.each([
+    ["zh-CN", "未找到视频 URL，无法播放此视频播客。"],
+    ["en", "Video URL not found. Cannot play this video podcast."],
+  ] as const)("routes a %s video-podcast without a URL through the localized missing-URL state", async (locale, expected) => {
+    const view = makeReader(locale);
+    await view.onOpen();
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    await view.displayItem(makeArticle({
+      guid: `missing-video-${locale}`,
+      mediaType: "video",
+      mediaContentType: "video/mp4",
+      videoUrl: undefined,
+    }));
+
+    const root = (view as unknown as ReaderInternals).readingContainer;
+    expect(root.querySelector(".rss-reader-error")?.textContent).toBe(expected);
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
   });
 
   it("uses the active locale for injected and rendered hero-image alt text", async () => {

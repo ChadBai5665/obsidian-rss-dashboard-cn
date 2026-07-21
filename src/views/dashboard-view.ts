@@ -50,7 +50,7 @@ import {
   CollectionQueryService,
   type CollectionQueryInput,
 } from "../collection/collection-query-service";
-import type { CollectedItem } from "../collection/collected-item";
+import type { CollectedItem, ContentBasis } from "../collection/collected-item";
 import { getContentBasisLabel } from "../collection/content-basis-display";
 import { toLocalCalendarDate } from "../refresh/local-calendar-day";
 import { createTranslator } from "../i18n";
@@ -137,6 +137,7 @@ export class RssDashboardView extends ItemView {
   private lastViewportMobileSidebarMode: boolean | null = null;
   private inlineArticle: FeedItem | null = null;
   private inlineArticleContentContext: ReaderContentContext | undefined;
+  private inlineArticleRenderGeneration = 0;
   private readonly inlineActionPendingKeys = new Set<string>();
   private articleRenderer: ArticleRenderer | null = null;
   private lastClickAnchorKey: string | null = null;
@@ -2402,6 +2403,7 @@ export class RssDashboardView extends ItemView {
   // --- Sidebar navigation and selection ---
   private handleFolderClick(folder: string | null): void {
     this.inlineArticle = null;
+    this.inlineArticleContentContext = undefined;
     this.selectedFolders = [];
     this.selectedFeeds = [];
     let scrollPosition = 0;
@@ -2513,6 +2515,7 @@ export class RssDashboardView extends ItemView {
     }
 
     this.inlineArticle = null;
+    this.inlineArticleContentContext = undefined;
     this.selectedFolders = [];
     this.selectedFeeds = [];
     let scrollPosition = 0;
@@ -2548,6 +2551,7 @@ export class RssDashboardView extends ItemView {
 
   private handleTagToggle(tag: string): void {
     this.inlineArticle = null;
+    this.inlineArticleContentContext = undefined;
     if (this.selectedTags.includes(tag)) {
       this.selectedTags = this.selectedTags.filter((t) => t !== tag);
     } else {
@@ -2610,6 +2614,7 @@ export class RssDashboardView extends ItemView {
 
   private handleFolderMultiSelect(folders: string[]): void {
     this.inlineArticle = null;
+    this.inlineArticleContentContext = undefined;
     this.selectedFolders = folders;
     this.selectedFeeds = [];
     // When entering multi-select, clear single-folder and feed selection
@@ -2760,6 +2765,7 @@ export class RssDashboardView extends ItemView {
     }
 
     this.inlineArticle = null;
+    this.inlineArticleContentContext = undefined;
     this.selectedFolders = Array.from(finalSelectedFolders);
     this.selectedFeeds = Array.from(finalSelectedFeeds);
     this.currentFolder =
@@ -4586,6 +4592,7 @@ export class RssDashboardView extends ItemView {
   }
 
   private renderInlineArticle(container: HTMLElement): void {
+    const renderGeneration = ++this.inlineArticleRenderGeneration;
     const header = container.createDiv({
       cls: "rss-reader-header inline-reader-header",
     });
@@ -4737,19 +4744,53 @@ export class RssDashboardView extends ItemView {
     });
 
     if (this.inlineArticleContentContext) {
-      body.createDiv({
-        cls: "rss-reader-content-basis",
-        text: getContentBasisLabel(
-          this.inlineArticleContentContext.contentBasis,
-          this.settings.locale ?? "zh-CN",
-        ),
-      });
+      this.upsertInlineContentBasis(
+        body,
+        this.inlineArticleContentContext.contentBasis,
+      );
     }
 
     if (this.articleRenderer && this.inlineArticle) {
-      const related = this.getRelatedItems(this.inlineArticle);
-      void this.articleRenderer.render(body, this.inlineArticle, related);
+      const article = this.inlineArticle;
+      const related = this.getRelatedItems(article);
+      const renderedContent = body.createDiv({ cls: "rss-inline-rendered-content" });
+      void this.articleRenderer
+        .render(
+          renderedContent,
+          article,
+          related,
+          this.inlineArticleContentContext?.contentBasis,
+        )
+        .then((actualContentBasis) => {
+          if (
+            !actualContentBasis ||
+            renderGeneration !== this.inlineArticleRenderGeneration ||
+            this.inlineArticle !== article
+          ) {
+            return;
+          }
+          this.inlineArticleContentContext = { contentBasis: actualContentBasis };
+          this.upsertInlineContentBasis(body, actualContentBasis);
+        });
     }
+  }
+
+  private upsertInlineContentBasis(
+    body: HTMLElement,
+    contentBasis: ContentBasis,
+  ): void {
+    const label = getContentBasisLabel(
+      contentBasis,
+      this.settings.locale ?? "zh-CN",
+    );
+    const existing = body.querySelector<HTMLElement>(
+      ":scope > .rss-reader-content-basis",
+    );
+    if (existing) {
+      existing.setText(label);
+      return;
+    }
+    body.createDiv({ cls: "rss-reader-content-basis", text: label });
   }
 
   private scheduleCardLayoutSave(): void {
@@ -4902,7 +4943,17 @@ export class RssDashboardView extends ItemView {
       const location = this.getSavedArticleOpenLocation();
 
       if (location === "inline" && article) {
+        const openingItemId = article.rssDashboardId;
         this.inlineArticle = article;
+        this.inlineArticleContentContext = undefined;
+        const contentContext = await this.resolveReaderContentContext(article);
+        if (
+          this.inlineArticle !== article ||
+          this.inlineArticle.rssDashboardId !== openingItemId
+        ) {
+          return;
+        }
+        this.inlineArticleContentContext = contentContext;
         void this.render();
         new Notice(this.t("dashboard.savedOpened", { file: file.basename }));
         return;
