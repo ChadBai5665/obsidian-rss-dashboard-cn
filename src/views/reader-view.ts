@@ -1286,6 +1286,7 @@ export class ReaderView extends ItemView {
 
     if (item.saved) {
       const fileExists = await this.articleSaver.checkSavedFileExists(item);
+      if (!this.isCurrentDisplayRequest(displayRequest, item)) return;
       if (!fileExists) {
         item.saved = false;
         item.savedFilePath = undefined;
@@ -1317,10 +1318,12 @@ export class ReaderView extends ItemView {
     }
 
     if (item.mediaType === "video" && item.videoId) {
-      await this.displayVideo(item);
+      await this.displayVideo(item, displayRequest);
+      if (!this.isCurrentDisplayRequest(displayRequest, item)) return;
       this.setActualContentBasis("title-description");
     } else if (this.isVideoPodcastItem(item)) {
-      await this.displayVideoPodcast(item);
+      await this.displayVideoPodcast(item, displayRequest);
+      if (!this.isCurrentDisplayRequest(displayRequest, item)) return;
       this.setActualContentBasis("title-description");
     } else if (
       item.mediaType === "podcast" &&
@@ -1330,7 +1333,8 @@ export class ReaderView extends ItemView {
         const aud = MediaService.extractPodcastAudio(item.description);
         if (aud) item.audioUrl = aud;
       }
-      await this.displayPodcast(item);
+      await this.displayPodcast(item, displayRequest);
+      if (!this.isCurrentDisplayRequest(displayRequest, item)) return;
       this.setActualContentBasis("feed");
     } else {
       const fullTextResult = this.shouldSkipFullArticleFetch(item)
@@ -1364,7 +1368,8 @@ export class ReaderView extends ItemView {
       this.currentDisplayTitle = displayTitle || undefined;
       this.currentContentIsFullArticle = hasFullArticleContent;
       this.syncReaderTitle();
-      await this.displayArticle(item, fullContent);
+      await this.displayArticle(item, fullContent, displayRequest);
+      if (!this.isCurrentDisplayRequest(displayRequest, item)) return;
       this.setActualContentBasis(
         this.resolveActualContentBasis(
           item,
@@ -1373,6 +1378,17 @@ export class ReaderView extends ItemView {
         ),
       );
     }
+  }
+
+  private isCurrentDisplayRequest(
+    displayRequest: number,
+    item: FeedItem,
+  ): boolean {
+    return (
+      !this.disposed &&
+      displayRequest === this.displayRequestSequence &&
+      this.currentItem === item
+    );
   }
 
   private isVideoPodcastItem(item: FeedItem): boolean {
@@ -1421,7 +1437,11 @@ export class ReaderView extends ItemView {
     });
   }
 
-  private async displayVideo(item: FeedItem): Promise<void> {
+  private async displayVideo(
+    item: FeedItem,
+    displayRequest: number,
+  ): Promise<void> {
+    if (!this.isCurrentDisplayRequest(displayRequest, item)) return;
     if (this.podcastPlayer) {
       this.podcastPlayer.destroy();
       this.podcastPlayer = null;
@@ -1456,11 +1476,15 @@ export class ReaderView extends ItemView {
         watchLink.target = "_blank";
         watchLink.rel = "noopener noreferrer";
       }
-      await this.displayArticle(item);
+      await this.displayArticle(item, undefined, displayRequest);
     }
   }
 
-  private async displayPodcast(item: FeedItem): Promise<void> {
+  private async displayPodcast(
+    item: FeedItem,
+    displayRequest: number,
+  ): Promise<void> {
+    if (!this.isCurrentDisplayRequest(displayRequest, item)) return;
     if (this.videoPlayer) {
       this.videoPlayer.destroy();
       this.videoPlayer = null;
@@ -1529,7 +1553,7 @@ export class ReaderView extends ItemView {
           cls: "rss-reader-error",
           text: this.t("reader.audioMissing"),
         });
-        await this.displayArticle(item);
+        await this.displayArticle(item, undefined, displayRequest);
       }
     }
   }
@@ -1560,7 +1584,9 @@ export class ReaderView extends ItemView {
   private async displayArticle(
     item: FeedItem,
     fullContent?: string,
+    displayRequest: number = this.displayRequestSequence,
   ): Promise<void> {
+    if (!this.isCurrentDisplayRequest(displayRequest, item)) return;
     if (this.podcastPlayer) {
       this.podcastPlayer.destroy();
       this.podcastPlayer = null;
@@ -1587,22 +1613,26 @@ export class ReaderView extends ItemView {
     );
 
     if (shouldUseWebViewer && this.webViewerIntegration) {
+      let success = false;
       try {
-        const success = await this.webViewerIntegration.openInWebViewer(
+        success = await this.webViewerIntegration.openInWebViewer(
           item.link,
           this.currentDisplayTitle || item.title,
         );
-        if (!success) {
-          this.renderArticle(item, fullContent);
-        }
       } catch {
+        success = false;
+      }
+      if (!this.isCurrentDisplayRequest(displayRequest, item)) return;
+      if (!success) {
         this.renderArticle(item, fullContent);
       }
 
       return;
     }
 
-    this.renderArticle(item, fullContent);
+    if (this.isCurrentDisplayRequest(displayRequest, item)) {
+      this.renderArticle(item, fullContent);
+    }
   }
 
   private shouldBypassWebViewerForFeedContent(
@@ -3578,7 +3608,11 @@ export class ReaderView extends ItemView {
     this.syncReaderTitle();
   }
 
-  private async displayVideoPodcast(item: FeedItem): Promise<void> {
+  private async displayVideoPodcast(
+    item: FeedItem,
+    displayRequest: number,
+  ): Promise<void> {
+    if (!this.isCurrentDisplayRequest(displayRequest, item)) return;
     if (this.podcastPlayer) {
       this.podcastPlayer.destroy();
       this.podcastPlayer = null;
@@ -3643,11 +3677,20 @@ export class ReaderView extends ItemView {
       video.addEventListener("pause", () => reportProgress(true));
       video.addEventListener("ended", () => reportProgress(true));
     } else {
-      container.createDiv({
+      const errorContainer = container.createDiv({
         cls: "rss-reader-error",
         text: this.t("reader.videoUrlMissing"),
       });
-      await this.displayArticle(item);
+      const sourceUrl = resolveItemExternalUrl(item);
+      if (sourceUrl) {
+        const sourceLink = errorContainer.createEl("a", {
+          cls: "rss-reader-error-link",
+          text: this.t("reader.openVideoSource"),
+          href: sourceUrl,
+        });
+        sourceLink.target = "_blank";
+        sourceLink.rel = "noopener noreferrer";
+      }
       return;
     }
 

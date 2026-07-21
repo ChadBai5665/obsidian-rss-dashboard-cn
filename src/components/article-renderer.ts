@@ -24,6 +24,7 @@ import {
 import { isYouTubeItem } from "../utils/youtube-detection";
 import { createTranslator } from "../i18n";
 import type { ContentBasis } from "../collection/collected-item";
+import { resolveItemExternalUrl } from "../utils/item-url-utils";
 
 const MAX_SESSION_CONTENT_ITEMS = 12;
 
@@ -252,7 +253,27 @@ export class ArticleRenderer {
     container: HTMLElement,
     item: FeedItem,
   ): Promise<void> {
-    // Placeholder for displayVideoPodcast if needed, logic seems missing in original snippet but referenced
+    if (!item.videoUrl) {
+      this.cleanupPlayers();
+      const mediaContainer = container.createDiv({
+        cls: "rss-reader-video-podcast-container enhanced",
+      });
+      const errorContainer = mediaContainer.createDiv({
+        cls: "rss-reader-error",
+        text: this.t("reader.videoUrlMissing"),
+      });
+      const sourceUrl = resolveItemExternalUrl(item);
+      if (sourceUrl) {
+        const sourceLink = errorContainer.createEl("a", {
+          cls: "rss-reader-error-link",
+          text: this.t("reader.openVideoSource"),
+          href: sourceUrl,
+        });
+        sourceLink.target = "_blank";
+        sourceLink.rel = "noopener noreferrer";
+      }
+      return;
+    }
     await this.displayArticle(container, item);
   }
 

@@ -29,10 +29,10 @@ function item(overrides: Partial<FeedItem> = {}): FeedItem {
   return { title: "Inline", link: "https://example.com/inline", description: "<p>fallback</p>", content: "", pubDate: "2026-07-21T00:00:00.000Z", guid: "inline", read: false, starred: false, tags: [], feedTitle: "Feed", feedUrl: "https://example.com/rss", coverImage: "", mediaType: "article", saved: false, ...overrides };
 }
 
-function renderer(): ArticleRenderer {
+function renderer(locale: "zh-CN" | "en" = "en"): ArticleRenderer {
   return new ArticleRenderer({
     app: { workspace: { getLeavesOfType: vi.fn().mockReturnValue([]) }, vault: { adapter: {} } } as never,
-    settings: { ...DEFAULT_SETTINGS, corsProxyEnabled: false } as RssDashboardSettings,
+    settings: { ...DEFAULT_SETTINGS, locale, corsProxyEnabled: false } as RssDashboardSettings,
     onArticleSave: vi.fn(), onArticleUpdate: vi.fn(),
   });
 }
@@ -100,5 +100,24 @@ describe("ArticleRenderer explicit content cache", () => {
     await renderer().render(document.createElement("div"), item({ feedUrl: "https://www.youtube.com/feeds/videos.xml?channel_id=secret", mediaType: "article" }));
     expect(fetchMock).not.toHaveBeenCalled();
     expect(readMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["zh-CN", "未找到视频 URL，无法播放此视频播客。"],
+    ["en", "Video URL not found. Cannot play this video podcast."],
+  ] as const)("renders the inline %s missing-video-podcast state without the generic watch-source fallback", async (locale, expected) => {
+    const container = document.createElement("div");
+
+    await expect(renderer(locale).render(container, item({
+      guid: `inline-missing-video-${locale}`,
+      mediaType: "video",
+      mediaContentType: "video/mp4",
+      videoUrl: undefined,
+      link: "https://example.com/video-source",
+    }))).resolves.toBe("title-description");
+
+    expect(container.querySelector(".rss-reader-error")?.textContent).toContain(expected);
+    expect(container.querySelector(".rss-reader-video-banner")).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

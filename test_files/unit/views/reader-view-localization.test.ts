@@ -13,6 +13,9 @@ type ReaderInternals = {
   }>;
   displayVideo(item: FeedItem): Promise<void>;
   prependFallbackHeroForSavedMarkdown(item: FeedItem, html: string): string;
+  webViewerIntegration: {
+    openInWebViewer(url: string, title: string): Promise<boolean>;
+  } | null;
 };
 
 function makeReader(locale: "zh-CN" | "en" = "zh-CN"): ReaderView {
@@ -168,6 +171,65 @@ describe("Reader Chinese localization", () => {
     expect(internal.readingContainer.querySelector(".rss-reader-content-basis")?.textContent).toBe("订阅源正文");
   });
 
+  it("does not let a deferred WebViewer completion from article A mutate article B DOM or basis", async () => {
+    const view = makeReader();
+    const internal = view as unknown as ReaderInternals;
+    (view as unknown as { settings: { useWebViewer: boolean } }).settings.useWebViewer = true;
+    await view.onOpen();
+    let finishFirst!: (success: boolean) => void;
+    const firstViewer = new Promise<boolean>((resolve) => { finishFirst = resolve; });
+    internal.webViewerIntegration = {
+      openInWebViewer: vi.fn()
+        .mockImplementationOnce(() => firstViewer)
+        .mockResolvedValueOnce(false),
+    };
+    vi.spyOn(internal, "readOrFetchExplicitArticleContent")
+      .mockResolvedValueOnce({
+        content: `<article><p>${"Article A full text ".repeat(30)}</p></article>`,
+        failureType: "none",
+      })
+      .mockResolvedValueOnce({ content: "", failureType: "none" });
+    const first = makeArticle({ guid: "webviewer-a", title: "Article A", description: "" });
+    const second = makeArticle({ guid: "webviewer-b", title: "Article B" });
+
+    const openingFirst = view.displayItem(first, [], { contentBasis: "feed" });
+    await vi.waitFor(() => expect(internal.webViewerIntegration?.openInWebViewer).toHaveBeenCalledTimes(1));
+    await view.displayItem(second, [], { contentBasis: "feed" });
+    const domAfterSecond = internal.readingContainer.innerHTML;
+    finishFirst(true);
+    await openingFirst;
+
+    expect(internal.readingContainer.innerHTML).toBe(domAfterSecond);
+    expect(internal.readingContainer.textContent).toContain("Article B");
+    expect(internal.readingContainer.querySelector(".rss-reader-content-basis")?.textContent).toBe("订阅源正文");
+  });
+
+  it("does not let a deferred stale media branch overwrite the current article basis", async () => {
+    const view = makeReader();
+    const internal = view as unknown as ReaderInternals;
+    await view.onOpen();
+    let finishVideo!: () => void;
+    vi.spyOn(internal, "displayVideo").mockImplementation(() =>
+      new Promise<void>((resolve) => { finishVideo = resolve; }));
+    vi.spyOn(internal, "readOrFetchExplicitArticleContent").mockResolvedValue({
+      content: "",
+      failureType: "none",
+    });
+    const openingVideo = view.displayItem(makeArticle({
+      guid: "stale-video",
+      title: "Stale video",
+      mediaType: "video",
+      videoId: "stale-id",
+    }));
+    await vi.waitFor(() => expect(internal.displayVideo).toHaveBeenCalledTimes(1));
+    await view.displayItem(makeArticle({ guid: "current-article", title: "Current article" }));
+    finishVideo();
+    await openingVideo;
+
+    expect(internal.readingContainer.textContent).toContain("Current article");
+    expect(internal.readingContainer.querySelector(".rss-reader-content-basis")?.textContent).toBe("订阅源正文");
+  });
+
   it.each([
     ["x-post", "X 帖子", "article"],
     ["linked-page", "链接页面", "article"],
@@ -250,7 +312,32 @@ describe("Reader Chinese localization", () => {
     }));
 
     const root = (view as unknown as ReaderInternals).readingContainer;
-    expect(root.querySelector(".rss-reader-error")?.textContent).toBe(expected);
+    expect(root.querySelector(".rss-reader-error")?.firstChild?.textContent).toBe(expected);
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it("renders missing video-podcast media locally without invoking WebViewer or opening a browser", async () => {
+    const view = makeReader("zh-CN");
+    const internal = view as unknown as ReaderInternals;
+    (view as unknown as { settings: { useWebViewer: boolean } }).settings.useWebViewer = true;
+    await view.onOpen();
+    const openInWebViewer = vi.fn(async () => false);
+    internal.webViewerIntegration = { openInWebViewer };
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const item = makeArticle({
+      guid: "missing-video-local-only",
+      mediaType: "video",
+      mediaContentType: "video/mp4",
+      videoUrl: undefined,
+      link: "https://example.com/video-source",
+    });
+
+    await view.displayItem(item);
+
+    expect(internal.readingContainer.querySelector(".rss-reader-error")?.textContent).toContain("未找到视频 URL");
+    expect(internal.readingContainer.querySelector<HTMLAnchorElement>(".rss-reader-error-link")?.href).toBe(item.link);
+    expect(openInWebViewer).not.toHaveBeenCalled();
     expect(open).not.toHaveBeenCalled();
     open.mockRestore();
   });
