@@ -22,6 +22,7 @@ import { showArticleContextMenu as showArticleContextMenuUtil } from "./article-
 import { renderFeedView as renderFeedViewUtil } from "./article-list/views/feed-view";
 import { renderListView as renderListViewUtil } from "./article-list/views/list-view";
 import { renderCardView as renderCardViewUtil } from "./article-list/views/card-view";
+import { createTranslator } from "../i18n";
 import type {
   BaseViewContext,
   ViewDeps,
@@ -986,6 +987,7 @@ export class ArticleList {
   }
 
   private syncArticleElement(articleEl: HTMLElement, article: FeedItem): void {
+    const t = createTranslator(this.settings.locale ?? "en");
     articleEl.classList.toggle("read", !!article.read);
     articleEl.classList.toggle("unread", !article.read);
     articleEl.classList.toggle("saved", !!article.saved);
@@ -1000,7 +1002,7 @@ export class ArticleList {
       readToggle.classList.toggle("unread", !article.read);
       readToggle.setAttr(
         "title",
-        article.read ? "Mark as unread" : "Mark as read",
+        article.read ? t("article.markUnread") : t("article.markRead"),
       );
       setIcon(readToggle, article.read ? "check-circle" : "circle");
     }
@@ -1013,10 +1015,10 @@ export class ArticleList {
       saveToggle.setAttr(
         "title",
         article.saved
-          ? "Click to open saved article"
+          ? t("article.openSaved")
           : this.settings.articleSaving.saveFullContent
-            ? "Save full article content to notes"
-            : "Save article summary to notes",
+            ? t("article.saveFull")
+            : t("article.saveSummary"),
       );
     }
 
@@ -1028,7 +1030,7 @@ export class ArticleList {
       starToggle.classList.toggle("unstarred", !article.starred);
       starToggle.setAttr(
         "title",
-        article.starred ? "Remove from starred items" : "Add to starred items",
+        article.starred ? t("article.removeStar") : t("article.addStar"),
       );
       const starIcon = starToggle.querySelector<HTMLElement>(
         ".rss-dashboard-star-icon",
@@ -1213,7 +1215,7 @@ export class ArticleList {
           type: "NoArticlesAtAll",
           unfilteredCount: 0,
         },
-        { onAction },
+        { onAction, locale: this.settings.locale },
       );
       return;
     }
@@ -1321,6 +1323,7 @@ export class ArticleList {
         notices: {
           show: (message: string) => new Notice(message),
         },
+        locale: this.settings.locale,
       },
     });
   }
@@ -1329,8 +1332,11 @@ export class ArticleList {
     articles: FeedItem[],
     groupBy: "feed" | "date" | "folder" | "none",
   ): Record<string, FeedItem[]> {
-    return groupArticlesUtil(articles, groupBy, (feedUrl: string) =>
-      this.getFeedFolder(feedUrl),
+    return groupArticlesUtil(
+      articles,
+      groupBy,
+      (feedUrl: string) => this.getFeedFolder(feedUrl),
+      this.settings.locale,
     );
   }
 
@@ -1480,7 +1486,10 @@ export class ArticleList {
   private showArticleContextMenu(event: MouseEvent, article: FeedItem): void {
     showArticleContextMenuUtil(event, article, {
       callbacks: this.callbacks,
-      settings: { articleSaving: this.settings.articleSaving },
+      settings: {
+        articleSaving: this.settings.articleSaving,
+        locale: this.settings.locale,
+      },
     });
   }
 

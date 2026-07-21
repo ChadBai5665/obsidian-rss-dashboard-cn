@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { App } from "obsidian";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
-import { DEFAULT_SETTINGS, type RssDashboardSettings } from "../../../src/types/types";
+import {
+  DEFAULT_SETTINGS,
+  type RssDashboardSettings,
+} from "../../../src/types/types";
 
 vi.mock("../../../src/utils/platform-utils", () => ({
   robustFetch: vi.fn(),
@@ -55,7 +58,10 @@ vi.mock("../../../src/services/article-saver", () => ({
 }));
 
 function cloneSettings(): RssDashboardSettings {
-  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+  return {
+    ...JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
+    locale: "en",
+  } as RssDashboardSettings;
 }
 
 interface TestDashboardView {
@@ -72,7 +78,8 @@ describe("Dashboard title filter summary", () => {
   });
 
   it("builds a logic-aware title + tooltip when dashboard multi-filters are active in All Feeds view", async () => {
-    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const { RssDashboardView } =
+      await import("../../../src/views/dashboard-view");
 
     const app = new App();
     const settings = cloneSettings();
@@ -97,7 +104,8 @@ describe("Dashboard title filter summary", () => {
   });
 
   it("keeps the base title when no multi-filters are active", async () => {
-    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const { RssDashboardView } =
+      await import("../../../src/views/dashboard-view");
 
     const app = new App();
     const settings = cloneSettings();

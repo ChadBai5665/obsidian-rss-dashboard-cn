@@ -1,29 +1,34 @@
 import type { Feed, FeedItem } from "../../../types/types";
 import { formatDateWithRelative } from "../../../utils/platform-utils";
+import { createTranslator } from "../../../i18n";
+import type { Locale } from "../../../i18n";
 
 export function groupArticles(
   articles: FeedItem[],
   groupBy: "feed" | "date" | "folder" | "none",
   getFeedFolderFn?: (feedUrl: string) => string | undefined,
+  locale: Locale = "en",
 ): Record<string, FeedItem[]> {
-  if (groupBy === "none") return { "All articles": articles };
+  const t = createTranslator(locale);
+  if (groupBy === "none") return { [t("dashboard.allArticles")]: articles };
 
   return articles.reduce(
     (acc, article) => {
       let key: string;
       switch (groupBy) {
         case "feed":
-          key = article.feedTitle || "Uncategorized";
+          key = article.feedTitle || t("dashboard.uncategorized");
           break;
         case "date":
           key = formatDateWithRelative(article.pubDate).text;
           break;
 
         case "folder":
-          key = getFeedFolderFn?.(article.feedUrl) || "Uncategorized";
+          key =
+            getFeedFolderFn?.(article.feedUrl) || t("dashboard.uncategorized");
           break;
         default:
-          key = "All articles";
+          key = t("dashboard.allArticles");
       }
 
       if (!acc[key]) {

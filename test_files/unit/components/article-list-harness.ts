@@ -39,7 +39,10 @@ export interface ArticleListHarnessOverrides {
 }
 
 function cloneSettings(): RssDashboardSettings {
-  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+  return {
+    ...JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
+    locale: "en",
+  } as RssDashboardSettings;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

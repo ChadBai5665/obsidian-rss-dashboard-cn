@@ -55,10 +55,9 @@ import {
   bindDetachedItemSourceIdentity,
   resolveFeedItemStableId,
 } from "../collection/item-identity";
-import {
-  ExplicitContentCoordinator,
-} from "../collection/explicit-content-coordinator";
+import { ExplicitContentCoordinator } from "../collection/explicit-content-coordinator";
 import { isYouTubeItem } from "../utils/youtube-detection";
+import { createTranslator } from "../i18n";
 
 const VIDEO_ARTICLE_BANNER =
   "This item appears to be a video. Open the source page to watch.";
@@ -196,7 +195,9 @@ export class ReaderView extends ItemView {
     this.onArticleSave = onArticleSave;
     this.onArticleUpdate = onArticleUpdate;
     this.onPlaybackProgress = options?.onPlaybackProgress;
-    this.explicitContentCoordinator = new ExplicitContentCoordinator(this.app.vault);
+    this.explicitContentCoordinator = new ExplicitContentCoordinator(
+      this.app.vault,
+    );
 
     this.scope = new Scope(this.app.scope);
     this.setupScope();
@@ -456,7 +457,7 @@ export class ReaderView extends ItemView {
     const targetLocation = location === "inline" ? "main" : location;
     const leaf = this.getConfiguredSavedArticleLeaf(targetLocation);
     if (!leaf) {
-      new Notice("No workspace leaf available for saved article");
+      new Notice(this.t("reader.noSavedLeaf"));
       return;
     }
 
@@ -501,12 +502,12 @@ export class ReaderView extends ItemView {
       return;
     }
 
-    new Notice("No dashboard pane is currently open.");
+    new Notice(this.t("reader.noDashboardPane"));
   }
 
   public actionFocusReader(): void {
     if (!this.leaf) {
-      new Notice("No reader pane is currently open.");
+      new Notice(this.t("reader.noReaderPane"));
       return;
     }
 
@@ -736,7 +737,7 @@ export class ReaderView extends ItemView {
       ? this.currentReaderTitle ||
           this.currentDisplayTitle ||
           this.currentItem.title
-      : "RSS reader";
+      : this.t("reader.title");
   }
 
   getIcon(): string {
@@ -752,7 +753,7 @@ export class ReaderView extends ItemView {
 
   private getEffectiveReaderTitle(): string {
     if (!this.currentItem) {
-      return "RSS reader";
+      return this.t("reader.title");
     }
 
     return (
@@ -761,6 +762,11 @@ export class ReaderView extends ItemView {
       this.currentItem.title
     );
   }
+
+  private t = (
+    key: Parameters<ReturnType<typeof createTranslator>>[0],
+    params?: Record<string, string | number>,
+  ): string => createTranslator(this.settings.locale ?? "en")(key, params);
 
   private syncReaderTitle(): void {
     if (this.titleElement) {
@@ -816,7 +822,7 @@ export class ReaderView extends ItemView {
 
     this.titleElement = header.createDiv({
       cls: "rss-reader-title",
-      text: "RSS reader",
+      text: this.t("reader.title"),
     });
 
     this.currentItem = null;
@@ -826,7 +832,10 @@ export class ReaderView extends ItemView {
     // Save button
     this.saveButton = actions.createDiv({
       cls: "rss-reader-action-button",
-      attr: { title: "Save article" },
+      attr: {
+        title: this.t("reader.save"),
+        "aria-label": this.t("reader.save"),
+      },
     });
 
     setIcon(this.saveButton, "save");
@@ -851,7 +860,10 @@ export class ReaderView extends ItemView {
     // Read toggle button
     this.readToggleButton = actions.createDiv({
       cls: "rss-reader-action-button rss-reader-read-toggle",
-      attr: { title: "Mark as read/unread" },
+      attr: {
+        title: this.t("reader.toggleRead"),
+        "aria-label": this.t("reader.toggleRead"),
+      },
     });
     setIcon(this.readToggleButton, "circle");
     this.readToggleButton.addEventListener("click", () => {
@@ -863,7 +875,10 @@ export class ReaderView extends ItemView {
     // Star toggle button
     this.starToggleButton = actions.createDiv({
       cls: "rss-reader-action-button rss-reader-star-toggle",
-      attr: { title: "Star/unstar article" },
+      attr: {
+        title: this.t("reader.toggleStar"),
+        "aria-label": this.t("reader.toggleStar"),
+      },
     });
     setIcon(this.starToggleButton, "star-off");
     this.starToggleButton.addEventListener("click", () => {
@@ -879,10 +894,10 @@ export class ReaderView extends ItemView {
     const tagsButton = tagsDropdown.createDiv({
       cls: "rss-dashboard-tags-toggle clickable-icon",
       attr: {
-        title: "Manage tags",
+        title: this.t("article.manageTags"),
         role: "button",
         tabindex: "0",
-        "aria-label": "Manage tags",
+        "aria-label": this.t("article.manageTags"),
       },
     });
     setIcon(tagsButton, "tag");
@@ -905,8 +920,8 @@ export class ReaderView extends ItemView {
     const readerFormatButton = actions.createDiv({
       cls: "rss-reader-action-button rss-reader-format-button",
       attr: {
-        title: "Reader settings",
-        "aria-label": "Reader settings",
+        title: this.t("reader.format"),
+        "aria-label": this.t("reader.format"),
         role: "button",
         tabindex: "0",
       },
@@ -927,7 +942,10 @@ export class ReaderView extends ItemView {
     // Open in browser button
     const browserButton = actions.createDiv({
       cls: "rss-reader-action-button",
-      attr: { title: "Open in Browser" },
+      attr: {
+        title: this.t("reader.openBrowser"),
+        "aria-label": this.t("reader.openBrowser"),
+      },
     });
     setIcon(browserButton, "external-link");
     browserButton.addEventListener("click", (e) => {
@@ -1081,7 +1099,7 @@ export class ReaderView extends ItemView {
 
     menu.addItem((menuItem: MenuItem) => {
       menuItem
-        .setTitle("Save with default settings")
+        .setTitle(this.t("reader.saveDefault"))
         .setIcon("save")
         .onClick(async () => {
           const markdownContent = this.buildReaderSaveMarkdown(item);
@@ -1107,7 +1125,7 @@ export class ReaderView extends ItemView {
 
     menu.addItem((menuItem: MenuItem) => {
       menuItem
-        .setTitle("Save to custom folder...")
+        .setTitle(this.t("reader.saveCustom"))
         .setIcon("folder")
         .onClick(() => {
           this.showCustomSaveModal(item);
@@ -1127,10 +1145,10 @@ export class ReaderView extends ItemView {
       cls: "rss-dashboard-modal-content",
     });
 
-    new Setting(modalContent).setName("Save article").setHeading();
+    new Setting(modalContent).setName(this.t("reader.save")).setHeading();
 
     const folderLabel = modalContent.createEl("label", {
-      text: "Save to folder:",
+      text: this.t("reader.saveToFolder"),
     });
 
     const folderInputContainer = modalContent.createDiv({
@@ -1140,7 +1158,7 @@ export class ReaderView extends ItemView {
     const folderInput = folderInputContainer.createEl("input", {
       attr: {
         type: "text",
-        placeholder: "Enter folder path",
+        placeholder: this.t("reader.folderPath"),
         value: this.settings.articleSaving.defaultFolder || "",
       },
     });
@@ -1148,7 +1166,7 @@ export class ReaderView extends ItemView {
     const clearIcon = folderInputContainer.createDiv({
       cls: "clickable-icon rss-dashboard-clear-icon",
       attr: {
-        "aria-label": "Clear input",
+        "aria-label": this.t("reader.clearInput"),
         role: "button",
         tabindex: "0",
       },
@@ -1169,12 +1187,12 @@ export class ReaderView extends ItemView {
     new VaultFolderSuggest(this.app, folderInput);
 
     const templateLabel = modalContent.createEl("label", {
-      text: "Use template:",
+      text: this.t("reader.useTemplate"),
     });
 
     const templateInput = modalContent.createEl("textarea", {
       attr: {
-        placeholder: "Enter template",
+        placeholder: this.t("reader.template"),
         rows: "6",
       },
     });
@@ -1188,14 +1206,14 @@ export class ReaderView extends ItemView {
     });
 
     const cancelButton = buttonContainer.createEl("button", {
-      text: "Cancel",
+      text: this.t("common.cancel"),
     });
     cancelButton.addEventListener("click", () => {
       activeDocument.body.removeChild(modal);
     });
 
     const saveButton = buttonContainer.createEl("button", {
-      text: "Save",
+      text: this.t("common.save"),
       cls: "rss-dashboard-primary-button",
     });
     saveButton.addEventListener("click", () => {
@@ -1313,7 +1331,10 @@ export class ReaderView extends ItemView {
       const fullTextResult = this.shouldSkipFullArticleFetch(item)
         ? { content: "", failureType: "none" as const }
         : await this.readOrFetchExplicitArticleContent(item);
-      if (displayRequest !== this.displayRequestSequence || this.currentItem !== item) {
+      if (
+        displayRequest !== this.displayRequestSequence ||
+        this.currentItem !== item
+      ) {
         return;
       }
       const fetchedContent = fullTextResult.content;
@@ -1366,12 +1387,12 @@ export class ReaderView extends ItemView {
     } else {
       const errorContainer = container.createDiv({
         cls: "rss-reader-error",
-        text: "Video id not found. Cannot play this video.",
+        text: this.t("reader.videoMissing"),
       });
       if (item.link) {
         const watchLink = errorContainer.createEl("a", {
           cls: "rss-reader-error-link",
-          text: "Watch on YouTube",
+          text: this.t("reader.watchYoutube"),
           href: item.link,
         });
         watchLink.target = "_blank";
@@ -1448,7 +1469,7 @@ export class ReaderView extends ItemView {
       } else {
         container.createDiv({
           cls: "rss-reader-error",
-          text: "Audio url not found. Cannot play this podcast.",
+          text: this.t("reader.audioMissing"),
         });
         await this.displayArticle(item);
       }
@@ -1697,7 +1718,9 @@ export class ReaderView extends ItemView {
         cls: "rss-reader-description-callout",
       });
       descriptionCallout.open = true;
-      descriptionCallout.createEl("summary", { text: "Feed description" });
+      descriptionCallout.createEl("summary", {
+        text: this.t("reader.feedDescription"),
+      });
       const descriptionBody = descriptionCallout.createDiv({
         cls: "rss-reader-description rss-reader-description-body",
       });
@@ -2880,17 +2903,20 @@ export class ReaderView extends ItemView {
       sourceUrl: item.link || undefined,
       fetch: async () => {
         let failureType: FullArticleFetchFailureType = "none";
-        const content = await this.fetchFullArticleContent(item.link, (next) => {
-          failureType = next;
-        });
+        const content = await this.fetchFullArticleContent(
+          item.link,
+          (next) => {
+            failureType = next;
+          },
+        );
         return { content, failureType };
       },
     });
   }
 
   private getCollectedItemId(item: FeedItem): string {
-    const feed = this.settings.feeds.find((candidate) =>
-      candidate.url === item.feedUrl,
+    const feed = this.settings.feeds.find(
+      (candidate) => candidate.url === item.feedUrl,
     );
     if (feed) {
       bindFeedItemSourceIdentity(feed, item);
@@ -2901,7 +2927,6 @@ export class ReaderView extends ItemView {
     }
     return resolveFeedItemStableId(item);
   }
-
 
   private async fetchFullArticleContent(
     url: string,
@@ -2997,10 +3022,9 @@ export class ReaderView extends ItemView {
     this.setStatusMutationPending("starred", true);
     try {
       const nextStarred = !this.currentItem.starred;
-      const didUpdate = await this.onArticleUpdate(
-        this.currentItem,
-        { starred: nextStarred },
-      );
+      const didUpdate = await this.onArticleUpdate(this.currentItem, {
+        starred: nextStarred,
+      });
       if (!didUpdate) return;
       this.updateToggleButtons();
     } finally {
@@ -3017,9 +3041,8 @@ export class ReaderView extends ItemView {
     } else {
       this.pendingStatusMutations.delete(mutation);
     }
-    const button = mutation === "read"
-      ? this.readToggleButton
-      : this.starToggleButton;
+    const button =
+      mutation === "read" ? this.readToggleButton : this.starToggleButton;
     button?.classList.toggle("pending", pending);
     button?.setAttr("aria-disabled", pending ? "true" : "false");
   }
@@ -3451,7 +3474,9 @@ export class ReaderView extends ItemView {
       this.readToggleButton.classList.toggle("unread", !this.currentItem.read);
       this.readToggleButton.setAttr(
         "title",
-        this.currentItem.read ? "Mark as unread" : "Mark as read",
+        this.currentItem.read
+          ? this.t("article.markUnread")
+          : this.t("article.markRead"),
       );
     }
 
@@ -3471,7 +3496,9 @@ export class ReaderView extends ItemView {
       );
       this.starToggleButton.setAttr(
         "title",
-        this.currentItem.starred ? "Remove from starred" : "Add to starred",
+        this.currentItem.starred
+          ? this.t("article.removeStar")
+          : this.t("article.addStar"),
       );
     }
 
@@ -3481,7 +3508,7 @@ export class ReaderView extends ItemView {
       this.saveButton.toggleClass("saved", isSaved);
       this.saveButton.setAttr(
         "title",
-        isSaved ? "Click to open saved article" : "Save article",
+        isSaved ? this.t("article.openSaved") : this.t("article.save"),
       );
     }
   }

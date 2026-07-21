@@ -59,7 +59,7 @@ describe("ArticleRenderer – summary de-duplication", () => {
 
     renderer = new ArticleRenderer({
       app: mockApp,
-      settings: { ...DEFAULT_SETTINGS } as RssDashboardSettings,
+      settings: { ...DEFAULT_SETTINGS, locale: "en" } as RssDashboardSettings,
       onArticleSave: vi.fn(),
       onArticleUpdate: vi.fn(),
     });
@@ -178,7 +178,8 @@ describe("ArticleRenderer – summary de-duplication", () => {
   it("shows a placeholder in the feed description callout when the description is missing", async () => {
     const item = makeItem({
       description: "",
-      content: "<p>Extended body paragraph that should still render in the article body.</p>",
+      content:
+        "<p>Extended body paragraph that should still render in the article body.</p>",
     });
 
     await renderer.render(container, item);
@@ -205,7 +206,8 @@ describe("ArticleRenderer – summary de-duplication", () => {
   it("shows the placeholder when the feed description is only an ellipsis placeholder", async () => {
     const item = makeItem({
       description: "<p>...</p>",
-      content: "<p>Extended body paragraph that should still render in the article body.</p>",
+      content:
+        "<p>Extended body paragraph that should still render in the article body.</p>",
     });
 
     await renderer.render(container, item);

@@ -1,6 +1,7 @@
 import { setIcon } from "obsidian";
 import { RssDashboardSettings } from "../types/types";
 import { FilterChangeEvent } from "./article-filter-menu";
+import { createTranslator } from "../i18n";
 
 type MenuOptionEntries = Array<[label: string, value: string]>;
 
@@ -33,6 +34,13 @@ export class ArticleHeaderMenu {
     listener: EventListenerOrEventListenerObject;
   }> = [];
 
+  private t(
+    key: Parameters<ReturnType<typeof createTranslator>>[0],
+    params?: Record<string, string | number>,
+  ): string {
+    return createTranslator(this.settings.locale ?? "zh-CN")(key, params);
+  }
+
   constructor(
     settings: RssDashboardSettings,
     searchQuery: string,
@@ -53,7 +61,12 @@ export class ArticleHeaderMenu {
 
     const hamburgerBtn = hamburgerMenu.createDiv({
       cls: "rss-dashboard-hamburger-button clickable-icon",
-      attr: { title: "Menu", role: "button", tabindex: "0" },
+      attr: {
+        title: this.t("dashboard.menu"),
+        "aria-label": this.t("dashboard.menu"),
+        role: "button",
+        tabindex: "0",
+      },
     });
     setIcon(hamburgerBtn, "menu");
 
@@ -166,7 +179,8 @@ export class ArticleHeaderMenu {
       cls: "rss-dashboard-article-search-input",
       attr: {
         type: "text",
-        placeholder: "Search articles...",
+        placeholder: this.t("dashboard.searchArticles"),
+        "aria-label": this.t("dashboard.searchArticles"),
         autocomplete: "off",
         spellcheck: "false",
       },
@@ -182,7 +196,7 @@ export class ArticleHeaderMenu {
     this.createThemedSelector(
       controls,
       "history",
-      "Age:",
+      this.t("dashboard.age"),
       this.getAgeOptions(),
       () => this.getCurrentAgeFilterValue(),
       (val) =>
@@ -196,8 +210,11 @@ export class ArticleHeaderMenu {
     this.createThemedSelector(
       controls,
       "arrow-up-down",
-      "Sort:",
-      { Newest: "newest", Oldest: "oldest" },
+      this.t("dashboard.sort"),
+      {
+        [this.t("settings.display.newest")]: "newest",
+        [this.t("settings.display.oldest")]: "oldest",
+      },
       () => this.settings.articleSort,
       (val) => this.callbacks.onSortChange(val as "newest" | "oldest"),
       "rss-dashboard-sort",
@@ -206,8 +223,13 @@ export class ArticleHeaderMenu {
     this.createThemedSelector(
       controls,
       "folders",
-      "Grouping:",
-      { None: "none", Feed: "feed", Date: "date", Folder: "folder" },
+      this.t("dashboard.grouping"),
+      {
+        [this.t("settings.display.none")]: "none",
+        [this.t("settings.display.feed")]: "feed",
+        [this.t("settings.display.date")]: "date",
+        [this.t("settings.display.folder")]: "folder",
+      },
       () => this.settings.articleGroupBy,
       (val) =>
         this.callbacks.onGroupChange(
@@ -230,7 +252,7 @@ export class ArticleHeaderMenu {
       cls: "rss-dashboard-mark-all-row",
     });
     markAllRow.createSpan({
-      text: "Mark all:",
+      text: this.t("dashboard.markAll"),
       cls: "rss-dashboard-mark-all-label",
     });
     const markAllBtns = markAllRow.createDiv({
@@ -241,7 +263,10 @@ export class ArticleHeaderMenu {
       cls: "rss-dashboard-mark-all-button rss-dashboard-mark-read",
     });
     setIcon(readBtn.createDiv(), "check-circle");
-    readBtn.createSpan({ text: "Read", cls: "rss-dashboard-mark-all-text" });
+    readBtn.createSpan({
+      text: this.t("common.read"),
+      cls: "rss-dashboard-mark-all-text",
+    });
     readBtn.onclick = () => this.callbacks.onMarkAllAsRead();
 
     const unreadBtn = markAllBtns.createEl("button", {
@@ -249,7 +274,7 @@ export class ArticleHeaderMenu {
     });
     setIcon(unreadBtn.createDiv(), "circle");
     unreadBtn.createSpan({
-      text: "Unread",
+      text: this.t("common.unread"),
       cls: "rss-dashboard-mark-all-text",
     });
     unreadBtn.onclick = () => this.callbacks.onMarkAllAsUnread();
@@ -265,7 +290,7 @@ export class ArticleHeaderMenu {
     });
     cardsPerRowRow.createSpan({
       cls: "rss-dashboard-dropdown-card-layout-label",
-      text: "Cards / row:",
+      text: this.t("dashboard.cardsPerRow"),
     });
 
     const cardsPerRowTrigger = cardsPerRowRow.createDiv({
@@ -276,7 +301,9 @@ export class ArticleHeaderMenu {
       const currentValue = this.clampCardColumnsPerRow(
         this.settings.display.cardColumnsPerRow ?? 0,
       );
-      return currentValue === 0 ? "Auto" : String(currentValue);
+      return currentValue === 0
+        ? this.t("dashboard.auto")
+        : String(currentValue);
     };
     cardsPerRowTrigger.createSpan({ text: getCardsPerRowLabel() });
     setIcon(
@@ -292,7 +319,7 @@ export class ArticleHeaderMenu {
       this.showThemedMenu(
         cardsPerRowTrigger,
         [
-          ["Auto", "0"],
+          [this.t("dashboard.auto"), "0"],
           ["1", "1"],
           ["2", "2"],
           ["3", "3"],
@@ -322,9 +349,9 @@ export class ArticleHeaderMenu {
     });
     const cardSpacingLabel = cardSpacingGroup.createDiv({
       cls: "rss-dashboard-dropdown-card-layout-label",
-      text: `Card spacing: ${this.clampCardSpacing(
-        this.settings.display.cardSpacing ?? 15,
-      )}px`,
+      text: this.t("dashboard.cardSpacing", {
+        count: this.clampCardSpacing(this.settings.display.cardSpacing ?? 15),
+      }),
     });
     const cardSpacingInput = cardSpacingGroup.createEl("input", {
       cls: "rss-dashboard-dropdown-card-spacing-input",
@@ -342,7 +369,9 @@ export class ArticleHeaderMenu {
     cardSpacingInput.addEventListener("input", () => {
       const nextValue = this.clampCardSpacing(Number(cardSpacingInput.value));
       cardSpacingInput.value = String(nextValue);
-      cardSpacingLabel.setText(`Card spacing: ${nextValue}px`);
+      cardSpacingLabel.setText(
+        this.t("dashboard.cardSpacing", { count: nextValue }),
+      );
       this.callbacks.onFilterChange({
         type: "card-spacing-live",
         value: nextValue,
@@ -351,7 +380,9 @@ export class ArticleHeaderMenu {
     cardSpacingInput.addEventListener("change", () => {
       const nextValue = this.clampCardSpacing(Number(cardSpacingInput.value));
       cardSpacingInput.value = String(nextValue);
-      cardSpacingLabel.setText(`Card spacing: ${nextValue}px`);
+      cardSpacingLabel.setText(
+        this.t("dashboard.cardSpacing", { count: nextValue }),
+      );
       this.callbacks.onFilterChange({
         type: "card-spacing-commit",
         value: nextValue,
@@ -418,9 +449,10 @@ export class ArticleHeaderMenu {
 
     const entries: MenuOptionEntries = Array.isArray(options)
       ? options
-      : Object.keys(options).map(
-          (label): [string, string] => [label, options[label]],
-        );
+      : Object.keys(options).map((label): [string, string] => [
+          label,
+          options[label],
+        ]);
 
     entries.forEach(([label, value]) => {
       const item = portal.createDiv({ cls: "rss-dashboard-filter-menu-item" });
@@ -478,7 +510,12 @@ export class ArticleHeaderMenu {
     );
     selector.createSpan({
       cls: "rss-dashboard-selector-text",
-      text: style.charAt(0).toUpperCase() + style.slice(1) + " View",
+      text:
+        style === "list"
+          ? this.t("dashboard.listView")
+          : style === "card"
+            ? this.t("dashboard.cardView")
+            : this.t("dashboard.feedView"),
     });
     setIcon(
       selector.createDiv({ cls: "rss-dashboard-selector-arrow" }),
@@ -493,7 +530,11 @@ export class ArticleHeaderMenu {
       }
       this.showThemedMenu(
         selector,
-        { "List View": "list", "Card View": "card", "Feed View": "feed" },
+        {
+          [this.t("dashboard.listView")]: "list",
+          [this.t("dashboard.cardView")]: "card",
+          [this.t("dashboard.feedView")]: "feed",
+        },
         this.settings.viewStyle,
         (val) =>
           this.callbacks.onToggleViewStyle(val as "list" | "card" | "feed"),

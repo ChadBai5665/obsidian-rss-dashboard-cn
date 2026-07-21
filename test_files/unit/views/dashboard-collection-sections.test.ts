@@ -40,7 +40,10 @@ vi.mock("../../../src/services/article-saver", () => ({
 }));
 
 function settings(): RssDashboardSettings {
-  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+  return {
+    ...JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
+    locale: "en",
+  } as RssDashboardSettings;
 }
 
 function feed(feedId: string): Feed {
@@ -81,7 +84,9 @@ interface CollectionDashboardTestApi {
   render: ReturnType<typeof vi.fn>;
   loadCollectionItems(): Promise<void>;
   onClose(): Promise<void>;
-  setCollectionSection(section: "today" | "subscriptions" | "starred" | "saved"): void;
+  setCollectionSection(
+    section: "today" | "subscriptions" | "starred" | "saved",
+  ): void;
   getCollectionSectionItems(): CollectedItem[];
   setCollectionQueryText(text: string): void;
   renderCollectionSections(container: HTMLElement): void;
@@ -91,7 +96,8 @@ interface CollectionDashboardTestApi {
 }
 
 async function makeView(input: { items: CollectedItem[]; feeds?: Feed[] }) {
-  const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+  const { RssDashboardView } =
+    await import("../../../src/views/dashboard-view");
   const app = new App();
   const plugin = {
     settings: { ...settings(), feeds: input.feeds ?? [feed("subscribed")] },
@@ -102,7 +108,10 @@ async function makeView(input: { items: CollectedItem[]; feeds?: Feed[] }) {
     manualRefreshSourceById: vi.fn(async () => {}),
   };
   const leaf = { app } as unknown as import("obsidian").WorkspaceLeaf;
-  const view = new RssDashboardView(leaf, plugin as never) as unknown as CollectionDashboardTestApi;
+  const view = new RssDashboardView(
+    leaf,
+    plugin as never,
+  ) as unknown as CollectionDashboardTestApi;
   view.render = vi.fn();
   return { view, plugin };
 }
@@ -158,7 +167,9 @@ describe("Dashboard collection sections", () => {
   });
 
   it("reflects a reloaded durable flag snapshot in the active section immediately", async () => {
-    const { view, plugin } = await makeView({ items: [item({ id: "stable", starred: false })] });
+    const { view, plugin } = await makeView({
+      items: [item({ id: "stable", starred: false })],
+    });
     await view.loadCollectionItems();
     view.setCollectionSection("starred");
     expect(view.getCollectionSectionItems()).toEqual([]);
@@ -219,7 +230,13 @@ describe("Dashboard collection sections", () => {
           read: false,
           title: "AI market video",
         }),
-        item({ id: "rss-read", sourceType: "rss", topics: ["AI"], read: true, title: "AI RSS" }),
+        item({
+          id: "rss-read",
+          sourceType: "rss",
+          topics: ["AI"],
+          read: true,
+          title: "AI RSS",
+        }),
       ],
     });
     await view.loadCollectionItems();
@@ -228,12 +245,16 @@ describe("Dashboard collection sections", () => {
     view.renderCollectionSections(root);
 
     root
-      .querySelector<HTMLButtonElement>('[data-collection-source-type="youtube"]')
+      .querySelector<HTMLButtonElement>(
+        '[data-collection-source-type="youtube"]',
+      )
       ?.click();
     root
       .querySelector<HTMLButtonElement>('[data-collection-topic="AI"]')
       ?.click();
-    const read = root.querySelector<HTMLSelectElement>(".rss-dashboard-collection-read-filter");
+    const read = root.querySelector<HTMLSelectElement>(
+      ".rss-dashboard-collection-read-filter",
+    );
     expect(read).not.toBeNull();
     if (read) {
       read.value = "read";
@@ -247,13 +268,18 @@ describe("Dashboard collection sections", () => {
 
   it("updates collection search results without destroying the active input or its cursor", async () => {
     const { view } = await makeView({
-      items: [item({ id: "one", title: "AI field note" }), item({ id: "two", title: "AI workflow" })],
+      items: [
+        item({ id: "one", title: "AI field note" }),
+        item({ id: "two", title: "AI workflow" }),
+      ],
     });
     await view.loadCollectionItems();
     view.render.mockClear();
     const root = document.body.createDiv();
     view.renderCollectionSections(root);
-    const search = root.querySelector<HTMLInputElement>(".rss-dashboard-collection-search");
+    const search = root.querySelector<HTMLInputElement>(
+      ".rss-dashboard-collection-search",
+    );
     expect(search).not.toBeNull();
     if (!search) return;
 
@@ -269,7 +295,9 @@ describe("Dashboard collection sections", () => {
     expect(document.activeElement).toBe(search);
     expect(search.selectionStart).toBe(4);
     expect(view.render).not.toHaveBeenCalled();
-    expect(root.querySelectorAll(".rss-dashboard-collection-row")).toHaveLength(1);
+    expect(root.querySelectorAll(".rss-dashboard-collection-row")).toHaveLength(
+      1,
+    );
   });
 
   it("shows a visible loading state immediately and gives the collection area independent layout classes", async () => {
@@ -291,22 +319,32 @@ describe("Dashboard collection sections", () => {
 
     const root = document.body.createDiv();
     view.renderCollectionSections(root);
-    expect(root.querySelector(".rss-dashboard-collection-sections")).not.toBeNull();
-    expect(root.querySelector(".rss-dashboard-collection-collapse")).not.toBeNull();
+    expect(
+      root.querySelector(".rss-dashboard-collection-sections"),
+    ).not.toBeNull();
+    expect(
+      root.querySelector(".rss-dashboard-collection-collapse"),
+    ).not.toBeNull();
     expect(root.querySelector(".rss-dashboard-collection-list")).not.toBeNull();
   });
 
   it("renders external collection text as text and leaves no stale rows after local result refreshes", async () => {
     const { view } = await makeView({
       items: [
-        item({ id: "safe", title: "<img src=x onerror=alert(1)>", sourceName: "<script>bad</script>" }),
+        item({
+          id: "safe",
+          title: "<img src=x onerror=alert(1)>",
+          sourceName: "<script>bad</script>",
+        }),
         item({ id: "other", title: "Other" }),
       ],
     });
     await view.loadCollectionItems();
     const root = document.body.createDiv();
     view.renderCollectionSections(root);
-    const search = root.querySelector<HTMLInputElement>(".rss-dashboard-collection-search");
+    const search = root.querySelector<HTMLInputElement>(
+      ".rss-dashboard-collection-search",
+    );
     if (!search) return;
 
     expect(root.querySelector("img, script")).toBeNull();
@@ -314,7 +352,9 @@ describe("Dashboard collection sections", () => {
     search.value = "Other";
     search.dispatchEvent(new Event("input"));
 
-    expect(root.querySelectorAll(".rss-dashboard-collection-row")).toHaveLength(1);
+    expect(root.querySelectorAll(".rss-dashboard-collection-row")).toHaveLength(
+      1,
+    );
     expect(root.textContent).not.toContain("<script>bad</script>");
   });
 });

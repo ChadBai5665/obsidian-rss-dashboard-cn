@@ -37,6 +37,7 @@ describe("Sidebar Rendering", () => {
     document.body.appendChild(container);
 
     settings = {
+      locale: "en",
       feeds: [
         {
           title: "Feed 1",

@@ -1,8 +1,11 @@
 import { setIcon } from "obsidian";
 import type { FilterContext } from "../utils/filter-detection";
+import { createTranslator } from "../i18n";
+import type { Locale } from "../i18n";
 
 interface ArticleEmptyStateOptions {
   onAction?: () => void;
+  locale?: Locale;
 }
 
 /**
@@ -24,6 +27,9 @@ export class ArticleEmptyState {
     context: FilterContext,
     options?: ArticleEmptyStateOptions,
   ): void {
+    // This standalone component historically rendered English when used
+    // without settings. Dashboard callers always pass their persisted locale.
+    const t = createTranslator(options?.locale ?? "en");
     const emptyState = container.createDiv({
       cls: "rss-dashboard-empty-state",
     });
@@ -36,23 +42,26 @@ export class ArticleEmptyState {
 
     // Render heading and description based on context type
     if (context.type === "NoArticlesAtAll") {
-      this.renderNoArticlesAtAll(emptyState);
+      this.renderNoArticlesAtAll(emptyState, t);
     } else if (context.type === "AllArticlesFiltered") {
-      this.renderAllArticlesFiltered(emptyState, context, options);
+      this.renderAllArticlesFiltered(emptyState, context, options, t);
     } else if (context.type === "AllArticlesPrunedByRetention") {
-      this.renderAllArticlesPrunedByRetention(emptyState, context, options);
+      this.renderAllArticlesPrunedByRetention(emptyState, context, options, t);
     }
   }
 
   /**
    * Render UI for genuinely empty feed
    */
-  private renderNoArticlesAtAll(emptyState: HTMLElement): void {
+  private renderNoArticlesAtAll(
+    emptyState: HTMLElement,
+    t: ReturnType<typeof createTranslator>,
+  ): void {
     const heading = emptyState.createEl("h2");
-    heading.textContent = "No articles found";
+    heading.textContent = t("article.empty.none");
 
     const description = emptyState.createEl("p");
-    description.textContent = "Try refreshing your feeds or adding new ones.";
+    description.textContent = t("article.empty.noneDesc");
   }
 
   /**
@@ -62,22 +71,37 @@ export class ArticleEmptyState {
     emptyState: HTMLElement,
     context: FilterContext,
     options?: ArticleEmptyStateOptions,
+    t: ReturnType<typeof createTranslator> = createTranslator("en"),
   ): void {
     const heading = emptyState.createEl("h2");
-    heading.textContent = "Articles outside your filter";
+    heading.textContent = t("article.empty.filtered");
 
     const description = emptyState.createEl("p");
     if (context.thresholdLabel && context.filterReason !== "view-filter") {
-      description.textContent = `${context.unfilteredCount} article${context.unfilteredCount !== 1 ? "s" : ""} found but all are older than ${context.thresholdLabel}.`;
+      description.textContent = t("article.empty.filteredOlder", {
+        count: context.unfilteredCount,
+        articleWord:
+          context.unfilteredCount === 1
+            ? t("article.article")
+            : t("article.articles"),
+        threshold: context.thresholdLabel,
+      });
     } else {
       const reasonLabel =
         context.filterReasonLabel ?? "the current view filters";
-      description.textContent = `${context.unfilteredCount} article${context.unfilteredCount !== 1 ? "s" : ""} found but none match ${reasonLabel}.`;
+      description.textContent = t("article.empty.filteredNoMatch", {
+        count: context.unfilteredCount,
+        articleWord:
+          context.unfilteredCount === 1
+            ? t("article.article")
+            : t("article.articles"),
+        reason: reasonLabel,
+      });
     }
 
     this.renderActionButton(
       emptyState,
-      context.actionLabel ?? "Adjust view filters",
+      context.actionLabel ?? t("article.empty.adjustFilters"),
       options?.onAction,
     );
   }
@@ -86,16 +110,26 @@ export class ArticleEmptyState {
     emptyState: HTMLElement,
     context: FilterContext,
     options?: ArticleEmptyStateOptions,
+    t: ReturnType<typeof createTranslator> = createTranslator("en"),
   ): void {
     const heading = emptyState.createEl("h2");
-    heading.textContent = "Feed refreshed successfully";
+    heading.textContent = t("article.empty.refreshed");
 
     const description = emptyState.createEl("p");
-    description.textContent = `${context.prunedCount ?? 0} fetched article${context.prunedCount === 1 ? " was" : "s were"} outside this feed's ${context.retentionLabel} auto-delete window.`;
+    description.textContent = t("article.empty.pruned", {
+      count: context.prunedCount ?? 0,
+      articleWord:
+        (context.prunedCount ?? 0) === 1
+          ? t("article.article")
+          : t("article.articles"),
+      verb:
+        (context.prunedCount ?? 0) === 1 ? t("article.was") : t("article.were"),
+      retention: context.retentionLabel ?? "",
+    });
 
     this.renderActionButton(
       emptyState,
-      context.actionLabel ?? "Adjust per-feed filter settings",
+      context.actionLabel ?? t("article.empty.adjustFeedFilters"),
       options?.onAction,
     );
   }

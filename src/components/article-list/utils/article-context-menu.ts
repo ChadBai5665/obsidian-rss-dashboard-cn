@@ -1,5 +1,7 @@
 import { Menu, MenuItem, Notice } from "obsidian";
 import type { FeedItem } from "../../../types/types";
+import { createTranslator } from "../../../i18n";
+import type { Locale } from "../../../i18n";
 
 export interface ArticleContext {
   callbacks: {
@@ -17,6 +19,7 @@ export interface ArticleContext {
     articleSaving: {
       saveFullContent: boolean;
     };
+    locale?: Locale;
   };
 }
 
@@ -25,12 +28,13 @@ export function showArticleContextMenu(
   article: FeedItem,
   ctx: ArticleContext,
 ): void {
+  const t = createTranslator(ctx.settings.locale ?? "zh-CN");
   const menu = new Menu();
 
   if (article.saved) {
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Open saved article")
+        .setTitle(t("article.openSaved"))
         .setIcon("file-text")
         .onClick(() => {
           if (ctx.callbacks.onOpenSavedArticle) {
@@ -41,7 +45,7 @@ export function showArticleContextMenu(
 
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Open in reader view")
+        .setTitle(t("article.openReader"))
         .setIcon("book-open")
         .onClick(() => {
           if (ctx.callbacks.onOpenInReaderView) {
@@ -55,7 +59,7 @@ export function showArticleContextMenu(
 
   menu.addItem((item: MenuItem) => {
     item
-      .setTitle("Open in browser")
+      .setTitle(t("article.openBrowser"))
       .setIcon("external-link")
       .onClick(() => {
         activeWindow.open(article.link, "_blank");
@@ -64,7 +68,7 @@ export function showArticleContextMenu(
 
   menu.addItem((item: MenuItem) => {
     item
-      .setTitle("Open in split view")
+      .setTitle(t("article.openSplit"))
       .setIcon("panel-left")
       .onClick(() => {
         if (ctx.callbacks.onArticleClick) {
@@ -75,22 +79,22 @@ export function showArticleContextMenu(
 
   menu.addItem((item: MenuItem) => {
     item
-      .setTitle("Copy article URL")
+      .setTitle(t("article.copyUrl"))
       .setIcon("link")
       .onClick(() => {
         void navigator.clipboard.writeText(article.link);
-        new Notice("Article URL copied to clipboard");
+        new Notice(t("article.urlCopied"));
       });
   });
 
   if (article.feedUrl) {
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Copy feed URL")
+        .setTitle(t("article.copyFeedUrl"))
         .setIcon("rss")
         .onClick(() => {
           void navigator.clipboard.writeText(article.feedUrl);
-          new Notice("Feed URL copied to clipboard");
+          new Notice(t("article.feedUrlCopied"));
         });
     });
   }
@@ -99,7 +103,7 @@ export function showArticleContextMenu(
 
   menu.addItem((item: MenuItem) => {
     item
-      .setTitle(article.read ? "Mark as unread" : "Mark as read")
+      .setTitle(article.read ? t("article.markUnread") : t("article.markRead"))
       .setIcon(article.read ? "circle" : "check-circle")
       .onClick(() => {
         ctx.callbacks.onArticleUpdate?.(
@@ -112,7 +116,7 @@ export function showArticleContextMenu(
 
   menu.addItem((item: MenuItem) => {
     item
-      .setTitle(article.starred ? "Unstar articles" : "Star articles")
+      .setTitle(article.starred ? t("article.unstar") : t("article.star"))
       .setIcon("star")
       .onClick(() => {
         ctx.callbacks.onArticleUpdate?.(
@@ -129,8 +133,8 @@ export function showArticleContextMenu(
       item
         .setTitle(
           ctx.settings.articleSaving.saveFullContent
-            ? "Save full article"
-            : "Save article summary",
+            ? t("article.saveFullShort")
+            : t("article.saveSummaryShort"),
         )
         .setIcon("save")
         .onClick(() => {

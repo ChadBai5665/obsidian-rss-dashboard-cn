@@ -82,6 +82,7 @@ function createReader(): ReaderView {
   };
   const settings: RssDashboardSettings = {
     ...DEFAULT_SETTINGS,
+    locale: "en",
     useWebViewer: false,
     corsProxyEnabled: false,
   };
@@ -102,8 +103,8 @@ describe("ReaderView explicit full-text content cache", () => {
     vi.clearAllMocks();
     document.body.innerHTML = "";
     contentReadMock.mockResolvedValue(null);
-    contentWriteMock.mockImplementation(async (content) =>
-      `.rss-dashboard-data/content/${content.itemId}.md`,
+    contentWriteMock.mockImplementation(
+      async (content) => `.rss-dashboard-data/content/${content.itemId}.md`,
     );
     updateContentMetadataMock.mockResolvedValue(undefined);
     fetchFullArticleContentWithOutcomeMock.mockResolvedValue({
@@ -128,7 +129,9 @@ describe("ReaderView explicit full-text content cache", () => {
     );
     expect(updateContentMetadataMock).toHaveBeenCalledWith(
       expect.any(String),
-      expect.stringMatching(/^\.rss-dashboard-data\/content\/[a-f0-9]{64}\.md$/),
+      expect.stringMatching(
+        /^\.rss-dashboard-data\/content\/[a-f0-9]{64}\.md$/,
+      ),
     );
   });
 
@@ -153,15 +156,13 @@ describe("ReaderView explicit full-text content cache", () => {
 
   it("reuses cached full text on a later explicit open without another network request", async () => {
     const cachedText = `<article><p>${"B".repeat(260)}</p></article>`;
-    contentReadMock
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        schemaVersion: 1,
-        itemId: "a".repeat(64),
-        fetchedAt: "2026-07-21T12:00:00.000Z",
-        contentBasis: "full-text",
-        text: cachedText,
-      });
+    contentReadMock.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      schemaVersion: 1,
+      itemId: "a".repeat(64),
+      fetchedAt: "2026-07-21T12:00:00.000Z",
+      contentBasis: "full-text",
+      text: cachedText,
+    });
     const reader = createReader();
     const item = makeItem();
     await reader.onOpen();
@@ -177,7 +178,9 @@ describe("ReaderView explicit full-text content cache", () => {
   });
 
   it("deduplicates overlapping opens of the same article and ignores a stale completion", async () => {
-    let resolveFirst: ((value: { content: string; failureType: "none" }) => void) | undefined;
+    let resolveFirst:
+      | ((value: { content: string; failureType: "none" }) => void)
+      | undefined;
     fetchFullArticleContentWithOutcomeMock.mockImplementation(
       () =>
         new Promise<{ content: string; failureType: "none" }>((resolve) => {
@@ -204,33 +207,60 @@ describe("ReaderView explicit full-text content cache", () => {
   });
 
   it("does not render late fetched content after the reader closes", async () => {
-    let resolveFetch: ((value: { content: string; failureType: "none" }) => void) | undefined;
-    fetchFullArticleContentWithOutcomeMock.mockImplementation(() =>
-      new Promise((resolve) => { resolveFetch = resolve; }),
+    let resolveFetch:
+      | ((value: { content: string; failureType: "none" }) => void)
+      | undefined;
+    fetchFullArticleContentWithOutcomeMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
     );
     const reader = createReader();
     await reader.onOpen();
     const opening = reader.displayItem(makeItem());
-    await vi.waitFor(() => expect(fetchFullArticleContentWithOutcomeMock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(fetchFullArticleContentWithOutcomeMock).toHaveBeenCalledTimes(1),
+    );
     await reader.onClose();
-    resolveFetch?.({ content: `<article><p>${"Z".repeat(260)}</p></article>`, failureType: "none" });
+    resolveFetch?.({
+      content: `<article><p>${"Z".repeat(260)}</p></article>`,
+      failureType: "none",
+    });
     await opening;
 
     expect(reader.getDisplayText()).toBe("RSS reader");
-    expect((reader as unknown as { readingContainer: HTMLElement }).readingContainer.childElementCount).toBe(0);
+    expect(
+      (reader as unknown as { readingContainer: HTMLElement }).readingContainer
+        .childElementCount,
+    ).toBe(0);
   });
 
   it("does not let a late first item replace a newer item", async () => {
-    const resolvers: Array<(value: { content: string; failureType: "none" }) => void> = [];
-    fetchFullArticleContentWithOutcomeMock.mockImplementation(() => new Promise((resolve) => resolvers.push(resolve)));
+    const resolvers: Array<
+      (value: { content: string; failureType: "none" }) => void
+    > = [];
+    fetchFullArticleContentWithOutcomeMock.mockImplementation(
+      () => new Promise((resolve) => resolvers.push(resolve)),
+    );
     const reader = createReader();
     await reader.onOpen();
-    const firstOpen = reader.displayItem(makeItem({ title: "Old", guid: "old", link: "https://example.com/old" }));
-    const secondOpen = reader.displayItem(makeItem({ title: "New", guid: "new", link: "https://example.com/new" }));
+    const firstOpen = reader.displayItem(
+      makeItem({ title: "Old", guid: "old", link: "https://example.com/old" }),
+    );
+    const secondOpen = reader.displayItem(
+      makeItem({ title: "New", guid: "new", link: "https://example.com/new" }),
+    );
     await vi.waitFor(() => expect(resolvers).toHaveLength(2));
-    resolvers[1]({ content: `<article><p>${"N".repeat(260)}</p></article>`, failureType: "none" });
+    resolvers[1]({
+      content: `<article><p>${"N".repeat(260)}</p></article>`,
+      failureType: "none",
+    });
     await secondOpen;
-    resolvers[0]({ content: `<article><p>${"O".repeat(260)}</p></article>`, failureType: "none" });
+    resolvers[0]({
+      content: `<article><p>${"O".repeat(260)}</p></article>`,
+      failureType: "none",
+    });
     await firstOpen;
     expect(reader.getDisplayText()).toBe("New");
   });
@@ -254,7 +284,9 @@ describe("ReaderView explicit full-text content cache", () => {
   it("retains a durable cache when collection metadata repair fails", async () => {
     const reader = createReader();
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-    updateContentMetadataMock.mockRejectedValue(new Error("metadata unavailable"));
+    updateContentMetadataMock.mockRejectedValue(
+      new Error("metadata unavailable"),
+    );
     await reader.onOpen();
 
     await reader.displayItem(makeItem());

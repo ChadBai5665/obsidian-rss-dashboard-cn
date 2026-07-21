@@ -4,6 +4,7 @@ import { TABLET_LAYOUT_MAX_WIDTH } from "../utils/platform-utils";
 import { ArticleFilterMenu, FilterChangeEvent } from "./article-filter-menu";
 import { ArticleHeaderMenu } from "./article-header-menu";
 import { renderHeaderFeedIcon } from "./article-list/utils/feed-icon";
+import { createTranslator } from "../i18n";
 interface ArticleHeaderMenuController {
   destroy(): void;
   render(parent: HTMLElement): void;
@@ -49,6 +50,13 @@ export class ArticleHeader {
   private resizeObserver: ResizeObserver | null = null;
   private articleSearchQuery: string = "";
   private articleSearchDesktopInput: HTMLInputElement | null = null;
+
+  private t(
+    key: Parameters<ReturnType<typeof createTranslator>>[0],
+    params?: Record<string, string | number>,
+  ): string {
+    return createTranslator(this.settings.locale ?? "zh-CN")(key, params);
+  }
   private headerMenu: ArticleHeaderMenuController | null = null;
   private activePortal: HTMLElement | null = null;
   private activePortalToggleBtn: HTMLElement | null = null;
@@ -168,7 +176,12 @@ export class ArticleHeader {
     });
     const sidebarToggle = leftSection.createDiv({
       cls: "rss-dashboard-sidebar-toggle clickable-icon",
-      attr: { title: "Toggle sidebar", role: "button", tabindex: "0" },
+      attr: {
+        title: this.t("dashboard.toggleSidebar"),
+        "aria-label": this.t("dashboard.toggleSidebar"),
+        role: "button",
+        tabindex: "0",
+      },
     });
     setIcon(
       sidebarToggle,
@@ -200,7 +213,12 @@ export class ArticleHeader {
 
     const mobileFilterBtn = rightSection.createEl("button", {
       cls: "rss-dashboard-mobile-filter-button rss-dashboard-filter-trigger clickable-icon",
-      attr: { title: "Filters", role: "button", tabindex: "0" },
+      attr: {
+        title: this.t("dashboard.filters"),
+        "aria-label": this.t("dashboard.filters"),
+        role: "button",
+        tabindex: "0",
+      },
     });
     setIcon(
       mobileFilterBtn.createDiv({ cls: "rss-dashboard-mobile-filter-icon" }),
@@ -256,7 +274,7 @@ export class ArticleHeader {
         cls: "rss-dashboard-multi-filter-btn rss-dashboard-filter-trigger",
       });
       setIcon(filterBtn.createDiv(), "filter");
-      filterBtn.createSpan({ text: "Filter" });
+      filterBtn.createSpan({ text: this.t("dashboard.filter") });
       this.updateFilterBadge(filterBtn);
       filterBtn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -275,7 +293,8 @@ export class ArticleHeader {
       cls: "rss-dashboard-article-search-input",
       attr: {
         type: "text",
-        placeholder: "Search articles...",
+        placeholder: this.t("dashboard.searchArticles"),
+        "aria-label": this.t("dashboard.searchArticles"),
         autocomplete: "off",
         spellcheck: "false",
       },
@@ -292,7 +311,7 @@ export class ArticleHeader {
     this.createThemedSelector(
       controls,
       "history",
-      "Age:",
+      this.t("dashboard.age"),
       this.getAgeOptions(),
       () => this.getCurrentAgeFilterValue(),
       (val) =>
@@ -306,8 +325,11 @@ export class ArticleHeader {
     this.createThemedSelector(
       controls,
       "arrow-up-down",
-      "Sort:",
-      { Newest: "newest", Oldest: "oldest" },
+      this.t("dashboard.sort"),
+      {
+        [this.t("settings.display.newest")]: "newest",
+        [this.t("settings.display.oldest")]: "oldest",
+      },
       () => this.settings.articleSort,
       (val) => this.callbacks.onSortChange(val as "newest" | "oldest"),
       "rss-dashboard-sort",
@@ -316,8 +338,13 @@ export class ArticleHeader {
     this.createThemedSelector(
       controls,
       "folders",
-      "Grouping:",
-      { None: "none", Feed: "feed", Date: "date", Folder: "folder" },
+      this.t("dashboard.grouping"),
+      {
+        [this.t("settings.display.none")]: "none",
+        [this.t("settings.display.feed")]: "feed",
+        [this.t("settings.display.date")]: "date",
+        [this.t("settings.display.folder")]: "folder",
+      },
       () => this.settings.articleGroupBy,
       (val) =>
         this.callbacks.onGroupChange(
@@ -337,7 +364,7 @@ export class ArticleHeader {
       cls: "rss-dashboard-mark-all-row",
     });
     markAllRow.createSpan({
-      text: "Mark all:",
+      text: this.t("dashboard.markAll"),
       cls: "rss-dashboard-mark-all-label",
     });
     const markAllBtns = markAllRow.createDiv({
@@ -348,7 +375,10 @@ export class ArticleHeader {
       cls: "rss-dashboard-mark-all-button rss-dashboard-mark-read",
     });
     setIcon(readBtn.createDiv(), "check-circle");
-    readBtn.createSpan({ text: "Read", cls: "rss-dashboard-mark-all-text" });
+    readBtn.createSpan({
+      text: this.t("common.read"),
+      cls: "rss-dashboard-mark-all-text",
+    });
     readBtn.onclick = () => this.callbacks.onMarkAllAsRead();
 
     const unreadBtn = markAllBtns.createEl("button", {
@@ -356,7 +386,7 @@ export class ArticleHeader {
     });
     setIcon(unreadBtn.createDiv(), "circle");
     unreadBtn.createSpan({
-      text: "Unread",
+      text: this.t("common.unread"),
       cls: "rss-dashboard-mark-all-text",
     });
     unreadBtn.onclick = () => this.callbacks.onMarkAllAsUnread();
@@ -488,7 +518,12 @@ export class ArticleHeader {
     );
     selector.createSpan({
       cls: "rss-dashboard-selector-text",
-      text: style.charAt(0).toUpperCase() + style.slice(1) + " View",
+      text:
+        style === "list"
+          ? this.t("dashboard.listView")
+          : style === "card"
+            ? this.t("dashboard.cardView")
+            : this.t("dashboard.feedView"),
     });
     setIcon(
       selector.createDiv({ cls: "rss-dashboard-selector-arrow" }),
@@ -508,7 +543,11 @@ export class ArticleHeader {
       };
       this.showThemedMenu(
         selector,
-        { "List View": "list", "Card View": "card", "Feed View": "feed" },
+        {
+          [this.t("dashboard.listView")]: "list",
+          [this.t("dashboard.cardView")]: "card",
+          [this.t("dashboard.feedView")]: "feed",
+        },
         this.settings.viewStyle,
         (val) =>
           this.callbacks.onToggleViewStyle(val as "list" | "card" | "feed"),
@@ -616,7 +655,6 @@ export class ArticleHeader {
 
     return String(currentValue);
   }
-
 
   private addDocumentListener(
     target: Document | Window,

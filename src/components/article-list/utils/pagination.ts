@@ -4,6 +4,8 @@ import {
   getPageSizeOptions,
   PAGE_SIZE_OPTIONS,
 } from "../../../utils/page-size-options";
+import { createTranslator } from "../../../i18n";
+import type { Locale } from "../../../i18n";
 
 export interface PaginationDependencies {
   isMobileViewport(): boolean;
@@ -13,6 +15,7 @@ export interface PaginationDependencies {
   onPersistSettings?(): Promise<void> | void;
   onRerender?(): void;
   notices?: { show(message: string): void };
+  locale?: Locale;
 }
 
 export interface RenderPaginationArgs {
@@ -33,8 +36,7 @@ export function createPageButton(
 ): HTMLElement {
   const btn = container.createEl("button", {
     cls:
-      "rss-dashboard-pagination-btn" +
-      (page === currentPage ? " active" : ""),
+      "rss-dashboard-pagination-btn" + (page === currentPage ? " active" : ""),
     text: String(page),
   });
   btn.disabled = page === currentPage;
@@ -56,6 +58,7 @@ export function renderPagination(args: RenderPaginationArgs): void {
     articles,
     deps,
   } = args;
+  const t = createTranslator(deps.locale ?? "en");
 
   const paginationContainer = container.createDiv({
     cls: "rss-dashboard-pagination",
@@ -129,7 +132,7 @@ export function renderPagination(args: RenderPaginationArgs): void {
 
   const markPageReadButton = controlsRow.createEl("button", {
     cls: "rss-dashboard-pagination-btn rss-dashboard-pagination-mark-page-read",
-    text: "Mark page read",
+    text: t("article.markPageRead"),
   });
   markPageReadButton.onclick = () => {
     if (deps.onMarkPageAsRead) {
@@ -151,7 +154,7 @@ export function renderPagination(args: RenderPaginationArgs): void {
           deps.onRerender();
         }
       } else if (deps.notices) {
-        deps.notices.show("No unread items on current page");
+        deps.notices.show(t("article.noUnreadPage"));
       }
     }
   };
@@ -168,10 +171,10 @@ export function renderPagination(args: RenderPaginationArgs): void {
     );
     const label =
       size === 0
-        ? "All"
+        ? t("common.all")
         : isStandardOption
           ? String(size)
-          : `Current (${size})`;
+          : t("article.currentPageSize", { size });
     const opt = pageSizeDropdown.createEl("option", {
       text: label,
       value: String(size),
@@ -196,6 +199,10 @@ export function renderPagination(args: RenderPaginationArgs): void {
 
   resultsRow.createEl("span", {
     cls: "rss-dashboard-pagination-results",
-    text: `Results: ${startIdx} - ${endIdx} of ${totalArticles}`,
+    text: t("article.results", {
+      start: startIdx,
+      end: endIdx,
+      total: totalArticles,
+    }),
   });
 }

@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ArticleHeaderMenu, type ArticleHeaderMenuCallbacks } from "../../../src/components/article-header-menu";
+import {
+  ArticleHeaderMenu,
+  type ArticleHeaderMenuCallbacks,
+} from "../../../src/components/article-header-menu";
 import type { RssDashboardSettings } from "../../../src/types/types";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 
@@ -21,6 +24,7 @@ describe("ArticleHeaderMenu Component", () => {
     document.body.appendChild(container);
 
     settings = {
+      locale: "en",
       viewStyle: "list",
       articleSort: "newest",
       articleGroupBy: "none",
@@ -50,36 +54,28 @@ describe("ArticleHeaderMenu Component", () => {
   });
 
   it("renders the hamburger trigger and dropdown structure", () => {
-    const menu = new ArticleHeaderMenu(
-      settings,
-      "",
-      callbacks,
-    );
+    const menu = new ArticleHeaderMenu(settings, "", callbacks);
 
     menu.render(container);
 
     expect(
-      container.querySelector(".rss-dashboard-hamburger-button")
+      container.querySelector(".rss-dashboard-hamburger-button"),
     ).not.toBeNull();
     expect(
-      container.querySelector(".rss-dashboard-dropdown-menu")
+      container.querySelector(".rss-dashboard-dropdown-menu"),
     ).not.toBeNull();
   });
 
   it("toggles is-menu-open classes on button and dropdown", () => {
-    const menu = new ArticleHeaderMenu(
-      settings,
-      "",
-      callbacks,
-    );
+    const menu = new ArticleHeaderMenu(settings, "", callbacks);
 
     menu.render(container);
 
     const button = container.querySelector(
-      ".rss-dashboard-hamburger-button"
+      ".rss-dashboard-hamburger-button",
     ) as HTMLElement;
     const dropdown = container.querySelector(
-      ".rss-dashboard-dropdown-menu"
+      ".rss-dashboard-dropdown-menu",
     ) as HTMLElement;
 
     button.click();
@@ -92,11 +88,7 @@ describe("ArticleHeaderMenu Component", () => {
   });
 
   it("renders card layout controls only for card view", () => {
-    const listMenu = new ArticleHeaderMenu(
-      settings,
-      "",
-      callbacks,
-    );
+    const listMenu = new ArticleHeaderMenu(settings, "", callbacks);
     listMenu.render(container);
     expect(container.textContent).not.toContain("Cards / row:");
     listMenu.destroy();
@@ -104,11 +96,7 @@ describe("ArticleHeaderMenu Component", () => {
 
     settings.viewStyle = "card";
 
-    const cardMenu = new ArticleHeaderMenu(
-      settings,
-      "",
-      callbacks,
-    );
+    const cardMenu = new ArticleHeaderMenu(settings, "", callbacks);
     cardMenu.render(container);
 
     expect(container.textContent).toContain("Cards / row:");
@@ -116,26 +104,26 @@ describe("ArticleHeaderMenu Component", () => {
   });
 
   it("forwards refresh and mark-all actions unchanged", () => {
-    const menu = new ArticleHeaderMenu(
-      settings,
-      "",
-      callbacks,
-    );
+    const menu = new ArticleHeaderMenu(settings, "", callbacks);
 
     menu.render(container);
     const button = container.querySelector(
-      ".rss-dashboard-hamburger-button"
+      ".rss-dashboard-hamburger-button",
     ) as HTMLElement;
     button.click();
 
     (
-      container.querySelector(".rss-dashboard-view-refresh-button") as HTMLButtonElement
+      container.querySelector(
+        ".rss-dashboard-view-refresh-button",
+      ) as HTMLButtonElement
     ).click();
     (
       container.querySelector(".rss-dashboard-mark-read") as HTMLButtonElement
     ).click();
     (
-      container.querySelectorAll(".rss-dashboard-mark-all-button")[1] as HTMLButtonElement
+      container.querySelectorAll(
+        ".rss-dashboard-mark-all-button",
+      )[1] as HTMLButtonElement
     ).click();
 
     expect(callbacks.onRefreshFeeds).toHaveBeenCalledTimes(1);
@@ -145,20 +133,16 @@ describe("ArticleHeaderMenu Component", () => {
 
   it("emits live and commit events for card spacing changes", () => {
     settings.viewStyle = "card";
-    const menu = new ArticleHeaderMenu(
-      settings,
-      "",
-      callbacks,
-    );
+    const menu = new ArticleHeaderMenu(settings, "", callbacks);
 
     menu.render(container);
     const button = container.querySelector(
-      ".rss-dashboard-hamburger-button"
+      ".rss-dashboard-hamburger-button",
     ) as HTMLElement;
     button.click();
 
     const spacingInput = container.querySelector(
-      ".rss-dashboard-dropdown-card-spacing-input"
+      ".rss-dashboard-dropdown-card-spacing-input",
     ) as HTMLInputElement;
     spacingInput.value = "23";
     spacingInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -175,18 +159,14 @@ describe("ArticleHeaderMenu Component", () => {
   });
 
   it("closes cleanly and removes outside-click handling on destroy", () => {
-    const menu = new ArticleHeaderMenu(
-      settings,
-      "",
-      callbacks,
-    );
+    const menu = new ArticleHeaderMenu(settings, "", callbacks);
 
     menu.render(container);
     const button = container.querySelector(
-      ".rss-dashboard-hamburger-button"
+      ".rss-dashboard-hamburger-button",
     ) as HTMLElement;
     const dropdown = container.querySelector(
-      ".rss-dashboard-dropdown-menu"
+      ".rss-dashboard-dropdown-menu",
     ) as HTMLElement;
 
     button.click();
@@ -197,9 +177,7 @@ describe("ArticleHeaderMenu Component", () => {
     expect(dropdown.classList.contains("is-menu-open")).toBe(false);
     expect(button.classList.contains("is-menu-open")).toBe(false);
 
-    document.dispatchEvent(
-      new PointerEvent("pointerdown", { bubbles: true })
-    );
+    document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
 
     expect(dropdown.classList.contains("is-menu-open")).toBe(false);
   });

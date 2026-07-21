@@ -1,10 +1,7 @@
 import { vi } from "vitest";
 import { ArticleList } from "../../../src/components/article-list";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
-import {
-  FeedItem,
-  RssDashboardSettings,
-} from "../../../src/types/types";
+import { FeedItem, RssDashboardSettings } from "../../../src/types/types";
 
 export type ArticleListCallbacks = ConstructorParameters<typeof ArticleList>[6];
 
@@ -54,8 +51,7 @@ export function installObservingResizeObserver(
     unobserve() {}
     disconnect() {}
   };
-  window.ResizeObserver =
-    ObservingResizeObserver;
+  window.ResizeObserver = ObservingResizeObserver;
 }
 
 export function installCapturingResizeObserver(handlers: {
@@ -72,8 +68,7 @@ export function installCapturingResizeObserver(handlers: {
       handlers.onDisconnect?.();
     }
   };
-  window.ResizeObserver =
-    CapturingResizeObserver;
+  window.ResizeObserver = CapturingResizeObserver;
 }
 
 export function makeBoundingRect(top: number, bottom: number) {
@@ -92,6 +87,7 @@ export function makeBoundingRect(top: number, bottom: number) {
 
 export function createDefaultSettings(): RssDashboardSettings {
   return {
+    locale: "en",
     viewStyle: "list",
     articleGroupBy: "none",
     articleSort: "newest",

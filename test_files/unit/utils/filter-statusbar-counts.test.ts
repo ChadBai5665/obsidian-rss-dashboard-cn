@@ -60,7 +60,10 @@ vi.mock("../../../src/services/article-saver", () => ({
 }));
 
 function cloneSettings(): RssDashboardSettings {
-  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+  return {
+    ...JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
+    locale: "en",
+  } as RssDashboardSettings;
 }
 
 interface TestPlugin {
@@ -73,7 +76,11 @@ interface TestView {
   activeStatusFilters: Set<string>;
   activeTagFilters: Set<string>;
   filterLogic?: "AND" | "OR";
-  dashboardMultiFilterCounts?: { shown: number; filteredOut: number; total: number };
+  dashboardMultiFilterCounts?: {
+    shown: number;
+    filteredOut: number;
+    total: number;
+  };
   keywordFilterStats?: {
     articlesRetrieved: number;
     globalExcluded: number;
@@ -92,8 +99,16 @@ interface TestView {
     updateArticleInPlace?: ReturnType<typeof vi.fn>;
   };
   refreshFilterStatusBarOnly?: ReturnType<typeof vi.fn>;
-  handleFilterChange?: (opts: { type: string; value: unknown; checked: boolean }) => void;
-  computeDashboardMultiFilterCounts?: (items: FeedItem[]) => { shown: number; filteredOut: number; total: number };
+  handleFilterChange?: (opts: {
+    type: string;
+    value: unknown;
+    checked: boolean;
+  }) => void;
+  computeDashboardMultiFilterCounts?: (items: FeedItem[]) => {
+    shown: number;
+    filteredOut: number;
+    total: number;
+  };
   renderFilterSubheader?: (container: HTMLElement) => void;
   syncArticleListAfterUpdate?: (article: FeedItem) => void;
 }
@@ -126,7 +141,8 @@ describe("Filter Status Bar counts (TDD)", () => {
   });
 
   it("computes shown/filtered-out/total for dashboard multi-filters", async () => {
-    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const { RssDashboardView } =
+      await import("../../../src/views/dashboard-view");
 
     const settings = cloneSettings();
     const plugin: TestPlugin = {
@@ -156,7 +172,8 @@ describe("Filter Status Bar counts (TDD)", () => {
   });
 
   it("renders viewing-filter counts when dashboard multi-filters are active", async () => {
-    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const { RssDashboardView } =
+      await import("../../../src/views/dashboard-view");
 
     const settings = cloneSettings();
     const plugin: TestPlugin = {
@@ -192,7 +209,9 @@ describe("Filter Status Bar counts (TDD)", () => {
     document.body.appendChild(container);
     view.renderFilterSubheader!(container);
 
-    const subheader = container.querySelector(".rss-dashboard-filter-subheader");
+    const subheader = container.querySelector(
+      ".rss-dashboard-filter-subheader",
+    );
     expect(subheader).toBeTruthy();
 
     const spans = Array.from(subheader?.querySelectorAll("span") ?? []);
@@ -205,7 +224,8 @@ describe("Filter Status Bar counts (TDD)", () => {
   });
 
   it("renders the no-filters message when dashboard multi-filters are enabled but empty", async () => {
-    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const { RssDashboardView } =
+      await import("../../../src/views/dashboard-view");
 
     const settings = cloneSettings();
     const plugin: TestPlugin = {
@@ -241,7 +261,9 @@ describe("Filter Status Bar counts (TDD)", () => {
     document.body.appendChild(container);
     view.renderFilterSubheader!(container);
 
-    const subheader = container.querySelector(".rss-dashboard-filter-subheader");
+    const subheader = container.querySelector(
+      ".rss-dashboard-filter-subheader",
+    );
     expect(subheader).toBeTruthy();
 
     const spans = Array.from(subheader?.querySelectorAll("span") ?? []);
@@ -254,7 +276,8 @@ describe("Filter Status Bar counts (TDD)", () => {
   });
 
   it("filter-menu apply path refreshes the status bar", async () => {
-    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const { RssDashboardView } =
+      await import("../../../src/views/dashboard-view");
 
     const settings = cloneSettings();
     const plugin: TestPlugin = {
@@ -279,7 +302,8 @@ describe("Filter Status Bar counts (TDD)", () => {
   });
 
   it("in-place read toggle refreshes the status bar (regression)", async () => {
-    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const { RssDashboardView } =
+      await import("../../../src/views/dashboard-view");
 
     const settings = cloneSettings();
     const plugin: TestPlugin = {
@@ -307,9 +331,7 @@ describe("Filter Status Bar counts (TDD)", () => {
     const article = makeItem({ read: false, guid: "sync-1" });
 
     view.syncArticleListAfterUpdate!(article);
-    expect(view.articleList.updateArticleInPlace).toHaveBeenCalledTimes(
-      1,
-    );
+    expect(view.articleList.updateArticleInPlace).toHaveBeenCalledTimes(1);
     expect(view.refreshFilterStatusBarOnly).toHaveBeenCalledTimes(1);
 
     article.read = true;

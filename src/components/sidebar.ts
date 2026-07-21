@@ -493,7 +493,9 @@ export class Sidebar {
     if (this.settings.feeds.length === 0) {
       feedFoldersSection.createDiv({
         cls: "rss-dashboard-empty-state",
-        text: "No feeds yet — add one of your own or visit the Discover tab!",
+        text: createTranslator(this.settings.locale ?? "zh-CN")(
+          "sidebar.empty",
+        ),
       });
     }
 
@@ -878,8 +880,12 @@ export class Sidebar {
       cls:
         "rss-dashboard-all-feeds-icon" + (isRefreshActive ? " refreshing" : ""),
       attr: {
-        title: "Refresh all feeds",
-        "aria-label": "Refresh all feeds",
+        title: createTranslator(this.settings.locale ?? "zh-CN")(
+          "sidebar.refreshAll",
+        ),
+        "aria-label": createTranslator(this.settings.locale ?? "zh-CN")(
+          "sidebar.refreshAll",
+        ),
       },
     });
     setIcon(feedIcon, "refresh-cw");
@@ -896,7 +902,10 @@ export class Sidebar {
 
     labelContainer.createDiv({
       cls: "rss-dashboard-all-feeds-label",
-      text: `All Feeds (${totalFeeds})`,
+      text: createTranslator(this.settings.locale ?? "zh-CN")(
+        "sidebar.allFeeds",
+        { count: totalFeeds },
+      ),
     });
 
     const rightContainer = allFeedsButton.createDiv({
@@ -1018,10 +1027,7 @@ export class Sidebar {
       "aria-label",
       isCollapsed ? "Expand folder" : "Collapse folder",
     );
-    setIcon(
-      toggleButton,
-      isCollapsed ? "chevron-right" : "chevron-down",
-    );
+    setIcon(toggleButton, isCollapsed ? "chevron-right" : "chevron-down");
 
     if (folderObj.pinned) {
       const pinIcon = folderHeader.createDiv({
@@ -1078,7 +1084,10 @@ export class Sidebar {
 
       // Shift+click: range selection (delegate computation to caller)
       if (e.shiftKey) {
-        const clickedKey = this.getSidebarTargetKey({ type: "folder", path: fullPath });
+        const clickedKey = this.getSidebarTargetKey({
+          type: "folder",
+          path: fullPath,
+        });
         const visibleKeys = this.sidebarRows.map((r) => r.key);
         this.callbacks.onRangeSelect?.(clickedKey, visibleKeys);
         return;
@@ -1384,7 +1393,8 @@ export class Sidebar {
         }
       }
     }
-    const isSelected = (this.options.selectedFeeds || []).includes(feed.url) || isSelectedFolder;
+    const isSelected =
+      (this.options.selectedFeeds || []).includes(feed.url) || isSelectedFolder;
 
     const feedEl = container.createDiv({
       cls:
@@ -1527,7 +1537,10 @@ export class Sidebar {
       e.stopPropagation();
       // Shift+click: range selection (delegate to caller)
       if (e.shiftKey) {
-        const clickedKey = this.getSidebarTargetKey({ type: "feed", url: feed.url });
+        const clickedKey = this.getSidebarTargetKey({
+          type: "feed",
+          url: feed.url,
+        });
         const visibleKeys = this.sidebarRows.map((r) => r.key);
         this.callbacks.onRangeSelect?.(clickedKey, visibleKeys);
         return;
@@ -1665,16 +1678,19 @@ export class Sidebar {
     });
   }
 
-  private isMultiSelectionTarget(targetType: 'folder' | 'feed', targetKey: string): boolean {
+  private isMultiSelectionTarget(
+    targetType: "folder" | "feed",
+    targetKey: string,
+  ): boolean {
     const { selectedFolders, selectedFeeds } = this.options;
     const folderCount = selectedFolders?.length || 0;
     const feedCount = selectedFeeds?.length || 0;
     // Multi-selection exists if more than 1 feed is selected, or if any folder is selected.
     const hasMultiSelection = folderCount > 0 || feedCount > 1;
-                              
+
     if (!hasMultiSelection) return false;
-    
-    if (targetType === 'folder') {
+
+    if (targetType === "folder") {
       return selectedFolders?.includes(targetKey) || false;
     } else {
       return selectedFeeds?.includes(targetKey) || false;
@@ -1683,14 +1699,16 @@ export class Sidebar {
 
   private appendSelectionContextMenu(menu: Menu): void {
     menu.addItem((item: MenuItem) => {
-      item.setTitle("Mark selection as read")
+      item
+        .setTitle("Mark selection as read")
         .setIcon("check-circle")
         .onClick(() => {
           void this.markSelectionReadStatus(true);
         });
     });
     menu.addItem((item: MenuItem) => {
-      item.setTitle("Mark selection as unread")
+      item
+        .setTitle("Mark selection as unread")
         .setIcon("circle")
         .onClick(() => {
           void this.markSelectionReadStatus(false);
@@ -1698,7 +1716,8 @@ export class Sidebar {
     });
     menu.addSeparator();
     menu.addItem((item: MenuItem) => {
-      item.setTitle("Delete selection")
+      item
+        .setTitle("Delete selection")
         .setIcon("trash")
         .onClick(() => {
           this.deleteSelection();
@@ -1708,7 +1727,7 @@ export class Sidebar {
 
   private async markSelectionReadStatus(read: boolean): Promise<void> {
     const { selectedFolders, selectedFeeds } = this.options;
-    
+
     const feedsToUpdate = new Set<Feed>();
     for (const feed of this.settings.feeds) {
       if (selectedFeeds && selectedFeeds.includes(feed.url)) {
@@ -1728,14 +1747,14 @@ export class Sidebar {
         }
       }
     }
-    
+
     const count = await this.markFeedsReadStatus([...feedsToUpdate], read);
     if (count === null) return;
     if (count > 0) {
-      new Notice(`Marked ${count} items as ${read ? 'read' : 'unread'}`);
+      new Notice(`Marked ${count} items as ${read ? "read" : "unread"}`);
       this.render();
     } else {
-      new Notice(`No items to mark as ${read ? 'read' : 'unread'}`);
+      new Notice(`No items to mark as ${read ? "read" : "unread"}`);
     }
   }
 
@@ -1743,9 +1762,9 @@ export class Sidebar {
     const { selectedFolders, selectedFeeds } = this.options;
     const folderCount = selectedFolders?.length || 0;
     const feedCount = selectedFeeds?.length || 0;
-    
+
     if (folderCount === 0 && feedCount === 0) return;
-    
+
     let msg = `Are you sure you want to delete the selected items? This action cannot be undone.`;
     if (folderCount > 0 && feedCount === 0) {
       msg = `Are you sure you want to delete ${folderCount} selected folder(s) and all their subfolders and feeds?`;
@@ -1754,7 +1773,7 @@ export class Sidebar {
     } else {
       msg = `Are you sure you want to delete ${folderCount} folder(s) and ${feedCount} feed(s)?`;
     }
-    
+
     this.showConfirmModal(msg, () => {
       if (selectedFolders) {
         for (const folder of selectedFolders) {
@@ -1763,7 +1782,7 @@ export class Sidebar {
       }
       if (selectedFeeds) {
         for (const feedUrl of selectedFeeds) {
-          const feed = this.settings.feeds.find(f => f.url === feedUrl);
+          const feed = this.settings.feeds.find((f) => f.url === feedUrl);
           if (feed) {
             this.callbacks.onDeleteFeed(feed);
           }
@@ -1782,8 +1801,8 @@ export class Sidebar {
     folderName: string,
   ): void {
     const menu = new Menu();
-    
-    if (this.isMultiSelectionTarget('folder', fullPath)) {
+
+    if (this.isMultiSelectionTarget("folder", fullPath)) {
       this.appendSelectionContextMenu(menu);
       menu.showAtMouseEvent(event);
       return;
@@ -2821,9 +2840,13 @@ export class Sidebar {
 
         case "sort":
           // sort requires the MouseEvent for menu positioning; action stored in fireIconAction
-          btn = createToolbarButton(iconConfig, () => {
-            /* keyboard: no-op */
-          }, toolbarT);
+          btn = createToolbarButton(
+            iconConfig,
+            () => {
+              /* keyboard: no-op */
+            },
+            toolbarT,
+          );
           btn.addEventListener("click", (e: MouseEvent) =>
             this.fireIconAction("sort", e),
           );
@@ -2873,7 +2896,9 @@ export class Sidebar {
     ) {
       const coachmark = addFeedBtn.createDiv({
         cls: "rss-dashboard-coachmark",
-        text: "Add your first feed here",
+        text: createTranslator(this.settings.locale ?? "zh-CN")(
+          "sidebar.addFeed",
+        ),
       });
       window.setTimeout(() => {
         if (!this.app.loadLocalStorage("rss-first-launch-coachmark-shown")) {
@@ -2892,8 +2917,12 @@ export class Sidebar {
       const closeBtn = rightActions.createDiv({
         cls: "rss-dashboard-header-close-button clickable-icon",
         attr: {
-          title: "Close sidebar",
-          "aria-label": "Close sidebar",
+          title: createTranslator(this.settings.locale ?? "zh-CN")(
+            "sidebar.close",
+          ),
+          "aria-label": createTranslator(this.settings.locale ?? "zh-CN")(
+            "sidebar.close",
+          ),
           role: "button",
           tabindex: "0",
         },
@@ -3086,7 +3115,12 @@ export class Sidebar {
       cls: "rss-dashboard-search-input",
       attr: {
         type: "text",
-        placeholder: "Search (feed:, folder:, tag:)",
+        placeholder: createTranslator(this.settings.locale ?? "zh-CN")(
+          "sidebar.search",
+        ),
+        "aria-label": createTranslator(this.settings.locale ?? "zh-CN")(
+          "sidebar.searchFeeds",
+        ),
         autocomplete: "off",
         spellcheck: "false",
         value: this.searchQuery,
@@ -3425,7 +3459,7 @@ export class Sidebar {
   private showFeedContextMenu(event: MouseEvent, feed: Feed): void {
     const menu = new Menu();
 
-    if (this.isMultiSelectionTarget('feed', feed.url)) {
+    if (this.isMultiSelectionTarget("feed", feed.url)) {
       this.appendSelectionContextMenu(menu);
       menu.showAtMouseEvent(event);
       return;

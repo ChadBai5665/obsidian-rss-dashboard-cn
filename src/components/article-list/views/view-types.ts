@@ -27,7 +27,7 @@ export interface ViewDeps {
 export interface BaseViewContext {
   selectedArticle: FeedItem | null;
   showFeedSource: boolean;
-  settings: Pick<RssDashboardSettings, "highlights" | "display"> & {
+  settings: Pick<RssDashboardSettings, "highlights" | "display" | "locale"> & {
     collapsedFeedSections?: string[];
   };
   highlightService: HighlightService | null;

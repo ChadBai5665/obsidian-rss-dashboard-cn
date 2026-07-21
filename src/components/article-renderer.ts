@@ -24,11 +24,8 @@ import {
   resolveFeedItemStableId,
 } from "../collection/item-identity";
 import { isYouTubeItem } from "../utils/youtube-detection";
+import { createTranslator } from "../i18n";
 
-const VIDEO_ARTICLE_BANNER =
-  "This item appears to be a video. Open the source page to watch.";
-const VIDEO_ARTICLE_LINK_TEXT = "Open video at source";
-const FEED_DESCRIPTION_UNAVAILABLE_TEXT = "No feed description available.";
 const MAX_SESSION_CONTENT_ITEMS = 12;
 
 export interface ArticleRendererOptions {
@@ -84,6 +81,13 @@ export class ArticleRenderer {
     { content: string; failureType: FullArticleFetchFailureType }
   >();
 
+  private t(
+    key: Parameters<ReturnType<typeof createTranslator>>[0],
+    params?: Record<string, string | number>,
+  ): string {
+    return createTranslator(this.settings.locale ?? "en")(key, params);
+  }
+
   constructor(options: ArticleRendererOptions) {
     this.app = options.app;
     this.settings = options.settings;
@@ -91,7 +95,9 @@ export class ArticleRenderer {
     this.onArticleUpdate = options.onArticleUpdate;
     this.onOpenSavedArticle = options.onOpenSavedArticle;
     this.onPlaybackProgress = options.onPlaybackProgress;
-    this.explicitContentCoordinator = new ExplicitContentCoordinator(this.app.vault);
+    this.explicitContentCoordinator = new ExplicitContentCoordinator(
+      this.app.vault,
+    );
   }
 
   public async render(
@@ -137,7 +143,10 @@ export class ArticleRenderer {
       const fullTextResult = this.shouldSkipFullArticleFetch(item)
         ? { content: "", failureType: "none" as const }
         : await this.readOrFetchExplicitArticleContent(item, renderRequest);
-      if (renderRequest !== this.renderRequestSequence || this.currentItem !== item) {
+      if (
+        renderRequest !== this.renderRequestSequence ||
+        this.currentItem !== item
+      ) {
         return;
       }
       const fetchedContent = fullTextResult.content;
@@ -189,12 +198,12 @@ export class ArticleRenderer {
     } else {
       const errorContainer = videoContainer.createDiv({
         cls: "rss-reader-error",
-        text: "Video id not found. Cannot play this video.",
+        text: this.t("reader.videoMissing"),
       });
       if (item.link) {
         const watchLink = errorContainer.createEl("a", {
           cls: "rss-reader-error-link",
-          text: "Watch on YouTube",
+          text: this.t("reader.watchYoutube"),
           href: item.link,
         });
         watchLink.target = "_blank";
@@ -334,7 +343,9 @@ export class ArticleRenderer {
         cls: "rss-reader-description-callout",
       });
       descriptionCallout.open = true;
-      descriptionCallout.createEl("summary", { text: "Feed description" });
+      descriptionCallout.createEl("summary", {
+        text: this.t("reader.feedDescription"),
+      });
       const descriptionBody = descriptionCallout.createDiv({
         cls: "rss-reader-description rss-reader-description-body",
       });
@@ -351,7 +362,7 @@ export class ArticleRenderer {
           undefined,
         );
       } else {
-        descriptionBody.setText(FEED_DESCRIPTION_UNAVAILABLE_TEXT);
+        descriptionBody.setText(this.t("reader.noFeedDescription"));
       }
     }
 
@@ -426,7 +437,7 @@ export class ArticleRenderer {
     });
     const message = banner.createDiv({
       cls: "rss-reader-video-banner-text",
-      text: VIDEO_ARTICLE_BANNER,
+      text: this.t("reader.videoSource"),
     });
     message.setAttr("role", "note");
 
@@ -436,7 +447,7 @@ export class ArticleRenderer {
 
     const link = banner.createEl("a", {
       cls: "rss-reader-video-banner-link",
-      text: VIDEO_ARTICLE_LINK_TEXT,
+      text: this.t("reader.openVideoSource"),
       href: item.link,
     });
     link.target = "_blank";
@@ -718,9 +729,12 @@ export class ArticleRenderer {
       sourceUrl: item.link || undefined,
       fetch: async () => {
         let failureType: FullArticleFetchFailureType = "none";
-        const content = await this.fetchFullArticleContent(item.link, (next) => {
-          failureType = next;
-        });
+        const content = await this.fetchFullArticleContent(
+          item.link,
+          (next) => {
+            failureType = next;
+          },
+        );
         return { content, failureType };
       },
     });
@@ -731,14 +745,18 @@ export class ArticleRenderer {
     ) {
       this.sessionContent.set(cacheKey, result);
       while (this.sessionContent.size > MAX_SESSION_CONTENT_ITEMS) {
-        this.sessionContent.delete(this.sessionContent.keys().next().value as string);
+        this.sessionContent.delete(
+          this.sessionContent.keys().next().value as string,
+        );
       }
     }
     return result;
   }
 
   private getCollectedItemId(item: FeedItem): string {
-    const feed = this.settings.feeds.find((candidate) => candidate.url === item.feedUrl);
+    const feed = this.settings.feeds.find(
+      (candidate) => candidate.url === item.feedUrl,
+    );
     if (feed) {
       bindFeedItemSourceIdentity(feed, item);
     } else {

@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { App } from "obsidian";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
-import { DEFAULT_SETTINGS, type RssDashboardSettings } from "../../../src/types/types";
+import {
+  DEFAULT_SETTINGS,
+  type RssDashboardSettings,
+} from "../../../src/types/types";
 
 const sidebarRenderSpy = vi.fn();
 
@@ -51,7 +54,10 @@ vi.mock("../../../src/services/article-saver", () => ({
 }));
 
 function cloneSettings(): RssDashboardSettings {
-  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+  return {
+    ...JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
+    locale: "en",
+  } as RssDashboardSettings;
 }
 
 describe("Dashboard header title batching", () => {
@@ -64,7 +70,8 @@ describe("Dashboard header title batching", () => {
   it("coalesces Apply's batch of filter updates into a single header title update", async () => {
     vi.useFakeTimers();
 
-    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const { RssDashboardView } =
+      await import("../../../src/views/dashboard-view");
 
     const app = new App();
     const settings = cloneSettings();
@@ -89,7 +96,10 @@ describe("Dashboard header title batching", () => {
       };
     }
 
-    const view = new RssDashboardView(leaf, plugin as never) as unknown as RssDashboardViewWithPrivates;
+    const view = new RssDashboardView(
+      leaf,
+      plugin as never,
+    ) as unknown as RssDashboardViewWithPrivates;
 
     view.schedulePersistDashboardMultiFilters = vi.fn();
     view.getFilteredArticles = vi.fn(() => []);
@@ -118,7 +128,8 @@ describe("Dashboard header title batching", () => {
   });
 
   it("refreshSidebarOnly rerenders the sidebar without rebuilding the article list", async () => {
-    const { RssDashboardView } = await import("../../../src/views/dashboard-view");
+    const { RssDashboardView } =
+      await import("../../../src/views/dashboard-view");
 
     const app = new App();
     const settings = cloneSettings();
@@ -139,7 +150,10 @@ describe("Dashboard header title batching", () => {
       refreshSidebarOnly: () => void;
     }
 
-    const view = new RssDashboardView(leaf, plugin as never) as unknown as RssDashboardViewWithPrivates;
+    const view = new RssDashboardView(
+      leaf,
+      plugin as never,
+    ) as unknown as RssDashboardViewWithPrivates;
 
     view.sidebar = {
       clearFolderPathCache: vi.fn(),
@@ -156,4 +170,3 @@ describe("Dashboard header title batching", () => {
     expect(view.articleList.destroy).not.toHaveBeenCalled();
   });
 });
-

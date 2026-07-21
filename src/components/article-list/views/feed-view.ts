@@ -1,4 +1,5 @@
 import { setIcon } from "obsidian";
+import { createTranslator } from "../../../i18n";
 import type { FeedItem } from "../../../types/types";
 import { formatArticleDate } from "../../../utils/platform-utils";
 import {
@@ -168,6 +169,7 @@ export function renderFeedView(
   ctx: BaseViewContext,
   deps: ViewDeps,
 ): void {
+  const t = createTranslator(ctx.settings.locale ?? "zh-CN");
   // Group articles by feed source
   const groupedArticles = groupArticles(articles, "feed");
 
@@ -197,7 +199,7 @@ export function renderFeedView(
       cls: "rss-dashboard-feed-section-toggle",
       attr: {
         type: "button",
-        "aria-label": `Toggle ${feedSourceName} section`,
+        "aria-label": t("article.toggleSection", { source: feedSourceName }),
         "aria-expanded": String(!isCollapsed),
       },
     });

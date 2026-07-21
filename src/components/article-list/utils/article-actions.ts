@@ -1,5 +1,11 @@
 import { Notice, setIcon } from "obsidian";
-import type { ArticleSavingSettings, DisplaySettings, FeedItem } from "../../../types/types";
+import type {
+  ArticleSavingSettings,
+  DisplaySettings,
+  FeedItem,
+} from "../../../types/types";
+import { createTranslator } from "../../../i18n";
+import type { Locale } from "../../../i18n";
 
 function toggleClickableIcon(
   el: HTMLElement,
@@ -25,6 +31,7 @@ export type CreateActionButtonArgs = {
   settings: {
     articleSaving?: Partial<ArticleSavingSettings>;
     display?: Partial<DisplaySettings>;
+    locale?: Locale;
   };
   callbacks: {
     onArticleUpdate?: (
@@ -46,15 +53,21 @@ export type CreateActionButtonArgs = {
 };
 
 export function createReadToggle(
-  arg: Pick<CreateActionButtonArgs, "article" | "actionToolbar" | "callbacks">,
+  arg: Pick<
+    CreateActionButtonArgs,
+    "article" | "actionToolbar" | "callbacks" | "settings"
+  >,
 ): HTMLElement {
+  const t = createTranslator(arg.settings.locale ?? "en");
   const readToggle = arg.actionToolbar.createDiv({
     cls: `rss-dashboard-read-toggle clickable-icon ${arg.article.read ? "read" : "unread"}`,
     attr: {
-      title: arg.article.read ? "Mark as unread" : "Mark as read",
+      title: arg.article.read ? t("article.markUnread") : t("article.markRead"),
       role: "button",
       tabindex: "0",
-      "aria-label": arg.article.read ? "Mark as unread" : "Mark as read",
+      "aria-label": arg.article.read
+        ? t("article.markUnread")
+        : t("article.markRead"),
     },
   });
   setIcon(readToggle, arg.article.read ? "check-circle" : "circle");
@@ -92,17 +105,18 @@ export function createSaveButton(
     "article" | "actionToolbar" | "settings" | "callbacks"
   >,
 ): HTMLElement {
+  const t = createTranslator(arg.settings.locale ?? "en");
   const saveButton = arg.actionToolbar.createDiv({
     cls: `rss-dashboard-save-toggle clickable-icon ${arg.article.saved ? "saved" : ""}`,
     attr: {
       title: arg.article.saved
-        ? "Click to open saved article"
+        ? t("article.openSaved")
         : arg.settings.articleSaving?.saveFullContent
-          ? "Save full article content to notes"
-          : "Save article summary to notes",
+          ? t("article.saveFull")
+          : t("article.saveSummary"),
       role: "button",
       tabindex: "0",
-      "aria-label": "Save article",
+      "aria-label": t("article.save"),
     },
   });
   setIcon(saveButton, "save");
@@ -118,7 +132,7 @@ export function createSaveButton(
       if (arg.callbacks.onOpenSavedArticle) {
         await arg.callbacks.onOpenSavedArticle(arg.article);
       } else {
-        new Notice("Article already saved. Look in your notes.");
+        new Notice(t("article.alreadySaved"));
       }
     } else if (arg.callbacks.onArticleSave) {
       if (saveButton.classList.contains("saving")) {
@@ -126,7 +140,7 @@ export function createSaveButton(
       }
 
       saveButton.classList.add("saving");
-      saveButton.setAttribute("title", "Saving article...");
+      saveButton.setAttribute("title", t("article.saving"));
 
       try {
         await arg.callbacks.onArticleSave(arg.article);
@@ -136,10 +150,10 @@ export function createSaveButton(
         if (!saveButton.querySelector("svg")) {
           saveButton.textContent = "S";
         }
-        saveButton.setAttribute("title", "Click to open saved article");
+        saveButton.setAttribute("title", t("article.openSaved"));
       } catch (error) {
         console.error("Failed to save article via card button:", error);
-        new Notice("Failed to save article.");
+        new Notice(t("article.saveFailed"));
       } finally {
         saveButton.classList.remove("saving");
       }
@@ -159,17 +173,21 @@ export function createSaveButton(
 }
 
 export function createStarToggle(
-  arg: Pick<CreateActionButtonArgs, "article" | "actionToolbar" | "callbacks">,
+  arg: Pick<
+    CreateActionButtonArgs,
+    "article" | "actionToolbar" | "callbacks" | "settings"
+  >,
 ): HTMLElement {
+  const t = createTranslator(arg.settings.locale ?? "en");
   const starToggle = arg.actionToolbar.createDiv({
     cls: `rss-dashboard-star-toggle clickable-icon ${arg.article.starred ? "starred" : "unstarred"}`,
     attr: {
       title: arg.article.starred
-        ? "Remove from starred items"
-        : "Add to starred items",
+        ? t("article.removeStar")
+        : t("article.addStar"),
       role: "button",
       tabindex: "0",
-      "aria-label": "Toggle star",
+      "aria-label": t("article.toggleStar"),
     },
   });
   const starIcon = starToggle.createSpan({
@@ -215,18 +233,22 @@ export function createStarToggle(
 }
 
 export function createTagsToggle(
-  arg: Pick<CreateActionButtonArgs, "article" | "actionToolbar" | "deps">,
+  arg: Pick<
+    CreateActionButtonArgs,
+    "article" | "actionToolbar" | "deps" | "settings"
+  >,
 ): HTMLElement {
+  const t = createTranslator(arg.settings.locale ?? "en");
   const tagsDropdown = arg.actionToolbar.createDiv({
     cls: "rss-dashboard-tags-dropdown",
   });
   const tagsToggle = tagsDropdown.createDiv({
     cls: "rss-dashboard-tags-toggle clickable-icon",
     attr: {
-      title: "Manage tags",
+      title: t("article.manageTags"),
       role: "button",
       tabindex: "0",
-      "aria-label": "Manage tags",
+      "aria-label": t("article.manageTags"),
     },
   });
   setIcon(tagsToggle, "tag");

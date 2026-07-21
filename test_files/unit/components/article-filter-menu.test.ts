@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ArticleFilterMenu, type ArticleFilterCallbacks } from "../../../src/components/article-filter-menu";
+import {
+  ArticleFilterMenu,
+  type ArticleFilterCallbacks,
+} from "../../../src/components/article-filter-menu";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
-import { type RssDashboardSettings, DEFAULT_SETTINGS } from "../../../src/types/types";
+import {
+  type RssDashboardSettings,
+  DEFAULT_SETTINGS,
+} from "../../../src/types/types";
 
 describe("ArticleFilterMenu Component", () => {
   let container: HTMLElement;
@@ -20,10 +26,11 @@ describe("ArticleFilterMenu Component", () => {
 
     settings = {
       ...DEFAULT_SETTINGS,
+      locale: "en",
       viewStyle: "card",
       availableTags: [
         { name: "Tag1", color: "#ff0000" },
-        { name: "Tag2", color: "#00ff00" }
+        { name: "Tag2", color: "#00ff00" },
       ],
       keywordRules: { ...DEFAULT_SETTINGS.keywordRules, bypassAll: false },
       highlights: { ...DEFAULT_SETTINGS.highlights, enabled: true },
@@ -32,7 +39,7 @@ describe("ArticleFilterMenu Component", () => {
         showFilterStatusBar: true,
         cardColumnsPerRow: 0,
         cardSpacing: 15,
-      }
+      },
     };
 
     mockCallbacks = {
@@ -51,7 +58,7 @@ describe("ArticleFilterMenu Component", () => {
       new Set(["unread"]),
       new Set(),
       "AND",
-      mockCallbacks
+      mockCallbacks,
     );
 
     filterMenu.show(toggleBtn);
@@ -68,23 +75,28 @@ describe("ArticleFilterMenu Component", () => {
       new Set(),
       new Set(),
       "AND",
-      mockCallbacks
+      mockCallbacks,
     );
 
     filterMenu.show(toggleBtn);
 
-    const applyBtn = document.querySelector(".rss-dashboard-filter-apply-btn") as HTMLElement;
+    const applyBtn = document.querySelector(
+      ".rss-dashboard-filter-apply-btn",
+    ) as HTMLElement;
     // Simulate checking Unread (usually item index 1 or by label)
     // Find the item with text "Unread"
-    const unreadItem = Array.from(document.querySelectorAll<HTMLElement>(".rss-dashboard-filter-menu-item"))
-        .find(item => item.textContent?.includes("Unread"));
+    const unreadItem = Array.from(
+      document.querySelectorAll<HTMLElement>(".rss-dashboard-filter-menu-item"),
+    ).find((item) => item.textContent?.includes("Unread"));
 
     if (unreadItem) {
       unreadItem.click();
     }
     applyBtn.click();
 
-    const mockFn = mockCallbacks.onFilterChange as unknown as { mock: { calls: Array<Array<{ batch: { statusFilters: Set<string> } }>> } };
+    const mockFn = mockCallbacks.onFilterChange as unknown as {
+      mock: { calls: Array<Array<{ batch: { statusFilters: Set<string> } }>> };
+    };
     expect(mockFn.mock.calls.length).toBe(1);
 
     const lastCall = mockFn.mock.calls[0][0];
@@ -97,7 +109,7 @@ describe("ArticleFilterMenu Component", () => {
       new Set(),
       new Set(),
       "AND",
-      mockCallbacks
+      mockCallbacks,
     );
 
     filterMenu.show(toggleBtn);
