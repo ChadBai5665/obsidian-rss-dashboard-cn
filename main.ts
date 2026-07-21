@@ -82,6 +82,7 @@ import { DailyIndexService } from "./src/collection/daily-index-service";
 import { CollectionService } from "./src/services/collection-service";
 import { isTimeoutFeedError } from "./src/services/feed-parser/feed-errors";
 import { bindFeedItemsToSourceIdentity } from "./src/collection/item-identity";
+import type { CollectedItem } from "./src/collection/collected-item";
 
 export interface FeedRefreshResult {
   feed: Feed;
@@ -542,6 +543,22 @@ export default class RssDashboardPlugin extends Plugin {
     return service;
   }
 
+  /**
+   * Reads a complete daily collection snapshot for neutral dashboard filters.
+   * Filtering stays in the view/query service so repository reads cannot
+   * accidentally hide records based on UI state.
+   */
+  public async getCollectedItemsForDate(
+    localDate: string,
+  ): Promise<CollectedItem[]> {
+    const repository = new CollectionRepository(
+      this.app.vault,
+      this.settings.collection.dataFolder.trim(),
+      () => new Date(),
+    );
+    return await repository.listByDate(localDate);
+  }
+
   private getRefreshSourceIds(): string[] {
     return this.getRefreshableFeeds(this.settings.feeds).map(
       (feed) => feed.feedId ?? feed.url,
@@ -922,10 +939,19 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.addCommand({
         id: "refresh-feeds",
-        name: "Refresh feeds",
+        name: "Refresh all sources",
         callback: () => {
           this.cancelPendingStartupRefresh();
           void this.refreshFeeds();
+        },
+      });
+
+      this.addCommand({
+        id: "refresh-failed-sources",
+        name: "Refresh failed sources",
+        callback: () => {
+          this.cancelPendingStartupRefresh();
+          void this.refreshFailedSources();
         },
       });
 
@@ -1423,6 +1449,21 @@ export default class RssDashboardPlugin extends Plugin {
     if (failedFeeds.length > 0) {
       await this.refreshFeeds(failedFeeds);
     }
+  }
+
+  /**
+   * Resolves a durable collection source identity only against current
+   * subscriptions before entering the existing single-source refresh path.
+   */
+  async refreshSourceById(sourceId: string): Promise<void> {
+    const feed = this.settings.feeds.find(
+      (candidate) => (candidate.feedId ?? candidate.url) === sourceId,
+    );
+    if (!feed) {
+      new Notice("This source is no longer subscribed.");
+      return;
+    }
+    await this.refreshSelectedFeed(feed);
   }
 
   /**

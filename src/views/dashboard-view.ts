@@ -39,6 +39,12 @@ import { applyAutomaticArticleTags } from "../utils/tag-utils";
 import { resolveItemExternalUrl } from "../utils/item-url-utils";
 import { buildArticleEmptyStateContext } from "../utils/filter-detection";
 import { setupDashboardHotkeys } from "../hotkeys/dashboard-hotkeys";
+import {
+  CollectionQueryService,
+  type CollectionQueryInput,
+} from "../collection/collection-query-service";
+import type { CollectedItem } from "../collection/collected-item";
+import { toLocalCalendarDate } from "../refresh/local-calendar-day";
 
 export const RSS_DASHBOARD_VIEW_TYPE = "rss-dashboard-view";
 
@@ -55,6 +61,8 @@ type SidebarKeyboardController = {
   deleteFocusedItem: () => void;
   renameFocusedItem: () => void;
 };
+
+type CollectionSection = "today" | "subscriptions" | "starred" | "saved";
 
 export class RssDashboardView extends ItemView {
   private static readonly CARD_LAYOUT_RELAYOUT_DELAY_MS = 90;
@@ -116,6 +124,14 @@ export class RssDashboardView extends ItemView {
   private inlineArticle: FeedItem | null = null;
   private articleRenderer: ArticleRenderer | null = null;
   private lastClickAnchorKey: string | null = null;
+  private readonly collectionQueryService = new CollectionQueryService();
+  private collectionSection: CollectionSection = "today";
+  private collectionItems: CollectedItem[] = [];
+  private collectionQueryText = "";
+  private collectionLoading = false;
+  private collectionLoadError = false;
+  private collectionLoadGeneration = 0;
+  private collectionViewDisposed = false;
 
   // ── Highlight match stats ─────────────────────────────────────────────────
   // Populated by computeHighlightMatchCounts() on every render cycle (before
@@ -183,6 +199,21 @@ export class RssDashboardView extends ItemView {
    */
   public async actionRefreshFeeds(): Promise<void> {
     await this.handleRefreshFeeds();
+  }
+
+  /** Refresh all current subscriptions through the shared refresh pipeline. */
+  public async actionRefreshAllSources(): Promise<void> {
+    await this.plugin.refreshFeeds();
+  }
+
+  /** Retry only currently subscribed sources with a durable error state. */
+  public async actionRefreshFailedSources(): Promise<void> {
+    await this.plugin.refreshFailedSources();
+  }
+
+  /** Refreshes the current subscription represented by a collection source row. */
+  public async actionRefreshCollectionSource(sourceId: string): Promise<void> {
+    await this.plugin.refreshSourceById(sourceId);
   }
 
   private getSidebarKeyboardController(): SidebarKeyboardController | null {
@@ -583,6 +614,7 @@ export class RssDashboardView extends ItemView {
 
   // --- Render pipeline ---
   onOpen(): Promise<void> {
+    this.collectionViewDisposed = false;
     this.articleRenderer = new ArticleRenderer({
       app: this.app,
       settings: this.settings,
@@ -790,6 +822,7 @@ export class RssDashboardView extends ItemView {
     this.dashboardContainer = dashboardContainer;
 
     this.render();
+    void this.loadCollectionItems();
 
     return Promise.resolve();
   }
@@ -875,6 +908,7 @@ export class RssDashboardView extends ItemView {
       }
 
       this.renderToolbar(contentContainer);
+      this.renderCollectionSections(contentContainer);
       this.renderFilterSubheader(contentContainer);
 
       const articlesContainer = contentContainer.createDiv({
@@ -1036,6 +1070,162 @@ export class RssDashboardView extends ItemView {
 
   private renderToolbar(container: HTMLElement): void {
     container.createDiv({ cls: "rss-dashboard-toolbar" });
+  }
+
+  /**
+   * Loads the entire local-day snapshot before any collection filter is
+   * applied. The generation guard prevents an asynchronously completed read
+   * from painting a dashboard that has since been closed or replaced.
+   */
+  public async loadCollectionItems(): Promise<void> {
+    const generation = ++this.collectionLoadGeneration;
+    this.collectionLoading = true;
+    this.collectionLoadError = false;
+
+    try {
+      const items = await this.plugin.getCollectedItemsForDate(
+        toLocalCalendarDate(new Date()),
+      );
+      if (this.collectionViewDisposed || generation !== this.collectionLoadGeneration) {
+        return;
+      }
+      this.collectionItems = items;
+    } catch {
+      if (this.collectionViewDisposed || generation !== this.collectionLoadGeneration) {
+        return;
+      }
+      this.collectionLoadError = true;
+    } finally {
+      if (!this.collectionViewDisposed && generation === this.collectionLoadGeneration) {
+        this.collectionLoading = false;
+        this.render();
+      }
+    }
+  }
+
+  public setCollectionSection(section: CollectionSection): void {
+    this.collectionSection = section;
+    this.render();
+  }
+
+  public setCollectionQueryText(text: string): void {
+    this.collectionQueryText = text;
+    this.render();
+  }
+
+  /** Returns an objectively filtered collection snapshot, never a ranked list. */
+  public getCollectionSectionItems(): CollectedItem[] {
+    const input: CollectionQueryInput = {
+      items: this.collectionItems,
+      text: this.collectionQueryText,
+    };
+
+    if (this.collectionSection === "subscriptions") {
+      const currentSourceIds = new Set(
+        this.settings.feeds.map((feed) => feed.feedId ?? feed.url),
+      );
+      input.items = input.items.filter((item) => currentSourceIds.has(item.sourceId));
+    } else if (this.collectionSection === "starred") {
+      input.starred = true;
+    } else if (this.collectionSection === "saved") {
+      input.saved = true;
+    }
+
+    return this.collectionQueryService.query(input);
+  }
+
+  private renderCollectionSections(container: HTMLElement): void {
+    const section = container.createDiv({
+      cls: "rss-dashboard-collection-sections",
+    });
+    section.createDiv({
+      cls: "rss-dashboard-collection-title",
+      text: "Collection",
+    });
+
+    const controls = section.createDiv({
+      cls: "rss-dashboard-collection-controls",
+    });
+    const labels: Array<{ section: CollectionSection; label: string }> = [
+      { section: "today", label: "Today" },
+      { section: "subscriptions", label: "My subscriptions" },
+      { section: "starred", label: "Starred" },
+      { section: "saved", label: "Saved" },
+    ];
+    for (const option of labels) {
+      const button = controls.createEl("button", {
+        text: option.label,
+        cls: "rss-dashboard-collection-section-button",
+        attr: { type: "button" },
+      });
+      button.toggleClass("is-active", option.section === this.collectionSection);
+      button.addEventListener("click", () => this.setCollectionSection(option.section));
+    }
+
+    const refreshAll = controls.createEl("button", {
+      text: "Refresh all",
+      cls: "rss-dashboard-collection-refresh-all",
+      attr: { type: "button" },
+    });
+    refreshAll.addEventListener("click", () => {
+      void this.actionRefreshAllSources();
+    });
+    const refreshFailed = controls.createEl("button", {
+      text: "Refresh failed",
+      cls: "rss-dashboard-collection-refresh-failed",
+      attr: { type: "button" },
+    });
+    refreshFailed.addEventListener("click", () => {
+      void this.actionRefreshFailedSources();
+    });
+
+    const search = section.createEl("input", {
+      cls: "rss-dashboard-collection-search",
+      attr: {
+        type: "search",
+        placeholder: "Search collected items",
+        "aria-label": "Search collected items",
+      },
+    });
+    search.value = this.collectionQueryText;
+    search.addEventListener("input", () => this.setCollectionQueryText(search.value));
+
+    if (this.collectionLoading) {
+      section.createDiv({ text: "Loading today's collection…" });
+      return;
+    }
+    if (this.collectionLoadError) {
+      // Do not expose a storage path or raw adapter error in the dashboard.
+      section.createDiv({ text: "Could not load today's collection." });
+      return;
+    }
+
+    const list = section.createDiv({ cls: "rss-dashboard-collection-list" });
+    const items = this.getCollectionSectionItems();
+    if (items.length === 0) {
+      list.createDiv({ text: "No collected items." });
+      return;
+    }
+
+    for (const item of items) {
+      const row = list.createDiv({ cls: "rss-dashboard-collection-row" });
+      row.createSpan({
+        cls: "rss-dashboard-collection-item-title",
+        text: item.title,
+      });
+      const source = row.createEl("button", {
+        cls: "rss-dashboard-collection-source-refresh",
+        text: item.sourceName,
+        attr: {
+          type: "button",
+          title: "Refresh this source",
+          "aria-label": `Refresh ${item.sourceName}`,
+        },
+      });
+      source.addEventListener("click", () => {
+        void this.actionRefreshCollectionSource(item.sourceId);
+      });
+    }
   }
 
   // --- Status bar / dashboard filter summary ---
@@ -3332,9 +3522,12 @@ export class RssDashboardView extends ItemView {
 
   refresh(): void {
     this.render();
+    void this.loadCollectionItems();
   }
 
   async onClose(): Promise<void> {
+    this.collectionViewDisposed = true;
+    this.collectionLoadGeneration += 1;
     this.articleRenderer?.dispose();
     this.articleRenderer = null;
     this.closeMobileSidebarModal();
