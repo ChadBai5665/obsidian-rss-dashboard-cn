@@ -27,6 +27,7 @@
 
 - Modify: `manifest.json`
 - Modify: `package.json`
+- Modify: `package-lock.json`
 - Modify: `src/types/types.ts`
 - Modify: `src/utils/settings-loader.ts`
 - Modify: `test_files/unit/utils/settings-loader.test.ts`
@@ -84,7 +85,7 @@ Set:
 }
 ```
 
-Change the package name to `obsidian-rss-dashboard-cn`. Do not change the semantic version in this task.
+Change the package name to `obsidian-rss-dashboard-cn` in both `package.json` and the root package metadata in `package-lock.json`. Do not change the semantic version in this task.
 
 - [ ] **Step 5: Make the settings loader perform an additive migration**
 
@@ -99,7 +100,7 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add manifest.json package.json src/types/types.ts src/utils/settings-loader.ts test_files/unit/utils/settings-loader.test.ts test_files/unit/main/plugin-lifecycle.test.ts
+git add manifest.json package.json package-lock.json src/types/types.ts src/utils/settings-loader.ts test_files/unit/utils/settings-loader.test.ts test_files/unit/main/plugin-lifecycle.test.ts
 git commit -m "feat: establish RSS Dashboard CN settings"
 ```
 
