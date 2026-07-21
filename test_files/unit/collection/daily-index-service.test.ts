@@ -96,7 +96,61 @@ describe("DailyIndexService", () => {
     });
 
     expect(adapter.files.get("信息收集/每日采集/2026-07-21.md")).toBe(
-      "# 用户标题\n\n用户正文\n\n<!-- RSS-DASHBOARD-CN:AUTO:START -->\n## 我的订阅\n- 来源：Example feed ｜ 时间：2026-07-21T12:00:00.000Z ｜ 类型：new\n  - [Example item](https://example.com/article)\n  - 原始链接：https://example.com/article\n<!-- RSS-DASHBOARD-CN:AUTO:END -->\n",
+      "# 用户标题\n\n用户正文\n\n<!-- RSS-DASHBOARD-CN:AUTO:START -->\n## 我的订阅\n- 来源：Example feed ｜ 时间：2026-07-21T12:00:00.000Z ｜ 类型：new\n  - [Example item](<https://example.com/article>)\n  - 原始链接：https://example.com/article\n<!-- RSS-DASHBOARD-CN:AUTO:END -->\n",
     );
+  });
+
+  it("does not write a document whose existing ownership markers are malformed", async () => {
+    const { adapter, service } = createHarness();
+    adapter.directories.add("信息收集");
+    adapter.directories.add("信息收集/每日采集");
+    const path = "信息收集/每日采集/2026-07-21.md";
+    const original = "用户内容\n<!-- RSS-DASHBOARD-CN:AUTO:START -->\n";
+    adapter.files.set(path, original);
+
+    await expect(
+      service.writeDailyIndex({ localDate: "2026-07-21", items: [createItem()] }),
+    ).rejects.toThrow("Invalid daily index ownership markers");
+
+    expect(adapter.files.get(path)).toBe(original);
+  });
+
+  it("rejects invalid local dates before touching the vault", async () => {
+    const { adapter, service } = createHarness();
+
+    for (const localDate of [
+      "2026-02-29",
+      "2026-02-30",
+      "2026-2-01",
+      "2026-13-01",
+      "2026-00-01",
+      "not-a-date",
+    ]) {
+      await expect(
+        service.writeDailyIndex({ localDate, items: [createItem()] }),
+      ).rejects.toThrow("Invalid local collection date");
+    }
+
+    expect(adapter.files).toEqual(new Map());
+    expect(adapter.directories).toEqual(new Set());
+  });
+
+  it("rejects unsafe non-relative daily index folders", () => {
+    for (const folder of [
+      "",
+      "/absolute",
+      "C:/work",
+      "C:\\work",
+      "folder\\child",
+      "folder//child",
+      "folder/./child",
+      "folder/../child",
+      "folder/\0child",
+      "folder/",
+    ]) {
+      expect(() => {
+        new DailyIndexService({ adapter: new InMemoryAdapter() } as unknown as Vault, folder);
+      }).toThrow("Invalid daily index folder");
+    }
   });
 });
