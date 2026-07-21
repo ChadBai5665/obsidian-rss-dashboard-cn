@@ -3595,7 +3595,7 @@ export class ReaderView extends ItemView {
     } else {
       container.createDiv({
         cls: "rss-reader-error",
-        text: "Video url not found. Cannot play this video podcast.",
+        text: this.t("reader.videoUrlMissing"),
       });
       await this.displayArticle(item);
       return;
@@ -3616,7 +3616,7 @@ export class ReaderView extends ItemView {
     const relatedContainer = container.createDiv({
       cls: "rss-video-related",
     });
-    relatedContainer.createEl("h4", { text: "From the same channel" });
+    relatedContainer.createEl("h4", { text: this.t("reader.sameChannel") });
 
     const relatedVideos = (
       this.settings.feeds.find((f) => f.url === item.feedUrl)?.items || []
@@ -3661,7 +3661,7 @@ export class ReaderView extends ItemView {
     } else {
       relatedContainer.createDiv({
         cls: "rss-video-related-empty",
-        text: "No related videos found",
+        text: this.t("reader.noRelatedVideos"),
       });
     }
   }

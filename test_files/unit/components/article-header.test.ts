@@ -81,6 +81,21 @@ describe("ArticleHeader Component", () => {
     expect(toggle).not.toBeNull();
   });
 
+  it("uses singular English and localized Chinese time ranges plus refresh accessibility", () => {
+    const header = new ArticleHeader(container, settings, "Title", null, null, new Set(), new Set(), "OR", mockCallbacks);
+    const enOptions = (header as unknown as { getAgeOptions(): Record<string, string> }).getAgeOptions();
+    expect(enOptions["1 hour"]).toBe("3600000");
+    expect(enOptions["1 week"]).toBe("604800000");
+    header.render();
+    const refresh = container.querySelector(".rss-dashboard-refresh-button");
+    expect(refresh?.getAttribute("title")).toBe("Refresh all");
+    expect(refresh?.getAttribute("aria-label")).toBe("Refresh all");
+
+    settings.locale = "zh-CN";
+    const zh = new ArticleHeader(container, settings, "标题", null, null, new Set(), new Set(), "OR", mockCallbacks);
+    expect((zh as unknown as { getAgeOptions(): Record<string, string> }).getAgeOptions()["1 小时"]).toBe("3600000");
+  });
+
   it("should trigger onToggleSidebar when sidebar toggle is clicked", () => {
     const header = new ArticleHeader(
       container,

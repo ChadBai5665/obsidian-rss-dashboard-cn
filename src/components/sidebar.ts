@@ -1710,7 +1710,7 @@ export class Sidebar {
   private appendSelectionContextMenu(menu: Menu): void {
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Mark selection as read")
+        .setTitle(this.t("sidebar.markSelectionRead"))
         .setIcon("check-circle")
         .onClick(() => {
           void this.markSelectionReadStatus(true);
@@ -1718,7 +1718,7 @@ export class Sidebar {
     });
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Mark selection as unread")
+        .setTitle(this.t("sidebar.markSelectionUnread"))
         .setIcon("circle")
         .onClick(() => {
           void this.markSelectionReadStatus(false);
@@ -1727,7 +1727,7 @@ export class Sidebar {
     menu.addSeparator();
     menu.addItem((item: MenuItem) => {
       item
-        .setTitle("Delete selection")
+        .setTitle(this.t("sidebar.deleteSelection"))
         .setIcon("trash")
         .onClick(() => {
           this.deleteSelection();
@@ -1761,10 +1761,10 @@ export class Sidebar {
     const count = await this.markFeedsReadStatus([...feedsToUpdate], read);
     if (count === null) return;
     if (count > 0) {
-      new Notice(`Marked ${count} items as ${read ? "read" : "unread"}`);
+      new Notice(this.t(read ? "dashboard.markedRead" : "dashboard.markedUnread", { count }));
       this.render();
     } else {
-      new Notice(`No items to mark as ${read ? "read" : "unread"}`);
+      new Notice(this.t("sidebar.noItemsToMark", { state: this.t(read ? "common.read" : "common.unread") }));
     }
   }
 
@@ -3527,7 +3527,7 @@ export class Sidebar {
           const typeMenu = new Menu();
           typeMenu.addItem((subItem: MenuItem) => {
             subItem
-              .setTitle("Article")
+              .setTitle(this.t("sidebar.mediaArticle"))
               .setIcon("file-text")
               .onClick(() => {
                 feed.mediaType = "article";
@@ -3536,7 +3536,7 @@ export class Sidebar {
           });
           typeMenu.addItem((subItem: MenuItem) => {
             subItem
-              .setTitle("Podcast")
+              .setTitle(this.t("sidebar.mediaPodcast"))
               .setIcon("headphones")
               .onClick(() => {
                 feed.mediaType = "podcast";
@@ -3545,7 +3545,7 @@ export class Sidebar {
           });
           typeMenu.addItem((subItem: MenuItem) => {
             subItem
-              .setTitle("Video")
+              .setTitle(this.t("sidebar.mediaVideo"))
               .setIcon("play-circle")
               .onClick(() => {
                 feed.mediaType = "video";

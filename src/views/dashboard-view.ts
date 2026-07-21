@@ -2843,7 +2843,7 @@ export class RssDashboardView extends ItemView {
         this.plugin.cancelPendingStartupRefresh();
         await this.plugin.refreshFeeds(feedsWithTags);
       } else {
-        new Notice("No feeds found with the selected tags");
+        new Notice(this.t("dashboard.noFeedsForTags"));
       }
     } else {
       this.plugin.cancelPendingStartupRefresh();
@@ -3933,7 +3933,7 @@ export class RssDashboardView extends ItemView {
 
   private async handleUpdateFeed(feed: Feed): Promise<void> {
     try {
-      new Notice(`Updating feed "${feed.title}"...`);
+      new Notice(this.t("dashboard.updateFeedStart", { feed: feed.title }));
 
       const updatedFeed = await this.plugin.feedParser.parseFeed(
         feed.url,
@@ -3951,10 +3951,10 @@ export class RssDashboardView extends ItemView {
       }
 
       void this.render();
-      new Notice(`Feed "${feed.title}" updated successfully`);
+      new Notice(this.t("dashboard.updateFeedSuccess", { feed: feed.title }));
     } catch (error) {
       new Notice(
-        `Error updating feed "${feed.title}": ${error instanceof Error ? error.message : "Unknown error"}`,
+        this.t("dashboard.updateFeedFailed", { feed: feed.title, error: error instanceof Error ? error.message : "Unknown error" }),
       );
     }
   }
@@ -4484,7 +4484,7 @@ export class RssDashboardView extends ItemView {
     });
     const backButton = header.createDiv({
       cls: "rss-reader-back-button clickable-icon",
-      attr: { title: "Back to dashboard", "aria-label": "Back to dashboard" },
+      attr: { title: this.t("dashboard.backToDashboard"), "aria-label": this.t("dashboard.backToDashboard") },
     });
     setIcon(backButton, "arrow-left");
     backButton.addEventListener("click", () => {
@@ -4494,7 +4494,7 @@ export class RssDashboardView extends ItemView {
 
     header.createDiv({
       cls: "rss-reader-title",
-      text: this.inlineArticle?.title || "Article",
+      text: this.inlineArticle?.title || this.t("dashboard.inlineArticle"),
     });
 
     if (this.inlineArticle) {
@@ -4502,7 +4502,7 @@ export class RssDashboardView extends ItemView {
 
       const saveButton = actions.createEl("button", {
         cls: `rss-reader-action-button${this.inlineArticle.saved ? " saved" : ""}`,
-        attr: { type: "button", title: "Save article" },
+        attr: { type: "button", title: this.t("reader.save"), "aria-label": this.t("reader.save") },
       });
       const saveKey = this.getInlineActionKey(this.inlineArticle, "save");
       saveButton.addClass("rss-inline-article-action");
@@ -4530,7 +4530,7 @@ export class RssDashboardView extends ItemView {
 
       const readToggleButton = actions.createEl("button", {
         cls: `rss-reader-action-button rss-reader-read-toggle${this.inlineArticle.read ? " read" : ""}`,
-        attr: { type: "button", title: "Mark as read/unread" },
+        attr: { type: "button", title: this.t("reader.toggleRead"), "aria-label": this.t("reader.toggleRead") },
       });
       const readKey = this.getInlineActionKey(this.inlineArticle, "read");
       readToggleButton.addClass("rss-inline-article-action");
@@ -4569,7 +4569,7 @@ export class RssDashboardView extends ItemView {
 
       const starToggleButton = actions.createEl("button", {
         cls: `rss-reader-action-button rss-reader-star-toggle${this.inlineArticle.starred ? " starred" : ""}`,
-        attr: { type: "button", title: "Star/unstar article" },
+        attr: { type: "button", title: this.t("reader.toggleStar"), "aria-label": this.t("reader.toggleStar") },
       });
       const starKey = this.getInlineActionKey(this.inlineArticle, "starred");
       starToggleButton.addClass("rss-inline-article-action");
@@ -4783,7 +4783,7 @@ export class RssDashboardView extends ItemView {
       if (location === "inline" && article) {
         this.inlineArticle = article;
         void this.render();
-        new Notice(`Opened saved article: ${file.basename}`);
+        new Notice(this.t("dashboard.savedOpened", { file: file.basename }));
         return;
       }
 
@@ -4795,20 +4795,20 @@ export class RssDashboardView extends ItemView {
       await leaf.openFile(file);
       void this.app.workspace.revealLeaf(leaf);
 
-      new Notice(`Opened saved article: ${file.basename}`);
+      new Notice(this.t("dashboard.savedOpened", { file: file.basename }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      new Notice(`Error opening saved article: ${message}`);
+      new Notice(this.t("dashboard.savedOpenFailed", { error: message }));
     }
   }
 
   private async handleOpenSavedArticle(article: FeedItem): Promise<void> {
     if (!article.saved) {
-      new Notice("Article is not saved locally");
+      new Notice(this.t("dashboard.savedNotLocal"));
       return;
     }
 
-    const loadingNotice = new Notice("Opening saved article...", 0);
+    const loadingNotice = new Notice(this.t("dashboard.savedOpening"), 0);
 
     try {
       const savedFile = await this.saver.findSavedArticleFile(article);
@@ -4825,12 +4825,12 @@ export class RssDashboardView extends ItemView {
         }
 
         loadingNotice.hide();
-        new Notice("Saved article file not found. Article status updated.");
+        new Notice(this.t("dashboard.savedMissing"));
       }
     } catch (error) {
       loadingNotice.hide();
       const message = error instanceof Error ? error.message : String(error);
-      new Notice(`Error opening saved article: ${message}`);
+      new Notice(this.t("dashboard.savedOpenFailed", { error: message }));
     }
   }
 

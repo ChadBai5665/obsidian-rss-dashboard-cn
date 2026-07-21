@@ -571,16 +571,16 @@ export class ArticleHeaderMenu {
   private getAgeOptions(): Record<string, string> {
     return {
       [this.t("dashboard.timeAll")]: "0",
-      [this.t("dashboard.timeHours", { count: 1 })]: "3600000",
+      [this.t("dashboard.timeHour")]: "3600000",
       [this.t("dashboard.timeHours", { count: 2 })]: "7200000",
       [this.t("dashboard.timeHours", { count: 4 })]: "14400000",
       [this.t("dashboard.timeHours", { count: 8 })]: "28800000",
       [this.t("dashboard.timeHours", { count: 24 })]: "86400000",
       [this.t("dashboard.timeHours", { count: 48 })]: "172800000",
       [this.t("settings.general.days", { count: 3 })]: "259200000",
-      [this.t("settings.general.weeks", { count: 1 })]: "604800000",
+      [this.t("dashboard.timeWeek")]: "604800000",
       [this.t("settings.general.weeks", { count: 2 })]: "1209600000",
-      [this.t("settings.general.months", { count: 1 })]: "2592000000",
+      [this.t("dashboard.timeMonth")]: "2592000000",
       [this.t("settings.general.months", { count: 6 })]: "15552000000",
       [this.t("settings.general.year")]: "31536000000",
     };

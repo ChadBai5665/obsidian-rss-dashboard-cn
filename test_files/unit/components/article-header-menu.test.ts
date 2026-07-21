@@ -66,6 +66,14 @@ describe("ArticleHeaderMenu Component", () => {
     ).not.toBeNull();
   });
 
+  it("keeps singular English and Chinese time ranges in the mobile menu", () => {
+    const en = new ArticleHeaderMenu(settings, "", callbacks);
+    expect((en as unknown as { getAgeOptions(): Record<string, string> }).getAgeOptions()["1 hour"]).toBe("3600000");
+    settings.locale = "zh-CN";
+    const zh = new ArticleHeaderMenu(settings, "", callbacks);
+    expect((zh as unknown as { getAgeOptions(): Record<string, string> }).getAgeOptions()["1 小时"]).toBe("3600000");
+  });
+
   it("toggles is-menu-open classes on button and dropdown", () => {
     const menu = new ArticleHeaderMenu(settings, "", callbacks);
 
