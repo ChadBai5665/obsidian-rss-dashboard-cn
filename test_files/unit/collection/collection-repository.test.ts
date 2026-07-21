@@ -179,7 +179,7 @@ function createHarness(
 
 function createRepository(
   adapter: InMemoryAdapter,
-  options: { withoutRename?: boolean; dataRoot?: string } = {},
+  options: { withoutRename?: boolean; dataRoot?: string; vault?: Vault } = {},
 ): CollectionRepository {
   const boundary = options.withoutRename
     ? {
@@ -192,7 +192,7 @@ function createRepository(
         list: adapter.list.bind(adapter),
       }
     : adapter;
-  const vault = { adapter: boundary } as unknown as Vault;
+  const vault = options.vault ?? ({ adapter: boundary } as unknown as Vault);
   return new CollectionRepository(
     vault,
     options.dataRoot ?? DATA_ROOT,
@@ -226,6 +226,44 @@ function createItem(overrides: Partial<CollectedItem> = {}): CollectedItem {
 }
 
 describe("CollectionRepository", () => {
+  it("preserves concurrent content metadata updates from separate repository instances", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+    const first = createRepository(adapter, { vault });
+    const second = createRepository(adapter, { vault });
+    const firstId = "a".repeat(64);
+    const secondId = "b".repeat(64);
+    await first.upsertDaily([createItem({ id: firstId }), createItem({ id: secondId })], "2026-07-21");
+
+    await Promise.all([
+      first.updateContentMetadata(firstId, `${DATA_ROOT}/content/${firstId}.md`),
+      second.updateContentMetadata(secondId, `${DATA_ROOT}/content/${secondId}.md`),
+    ]);
+
+    const stored = await first.listByDate("2026-07-21");
+    expect(stored.find((item) => item.id === firstId)?.contentBasis).toBe("full-text");
+    expect(stored.find((item) => item.id === secondId)?.contentBasis).toBe("full-text");
+  });
+
+  it("serializes refresh persistence with content metadata synchronization", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+    const refresh = createRepository(adapter, { vault });
+    const metadata = createRepository(adapter, { vault });
+    const cachedId = "c".repeat(64);
+    await refresh.upsertDaily([createItem({ id: cachedId })], "2026-07-21");
+    const freshId = "d".repeat(64);
+
+    await Promise.all([
+      refresh.upsertDaily([createItem({ id: freshId })], "2026-07-21"),
+      metadata.updateContentMetadata(cachedId, `${DATA_ROOT}/content/${cachedId}.md`),
+    ]);
+
+    const stored = await refresh.listByDate("2026-07-21");
+    expect(stored.map((item) => item.id)).toEqual(expect.arrayContaining([cachedId, freshId]));
+    expect(stored.find((item) => item.id === cachedId)?.contentPath).toBe(`${DATA_ROOT}/content/${cachedId}.md`);
+  });
+
   it("links durable cached full text to every collected observation of an item", async () => {
     const { repository } = createHarness();
     const id = "d".repeat(64);

@@ -64,6 +64,7 @@ const CONTENT_BASES = new Set([
 ]);
 
 const COLLECTION_STATUSES = new Set(["collected", "partial", "parse-error"]);
+const rootMutationQueues = new WeakMap<object, Map<string, Promise<void>>>();
 
 export class CollectionRepository {
   private readonly dataRoot: string;
@@ -80,6 +81,15 @@ export class CollectionRepository {
   }
 
   async upsertDaily(
+    items: CollectedItem[],
+    localDate: string,
+  ): Promise<CollectedItem[]> {
+    return await this.withRootMutationLock(async () =>
+      await this.upsertDailyUnlocked(items, localDate),
+    );
+  }
+
+  private async upsertDailyUnlocked(
     items: CollectedItem[],
     localDate: string,
   ): Promise<CollectedItem[]> {
@@ -168,6 +178,12 @@ export class CollectionRepository {
   }
 
   async updateFlags(id: string, patch: FlagPatch): Promise<void> {
+    await this.withRootMutationLock(async () =>
+      await this.updateFlagsUnlocked(id, patch),
+    );
+  }
+
+  private async updateFlagsUnlocked(id: string, patch: FlagPatch): Promise<void> {
     await this.loadIndex();
     const dates = await this.collectionDates();
     const rewrites: PreparedRewrite[] = [];
@@ -232,6 +248,15 @@ export class CollectionRepository {
    * that has not reached storage.
    */
   async updateContentMetadata(id: string, contentPath: string): Promise<void> {
+    await this.withRootMutationLock(async () =>
+      await this.updateContentMetadataUnlocked(id, contentPath),
+    );
+  }
+
+  private async updateContentMetadataUnlocked(
+    id: string,
+    contentPath: string,
+  ): Promise<void> {
     assertStableContentReference(id, contentPath, this.dataRoot);
     await this.loadIndex();
     const dates = await this.collectionDates();
@@ -289,6 +314,21 @@ export class CollectionRepository {
 
   private get collectionsPath(): string {
     return normalizePath(`${this.dataRoot}/collections`);
+  }
+
+  private async withRootMutationLock<T>(operation: () => Promise<T>): Promise<T> {
+    const queues = rootMutationQueues.get(this.vault) ?? new Map<string, Promise<void>>();
+    rootMutationQueues.set(this.vault, queues);
+    const prior = queues.get(this.dataRoot) ?? Promise.resolve();
+    const running = prior.catch(() => undefined).then(operation);
+    const settled = running.then(() => undefined, () => undefined);
+    queues.set(this.dataRoot, settled);
+    try {
+      return await running;
+    } finally {
+      if (queues.get(this.dataRoot) === settled) queues.delete(this.dataRoot);
+      if (queues.size === 0) rootMutationQueues.delete(this.vault);
+    }
   }
 
   private get statePath(): string {

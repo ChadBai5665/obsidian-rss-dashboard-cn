@@ -3334,6 +3334,8 @@ export class RssDashboardView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.articleRenderer?.dispose();
+    this.articleRenderer = null;
     this.closeMobileSidebarModal();
     this.lastViewportMobileSidebarMode = null;
 

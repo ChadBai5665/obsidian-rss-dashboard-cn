@@ -56,6 +56,26 @@ describe("ArticleRenderer explicit content cache", () => {
     expect(metadataMock).toHaveBeenCalled();
   });
 
+  it("keeps a bounded renderer-session result when durable cache writing fails", async () => {
+    writeMock.mockRejectedValueOnce(new Error("disk unavailable"));
+    const view = renderer(); const container = document.createElement("div"); const article = item();
+    await view.render(container, article);
+    await view.render(container, article);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render late content after inline renderer disposal", async () => {
+    let resolveFetch: ((value: { content: string; failureType: "none" }) => void) | undefined;
+    fetchMock.mockImplementation(() => new Promise((resolve) => { resolveFetch = resolve; }));
+    const view = renderer(); const container = document.createElement("div");
+    const rendering = view.render(container, item());
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    view.dispose();
+    resolveFetch?.({ content: `<article><p>${"L".repeat(260)}</p></article>`, failureType: "none" });
+    await rendering;
+    expect(container.childElementCount).toBe(0);
+  });
+
   it.each(["https://youtube.com/watch?v=x", "https://www.youtube.com/watch?v=x", "https://m.youtube.com/watch?v=x", "https://youtu.be/x"])("never fetches a YouTube article URL: %s", async (link) => {
     await renderer().render(document.createElement("div"), item({ link, mediaType: "article" }));
     expect(fetchMock).not.toHaveBeenCalled();

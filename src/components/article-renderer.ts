@@ -25,6 +25,7 @@ const VIDEO_ARTICLE_BANNER =
   "This item appears to be a video. Open the source page to watch.";
 const VIDEO_ARTICLE_LINK_TEXT = "Open video at source";
 const FEED_DESCRIPTION_UNAVAILABLE_TEXT = "No feed description available.";
+const MAX_SESSION_CONTENT_ITEMS = 12;
 
 export interface ArticleRendererOptions {
   app: App;
@@ -73,6 +74,11 @@ export class ArticleRenderer {
   private lastRestrictedNoticeGuid: string | null = null;
   private renderRequestSequence = 0;
   private readonly explicitContentCoordinator: ExplicitContentCoordinator;
+  private disposed = false;
+  private readonly sessionContent = new Map<
+    string,
+    { content: string; failureType: FullArticleFetchFailureType }
+  >();
 
   constructor(options: ArticleRendererOptions) {
     this.app = options.app;
@@ -89,6 +95,7 @@ export class ArticleRenderer {
     item: FeedItem,
     relatedItems: FeedItem[] = [],
   ): Promise<void> {
+    if (this.disposed) return;
     const renderRequest = ++this.renderRequestSequence;
     if (this.currentItem?.guid !== item.guid) {
       this.lastRestrictedNoticeGuid = null;
@@ -629,6 +636,15 @@ export class ArticleRenderer {
     }
   }
 
+  public dispose(): void {
+    this.disposed = true;
+    this.renderRequestSequence += 1;
+    this.currentItem = null;
+    this.currentFullContent = undefined;
+    this.sessionContent.clear();
+    this.cleanupPlayers();
+  }
+
   // --- Helper methods (extracted from ReaderView) ---
 
   private async fetchFullArticleContent(
@@ -686,16 +702,12 @@ export class ArticleRenderer {
   private async readOrFetchExplicitArticleContent(
     item: FeedItem,
   ): Promise<{ content: string; failureType: FullArticleFetchFailureType }> {
-    const feed = this.settings.feeds.find((candidate) => candidate.url === item.feedUrl);
-    const itemId = createCollectedItemId({
-      sourceId: feed?.feedId || item.feedUrl || item.feedTitle || "reader",
-      guid: item.guid,
-      url: item.link,
-      title: item.title,
-      author: item.author,
-      publishedAt: item.pubDate,
-    });
-    return await this.explicitContentCoordinator.readOrFetch({
+    const itemId = this.getCollectedItemId(item);
+    const root = this.settings.collection.dataFolder.trim();
+    const cacheKey = `${root}\0${itemId}`;
+    const memory = this.sessionContent.get(cacheKey);
+    if (memory) return memory;
+    const result = await this.explicitContentCoordinator.readOrFetch({
       dataRoot: this.settings.collection.dataFolder,
       itemId,
       sourceUrl: item.link || undefined,
@@ -706,6 +718,25 @@ export class ArticleRenderer {
         });
         return { content, failureType };
       },
+    });
+    if (this.hasMeaningfulArticleContent(result.content)) {
+      this.sessionContent.set(cacheKey, result);
+      while (this.sessionContent.size > MAX_SESSION_CONTENT_ITEMS) {
+        this.sessionContent.delete(this.sessionContent.keys().next().value as string);
+      }
+    }
+    return result;
+  }
+
+  private getCollectedItemId(item: FeedItem): string {
+    const feed = this.settings.feeds.find((candidate) => candidate.url === item.feedUrl);
+    return createCollectedItemId({
+      sourceId: feed?.feedId || item.feedUrl || item.feedTitle || "reader",
+      guid: item.guid,
+      url: item.link,
+      title: item.title,
+      author: item.author,
+      publishedAt: item.pubDate,
     });
   }
 
