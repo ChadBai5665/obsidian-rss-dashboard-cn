@@ -49,6 +49,9 @@ class InMemoryAdapter {
     if (content === undefined) {
       throw new Error(`Missing rename source: ${from}`);
     }
+    if (this.files.has(to) || this.directories.has(to)) {
+      throw new Error(`Rename destination already exists: ${to}`);
+    }
 
     const parent = parentPath(to);
     if (parent && !this.directories.has(parent)) {
@@ -96,7 +99,9 @@ function parentPath(path: string): string {
   return separator === -1 ? "" : path.slice(0, separator);
 }
 
-function createHarness(options: { withoutRename?: boolean } = {}): {
+function createHarness(
+  options: { withoutRename?: boolean; dataRoot?: string } = {},
+): {
   adapter: InMemoryAdapter;
   repository: CollectionRepository;
 } {
@@ -114,7 +119,11 @@ function createHarness(options: { withoutRename?: boolean } = {}): {
   const vault = { adapter: boundary } as unknown as Vault;
   return {
     adapter,
-    repository: new CollectionRepository(vault, DATA_ROOT, () => NOW),
+    repository: new CollectionRepository(
+      vault,
+      options.dataRoot ?? DATA_ROOT,
+      () => NOW,
+    ),
   };
 }
 
@@ -427,5 +436,125 @@ describe("CollectionRepository", () => {
       earliestDate: "2026-07-21",
       latestDate: "2026-07-22",
     });
+  });
+
+  it("repairs a stale earliest date even when the indexed latest date is correct", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    await repository.upsertDaily([createItem()], "2026-07-22");
+    await adapter.write(
+      `${DATA_ROOT}/state/item-index.json`,
+      JSON.stringify({
+        schemaVersion: 1,
+        items: {
+          "item-1": {
+            earliestDate: "2026-07-22",
+            latestDate: "2026-07-22",
+          },
+        },
+      }),
+    );
+
+    await expect(repository.findById("item-1")).resolves.toMatchObject({
+      id: "item-1",
+      lastSeenAt: "2026-07-21T08:00:00.000Z",
+    });
+    expect(
+      JSON.parse(await adapter.read(`${DATA_ROOT}/state/item-index.json`)),
+    ).toEqual({
+      schemaVersion: 1,
+      items: {
+        "item-1": {
+          earliestDate: "2026-07-21",
+          latestDate: "2026-07-22",
+        },
+      },
+    });
+  });
+
+  it("rolls back earlier flag rewrites when a later date fails", async () => {
+    const { adapter, repository } = createHarness();
+    const initialFlags = {
+      read: true,
+      starred: true,
+      saved: true,
+      savedNotePath: "Saved/item-1.md",
+    };
+    await repository.upsertDaily([createItem(initialFlags)], "2026-07-21");
+    await repository.upsertDaily([createItem(initialFlags)], "2026-07-22");
+    adapter.failNextWriteWhere((path) =>
+      path.startsWith(`${DATA_ROOT}/collections/2026-07-22.jsonl.tmp-`),
+    );
+
+    await expect(
+      repository.updateFlags("item-1", {
+        read: false,
+        starred: false,
+        saved: false,
+        savedNotePath: undefined,
+      }),
+    ).rejects.toThrow("Injected write failure");
+
+    for (const date of ["2026-07-21", "2026-07-22"]) {
+      const [item] = await repository.listByDate(date);
+      expect(item).toMatchObject(initialFlags);
+    }
+  });
+
+  it("quarantines duplicate corrupt lines found while rebuilding from older dates", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-20");
+    await repository.upsertDaily([createItem({ id: "item-2" })], "2026-07-22");
+    const olderPath = `${DATA_ROOT}/collections/2026-07-20.jsonl`;
+    const duplicateCorruption =
+      "duplicate-corrupt-line\nduplicate-corrupt-line\n";
+    await adapter.write(
+      olderPath,
+      `${await adapter.read(olderPath)}${duplicateCorruption}`,
+    );
+    await adapter.write(`${DATA_ROOT}/state/item-index.json`, "{invalid");
+
+    await expect(repository.findById("item-2")).resolves.toMatchObject({
+      id: "item-2",
+    });
+
+    expect(await adapter.read(`${olderPath}.corrupt`)).toBe(
+      duplicateCorruption,
+    );
+    expect(await adapter.read(olderPath)).not.toContain(
+      "duplicate-corrupt-line",
+    );
+  });
+
+  it("quarantines records with invalid enums, optional fields, or metrics", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const invalidRecords = [
+      { ...createItem(), sourceType: "email" },
+      { ...createItem(), author: 42 },
+      { ...createItem(), metrics: { likes: "many" } },
+    ];
+    const raw = `${invalidRecords.map((item) => JSON.stringify(item)).join("\n")}\n`;
+    await adapter.write(dailyPath, raw);
+
+    await expect(repository.listByDate("2026-07-21")).resolves.toEqual([]);
+    expect(await adapter.read(`${dailyPath}.corrupt`)).toBe(raw);
+    expect(await adapter.read(dailyPath)).toBe("");
+  });
+
+  it.each([
+    "",
+    "   ",
+    ".",
+    "./data",
+    "nested/../escape",
+    "/absolute/path",
+    "C:\\vault",
+    "C:vault",
+    "folder\\child",
+    "unsafe\0root",
+  ])("rejects unsafe data root %j before filesystem access", (dataRoot) => {
+    expect(() => createHarness({ dataRoot })).toThrow("Invalid data root");
   });
 });

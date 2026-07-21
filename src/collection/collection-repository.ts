@@ -17,12 +17,39 @@ interface ParsedCollection {
   corruptLines: string[];
 }
 
+interface PreparedRewrite {
+  path: string;
+  before: string;
+  after: string;
+}
+
 type FlagPatch = Pick<
   CollectedItem,
   "read" | "starred" | "saved" | "savedNotePath"
 >;
 
 const EMPTY_INDEX = (): ItemIndex => ({ schemaVersion: 1, items: {} });
+
+const SOURCE_TYPES = new Set([
+  "rss",
+  "atom",
+  "json",
+  "podcast",
+  "website",
+  "youtube",
+  "x-account",
+  "x-topic",
+]);
+
+const CONTENT_BASES = new Set([
+  "feed",
+  "full-text",
+  "title-description",
+  "x-post",
+  "linked-page",
+]);
+
+const COLLECTION_STATUSES = new Set(["collected", "partial", "parse-error"]);
 
 export class CollectionRepository {
   private readonly dataRoot: string;
@@ -33,10 +60,8 @@ export class CollectionRepository {
     dataRoot: string,
     private readonly clock: () => Date,
   ) {
-    const trimmedRoot = dataRoot.trim().replace(/^\/+|\/+$/g, "");
-    if (!trimmedRoot) {
-      throw new Error("Collection data root must not be empty");
-    }
+    const trimmedRoot = dataRoot.trim();
+    assertSafeDataRoot(trimmedRoot);
     this.dataRoot = normalizePath(trimmedRoot);
   }
 
@@ -50,10 +75,6 @@ export class CollectionRepository {
     const index = await this.rebuildIndex();
     const dailyPath = this.dailyPath(localDate);
     const parsed = await this.readCollection(dailyPath);
-    if (parsed.corruptLines.length > 0) {
-      await this.preserveCorruptLines(dailyPath, parsed.corruptLines);
-    }
-
     const dailyItems = new Map(parsed.items.map((item) => [item.id, item]));
     const priorItems = new Map<string, CollectedItem | null>();
 
@@ -108,44 +129,9 @@ export class CollectionRepository {
   async findById(id: string): Promise<CollectedItem | null> {
     const index = await this.loadIndex();
     const indexedEntry = index.items[id];
-    let latest = indexedEntry
-      ? await this.findItemOnDate(id, indexedEntry.latestDate)
+    return indexedEntry
+      ? this.findItemOnDate(id, indexedEntry.latestDate)
       : null;
-    let latestDate = indexedEntry?.latestDate;
-
-    const dates = await this.collectionDates();
-    const datesToScan = latestDate
-      ? dates.filter((date) => date > latestDate)
-      : dates;
-    for (const date of datesToScan) {
-      const candidate = await this.findItemOnDate(id, date);
-      if (candidate) {
-        latest = candidate;
-        latestDate = date;
-      }
-    }
-
-    if (!latest && indexedEntry) {
-      const rebuilt = await this.rebuildIndex();
-      await this.writeIndex(rebuilt);
-      const rebuiltEntry = rebuilt.items[id];
-      return rebuiltEntry
-        ? this.findItemOnDate(id, rebuiltEntry.latestDate)
-        : null;
-    }
-
-    if (latest && !indexedEntry) {
-      const rebuilt = await this.rebuildIndex();
-      await this.writeIndex(rebuilt);
-      return latest;
-    }
-
-    if (latest && latestDate && latestDate !== indexedEntry?.latestDate) {
-      updateIndexEntry(index, id, latestDate);
-      await this.writeIndex(index);
-    }
-
-    return latest;
   }
 
   async listByDate(localDate: string): Promise<CollectedItem[]> {
@@ -156,6 +142,7 @@ export class CollectionRepository {
   async updateFlags(id: string, patch: FlagPatch): Promise<void> {
     await this.loadIndex();
     const dates = await this.collectionDates();
+    const rewrites: PreparedRewrite[] = [];
 
     for (const date of dates) {
       const path = this.dailyPath(date);
@@ -175,13 +162,39 @@ export class CollectionRepository {
         };
       });
 
-      if (!changed && parsed.corruptLines.length === 0) {
+      if (!changed) {
         continue;
       }
-      if (parsed.corruptLines.length > 0) {
-        await this.preserveCorruptLines(path, parsed.corruptLines);
+      rewrites.push({
+        path,
+        before: serializeCollection(parsed.items),
+        after: serializeCollection(updated),
+      });
+    }
+
+    const completed: PreparedRewrite[] = [];
+    try {
+      for (const rewrite of rewrites) {
+        await this.atomicWrite(rewrite.path, rewrite.after);
+        completed.push(rewrite);
       }
-      await this.atomicWrite(path, serializeCollection(updated));
+    } catch (updateError) {
+      const rollbackErrors: unknown[] = [];
+      for (const rewrite of completed.reverse()) {
+        try {
+          await this.atomicWrite(rewrite.path, rewrite.before);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+      }
+      if (rollbackErrors.length > 0) {
+        throw combinedError(
+          "Flag update failed and rollback was incomplete",
+          updateError,
+          rollbackErrors,
+        );
+      }
+      throw updateError;
     }
   }
 
@@ -214,21 +227,26 @@ export class CollectionRepository {
   }
 
   private async loadIndex(): Promise<ItemIndex> {
+    const rebuilt = await this.rebuildIndex();
+    let stored: ItemIndex | null = null;
+
     if (await this.vault.adapter.exists(this.indexPath)) {
       try {
         const parsed: unknown = JSON.parse(
           await this.vault.adapter.read(this.indexPath),
         );
         if (isItemIndex(parsed)) {
-          return parsed;
+          stored = parsed;
         }
       } catch {
         // Invalid derived state is rebuilt from durable collection files.
       }
     }
 
-    const rebuilt = await this.rebuildIndex();
-    if (await this.vault.adapter.exists(this.collectionsPath)) {
+    if (
+      (await this.vault.adapter.exists(this.collectionsPath)) &&
+      (!stored || !itemIndexesEqual(stored, rebuilt))
+    ) {
       await this.ensureDirectory(this.dataRoot);
       await this.ensureDirectory(this.statePath);
       await this.writeIndex(rebuilt);
@@ -302,6 +320,12 @@ export class CollectionRepository {
       }
     }
 
+    if (corruptLines.length > 0) {
+      await this.preserveCorruptLines(path, corruptLines);
+      await this.atomicWrite(path, serializeCollection(items));
+      return { items, corruptLines: [] };
+    }
+
     return { items, corruptLines };
   }
 
@@ -313,18 +337,22 @@ export class CollectionRepository {
     const existing = (await this.vault.adapter.exists(sidecarPath))
       ? await this.vault.adapter.read(sidecarPath)
       : "";
-    const existingLines = new Set(splitLinesPreservingEndings(existing));
+    const existingCounts = countOccurrences(
+      splitLinesPreservingEndings(existing),
+    );
+    const incomingCounts = new Map<string, number>();
     let next = existing;
 
     for (const line of corruptLines) {
-      if (existingLines.has(line)) {
+      const occurrence = (incomingCounts.get(line) ?? 0) + 1;
+      incomingCounts.set(line, occurrence);
+      if (occurrence <= (existingCounts.get(line) ?? 0)) {
         continue;
       }
       if (next && !/(?:\r\n|\n|\r)$/.test(next)) {
         next += "\n";
       }
       next += line;
-      existingLines.add(line);
     }
 
     if (next !== existing) {
@@ -333,12 +361,38 @@ export class CollectionRepository {
   }
 
   private async atomicWrite(path: string, content: string): Promise<void> {
-    const tempPath = `${path}.tmp-${this.clock().getTime()}-${this.tempSequence++}`;
+    const writeId = `${this.clock().getTime()}-${this.tempSequence++}`;
+    const tempPath = `${path}.tmp-${writeId}`;
     await this.vault.adapter.write(tempPath, content);
 
     const adapter = this.vault.adapter as Partial<DataAdapter>;
     if (typeof adapter.rename === "function") {
-      await adapter.rename.call(this.vault.adapter, tempPath, path);
+      if (!(await this.vault.adapter.exists(path))) {
+        await adapter.rename.call(this.vault.adapter, tempPath, path);
+        return;
+      }
+
+      if (typeof adapter.remove !== "function") {
+        throw new Error("Adapter remove is unavailable for atomic replacement");
+      }
+
+      const backupPath = `${path}.backup-${writeId}`;
+      await adapter.rename.call(this.vault.adapter, path, backupPath);
+      try {
+        await adapter.rename.call(this.vault.adapter, tempPath, path);
+      } catch (replaceError) {
+        try {
+          await adapter.rename.call(this.vault.adapter, backupPath, path);
+        } catch (restoreError) {
+          throw combinedError(
+            "Atomic replacement and restore both failed",
+            replaceError,
+            [restoreError],
+          );
+        }
+        throw replaceError;
+      }
+      await adapter.remove.call(this.vault.adapter, backupPath);
       return;
     }
 
@@ -349,6 +403,22 @@ export class CollectionRepository {
   }
 }
 
+function combinedError(
+  message: string,
+  primary: unknown,
+  secondary: unknown[],
+): Error {
+  return new Error(
+    `${message}: ${errorMessage(primary)}; recovery: ${secondary
+      .map(errorMessage)
+      .join("; ")}`,
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function serializeCollection(items: CollectedItem[]): string {
   return items.length > 0
     ? `${items.map((item) => JSON.stringify(item)).join("\n")}\n`
@@ -357,6 +427,14 @@ function serializeCollection(items: CollectedItem[]): string {
 
 function splitLinesPreservingEndings(value: string): string[] {
   return value.match(/[^\r\n]*(?:\r\n|\n|\r|$)/g)?.filter(Boolean) ?? [];
+}
+
+function countOccurrences(values: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return counts;
 }
 
 function updateIndexEntry(
@@ -390,6 +468,22 @@ function isItemIndex(value: unknown): value is ItemIndex {
   );
 }
 
+function itemIndexesEqual(left: ItemIndex, right: ItemIndex): boolean {
+  const leftIds = Object.keys(left.items).sort();
+  const rightIds = Object.keys(right.items).sort();
+  if (
+    leftIds.length !== rightIds.length ||
+    leftIds.some((id, index) => id !== rightIds[index])
+  ) {
+    return false;
+  }
+  return leftIds.every(
+    (id) =>
+      left.items[id].earliestDate === right.items[id].earliestDate &&
+      left.items[id].latestDate === right.items[id].latestDate,
+  );
+}
+
 function isCollectedItem(value: unknown): value is CollectedItem {
   if (!isRecord(value)) {
     return false;
@@ -398,6 +492,7 @@ function isCollectedItem(value: unknown): value is CollectedItem {
     value.schemaVersion === 1 &&
     typeof value.id === "string" &&
     typeof value.sourceType === "string" &&
+    SOURCE_TYPES.has(value.sourceType) &&
     typeof value.sourceId === "string" &&
     typeof value.sourceName === "string" &&
     typeof value.sourceBucket === "string" &&
@@ -411,10 +506,35 @@ function isCollectedItem(value: unknown): value is CollectedItem {
     Array.isArray(value.topics) &&
     value.topics.every((topic) => typeof topic === "string") &&
     typeof value.contentBasis === "string" &&
+    CONTENT_BASES.has(value.contentBasis) &&
     typeof value.read === "boolean" &&
     typeof value.starred === "boolean" &&
     typeof value.saved === "boolean" &&
-    typeof value.collectionStatus === "string"
+    typeof value.collectionStatus === "string" &&
+    COLLECTION_STATUSES.has(value.collectionStatus) &&
+    optionalString(value.author) &&
+    optionalString(value.publishedAt) &&
+    optionalString(value.url) &&
+    optionalString(value.guid) &&
+    optionalString(value.language) &&
+    optionalString(value.excerpt) &&
+    optionalString(value.contentPath) &&
+    optionalString(value.savedNotePath) &&
+    validMetrics(value.metrics)
+  );
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function validMetrics(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (isRecord(value) &&
+      Object.values(value).every(
+        (metric) => typeof metric === "number" && Number.isFinite(metric),
+      ))
   );
 }
 
@@ -425,6 +545,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function assertLocalDate(value: string): void {
   if (!isLocalDate(value)) {
     throw new Error(`Invalid local date: ${value}`);
+  }
+}
+
+function assertSafeDataRoot(value: string): void {
+  const segments = value.split("/");
+  if (
+    !value ||
+    value.startsWith("/") ||
+    value.includes("\\") ||
+    value.includes("\0") ||
+    /^[A-Za-z]:/.test(value) ||
+    segments.some(
+      (segment) => segment === "" || segment === "." || segment === "..",
+    )
+  ) {
+    throw new Error(`Invalid data root: ${value}`);
   }
 }
 
