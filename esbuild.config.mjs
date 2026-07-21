@@ -38,6 +38,9 @@ const context = await esbuild.context({
 	logLevel: "info",
 	sourcemap: prod ? false : "inline",
 	treeShaking: true,
+	define: {
+		__RSS_DASHBOARD_PRODUCTION__: prod ? "true" : "false",
+	},
 	outfile: "main.js",
 	minify: prod,
 	loader: {

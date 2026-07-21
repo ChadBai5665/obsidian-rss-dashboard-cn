@@ -1,3 +1,5 @@
+/* global __RSS_DASHBOARD_PRODUCTION__ */
+
 import { en } from "./en";
 import type {
   Locale,
@@ -35,16 +37,21 @@ export interface TranslatorOptions {
 }
 
 function isProductionBuild(): boolean {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  const processEnv = (
-    window as Window & { process?: { env?: { NODE_ENV?: unknown } } }
-  ).process?.env;
-
-  return processEnv?.NODE_ENV === "production";
+  return (
+    typeof __RSS_DASHBOARD_PRODUCTION__ === "boolean" &&
+    __RSS_DASHBOARD_PRODUCTION__
+  );
 }
+
+function hasOwn(object: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+const UNSAFE_PARAMETER_NAMES = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
 
 /** Returns true only when two catalogs expose the exact same key set. */
 export function catalogsHaveMatchingKeys(
@@ -69,23 +76,23 @@ function resolveTemplate(
   key: TranslationKey,
   overrides?: TranslationCatalogOverrides,
 ): string | undefined {
-  const selectedCatalog = {
-    ...catalogs[locale],
-    ...overrides?.[locale],
-  };
-  const selectedValue = selectedCatalog[key];
+  const selectedOverride = getOwnCatalogOverride(overrides, locale);
+  const selectedValue =
+    selectedOverride && hasOwn(selectedOverride, key)
+      ? getOwnTranslation(selectedOverride, key)
+      : getOwnTranslation(catalogs[locale], key);
 
-  if (typeof selectedValue === "string") {
+  if (selectedValue !== undefined) {
     return selectedValue;
   }
 
   if (locale !== "en") {
-    const englishCatalog = {
-      ...catalogs.en,
-      ...overrides?.en,
-    };
-    const englishValue = englishCatalog[key];
-    if (typeof englishValue === "string") {
+    const englishOverride = getOwnCatalogOverride(overrides, "en");
+    const englishValue =
+      englishOverride && hasOwn(englishOverride, key)
+        ? getOwnTranslation(englishOverride, key)
+        : getOwnTranslation(catalogs.en, key);
+    if (englishValue !== undefined) {
       return englishValue;
     }
   }
@@ -96,6 +103,29 @@ function resolveTemplate(
   return undefined;
 }
 
+function getOwnCatalogOverride(
+  overrides: TranslationCatalogOverrides | undefined,
+  locale: Locale,
+): Partial<Record<TranslationKey, string | undefined>> | undefined {
+  if (!overrides || !hasOwn(overrides, locale)) {
+    return undefined;
+  }
+
+  return overrides[locale];
+}
+
+function getOwnTranslation(
+  catalog: Partial<Record<TranslationKey, string | undefined>>,
+  key: TranslationKey,
+): string | undefined {
+  if (!hasOwn(catalog, key)) {
+    return undefined;
+  }
+
+  const value = catalog[key];
+  return typeof value === "string" ? value : undefined;
+}
+
 function interpolate(
   template: string,
   params: TranslationParams | undefined,
@@ -103,7 +133,10 @@ function interpolate(
   return template.replace(
     /\{([A-Za-z0-9_]+)\}/g,
     (placeholder: string, name: string) => {
-      const value = params?.[name];
+      const value =
+        params && !UNSAFE_PARAMETER_NAMES.has(name) && hasOwn(params, name)
+          ? params[name]
+          : undefined;
       // Missing parameters stay visible. Values are returned as text only: this
       // translator never interprets HTML, Markdown, or template expressions.
       return value === undefined ? placeholder : String(value);
