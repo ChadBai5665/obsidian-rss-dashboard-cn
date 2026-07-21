@@ -1,4 +1,5 @@
 import { Modal, App, Setting } from "obsidian";
+import { createTranslator, type Locale } from "../i18n";
 
 /**
  * A simple confirmation modal shown after a successful data import.
@@ -6,7 +7,7 @@ import { Modal, App, Setting } from "obsidian";
 export class ImportSuccessModal extends Modal {
   private message: string;
 
-  constructor(app: App, message: string) {
+  constructor(app: App, message: string, private locale: Locale = "zh-CN") {
     super(app);
     this.message = message;
   }
@@ -18,7 +19,8 @@ export class ImportSuccessModal extends Modal {
     this.modalEl.addClass("rss-dashboard-modal");
     this.modalEl.addClass("rss-dashboard-modal-container");
 
-    new Setting(contentEl).setName("Import successful").setHeading();
+    const t = createTranslator(this.locale);
+    new Setting(contentEl).setName(t("modal.importSuccess.title")).setHeading();
 
     contentEl.createEl("p", {
       text: this.message,
@@ -30,7 +32,7 @@ export class ImportSuccessModal extends Modal {
     });
 
     const okButton = buttonContainer.createEl("button", {
-      text: "OK",
+      text: t("common.ok"),
       cls: "rss-dashboard-primary-button",
     });
     okButton.onclick = () => this.close();

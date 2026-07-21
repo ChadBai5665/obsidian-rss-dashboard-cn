@@ -1,6 +1,7 @@
 import { setIcon } from "obsidian";
 import type RssDashboardPlugin from "../../main";
 import { collectFolderPaths } from "../utils/folder-paths";
+import { createTranslator } from "../i18n";
 
 export interface FolderSelectorOptions {
   /** The element to position the popup relative to */
@@ -37,9 +38,11 @@ export class FolderSelectorPopup {
   private keydownHandler!: (e: KeyboardEvent) => void;
   private isDestroyed = false;
   private listOnly: boolean = false;
+  private readonly t: ReturnType<typeof createTranslator>;
 
   constructor(plugin: RssDashboardPlugin, options: FolderSelectorOptions) {
     this.plugin = plugin;
+    this.t = createTranslator(plugin.settings.locale ?? "zh-CN");
     this.onSelect = options.onSelect;
     this.onClose = options.onClose;
     this.defaultFolder = options.defaultFolder;
@@ -148,7 +151,7 @@ export class FolderSelectorPopup {
         cls: "rss-folder-selector-input",
         attr: {
           type: "text",
-          placeholder: "Select or create folder...",
+          placeholder: this.t("modal.folderSelector.placeholder"),
           autocomplete: "off",
           spellcheck: "false",
           value: initialQuery || "",
@@ -208,7 +211,7 @@ export class FolderSelectorPopup {
       });
       setIcon(iconSpan, "folder-plus");
       createItem.createSpan({
-        text: `Create "${query}"`,
+        text: this.t("modal.folderSelector.create", { folder: query }),
         cls: "rss-folder-selector-text",
       });
       createItem.addEventListener("click", () => {
@@ -226,7 +229,7 @@ export class FolderSelectorPopup {
         cls: "rss-folder-selector-item rss-folder-selector-empty",
       });
       emptyItem.createSpan({
-        text: "No folders found",
+        text: this.t("modal.folderSelector.empty"),
         cls: "rss-folder-selector-text",
       });
       return;

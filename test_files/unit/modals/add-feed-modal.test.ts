@@ -111,6 +111,24 @@ beforeEach(() => {
 });
 
 describe("AddFeedModal", () => {
+  it("uses Chinese for a configured Chinese dashboard", () => {
+    const app = createMockApp();
+    const plugin = {
+      settings: {
+        locale: "zh-CN",
+        defaultAutoDeleteDuration: 30,
+        maxItems: 50,
+        savedTemplates: [],
+        tags: [],
+      },
+    } as unknown as ConstructorParameters<typeof AddFeedModal>[5];
+    const modal = new AddFeedModal(app, [], vi.fn(), vi.fn(), "", plugin);
+    modal.open();
+
+    expect(modal.contentEl.textContent).toContain("添加订阅源");
+    expect(modal.contentEl.textContent).toContain("订阅源 URL");
+  });
+
   it("submits an explicit Off auto-refresh override as -1", async () => {
     const app = createMockApp();
     const onAdd: OnAddFn = vi.fn(async () => true);

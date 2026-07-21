@@ -62,6 +62,28 @@ beforeEach(() => {
 });
 
 describe("ImportOpmlModal", () => {
+  it("renders Chinese by default and preserves English when selected", () => {
+    const app = createMockApp();
+    const plugin = {
+      settings: cloneSettings(),
+      saveSettings: vi.fn(async () => {}),
+    } as unknown as TestPlugin;
+    const chinese = new ImportOpmlModal(
+      app,
+      plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1],
+    );
+    chinese.open();
+    expect(chinese.contentEl.textContent).toContain("导入 OPML");
+
+    plugin.settings.locale = "en";
+    const english = new ImportOpmlModal(
+      app,
+      plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1],
+    );
+    english.open();
+    expect(english.contentEl.textContent).toContain("Import OPML");
+  });
+
   it("shows a validation error for invalid XML and keeps import disabled", async () => {
     const app = createMockApp();
     const plugin: TestPlugin = {
@@ -83,7 +105,7 @@ describe("ImportOpmlModal", () => {
     const errorMessage = document.querySelector(
       ".import-error-message",
     ) as HTMLDivElement;
-    expect(errorMessage?.textContent).toContain("invalid XML");
+    expect(errorMessage?.textContent).toContain("无效的 XML");
 
     const importBtn = (modal as unknown as TestModal).contentEl.querySelector(
       "button.rss-dashboard-primary-button",

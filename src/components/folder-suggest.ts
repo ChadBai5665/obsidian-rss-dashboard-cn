@@ -1,6 +1,7 @@
 import { AbstractInputSuggest, App, TFolder } from "obsidian";
 import type { Folder } from "../types/types";
 import { collectFolderPaths } from "../utils/folder-paths";
+import { createTranslator, type Locale } from "../i18n";
 
 /**
  * Provides type-ahead folder suggestions from the vault
@@ -61,18 +62,21 @@ export class FolderSuggest extends AbstractInputSuggest<string> {
   private inputEl: HTMLInputElement;
   private showAddNewOption: boolean;
 
-  private static readonly ADD_NEW_FOLDER_LABEL = "Add new folder...";
+  private readonly addNewFolderLabel: string;
 
   constructor(
     app: App,
     inputEl: HTMLInputElement,
     folders: Folder[],
-    options?: { showAddNewOption?: boolean },
+    options?: { showAddNewOption?: boolean; locale?: Locale },
   ) {
     super(app, inputEl);
     this.inputEl = inputEl;
     this.folders = collectFolderPaths(folders, { sort: true });
     this.showAddNewOption = options?.showAddNewOption ?? true;
+    this.addNewFolderLabel = createTranslator(options?.locale ?? "en")(
+      "modal.folderSuggest.add",
+    );
 
     const suggestEl = (this as unknown as { suggestEl?: HTMLElement })
       .suggestEl;
@@ -128,16 +132,16 @@ export class FolderSuggest extends AbstractInputSuggest<string> {
       return [...folders];
     }
 
-    return [FolderSuggest.ADD_NEW_FOLDER_LABEL, ...folders];
+    return [this.addNewFolderLabel, ...folders];
   }
 
   /**
    * Renders a folder suggestion in the dropdown
    */
   public renderSuggestion(folder: string, el: HTMLElement): void {
-    if (folder === FolderSuggest.ADD_NEW_FOLDER_LABEL) {
+    if (folder === this.addNewFolderLabel) {
       el.addClass("rss-dashboard-add-new-suggestion");
-      el.setText(FolderSuggest.ADD_NEW_FOLDER_LABEL);
+      el.setText(this.addNewFolderLabel);
     } else {
       el.setText(folder);
     }
@@ -150,7 +154,7 @@ export class FolderSuggest extends AbstractInputSuggest<string> {
     folder: string,
     _evt: MouseEvent | KeyboardEvent,
   ): void {
-    if (folder !== FolderSuggest.ADD_NEW_FOLDER_LABEL) {
+    if (folder !== this.addNewFolderLabel) {
       this.inputEl.value = folder;
       this.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
       this.inputEl.dispatchEvent(new Event("change", { bubbles: true }));

@@ -1,5 +1,6 @@
 import { Modal, App, Setting, Notice } from "obsidian";
 import type RssDashboardPlugin from "../../main";
+import { createTranslator } from "../i18n";
 
 /**
  * Shown on every plugin load when the user's storage mode is not vault-shards-v2
@@ -19,6 +20,7 @@ export class StorageMigrationModal extends Modal {
   }
 
   onOpen() {
+    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     const { contentEl } = this;
     contentEl.empty();
 
@@ -26,16 +28,18 @@ export class StorageMigrationModal extends Modal {
     this.modalEl.addClass("rss-dashboard-modal-container");
 
     new Setting(contentEl)
-      .setName("Storage mode upgrade available")
+      .setName(t("modal.storageMigration.title"))
       .setHeading();
 
     contentEl.createEl("p", {
-      text: `Your RSS Dashboard is using an older storage mode (${this.plugin.settings.storageMode}). Upgrading to Vault Shards V2 offers better performance and more reliable sync across devices.`,
+      text: t("modal.storageMigration.desc", {
+        mode: this.plugin.settings.storageMode,
+      }),
       cls: "rss-dashboard-modal-message",
     });
 
     contentEl.createEl("p", {
-      text: "Upgrading will automatically create a backup of your data first.",
+      text: t("modal.storageMigration.backup"),
       cls: "rss-dashboard-modal-message",
     });
 
@@ -45,7 +49,7 @@ export class StorageMigrationModal extends Modal {
 
     // "Never Show Again" — leftmost, lowest priority
     const neverButton = buttonContainer.createEl("button", {
-      text: "Never show again",
+      text: t("modal.storageMigration.never"),
     });
     neverButton.onclick = async () => {
       this.plugin.settings.storageMigrationDismissedPermanently = true;
@@ -55,7 +59,7 @@ export class StorageMigrationModal extends Modal {
 
     // "Remind Me Later" — middle, stateless dismiss
     const laterButton = buttonContainer.createEl("button", {
-      text: "Remind me later",
+      text: t("modal.storageMigration.later"),
     });
     laterButton.onclick = () => {
       // No flag set — modal will appear again next plugin load
@@ -64,21 +68,21 @@ export class StorageMigrationModal extends Modal {
 
     // "Upgrade Now" — rightmost CTA
     const upgradeButton = buttonContainer.createEl("button", {
-      text: "Upgrade now (recommended)",
+      text: t("modal.storageMigration.upgrade"),
       cls: "mod-cta",
     });
     upgradeButton.onclick = async () => {
       upgradeButton.disabled = true;
       laterButton.disabled = true;
       neverButton.disabled = true;
-      upgradeButton.textContent = "Upgrading...";
+      upgradeButton.textContent = t("modal.storageMigration.upgrading");
 
       try {
         await this.plugin.backupAndMigrateStorageToV2();
-        new Notice("Successfully migrated to vault shards v2.");
+        new Notice(t("modal.storageMigration.success"));
       } catch (error) {
         console.error("Migration failed:", error);
-        new Notice("Migration failed. Check the console for details.");
+        new Notice(t("modal.storageMigration.failed"));
       } finally {
         this.close();
       }

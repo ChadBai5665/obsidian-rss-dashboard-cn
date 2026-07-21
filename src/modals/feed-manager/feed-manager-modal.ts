@@ -3,6 +3,7 @@ import type RssDashboardPlugin from "../../../main";
 import { ImportOpmlModal } from "../import-opml-modal";
 import { shouldUseMobileSidebarLayout } from "../../utils/platform-utils";
 import { AddFeedModal, type AddFeedRequest } from "./add-feed-modal";
+import { createTranslator } from "../../i18n";
 
 export class FeedManagerModal extends Modal {
   plugin: RssDashboardPlugin;
@@ -13,6 +14,7 @@ export class FeedManagerModal extends Modal {
   }
 
   onOpen() {
+    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     const { contentEl } = this;
     const isMobile = shouldUseMobileSidebarLayout();
 
@@ -24,7 +26,7 @@ export class FeedManagerModal extends Modal {
 
     contentEl.empty();
 
-    new Setting(contentEl).setName("Manage feeds").setHeading();
+    new Setting(contentEl).setName(t("modal.feedManager.title")).setHeading();
 
     // Single button row for all four actions
     const buttonRow = contentEl.createDiv({
@@ -35,7 +37,7 @@ export class FeedManagerModal extends Modal {
     const addFeedBtn = buttonRow.createEl("button", {
       cls: "feed-manager-add-button",
     });
-    addFeedBtn.createSpan({ text: "Add new feed..." });
+    addFeedBtn.createSpan({ text: t("modal.feedManager.add") });
     addFeedBtn.onclick = () => {
       new AddFeedModal(
         this.app,
@@ -64,7 +66,7 @@ export class FeedManagerModal extends Modal {
       cls: "feed-manager-import-button",
     });
     setIcon(importOpmlBtn, "upload");
-    importOpmlBtn.createSpan({ text: " Import OPML" });
+    importOpmlBtn.createSpan({ text: ` ${t("modal.feedManager.import")}` });
     importOpmlBtn.onclick = () => {
       new ImportOpmlModal(this.app, this.plugin, () => this.close()).open();
     };
@@ -74,7 +76,7 @@ export class FeedManagerModal extends Modal {
       cls: "feed-manager-export-button",
     });
     setIcon(exportOpmlBtn, "download");
-    exportOpmlBtn.createSpan({ text: " Export OPML" });
+    exportOpmlBtn.createSpan({ text: ` ${t("modal.feedManager.export")}` });
     exportOpmlBtn.onclick = () => {
       this.plugin.exportOpml();
     };
@@ -84,10 +86,10 @@ export class FeedManagerModal extends Modal {
       cls: "feed-manager-delete-all-button",
     });
     setIcon(deleteAllBtn, "trash-2");
-    deleteAllBtn.createSpan({ text: " Delete all feeds" });
+    deleteAllBtn.createSpan({ text: ` ${t("modal.feedManager.deleteAll")}` });
     deleteAllBtn.onclick = () => {
       if (this.plugin.settings.feeds.length === 0) {
-        new Notice("There are no feeds to delete");
+        new Notice(t("modal.feedManager.noneToDelete"));
         return;
       }
 
@@ -97,22 +99,26 @@ export class FeedManagerModal extends Modal {
       const { contentEl } = confirmModal;
       contentEl.empty();
 
-      new Setting(contentEl).setName("Delete all feeds?").setHeading();
+      new Setting(contentEl)
+        .setName(t("modal.feedManager.deleteAllTitle"))
+        .setHeading();
       contentEl.createEl("p", {
-        text: `This will permanently remove all ${this.plugin.settings.feeds.length} feeds from RSS Dashboard. Your folder structure and plugin settings will remain intact.`,
+        text: t("modal.feedManager.deleteAllDesc", {
+          count: this.plugin.settings.feeds.length,
+        }),
       });
 
       const buttonsSetting = new Setting(contentEl);
       buttonsSetting.controlEl.addClass("rss-dashboard-modal-buttons");
       buttonsSetting
         .addButton((btn) =>
-          btn.setButtonText("Cancel").onClick(() => {
+          btn.setButtonText(t("common.cancel")).onClick(() => {
             confirmModal.close();
           }),
         )
         .addButton((btn) =>
           btn
-            .setButtonText("Delete all feeds")
+            .setButtonText(t("modal.feedManager.deleteAll"))
             .setWarning()
             .onClick(async () => {
               this.plugin.settings.feeds = [];
@@ -125,7 +131,7 @@ export class FeedManagerModal extends Modal {
 
               this.close();
               confirmModal.close();
-              new Notice("All feeds deleted");
+              new Notice(t("modal.feedManager.deletedAll"));
             }),
         );
 

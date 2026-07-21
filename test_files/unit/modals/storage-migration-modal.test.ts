@@ -30,7 +30,7 @@ beforeEach(() => {
 });
 
 describe("StorageMigrationModal", () => {
-  it("closes statelessly on 'Remind me later'", async () => {
+  it("renders Chinese by default and closes statelessly on '稍后提醒'", async () => {
     const app = createMockApp();
     const plugin: TestPlugin = {
       settings: { storageMode: "legacy-json" },
@@ -42,7 +42,7 @@ describe("StorageMigrationModal", () => {
     modal.open();
 
     const buttons = Array.from(modal.contentEl.querySelectorAll("button"));
-    const remindBtn = buttons.find((b) => b.textContent === "Remind me later") as HTMLButtonElement;
+    const remindBtn = buttons.find((b) => b.textContent === "稍后提醒") as HTMLButtonElement;
     expect(remindBtn).toBeDefined();
 
     remindBtn.click();
@@ -53,7 +53,7 @@ describe("StorageMigrationModal", () => {
     expect(plugin.backupAndMigrateStorageToV2).not.toHaveBeenCalled();
   });
 
-  it("sets dismissed permanently on 'Never show again'", async () => {
+  it("sets dismissed permanently on '不再提示'", async () => {
     const app = createMockApp();
     const plugin: TestPlugin = {
       settings: { storageMode: "legacy-json" },
@@ -65,7 +65,7 @@ describe("StorageMigrationModal", () => {
     modal.open();
 
     const buttons = Array.from(modal.contentEl.querySelectorAll("button"));
-    const neverBtn = buttons.find((b) => b.textContent === "Never show again") as HTMLButtonElement;
+    const neverBtn = buttons.find((b) => b.textContent === "不再提示") as HTMLButtonElement;
     expect(neverBtn).toBeDefined();
 
     neverBtn.click();
@@ -76,7 +76,7 @@ describe("StorageMigrationModal", () => {
     expect(plugin.backupAndMigrateStorageToV2).not.toHaveBeenCalled();
   });
 
-  it("calls backupAndMigrateStorageToV2 and sets flag on 'Upgrade now'", async () => {
+  it("calls backupAndMigrateStorageToV2 from the Chinese upgrade action", async () => {
     const app = createMockApp();
     const plugin: TestPlugin = {
       settings: { storageMode: "legacy-json" },
@@ -88,7 +88,7 @@ describe("StorageMigrationModal", () => {
     modal.open();
 
     const buttons = Array.from(modal.contentEl.querySelectorAll("button"));
-    const upgradeBtn = buttons.find((b) => b.textContent?.includes("Upgrade now")) as HTMLButtonElement;
+    const upgradeBtn = buttons.find((b) => b.textContent?.includes("立即升级")) as HTMLButtonElement;
     expect(upgradeBtn).toBeDefined();
 
     upgradeBtn.click();

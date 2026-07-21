@@ -129,7 +129,9 @@ function renderFolderSetting(
           plugin.settings.media[key] = normalizePath(nextValue);
           await plugin.saveSettings();
         });
-      new FolderSuggest(plugin.app, text.inputEl, plugin.settings.folders);
+      new FolderSuggest(plugin.app, text.inputEl, plugin.settings.folders, {
+        locale: plugin.settings.locale,
+      });
     });
 }
 

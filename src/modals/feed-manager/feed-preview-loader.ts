@@ -2,6 +2,7 @@ import { MediaService } from "../../services/media-service";
 import { MastodonService } from "../../services/mastodon-service";
 import { loadFeedForPreview, resolvePodcastPlatformUrl } from "../../services/feed-parser";
 import { detectPodcastPlatform } from "../../utils/podcast-platforms";
+import { createTranslator, type Locale } from "../../i18n";
 
 export type FeedPreviewType = "rss" | "podcast" | "youtube";
 
@@ -44,12 +45,16 @@ function isYouTubeRssFeedUrl(url: string): boolean {
 export function formatLatestEntryLabel(
   latestPubDate?: string,
   now = Date.now(),
+  locale: Locale = "en",
 ): string {
-  if (!latestPubDate) return "N/A";
+  const t = createTranslator(locale);
+  if (!latestPubDate) return t("modal.feed.notAvailable");
   const date = new Date(latestPubDate);
-  if (!Number.isFinite(date.getTime())) return "N/A";
+  if (!Number.isFinite(date.getTime())) return t("modal.feed.notAvailable");
   const daysAgo = Math.floor((now - date.getTime()) / (1000 * 60 * 60 * 24));
-  return daysAgo === 0 ? "Today" : `${daysAgo} days ago`;
+  return daysAgo === 0
+    ? t("modal.feed.today")
+    : t("modal.feed.daysAgo", { count: daysAgo });
 }
 
 export function getPreviewConversionNotice(
