@@ -4274,7 +4274,7 @@ export class RssDashboardView extends ItemView {
 
   private verifySavedArticles(): void {
     const allArticles = this.getFilteredArticles();
-    this.saver.verifyAllSavedArticles(allArticles);
+    void this.saver.verifyAllSavedArticles(allArticles);
   }
 
   private handleFileDeleted(file: TFile): void {

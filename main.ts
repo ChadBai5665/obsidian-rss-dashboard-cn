@@ -3172,7 +3172,7 @@ export default class RssDashboardPlugin extends Plugin {
     for (const feed of this.settings.feeds) {
       for (const item of feed.items) {
         if (item.saved) {
-          const fileExists = this.articleSaver.checkSavedFileExists(item);
+          const fileExists = await this.articleSaver.checkSavedFileExists(item);
           if (!fileExists) {
             item.saved = false;
             item.savedFilePath = undefined;

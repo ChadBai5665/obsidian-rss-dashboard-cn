@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App, TFile, moment } from "obsidian";
+import { isMap, parseDocument } from "yaml";
 import type {
   ArticleSavingSettings,
   CollectionSettings,
@@ -60,6 +61,30 @@ const FOURTH_ITEM_ID = "d".repeat(64);
 
 function ownedNote(itemId: string, body = "existing body"): string {
   return `---\nrssDashboardId: ${JSON.stringify(itemId)}\n---\n\n${body}`;
+}
+
+function parseSavedFrontmatter(raw: string): {
+  document: ReturnType<typeof parseDocument>;
+  value: Record<string, unknown>;
+} {
+  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match) throw new Error("expected frontmatter");
+  const document = parseDocument(match[1], { uniqueKeys: true });
+  expect(document.errors).toEqual([]);
+  expect(isMap(document.contents)).toBe(true);
+  return {
+    document,
+    value: document.toJS() as Record<string, unknown>,
+  };
+}
+
+function ownedKeyCount(
+  document: ReturnType<typeof parseDocument>,
+  key: string,
+): number {
+  if (!isMap(document.contents)) return 0;
+  return document.contents.items.filter((pair) => pair.key?.toString() === key)
+    .length;
 }
 
 beforeEach(() => {
@@ -145,11 +170,12 @@ describe("ArticleSaver.saveArticle", () => {
     expect(createSpy.mock.calls[0][0]).toBe(expectedPath);
 
     const written = createSpy.mock.calls[0][1];
-    expect(written).toContain('title: "Hello / World: An Article"');
-    expect(written).toContain('source: "Test Feed"');
-    expect(written).toContain('link: "https://example.com/article"');
-    expect(written).toContain('guid: "guid-1"');
-    expect(written).toContain("tags: [tech, Saved]");
+    const { value } = parseSavedFrontmatter(written);
+    expect(value.title).toBe("Hello / World: An Article");
+    expect(value.source).toBe("Test Feed");
+    expect(value.link).toBe("https://example.com/article");
+    expect(value.guid).toBe("guid-1");
+    expect(value.tags).toEqual(["tech, Saved"]);
     expect(written).toContain("iso=2024-01-01T00:00:00.000Z");
     expect(written).toContain("tags=tech, Saved");
     expect(written).toContain("BODY");
@@ -197,12 +223,43 @@ describe("ArticleSaver.saveArticle", () => {
     expect(openFile).toHaveBeenCalledWith(result);
   });
 
+  it("does not scan the entire Vault when the legacy save folder is the root", async () => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultFolder: "", defaultTemplate: "{{content}}" }),
+    );
+    const unrelated = await app.vault.create(
+      "Unrelated Legacy Name.md",
+      ownedNote(FIRST_ITEM_ID, "UNRELATED ROOT NOTE"),
+    );
+    const readSpy = vi.spyOn(app.vault, "read");
+    const filesSpy = vi.spyOn(app.vault, "getFiles");
+
+    const saved = await saver.saveArticle(
+      createItem({ title: "Current Title", rssDashboardId: FIRST_ITEM_ID }),
+      undefined,
+      undefined,
+      "CURRENT BODY",
+    );
+
+    expect(saved?.path).toBe("Current Title.md");
+    expect(readSpy).not.toHaveBeenCalledWith(unrelated);
+    expect(filesSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("returns null and does not mark the item saved when writing fails", async () => {
     const app = App.createMock();
     const settings = createSettings({
       defaultTemplate: "{{content}}",
     });
-    const saver = new ArticleSaver(app, settings);
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
+    const flagsSpy = vi.spyOn(CollectionRepository.prototype, "updateFlags");
 
     vi.spyOn(app.vault, "create").mockRejectedValueOnce(new Error("disk full"));
 
@@ -212,6 +269,7 @@ describe("ArticleSaver.saveArticle", () => {
     expect(result).toBeNull();
     expect(item.saved).not.toBe(true);
     expect(item.savedFilePath).toBeUndefined();
+    expect(flagsSpy).not.toHaveBeenCalled();
   });
 
   it("uses deterministic ID suffixes without overwriting unrelated same-title notes", async () => {
@@ -312,17 +370,25 @@ describe("ArticleSaver.saveArticle", () => {
     const file = await saver.saveArticle(item, undefined, undefined, "BODY");
     const written = await app.vault.read(file!);
 
-    expect(written).toContain(`rssDashboardId: ${JSON.stringify(FIRST_ITEM_ID)}`);
-    expect(written).toContain(
-      `source: ${JSON.stringify('Source "quoted"\ninjected: true')}`,
+    const { document, value } = parseSavedFrontmatter(written);
+    expect(value.rssDashboardId).toBe(FIRST_ITEM_ID);
+    expect(value.source).toBe('Source "quoted"\ninjected: true');
+    expect(value.sourceUrl).toBe(
+      "https://example.com/article\nmalicious: true",
     );
-    expect(written).toContain(
-      `sourceUrl: ${JSON.stringify("https://example.com/article\nmalicious: true")}`,
-    );
-    expect(written).toContain(
-      'publishedAt: "2026-07-20T08:00:00.000Z"',
-    );
-    expect(written).toContain('savedAt: "2026-07-21T12:34:56.000Z"');
+    expect(value.publishedAt).toBe("2026-07-20T08:00:00.000Z");
+    expect(value.savedAt).toBe("2026-07-21T12:34:56.000Z");
+    for (const key of [
+      "rssDashboardId",
+      "source",
+      "sourceUrl",
+      "publishedAt",
+      "savedAt",
+      "contentBasis",
+    ]) {
+      expect(typeof value[key]).toBe("string");
+      expect(ownedKeyCount(document, key)).toBe(1);
+    }
     expect(written).not.toMatch(/^malicious: true$/m);
     expect(written).not.toMatch(/^injected: true$/m);
     vi.useRealTimers();
@@ -334,7 +400,7 @@ describe("ArticleSaver.saveArticle", () => {
       app,
       createSettings({
         defaultTemplate:
-          '---\ntitle: "{{title}}"\nlink: "{{link}}"\nauthor: "{{author}}"\n---\n\n{{content}}',
+          "---\ntitle: {{title}}\nlink: '{{link}}'\nauthor: \"{{author}}\"\n---\n\n{{content}}",
         includeFrontmatter: false,
       }),
       undefined,
@@ -343,9 +409,9 @@ describe("ArticleSaver.saveArticle", () => {
     const file = await saver.saveArticle(
       createItem({
         rssDashboardId: FIRST_ITEM_ID,
-        title: 'Title "quoted"\ninjectedTitle: true',
-        link: "https://example.com/path\ninjectedLink: true",
-        author: "Author\ninjectedAuthor: true",
+        title: "Malicious: true",
+        link: "https://example.com/path\r\n---\r\ninjectedLink: true",
+        author: 'Author "quoted"\ninjectedAuthor: true',
       }),
       undefined,
       undefined,
@@ -353,12 +419,87 @@ describe("ArticleSaver.saveArticle", () => {
     );
     const written = await app.vault.read(file!);
 
-    expect(written).toContain('title: "Title \\"quoted\\"\\ninjectedTitle: true"');
-    expect(written).toContain(
-      'link: "https://example.com/path\\ninjectedLink: true"',
+    const { document, value } = parseSavedFrontmatter(written);
+    expect(value.title).toBe("Malicious: true");
+    expect(value.link).toBe(
+      "https://example.com/path\r\n---\r\ninjectedLink: true",
     );
-    expect(written).toContain('author: "Author\\ninjectedAuthor: true"');
+    expect(value.author).toBe('Author "quoted"\ninjectedAuthor: true');
     expect(written).not.toMatch(/^injected(?:Title|Link|Author): true$/m);
+    for (const key of [
+      "rssDashboardId",
+      "source",
+      "sourceUrl",
+      "publishedAt",
+      "savedAt",
+      "contentBasis",
+    ]) {
+      expect(typeof value[key]).toBe("string");
+      expect(ownedKeyCount(document, key)).toBe(1);
+    }
+  });
+
+  it("parses flow and block frontmatter before substituting string values", async () => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({
+        defaultTemplate:
+          "---\nmeta: { title: {{title}}, link: \"{{link}}\" }\nsummary: |\n  {{summary}}\n\"source\": template-owned-value\n---\n\n{{content}}",
+      }),
+      undefined,
+      collectionSettings,
+    );
+    const item = createItem({
+      rssDashboardId: FIRST_ITEM_ID,
+      title: "Flow: remains one scalar",
+      link: "https://example.com/a\r\n---\r\nextra: true",
+      summary: "Line one\nLine two: still text",
+      feedTitle: "Canonical source",
+    });
+
+    const file = await saver.saveArticle(item, undefined, undefined, "BODY");
+    const { document, value } = parseSavedFrontmatter(
+      await app.vault.read(file!),
+    );
+
+    expect(value.meta).toEqual({
+      title: "Flow: remains one scalar",
+      link: "https://example.com/a\r\n---\r\nextra: true",
+    });
+    expect(value.summary).toBe("Line one\nLine two: still text\n");
+    expect(value.source).toBe("Canonical source");
+    expect(ownedKeyCount(document, "source")).toBe(1);
+  });
+
+  it("rejects malformed, non-mapping, duplicate-key, and alias frontmatter templates", async () => {
+    const templates = [
+      "---\n- not\n- a mapping\n---\nBODY",
+      "---\ntitle: [unterminated\n---\nBODY",
+      "---\nsource: first\n\"source\": second\n---\nBODY",
+      `---\nanchor: &id ${FIRST_ITEM_ID}\nrssDashboardId: *id\n---\nBODY`,
+    ];
+
+    for (const [index, template] of templates.entries()) {
+      const app = App.createMock();
+      const saver = new ArticleSaver(
+        app,
+        createSettings({ defaultTemplate: template }),
+        undefined,
+        collectionSettings,
+      );
+      const createSpy = vi.spyOn(app.vault, "create");
+
+      const file = await saver.saveArticle(
+        createItem({
+          title: `Invalid template ${index}`,
+          rssDashboardId: FIRST_ITEM_ID,
+        }),
+      );
+
+      expect(file).toBeNull();
+      expect(createSpy).not.toHaveBeenCalled();
+    }
   });
 
   it("rejects traversal in the configured save folder and never scans outside it", async () => {
@@ -406,6 +547,148 @@ describe("ArticleSaver.saveArticle", () => {
     expect(result).toBeNull();
     expect(createSpy).not.toHaveBeenCalled();
   });
+
+  it.each([
+    "",
+    "   ",
+    "/",
+    "/Information/Saved",
+    "Information/Saved/",
+    "Information//Saved",
+    "Information/./Saved",
+    "Information/../Saved",
+    "Information/   /Saved",
+    "Information\\Saved",
+    "C:/Information/Saved",
+    "Information/Bad\u0000Name",
+    "Information/Bad\u001fName",
+    "Information/Bad\u007fName",
+  ])("rejects unsafe collection saved folder %j", async (savedNoteFolder) => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultFolder: "Legacy Root" }),
+      undefined,
+      { ...collectionSettings, savedNoteFolder },
+    );
+    const createSpy = vi.spyOn(app.vault, "create");
+
+    const result = await saver.saveArticle(
+      createItem({ rssDashboardId: FIRST_ITEM_ID }),
+      undefined,
+      undefined,
+      "BODY",
+    );
+
+    expect(result).toBeNull();
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("normalizes equivalent Unicode titles and folders before locking and collision selection", async () => {
+    const app = App.createMock();
+    const decomposed = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      undefined,
+      { ...collectionSettings, savedNoteFolder: "Information/Cafe\u0301" },
+    );
+    const composed = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      undefined,
+      { ...collectionSettings, savedNoteFolder: "Information/Café" },
+    );
+
+    const [first, second] = await Promise.all([
+      decomposed.saveArticle(
+        createItem({ title: "Cafe\u0301", rssDashboardId: FIRST_ITEM_ID }),
+        undefined,
+        undefined,
+        "FIRST",
+      ),
+      composed.saveArticle(
+        createItem({ title: "Café", rssDashboardId: SECOND_ITEM_ID }),
+        undefined,
+        undefined,
+        "SECOND",
+      ),
+    ]);
+
+    expect(first?.path).toBe("Information/Café/Café.md");
+    expect(second?.path).toBe(
+      `Information/Café/Café-${SECOND_ITEM_ID.slice(0, 8)}.md`,
+    );
+  });
+
+  it("treats a pre-existing canonically equivalent Unicode path as occupied", async () => {
+    const app = App.createMock();
+    await app.vault.create(
+      "Information/Cafe\u0301/Cafe\u0301.md",
+      ownedNote(SECOND_ITEM_ID, "DECOMPOSED OWNER"),
+    );
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      undefined,
+      { ...collectionSettings, savedNoteFolder: "Information/Café" },
+    );
+
+    const saved = await saver.saveArticle(
+      createItem({ title: "Café", rssDashboardId: FIRST_ITEM_ID }),
+      undefined,
+      undefined,
+      "NEW BODY",
+    );
+
+    expect(saved?.path).toBe(
+      `Information/Café/Café-${FIRST_ITEM_ID.slice(0, 8)}.md`,
+    );
+    expect(await app.vault.read("Information/Cafe\u0301/Cafe\u0301.md")).toContain(
+      "DECOMPOSED OWNER",
+    );
+  });
+
+  it("preserves validated folder segment spacing when creating folders", async () => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      undefined,
+      { ...collectionSettings, savedNoteFolder: "Information/My  Saved" },
+    );
+    const createFolderSpy = vi.spyOn(app.vault, "createFolder");
+
+    await saver.saveArticle(
+      createItem({ rssDashboardId: FIRST_ITEM_ID }),
+      undefined,
+      undefined,
+      "BODY",
+    );
+
+    expect(createFolderSpy).toHaveBeenCalledWith("Information/My  Saved");
+  });
+
+  it.each([".", "..", "   ", "Unsafe\u0000Title", "Unsafe\u007fTitle"])(
+    "rejects unsafe sanitized filename %j",
+    async (title) => {
+      const app = App.createMock();
+      const saver = new ArticleSaver(
+        app,
+        createSettings({ defaultTemplate: "{{content}}" }),
+        undefined,
+        collectionSettings,
+      );
+
+      expect(
+        await saver.saveArticle(
+          createItem({ title, rssDashboardId: FIRST_ITEM_ID }),
+          undefined,
+          undefined,
+          "BODY",
+        ),
+      ).toBeNull();
+    },
+  );
 
   it("serializes concurrent saves across saver instances for same and colliding IDs", async () => {
     const app = App.createMock();
@@ -501,6 +784,29 @@ describe("ArticleSaver.saveArticle", () => {
     );
   });
 
+  it("retries metadata repair when an owned note already exists", async () => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings({ defaultTemplate: "{{content}}" }),
+      undefined,
+      collectionSettings,
+    );
+    const flagsSpy = vi
+      .spyOn(CollectionRepository.prototype, "updateFlags")
+      .mockReset()
+      .mockRejectedValueOnce(new Error("temporary metadata failure"))
+      .mockResolvedValueOnce(undefined);
+    const item = createItem({ rssDashboardId: FIRST_ITEM_ID });
+
+    const first = await saver.saveArticle(item, undefined, undefined, "FIRST");
+    const second = await saver.saveArticle(item, undefined, undefined, "SECOND");
+
+    expect(second).toBe(first);
+    expect(flagsSpy).toHaveBeenCalledTimes(2);
+    expect(await app.vault.read(first!)).not.toContain("SECOND");
+  });
+
   it("ignores caller-supplied YouTube media or transcript content", async () => {
     const app = App.createMock();
     const saver = new ArticleSaver(
@@ -529,7 +835,9 @@ describe("ArticleSaver.saveArticle", () => {
 
     expect(written).toContain("Feed description only.");
     expect(written).not.toContain("downloaded transcript");
-    expect(written).toContain('contentBasis: "title-description"');
+    expect(parseSavedFrontmatter(written).value.contentBasis).toBe(
+      "title-description",
+    );
   });
 
   it("creates nested folders one segment at a time", async () => {
@@ -597,7 +905,7 @@ describe("ArticleSaver.saveArticle", () => {
     expect(item.savedFilePath).toBe(expectedPath);
   });
 
-  it("uses a fallback filename when the title sanitizes to empty", async () => {
+  it("does not save when the title sanitizes to an unsafe empty filename", async () => {
     const app = App.createMock();
     const settings = createSettings({
       defaultFolder: "Articles",
@@ -609,11 +917,11 @@ describe("ArticleSaver.saveArticle", () => {
 
     const createSpy = vi.spyOn(app.vault, "create");
 
-    await saver.saveArticle(item, undefined, undefined, "BODY");
+    const result = await saver.saveArticle(item, undefined, undefined, "BODY");
 
-    expect(createSpy).toHaveBeenCalled();
-    expect(createSpy.mock.calls[0][0]).toBe("Articles/Untitled Article.md");
-    expect(item.savedFilePath).toBe("Articles/Untitled Article.md");
+    expect(result).toBeNull();
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(item.savedFilePath).toBeUndefined();
   });
 });
 
@@ -759,7 +1067,7 @@ describe("ArticleSaver.saveArticleWithFullContent", () => {
     expect(file).toBeInstanceOf(TFile);
     const written = await app.vault.read(file!);
     expect(written).toContain("Short but valid cached article text.");
-    expect(written).toContain('contentBasis: "full-text"');
+    expect(parseSavedFrontmatter(written).value.contentBasis).toBe("full-text");
   });
 
   it("opens an existing stable-ID note before cache or network work", async () => {
@@ -829,7 +1137,9 @@ describe("ArticleSaver.saveArticleWithFullContent", () => {
     expect(written).toContain("# Video title");
     expect(written).toContain("Channel-provided description.");
     expect(written).not.toContain("media/transcript payload");
-    expect(written).toContain('contentBasis: "title-description"');
+    expect(parseSavedFrontmatter(written).value.contentBasis).toBe(
+      "title-description",
+    );
   });
 
   it("prepends enclosure image when chosen feed HTML has no inline image", async () => {
@@ -1007,7 +1317,9 @@ describe("ArticleSaver.saveArticleWithFullContent", () => {
 
     expect(file).toBeInstanceOf(TFile);
     expect(await app.vault.read(file!)).toContain("Feed body wins.");
-    expect(await app.vault.read(file!)).toContain('contentBasis: "feed"');
+    expect(
+      parseSavedFrontmatter(await app.vault.read(file!)).value.contentBasis,
+    ).toBe("feed");
   });
 
   it("falls back to feed content when the explicit website request throws", async () => {
@@ -1030,7 +1342,9 @@ describe("ArticleSaver.saveArticleWithFullContent", () => {
 
     expect(file).toBeInstanceOf(TFile);
     expect(await app.vault.read(file!)).toContain("Durable feed fallback.");
-    expect(await app.vault.read(file!)).toContain('contentBasis: "feed"');
+    expect(
+      parseSavedFrontmatter(await app.vault.read(file!)).value.contentBasis,
+    ).toBe("feed");
   });
 
   it("uses richer feed content when fetched article content is only a short excerpt", async () => {
@@ -1143,7 +1457,9 @@ describe("ArticleSaver.saveArticleWithFullContent", () => {
 
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(file).toBeInstanceOf(TFile);
-    expect(await app.vault.read(file!)).toContain('contentBasis: "feed"');
+    expect(
+      parseSavedFrontmatter(await app.vault.read(file!)).value.contentBasis,
+    ).toBe("feed");
     expect(item.restrictedReason).toBeUndefined();
   });
 
@@ -1183,21 +1499,27 @@ describe("ArticleSaver.verifySavedArticle", () => {
   it("returns true when the saved file exists in the vault", async () => {
     const app = App.createMock();
     const settings = createSettings();
-    const saver = new ArticleSaver(app, settings);
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
 
     const item = createItem({ title: "Exists" });
-    const filePath = "Articles/Exists.md";
-    await app.vault.create(filePath, "x");
+    item.rssDashboardId = FIRST_ITEM_ID;
+    const filePath = "Information/Saved/Exists.md";
+    await app.vault.create(filePath, ownedNote(FIRST_ITEM_ID));
 
     item.saved = true;
     item.savedFilePath = filePath;
     item.tags = [{ name: "saved", color: "#3498db" }];
 
-    expect(saver.verifySavedArticle(item)).toBe(true);
+    expect(await saver.verifySavedArticle(item)).toBe(true);
     expect(item.saved).toBe(true);
   });
 
-  it("clears saved state and removes the saved tag when the file is missing", () => {
+  it("clears saved state and removes the saved tag when the file is missing", async () => {
     const app = App.createMock();
     const settings = createSettings();
     const saver = new ArticleSaver(app, settings);
@@ -1210,7 +1532,7 @@ describe("ArticleSaver.verifySavedArticle", () => {
       { name: "other", color: "#000" },
     ];
 
-    expect(saver.verifySavedArticle(item)).toBe(false);
+    expect(await saver.verifySavedArticle(item)).toBe(false);
     expect(item.saved).toBe(false);
     expect(item.savedFilePath).toBeUndefined();
     expect(item.tags.map((t) => t.name)).toEqual(["other"]);
@@ -1218,34 +1540,56 @@ describe("ArticleSaver.verifySavedArticle", () => {
 });
 
 describe("ArticleSaver.fixSavedFilePaths", () => {
-  it("normalizes paths when the normalized path exists", async () => {
+  it("repairs a saved path only by finding the same stable ID in the configured folder", async () => {
     const app = App.createMock();
     const settings = createSettings();
-    const saver = new ArticleSaver(app, settings);
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
 
-    await app.vault.create("Folder/Item.md", "x");
+    await app.vault.create(
+      "Information/Saved/Renamed.md",
+      ownedNote(FIRST_ITEM_ID),
+    );
+    await app.vault.create(
+      "Information/Saved/Item.md",
+      ownedNote(SECOND_ITEM_ID),
+    );
 
-    const item = createItem({ title: "Item" });
+    const item = createItem({ title: "Item", rssDashboardId: FIRST_ITEM_ID });
     item.saved = true;
-    item.savedFilePath = "/Folder/Item.md";
+    item.savedFilePath = "Information/Saved/Item.md";
 
     const renameSpy = vi.spyOn(app.fileManager, "renameFile");
     await saver.fixSavedFilePaths([item]);
 
-    expect(item.savedFilePath).toBe("Folder/Item.md");
+    expect(item.savedFilePath).toBe("Information/Saved/Renamed.md");
     expect(renameSpy).not.toHaveBeenCalled();
   });
 
-  it("renames files when the old path exists but the normalized path does not", async () => {
+  it("moves an explicitly owned legacy path with the deterministic collision rule", async () => {
     const app = App.createMock();
-    const settings = createSettings({ defaultFolder: "/Normalized/" });
-    const saver = new ArticleSaver(app, settings);
+    const settings = createSettings({ defaultFolder: "Legacy" });
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
 
-    const oldPath = "/Old Folder/Weird.md";
-    const file = await app.vault.create(oldPath, "x");
+    const oldPath = "Old Folder/Weird.md";
+    const file = await app.vault.create(oldPath, ownedNote(FIRST_ITEM_ID));
+    await app.vault.create(
+      "Information/Saved/My Weird Title.md",
+      ownedNote(SECOND_ITEM_ID),
+    );
 
     const item = createItem({
       title: "My / Weird : Title",
+      rssDashboardId: FIRST_ITEM_ID,
       tags: [{ name: "saved", color: "#3498db" }],
     });
     item.saved = true;
@@ -1255,19 +1599,33 @@ describe("ArticleSaver.fixSavedFilePaths", () => {
     await saver.fixSavedFilePaths([item]);
 
     expect(renameSpy).toHaveBeenCalledTimes(1);
-    expect(file.path).toBe("Normalized/My Weird Title.md");
-    expect(item.savedFilePath).toBe("Normalized/My Weird Title.md");
+    expect(file.path).toBe(
+      `Information/Saved/My Weird Title-${FIRST_ITEM_ID.slice(0, 8)}.md`,
+    );
+    expect(item.savedFilePath).toBe(file.path);
     expect(item.saved).toBe(true);
   });
 
-  it("clears saved state when the savedFilePath is missing or not a file", async () => {
+  it("does not claim or rename an unowned same-title note during startup repair", async () => {
     const app = App.createMock();
     const settings = createSettings();
-    const saver = new ArticleSaver(app, settings);
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
+    await app.vault.create(
+      "Information/Saved/Not A File.md",
+      "---\ntitle: user note\n---\n\nUSER BODY",
+    );
 
-    const item = createItem({ title: "Not A File" });
+    const item = createItem({
+      title: "Not A File",
+      rssDashboardId: FIRST_ITEM_ID,
+    });
     item.saved = true;
-    item.savedFilePath = "/Missing/NotAFile.md";
+    item.savedFilePath = "Information/Saved/Not A File.md";
     item.tags = [
       { name: "saved", color: "#3498db" },
       { name: "keep", color: "#000" },
@@ -1278,60 +1636,117 @@ describe("ArticleSaver.fixSavedFilePaths", () => {
     expect(item.saved).toBe(false);
     expect(item.savedFilePath).toBeUndefined();
     expect(item.tags.map((t) => t.name)).toEqual(["keep"]);
+    expect(await app.vault.read("Information/Saved/Not A File.md")).toContain(
+      "USER BODY",
+    );
   });
 });
 
 describe("ArticleSaver saved file lookups", () => {
-  it("prefers savedFilePath when the title-based filename no longer matches", async () => {
+  it("accepts savedFilePath only when it is inside the configured folder and owned by the stable ID", async () => {
     const app = App.createMock();
     const settings = createSettings({ defaultFolder: "Articles" });
-    const saver = new ArticleSaver(app, settings);
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
 
     const item = createItem({
       title: "Title With / Slash",
+      rssDashboardId: FIRST_ITEM_ID,
       saved: true,
-      savedFilePath: "Archive/Already Saved.md",
+      savedFilePath: "Information/Saved/Already Saved.md",
     });
 
-    await app.vault.create("Archive/Already Saved.md", "content");
+    await app.vault.create(
+      "Information/Saved/Already Saved.md",
+      ownedNote(FIRST_ITEM_ID),
+    );
 
-    expect(saver.checkSavedFileExists(item)).toBe(true);
-    expect(item.savedFilePath).toBe("Archive/Already Saved.md");
+    expect(await saver.checkSavedFileExists(item)).toBe(true);
+    expect(item.savedFilePath).toBe("Information/Saved/Already Saved.md");
   });
 
-  it("falls back to the normalized default-folder path for legacy items", async () => {
+  it("never falls back to an unowned same-title file", async () => {
     const app = App.createMock();
     const settings = createSettings({ defaultFolder: "/Articles/" });
-    const saver = new ArticleSaver(app, settings);
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
 
     const item = createItem({
       title: "Legacy / Saved Article",
+      rssDashboardId: FIRST_ITEM_ID,
       saved: true,
     });
 
-    await app.vault.create("Articles/Legacy Saved Article.md", "content");
+    await app.vault.create(
+      "Information/Saved/Legacy Saved Article.md",
+      "user content",
+    );
 
-    expect(saver.checkSavedFileExists(item)).toBe(true);
-    expect(item.savedFilePath).toBe("Articles/Legacy Saved Article.md");
+    expect(await saver.checkSavedFileExists(item)).toBe(false);
+    expect(item.savedFilePath).toBeUndefined();
   });
 
-  it("finds a saved file by savedFilePath even when the default folder differs", async () => {
+  it("rejects an owned savedFilePath outside the configured collection folder", async () => {
     const app = App.createMock();
     const settings = createSettings({ defaultFolder: "RSS articles" });
-    const saver = new ArticleSaver(app, settings);
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      undefined,
+      collectionSettings,
+    );
 
     const item = createItem({
       title: "My Article",
+      rssDashboardId: FIRST_ITEM_ID,
       saved: true,
       savedFilePath: "Custom Folder/My Article.md",
     });
 
-    await app.vault.create("Custom Folder/My Article.md", "content");
+    await app.vault.create(
+      "Custom Folder/My Article.md",
+      ownedNote(FIRST_ITEM_ID),
+    );
 
     const file = await saver.findSavedArticleFile(item);
 
-    expect(file).toBeInstanceOf(TFile);
-    expect(file?.path).toBe("Custom Folder/My Article.md");
+    expect(file).toBeNull();
+  });
+
+  it.each([
+    `---\nrssDashboardId: ${JSON.stringify(FIRST_ITEM_ID)}\nrssDashboardId: ${JSON.stringify(FIRST_ITEM_ID)}\n---\n`,
+    `---\n"rssDashboardId": ${JSON.stringify(FIRST_ITEM_ID)}\nrssDashboardId: ${JSON.stringify(FIRST_ITEM_ID)}\n---\n`,
+    `---\nnested:\n  rssDashboardId: ${JSON.stringify(FIRST_ITEM_ID)}\n---\n`,
+    `---\nrssDashboardId: [${JSON.stringify(FIRST_ITEM_ID)}]\n---\n`,
+    `---\nrssDashboardId: &id ${JSON.stringify(FIRST_ITEM_ID)}\ncopy: *id\n---\n`,
+    `---\nrssDashboardId: [unterminated\n---\n`,
+  ])("treats ambiguous ownership frontmatter as unowned", async (frontmatter) => {
+    const app = App.createMock();
+    const saver = new ArticleSaver(
+      app,
+      createSettings(),
+      undefined,
+      collectionSettings,
+    );
+    const path = "Information/Saved/Ambiguous.md";
+    await app.vault.create(path, `${frontmatter}\nUSER BODY`);
+    const item = createItem({
+      title: "Ambiguous",
+      rssDashboardId: FIRST_ITEM_ID,
+      saved: true,
+      savedFilePath: path,
+    });
+
+    expect(await saver.findSavedArticleFile(item)).toBeNull();
+    expect(await app.vault.read(path)).toContain("USER BODY");
   });
 });
 

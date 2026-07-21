@@ -1260,7 +1260,7 @@ export class ReaderView extends ItemView {
     this.updateToggleButtons();
 
     if (item.saved) {
-      const fileExists = this.articleSaver.checkSavedFileExists(item);
+      const fileExists = await this.articleSaver.checkSavedFileExists(item);
       if (!fileExists) {
         item.saved = false;
         item.savedFilePath = undefined;
