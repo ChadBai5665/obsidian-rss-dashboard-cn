@@ -538,8 +538,11 @@ describe("onload() initialization", () => {
     await flushPromises();
 
     expect(refreshSpy).not.toHaveBeenCalled();
+    plugin.app.workspace.triggerLayoutReady();
+    await flushPromises();
+    expect(refreshSpy).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(15_000);
-    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    expect(refreshSpy).toHaveBeenCalledWith([sourceFeed]);
     vi.useRealTimers();
   });
 
@@ -573,6 +576,8 @@ describe("onload() initialization", () => {
 
     await plugin.onload();
     await flushPromises();
+    plugin.app.workspace.triggerLayoutReady();
+    await flushPromises();
     await vi.advanceTimersByTimeAsync(15_000);
 
     expect(refreshSpy).not.toHaveBeenCalled();
@@ -599,6 +604,8 @@ describe("onload() initialization", () => {
       .mockResolvedValue(undefined);
 
     await plugin.onload();
+    await flushPromises();
+    plugin.app.workspace.triggerLayoutReady();
     await flushPromises();
     plugin.onunload();
     deferredExists.resolve(false);
@@ -629,6 +636,8 @@ describe("onload() initialization", () => {
       .mockResolvedValue(undefined);
 
     await plugin.onload();
+    await flushPromises();
+    plugin.app.workspace.triggerLayoutReady();
     await flushPromises();
     const manualRefreshCommand = (
       plugin.addCommand as ReturnType<typeof vi.fn>
@@ -664,6 +673,7 @@ describe("onload() initialization", () => {
       .mockResolvedValue(undefined);
 
     await plugin.onload();
+    plugin.app.workspace.triggerLayoutReady();
     await flushPromises();
     await flushPromises();
 
@@ -671,6 +681,162 @@ describe("onload() initialization", () => {
     expect(warningSpy).toHaveBeenCalledWith(
       "[RSS Dashboard] Automatic refresh scheduling skipped due to ledger access failure.",
     );
+    vi.useRealTimers();
+  });
+
+  it("does not read the daily ledger or schedule a refresh until layout is ready", async () => {
+    vi.useFakeTimers();
+    const sourceFeed = { ...sampleFeed, feedId: "feed-1" };
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 0,
+      feeds: [sourceFeed],
+    });
+    const adapter = plugin.app.vault.adapter;
+    const originalExists = adapter.exists;
+    const ledgerExists = vi.fn((path: string) => originalExists(path));
+    adapter.exists = ledgerExists;
+    const refreshSpy = vi.spyOn(plugin, "refreshFeeds").mockResolvedValue(undefined);
+
+    await plugin.onload();
+    await flushPromises();
+
+    expect(ledgerExists).not.toHaveBeenCalledWith(
+      ".rss-dashboard-data/state/source-refresh.json",
+    );
+    expect(refreshSpy).not.toHaveBeenCalled();
+
+    plugin.app.workspace.triggerLayoutReady();
+    await flushPromises();
+    await flushPromises();
+
+    expect(ledgerExists).toHaveBeenCalledWith(
+      ".rss-dashboard-data/state/source-refresh.json",
+    );
+    expect(refreshSpy).toHaveBeenCalledWith([sourceFeed]);
+    vi.useRealTimers();
+  });
+
+  it("does not begin a daily refresh when unloaded before layout becomes ready", async () => {
+    vi.useFakeTimers();
+    const sourceFeed = { ...sampleFeed, feedId: "feed-1" };
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 0,
+      feeds: [sourceFeed],
+    });
+    const refreshSpy = vi.spyOn(plugin, "refreshFeeds").mockResolvedValue(undefined);
+
+    await plugin.onload();
+    plugin.onunload();
+    plugin.app.workspace.triggerLayoutReady();
+    await flushPromises();
+    await vi.runAllTimersAsync();
+
+    expect(refreshSpy).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("refreshes only the sources due today and excludes removed or excluded sources", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 21, 9, 0, 0));
+    const succeeded = { ...sampleFeed, feedId: "succeeded" };
+    const errored = { ...sampleFeed, feedId: "errored", url: "https://example.com/error.xml" };
+    const excluded = {
+      ...sampleFeed,
+      feedId: "excluded",
+      url: "https://example.com/excluded.xml",
+      excludeFromRefresh: true,
+    };
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 0,
+      feeds: [succeeded, errored, excluded],
+    });
+    await plugin.app.vault.adapter.write(
+      ".rss-dashboard-data/state/source-refresh.json",
+      JSON.stringify({
+        schemaVersion: 1,
+        sources: {
+          succeeded: { sourceId: "succeeded", status: "success", lastSuccessDate: "2026-07-21" },
+          errored: { sourceId: "errored", status: "error", lastSuccessDate: "2026-07-21" },
+          excluded: { sourceId: "excluded", status: "error", lastSuccessDate: "2026-07-20" },
+          deleted: { sourceId: "deleted", status: "error", lastSuccessDate: "2026-07-20" },
+        },
+      }),
+    );
+    const refreshSpy = vi.spyOn(plugin, "refreshFeeds").mockResolvedValue(undefined);
+
+    await plugin.onload();
+    plugin.app.workspace.triggerLayoutReady();
+    await flushPromises();
+    await flushPromises();
+
+    expect(refreshSpy).toHaveBeenCalledWith([errored]);
+    vi.useRealTimers();
+  });
+
+  it("treats missing and yesterday-success source entries as due but skips all-success sources", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 21, 9, 0, 0));
+    const succeeded = { ...sampleFeed, feedId: "succeeded" };
+    const missing = { ...sampleFeed, feedId: "missing", url: "https://example.com/missing.xml" };
+    const yesterday = { ...sampleFeed, feedId: "yesterday", url: "https://example.com/yesterday.xml" };
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 0,
+      feeds: [succeeded, missing, yesterday],
+    });
+    await plugin.app.vault.adapter.write(
+      ".rss-dashboard-data/state/source-refresh.json",
+      JSON.stringify({
+        schemaVersion: 1,
+        sources: {
+          succeeded: { sourceId: "succeeded", status: "success", lastSuccessDate: "2026-07-21" },
+          yesterday: { sourceId: "yesterday", status: "success", lastSuccessDate: "2026-07-20" },
+        },
+      }),
+    );
+    const refreshSpy = vi.spyOn(plugin, "refreshFeeds").mockResolvedValue(undefined);
+
+    await plugin.onload();
+    plugin.app.workspace.triggerLayoutReady();
+    await flushPromises();
+    await flushPromises();
+
+    expect(refreshSpy).toHaveBeenCalledWith([missing, yesterday]);
+    vi.useRealTimers();
+  });
+
+  it("keeps manual refresh-all unfiltered even after today's automatic refresh is skipped", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 21, 9, 0, 0));
+    const first = { ...sampleFeed, feedId: "first" };
+    const second = { ...sampleFeed, feedId: "second", url: "https://example.com/second.xml" };
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 0,
+      feeds: [first, second],
+    });
+    await plugin.app.vault.adapter.write(
+      ".rss-dashboard-data/state/source-refresh.json",
+      JSON.stringify({
+        schemaVersion: 1,
+        sources: {
+          first: { sourceId: "first", status: "success", lastSuccessDate: "2026-07-21" },
+          second: { sourceId: "second", status: "success", lastSuccessDate: "2026-07-21" },
+        },
+      }),
+    );
+    const refreshSpy = vi.spyOn(plugin, "refreshFeeds").mockResolvedValue(undefined);
+
+    await plugin.onload();
+    plugin.app.workspace.triggerLayoutReady();
+    await flushPromises();
+    await plugin.manualRefreshAllSources();
+
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    expect(refreshSpy).toHaveBeenCalledWith();
     vi.useRealTimers();
   });
 
@@ -991,9 +1157,8 @@ describe("onload() initialization", () => {
 
   it("does not attempt a startup refresh before FeedParser initialization", async () => {
     plugin.loadData = vi.fn().mockResolvedValue({
-      refreshInterval: 60,
-      lastRefreshTimestamp: 0,
-      feeds: [],
+      refreshMode: "daily-on-open",
+      feeds: [{ ...sampleFeed, feedId: "feed-1" }],
       startupRefreshDelaySeconds: 0,
     });
     const refreshSpy = vi
@@ -1002,6 +1167,10 @@ describe("onload() initialization", () => {
 
     await plugin.onload();
 
+    await flushPromises();
+
+    expect(refreshSpy).not.toHaveBeenCalled();
+    plugin.app.workspace.triggerLayoutReady();
     await flushPromises();
 
     expect(refreshSpy).toHaveBeenCalledTimes(1);

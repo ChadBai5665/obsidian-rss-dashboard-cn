@@ -74,6 +74,24 @@ export class SourceRefreshLedger {
     return (await this.getSharedSuccessDate(sourceIds)) === localDate;
   }
 
+  /**
+   * Returns only subscriptions which still need an automatic refresh today.
+   * The caller supplies the current subscription set so deleted ledger entries
+   * can never revive a removed source. A source is skipped only after a
+   * successful refresh for the current machine-local calendar date.
+   */
+  async getDueSourceIds(sourceIds: string[], now: Date): Promise<string[]> {
+    const localDate = toLocalCalendarDate(now);
+    const sources = (await this.readLedger()).sources;
+    const seen = new Set<string>();
+
+    return sourceIds.filter((sourceId) => {
+      if (seen.has(sourceId)) return false;
+      seen.add(sourceId);
+      return isSourceRefreshDue(sources[sourceId], localDate);
+    });
+  }
+
   async getSourceIdsWithStatus(
     status: SourceRefreshState["status"],
   ): Promise<string[]> {
@@ -224,6 +242,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function optionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string";
+}
+
+export function isSourceRefreshDue(
+  state: SourceRefreshState | undefined,
+  localDate: string,
+): boolean {
+  return state?.status !== "success" || state.lastSuccessDate !== localDate;
 }
 
 function assertSafeDataRoot(folder: string): void {

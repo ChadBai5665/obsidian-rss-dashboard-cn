@@ -76,7 +76,6 @@ import {
   migrateSettings,
 } from "./src/utils/settings-loader";
 import { applyAutomaticArticleTags } from "./src/utils/tag-utils";
-import { shouldRunDailyRefresh } from "./src/refresh/local-calendar-day";
 import { SourceRefreshLedger } from "./src/refresh/source-refresh-ledger";
 import { CollectionRepository } from "./src/collection/collection-repository";
 import { DailyIndexService } from "./src/collection/daily-index-service";
@@ -903,12 +902,6 @@ export default class RssDashboardPlugin extends Plugin {
     return await repository.listByDate(localDate);
   }
 
-  private getRefreshSourceIds(): string[] {
-    return this.getRefreshableFeeds(this.settings.feeds).map(
-      (feed) => feed.feedId ?? feed.url,
-    );
-  }
-
   private scheduleAutomaticRefresh(): void {
     if (this.settings.refreshMode === "off") {
       return;
@@ -926,10 +919,16 @@ export default class RssDashboardPlugin extends Plugin {
       return;
     }
 
-    void this.refreshOnOpenIfNeeded().catch(() => {
-      console.warn(
-        "[RSS Dashboard] Automatic refresh scheduling skipped due to ledger access failure.",
-      );
+    const generation = this.automaticRefreshGeneration;
+    this.app.workspace.onLayoutReady(() => {
+      if (!this.isAutomaticRefreshActive(generation)) {
+        return;
+      }
+      void this.refreshOnOpenIfNeeded().catch(() => {
+        console.warn(
+          "[RSS Dashboard] Automatic refresh scheduling skipped due to ledger access failure.",
+        );
+      });
     });
   }
 
@@ -939,14 +938,24 @@ export default class RssDashboardPlugin extends Plugin {
       return;
     }
 
+    const refreshableFeeds = this.getRefreshableFeeds(this.settings.feeds);
+    if (refreshableFeeds.length === 0) {
+      return;
+    }
+
     const now = new Date();
-    const lastSuccessDate = await this.getSourceRefreshLedger().getSharedSuccessDate(
-      this.getRefreshSourceIds(),
+    const dueSourceIds = await this.getSourceRefreshLedger().getDueSourceIds(
+      refreshableFeeds.map((feed) => feed.feedId ?? feed.url),
+      now,
     );
     if (!this.isAutomaticRefreshActive(generation)) {
       return;
     }
-    if (!shouldRunDailyRefresh(lastSuccessDate, now)) {
+    const dueSourceIdSet = new Set(dueSourceIds);
+    const dueFeeds = refreshableFeeds.filter((feed) =>
+      dueSourceIdSet.has(feed.feedId ?? feed.url),
+    );
+    if (dueFeeds.length === 0) {
       return;
     }
 
@@ -961,7 +970,7 @@ export default class RssDashboardPlugin extends Plugin {
         if (!this.isAutomaticRefreshActive(generation)) {
           return;
         }
-        void this.refreshFeeds();
+        void this.refreshFeeds(dueFeeds);
       }, delay * 1000);
       if (!this.isAutomaticRefreshActive(generation)) {
         window.clearTimeout(timeoutId);
@@ -974,7 +983,7 @@ export default class RssDashboardPlugin extends Plugin {
     if (!this.isAutomaticRefreshActive(generation)) {
       return;
     }
-    void this.refreshFeeds();
+    void this.refreshFeeds(dueFeeds);
   }
 
   private isAutomaticRefreshActive(generation: number): boolean {

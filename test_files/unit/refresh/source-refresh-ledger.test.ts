@@ -95,6 +95,38 @@ describe("SourceRefreshLedger", () => {
     );
   });
 
+  it("returns only current sources that still need a local-day refresh", async () => {
+    const { ledger } = createLedger();
+    const today = new Date(2026, 6, 21, 9, 0, 0);
+
+    await ledger.recordSuccess("succeeded-today", today);
+    await ledger.recordSuccess("succeeded-yesterday", new Date(2026, 6, 20, 9, 0, 0));
+    await ledger.recordAttempt("idle", today);
+    await ledger.recordError("errored", today, {
+      code: "network",
+      message: "Retry me",
+    });
+    await ledger.recordError("deleted-source", today, {
+      code: "network",
+      message: "This source is no longer subscribed",
+    });
+
+    await expect(
+      ledger.getDueSourceIds([
+        "succeeded-today",
+        "errored",
+        "missing",
+        "succeeded-yesterday",
+        "idle",
+      ], today),
+    ).resolves.toEqual([
+      "errored",
+      "missing",
+      "succeeded-yesterday",
+      "idle",
+    ]);
+  });
+
   it("redacts URL queries and header-like secrets from persisted error messages", async () => {
     const { ledger } = createLedger();
     const message = `Authorization: Bearer super-secret-token; https://api.example.com/feed?api_key=secret&token=also-secret ${"x".repeat(400)}`;
