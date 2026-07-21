@@ -3779,7 +3779,13 @@ export default class RssDashboardPlugin extends Plugin {
               false,
               { suppressCollectionBroadcast: true },
             );
-            if (updated) updatedCount++;
+            if (
+              updated &&
+              typeof item.rssDashboardId === "string" &&
+              /^[a-f0-9]{64}$/.test(item.rssDashboardId)
+            ) {
+              updatedCount++;
+            }
           }
         }
       }
@@ -3787,7 +3793,6 @@ export default class RssDashboardPlugin extends Plugin {
 
     if (updatedCount > 0) {
       this.emitCollectionFlagsUpdated();
-      await this.refreshDashboardViews();
     }
   }
 
