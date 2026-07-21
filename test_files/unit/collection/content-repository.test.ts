@@ -83,9 +83,9 @@ function parentPath(path: string): string {
   return separator === -1 ? "" : path.slice(0, separator);
 }
 
-function createRepository(adapter: InMemoryAdapter): ContentRepository {
+function createRepository(adapter: InMemoryAdapter, vault?: Vault): ContentRepository {
   return new ContentRepository(
-    { adapter } as unknown as Vault,
+    vault ?? ({ adapter } as unknown as Vault),
     DATA_ROOT,
     () => new Date("2026-07-21T12:00:00.000Z"),
   );
@@ -172,5 +172,37 @@ describe("ContentRepository", () => {
 
     expect((await repository.read(ITEM_ID))?.text).toBe("<p>Old full text</p>");
     expect(adapter.files.has(finalPath)).toBe(true);
+  });
+
+  it("serializes concurrent same-item writes across repository instances", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+    const first = createRepository(adapter, vault);
+    const second = createRepository(adapter, vault);
+
+    await Promise.all([
+      first.write(createContent({ text: "<p>First durable text</p>" })),
+      second.write(createContent({ text: "<p>Second durable text</p>" })),
+    ]);
+
+    expect((await first.read(ITEM_ID))?.text).toBe("<p>Second durable text</p>");
+    expect(
+      [...adapter.files.keys()].filter((path) => path.includes(".tmp-") || path.includes(".backup-")),
+    ).toEqual([]);
+  });
+
+  it("coordinates a read with a sibling write rather than deleting an active temp", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+    const writer = createRepository(adapter, vault);
+    const reader = createRepository(adapter, vault);
+    await writer.write(createContent({ text: "<p>Old durable text</p>" }));
+
+    await Promise.all([
+      writer.write(createContent({ text: "<p>Replacement durable text</p>" })),
+      reader.read(ITEM_ID),
+    ]);
+
+    expect((await reader.read(ITEM_ID))?.text).toBe("<p>Replacement durable text</p>");
   });
 });

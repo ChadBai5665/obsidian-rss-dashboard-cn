@@ -17,6 +17,9 @@ import {
 } from "../utils/substack-image-url";
 import { PodcastPlayer } from "../views/podcast-player";
 import { VideoPlayer } from "../views/video-player";
+import { ExplicitContentCoordinator } from "../collection/explicit-content-coordinator";
+import { createCollectedItemId } from "../collection/item-identity";
+import { isYouTubeItem } from "../utils/youtube-detection";
 
 const VIDEO_ARTICLE_BANNER =
   "This item appears to be a video. Open the source page to watch.";
@@ -68,6 +71,8 @@ export class ArticleRenderer {
   private currentContentIsFullArticle = false;
   private currentFullContentFailureType: FullArticleFetchFailureType = "none";
   private lastRestrictedNoticeGuid: string | null = null;
+  private renderRequestSequence = 0;
+  private readonly explicitContentCoordinator: ExplicitContentCoordinator;
 
   constructor(options: ArticleRendererOptions) {
     this.app = options.app;
@@ -76,6 +81,7 @@ export class ArticleRenderer {
     this.onArticleUpdate = options.onArticleUpdate;
     this.onOpenSavedArticle = options.onOpenSavedArticle;
     this.onPlaybackProgress = options.onPlaybackProgress;
+    this.explicitContentCoordinator = new ExplicitContentCoordinator(this.app.vault);
   }
 
   public async render(
@@ -83,6 +89,7 @@ export class ArticleRenderer {
     item: FeedItem,
     relatedItems: FeedItem[] = [],
   ): Promise<void> {
+    const renderRequest = ++this.renderRequestSequence;
     if (this.currentItem?.guid !== item.guid) {
       this.lastRestrictedNoticeGuid = null;
     }
@@ -116,9 +123,14 @@ export class ArticleRenderer {
       }
       await this.displayPodcast(container, item);
     } else {
-      const fetchedContent = this.shouldSkipFullArticleFetch(item)
-        ? ""
-        : await this.fetchFullArticleContent(item.link);
+      const fullTextResult = this.shouldSkipFullArticleFetch(item)
+        ? { content: "", failureType: "none" as const }
+        : await this.readOrFetchExplicitArticleContent(item);
+      if (renderRequest !== this.renderRequestSequence || this.currentItem !== item) {
+        return;
+      }
+      const fetchedContent = fullTextResult.content;
+      this.currentFullContentFailureType = fullTextResult.failureType;
       const hasFullArticleContent =
         this.hasMeaningfulArticleContent(fetchedContent);
 
@@ -619,9 +631,13 @@ export class ArticleRenderer {
 
   // --- Helper methods (extracted from ReaderView) ---
 
-  private async fetchFullArticleContent(url?: string): Promise<string> {
+  private async fetchFullArticleContent(
+    url?: string,
+    onOutcome?: (failureType: FullArticleFetchFailureType) => void,
+  ): Promise<string> {
     if (!url) {
       this.currentFullContentFailureType = "none";
+      onOutcome?.("none");
       return "";
     }
 
@@ -631,9 +647,11 @@ export class ArticleRenderer {
         : undefined;
       const result = await fetchFullArticleContentWithOutcome(url, proxyUrl);
       this.currentFullContentFailureType = result.failureType;
+      onOutcome?.(result.failureType);
       return result.content;
     } catch {
       this.currentFullContentFailureType = "network";
+      onOutcome?.("network");
       return "";
     }
   }
@@ -657,12 +675,38 @@ export class ArticleRenderer {
   }
 
   private shouldSkipFullArticleFetch(item: FeedItem): boolean {
-    if (this.isVideoMediaItem(item)) return true;
+    if (this.isVideoMediaItem(item) || isYouTubeItem(item)) return true;
     return this.prefersFeedContent(item);
   }
 
   private isVideoMediaItem(item: FeedItem): boolean {
     return isLikelyVideoItem(item);
+  }
+
+  private async readOrFetchExplicitArticleContent(
+    item: FeedItem,
+  ): Promise<{ content: string; failureType: FullArticleFetchFailureType }> {
+    const feed = this.settings.feeds.find((candidate) => candidate.url === item.feedUrl);
+    const itemId = createCollectedItemId({
+      sourceId: feed?.feedId || item.feedUrl || item.feedTitle || "reader",
+      guid: item.guid,
+      url: item.link,
+      title: item.title,
+      author: item.author,
+      publishedAt: item.pubDate,
+    });
+    return await this.explicitContentCoordinator.readOrFetch({
+      dataRoot: this.settings.collection.dataFolder,
+      itemId,
+      sourceUrl: item.link || undefined,
+      fetch: async () => {
+        let failureType: FullArticleFetchFailureType = "none";
+        const content = await this.fetchFullArticleContent(item.link, (next) => {
+          failureType = next;
+        });
+        return { content, failureType };
+      },
+    });
   }
 
   private prefersFeedContent(item: FeedItem): boolean {

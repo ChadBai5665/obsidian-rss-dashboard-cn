@@ -28,6 +28,7 @@ vi.mock("../../../src/collection/content-repository", () => ({
     read = contentReadMock;
     write = contentWriteMock;
     remove = contentRemoveMock;
+    pathFor = (itemId: string) => `.rss-dashboard-data/content/${itemId}.md`;
   },
 }));
 
@@ -200,6 +201,38 @@ describe("ReaderView explicit full-text content cache", () => {
     await Promise.all([openingOne, openingTwo]);
 
     expect(reader.getDisplayText()).toBe("First");
+  });
+
+  it("does not render late fetched content after the reader closes", async () => {
+    let resolveFetch: ((value: { content: string; failureType: "none" }) => void) | undefined;
+    fetchFullArticleContentWithOutcomeMock.mockImplementation(() =>
+      new Promise((resolve) => { resolveFetch = resolve; }),
+    );
+    const reader = createReader();
+    await reader.onOpen();
+    const opening = reader.displayItem(makeItem());
+    await vi.waitFor(() => expect(fetchFullArticleContentWithOutcomeMock).toHaveBeenCalledTimes(1));
+    await reader.onClose();
+    resolveFetch?.({ content: `<article><p>${"Z".repeat(260)}</p></article>`, failureType: "none" });
+    await opening;
+
+    expect(reader.getDisplayText()).toBe("RSS reader");
+    expect((reader as unknown as { readingContainer: HTMLElement }).readingContainer.childElementCount).toBe(0);
+  });
+
+  it("does not let a late first item replace a newer item", async () => {
+    const resolvers: Array<(value: { content: string; failureType: "none" }) => void> = [];
+    fetchFullArticleContentWithOutcomeMock.mockImplementation(() => new Promise((resolve) => resolvers.push(resolve)));
+    const reader = createReader();
+    await reader.onOpen();
+    const firstOpen = reader.displayItem(makeItem({ title: "Old", guid: "old", link: "https://example.com/old" }));
+    const secondOpen = reader.displayItem(makeItem({ title: "New", guid: "new", link: "https://example.com/new" }));
+    await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+    resolvers[1]({ content: `<article><p>${"N".repeat(260)}</p></article>`, failureType: "none" });
+    await secondOpen;
+    resolvers[0]({ content: `<article><p>${"O".repeat(260)}</p></article>`, failureType: "none" });
+    await firstOpen;
+    expect(reader.getDisplayText()).toBe("New");
   });
 
   it("never fetches or caches YouTube video content", async () => {

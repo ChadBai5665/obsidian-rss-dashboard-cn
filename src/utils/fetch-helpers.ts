@@ -116,7 +116,7 @@ export async function fetchWithProxyFallbackDetailed(
 
     if (!directBlocked) {
       console.debug(
-        `[RSS Dashboard] Direct fetch succeeded for ${url} (${directHtml.length} chars).`,
+        `[RSS Dashboard] Direct article fetch succeeded (host=${safeHost(url)}, status=${directResponse.status}).`,
       );
       return { content: parseArticleContent(directHtml), failureType: "none" };
     }
@@ -125,7 +125,7 @@ export async function fetchWithProxyFallbackDetailed(
       isRestrictedStatus(directResponse.status) ||
       isRestrictedSignal(directHtml);
     console.warn(
-      `[RSS Dashboard] Direct fetch returned blocked/empty response for ${url} (${directHtml?.length ?? 0} chars). Attempting proxy...`,
+      `[RSS Dashboard] Direct article fetch blocked or empty (host=${safeHost(url)}, status=${directResponse.status}). Attempting proxy.`,
     );
 
     // 2. Proxy fallback (silent, logs only)
@@ -156,7 +156,7 @@ export async function fetchWithProxyFallbackDetailed(
         isRestrictedStatus(proxyResponse.status) ||
         isRestrictedSignal(proxyHtml || "");
       console.warn(
-        `[RSS Dashboard] Proxy fetch also returned blocked/empty response for ${url}.`,
+        `[RSS Dashboard] Proxy article fetch blocked or empty (host=${safeHost(url)}, status=${proxyResponse.status}).`,
       );
       return {
         content: "",
@@ -166,7 +166,7 @@ export async function fetchWithProxyFallbackDetailed(
     }
 
     console.debug(
-      `[RSS Dashboard] Proxy fetch succeeded for ${url} (${proxyHtml.length} chars).`,
+      `[RSS Dashboard] Proxy article fetch succeeded (host=${safeHost(url)}, status=${proxyResponse.status}).`,
     );
     return { content: parseArticleContent(proxyHtml), failureType: "none" };
   } catch (e: unknown) {
@@ -176,13 +176,13 @@ export async function fetchWithProxyFallbackDetailed(
       statusCode?: number;
       response?: { status?: number };
     };
-    const msg = e instanceof Error ? e.message : String(e);
     const status =
       error?.status ?? error?.statusCode ?? error?.response?.status ?? 0;
-    const restricted = isRestrictedStatus(status) || isRestrictedSignal(msg);
+    const rawMessage = e instanceof Error ? e.message : String(e);
+    const restricted = isRestrictedStatus(status) || isRestrictedSignal(rawMessage);
     const logMessage = restricted
-      ? `[RSS Dashboard] Restricted article fetch blocked (${status || "no-status"}): ${msg}`
-      : `[RSS Dashboard] fetchWithProxyFallback error: ${msg}`;
+      ? `[RSS Dashboard] Restricted article fetch blocked (status=${status || "unknown"}).`
+      : `[RSS Dashboard] Article fetch failed (status=${status || "unknown"}).`;
 
     if (restricted) {
       console.warn(logMessage);
@@ -193,6 +193,14 @@ export async function fetchWithProxyFallbackDetailed(
       content: "",
       failureType: restricted ? "restricted" : "network",
     };
+  }
+}
+
+function safeHost(rawUrl: string): string {
+  try {
+    return new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    return "invalid-host";
   }
 }
 

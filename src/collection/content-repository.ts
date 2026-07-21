@@ -10,6 +10,8 @@ export interface CachedItemContent {
 }
 
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/;
+const vaultItemQueues = new WeakMap<object, Map<string, Promise<void>>>();
+let transactionSequence = 0;
 
 /**
  * Persists article text explicitly requested by the reader. This repository
@@ -18,8 +20,6 @@ const STABLE_ITEM_ID = /^[a-f0-9]{64}$/;
  */
 export class ContentRepository {
   private readonly dataRoot: string;
-  private readonly pendingWrites = new Map<string, Promise<void>>();
-  private writeSequence = 0;
 
   constructor(
     private readonly vault: Vault,
@@ -33,44 +33,54 @@ export class ContentRepository {
 
   async read(itemId: string): Promise<CachedItemContent | null> {
     assertStableItemId(itemId);
-    const path = this.contentPath(itemId);
-    await this.recoverAtomicTarget(path);
-    if (!(await this.vault.adapter.exists(path))) {
-      return null;
-    }
-
-    const content = parseCachedItemContent(await this.vault.adapter.read(path));
-    return content?.itemId === itemId ? content : null;
+    return await this.withItemLock(itemId, async () => {
+      const path = this.contentPath(itemId);
+      await this.recoverAtomicTarget(path);
+      if (!(await this.vault.adapter.exists(path))) return null;
+      const content = parseCachedItemContent(await this.vault.adapter.read(path));
+      return content?.itemId === itemId ? content : null;
+    });
   }
 
   async write(content: CachedItemContent): Promise<string> {
     assertCachedItemContent(content);
-    const prior = this.pendingWrites.get(content.itemId) ?? Promise.resolve();
-    const operation = prior
-      .catch(() => undefined)
-      .then(async () => this.writeInternal(content));
-    const settled = operation.then(
-      () => undefined,
-      () => undefined,
+    return await this.withItemLock(content.itemId, async () =>
+      await this.writeInternal(content),
     );
-    this.pendingWrites.set(content.itemId, settled);
-
-    try {
-      return await operation;
-    } finally {
-      if (this.pendingWrites.get(content.itemId) === settled) {
-        this.pendingWrites.delete(content.itemId);
-      }
-    }
   }
 
   async remove(itemId: string): Promise<void> {
     assertStableItemId(itemId);
-    const path = this.contentPath(itemId);
-    await this.recoverAtomicTarget(path);
-    const adapter = this.vault.adapter as Partial<DataAdapter>;
-    if (typeof adapter.remove === "function" && (await this.vault.adapter.exists(path))) {
-      await adapter.remove.call(this.vault.adapter, path);
+    await this.withItemLock(itemId, async () => {
+      const path = this.contentPath(itemId);
+      await this.recoverAtomicTarget(path);
+      const adapter = this.vault.adapter as Partial<DataAdapter>;
+      if (typeof adapter.remove === "function" && (await this.vault.adapter.exists(path))) {
+        await adapter.remove.call(this.vault.adapter, path);
+      }
+    });
+  }
+
+  pathFor(itemId: string): string {
+    return this.contentPath(itemId);
+  }
+
+  private async withItemLock<T>(
+    itemId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const queues = vaultItemQueues.get(this.vault) ?? new Map<string, Promise<void>>();
+    vaultItemQueues.set(this.vault, queues);
+    const key = `${this.dataRoot}\0${itemId}`;
+    const prior = queues.get(key) ?? Promise.resolve();
+    const running = prior.catch(() => undefined).then(operation);
+    const settled = running.then(() => undefined, () => undefined);
+    queues.set(key, settled);
+    try {
+      return await running;
+    } finally {
+      if (queues.get(key) === settled) queues.delete(key);
+      if (queues.size === 0) vaultItemQueues.delete(this.vault);
     }
   }
 
@@ -93,7 +103,11 @@ export class ContentRepository {
 
   private async ensureDirectory(path: string): Promise<void> {
     if (!(await this.vault.adapter.exists(path))) {
-      await this.vault.adapter.mkdir(path);
+      try {
+        await this.vault.adapter.mkdir(path);
+      } catch (error) {
+        if (!(await this.vault.adapter.exists(path))) throw error;
+      }
     }
   }
 
@@ -104,7 +118,7 @@ export class ContentRepository {
       throw new Error("Atomic content writes require rename and remove support");
     }
 
-    const writeId = `${this.clock().getTime()}-${this.writeSequence++}`;
+    const writeId = nextTransactionId(this.clock);
     const tempPath = `${path}.tmp-${writeId}`;
     await this.vault.adapter.write(tempPath, content);
 
@@ -289,4 +303,10 @@ function parentPath(path: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function nextTransactionId(clock: () => Date): string {
+  const random = window.crypto?.randomUUID?.().replace(/-/g, "") ??
+    Math.random().toString(36).slice(2);
+  return `${clock().getTime()}-${transactionSequence++}-${random}`;
 }

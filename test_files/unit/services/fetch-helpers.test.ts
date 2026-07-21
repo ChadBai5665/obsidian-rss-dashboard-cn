@@ -253,6 +253,26 @@ describe("fetchWithProxyFallback", () => {
     expect(result).toBe("");
   });
 
+  it("never logs article tokens, proxy credentials, query strings, fragments, or raw errors", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const articleUrl = "https://example.com/article?token=article-secret#fragment";
+    const proxyUrl = "https://user:proxy-secret@proxy.example.com/?api_key=proxy-secret&url=";
+    robustFetchMock.mockResolvedValueOnce(CLOUDFLARE_RESPONSE);
+    robustFetchMock.mockRejectedValueOnce(new Error("raw-error-body signed=super-secret"));
+
+    await fetchWithProxyFallback(articleUrl, proxyUrl);
+
+    const output = [...warn.mock.calls, ...error.mock.calls, ...debug.mock.calls]
+      .flat()
+      .join(" ");
+    expect(output).not.toContain("article-secret");
+    expect(output).not.toContain("proxy-secret");
+    expect(output).not.toContain("super-secret");
+    expect(output).not.toContain("#fragment");
+  });
+
   it("does not emit intermediate Notice logs during retry flow", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     robustFetchMock.mockResolvedValueOnce(CLOUDFLARE_RESPONSE);
