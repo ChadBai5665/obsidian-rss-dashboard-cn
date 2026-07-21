@@ -396,15 +396,41 @@ export class FeedStorageRepository {
       forceAllShards: Boolean(options.forceAllShards),
     });
 
+    const previousShardCache = new Map(this.lastPersistedShardJsonByFeedId);
+    const previousMetadataCache = this.lastPersistedMetadataJson;
+    const previousStorageFolderCache = this.lastStorageFolderPath;
+    const metadataSnapshot = this.metadataTransaction
+      ? await this.metadataTransaction.capture()
+      : undefined;
+
     if (settings.storageMode !== "vault-shards" && settings.storageMode !== "vault-shards-v2") {
-      await saveData(withSyncNonce(cloneJson(settings)));
-      storageLog("Saved full settings to legacy data.json");
-      this.capturePersistedState(settings);
-      return {
-        metadataSaved: true,
-        shardWriteCount: 0,
-        shardDeleteCount: 0,
-      };
+      try {
+        await saveData(withSyncNonce(cloneJson(settings)));
+        storageLog("Saved full settings to legacy data.json");
+        this.capturePersistedState(settings);
+        return {
+          metadataSaved: true,
+          shardWriteCount: 0,
+          shardDeleteCount: 0,
+        };
+      } catch (error) {
+        try {
+          if (this.metadataTransaction) {
+            await this.metadataTransaction.restore(metadataSnapshot);
+          } else if (previousMetadataCache !== null) {
+            await saveData(withSyncNonce(JSON.parse(previousMetadataCache)));
+          }
+        } catch {
+          this.lastPersistedShardJsonByFeedId.clear();
+          this.lastPersistedMetadataJson = null;
+          this.lastStorageFolderPath = null;
+          throw new FeedStorageRollbackIncompleteError();
+        }
+        this.lastPersistedShardJsonByFeedId = previousShardCache;
+        this.lastPersistedMetadataJson = previousMetadataCache;
+        this.lastStorageFolderPath = previousStorageFolderCache;
+        throw error;
+      }
     }
 
     const normalizedStorageFolder = normalizeFolderPath(settings.storageFolder);
@@ -412,12 +438,6 @@ export class FeedStorageRepository {
     // restart with a mixed generation. Keep the old bytes for every touched
     // vault file and compensate them as one persistence attempt on failure.
     const rollbackFileBytes = new Map<string, string | null>();
-    const previousShardCache = new Map(this.lastPersistedShardJsonByFeedId);
-    const previousMetadataCache = this.lastPersistedMetadataJson;
-    const previousStorageFolderCache = this.lastStorageFolderPath;
-    const metadataSnapshot = this.metadataTransaction
-      ? await this.metadataTransaction.capture()
-      : undefined;
     let metadataWriteStarted = false;
     const captureRollbackFile = async (path: string): Promise<void> => {
       if (rollbackFileBytes.has(path)) return;

@@ -101,6 +101,7 @@ export class ReaderView extends ItemView {
   ) => void;
   private readToggleButton: HTMLElement | null = null;
   private starToggleButton: HTMLElement | null = null;
+  private readonly pendingStatusMutations = new Set<"read" | "starred">();
   private saveButton: HTMLElement | null = null;
   private returnLeaf: WorkspaceLeaf | null = null;
   private tagsDropdownCleanup: (() => void) | null = null;
@@ -2936,15 +2937,20 @@ export class ReaderView extends ItemView {
   }
 
   private async toggleReadStatus(): Promise<void> {
-    if (!this.currentItem) return;
-    const nextRead = !this.currentItem.read;
-    const didUpdate = await this.onArticleUpdate(
-      this.currentItem,
-      { read: nextRead },
-      false,
-    );
-    if (!didUpdate) return;
-    this.updateToggleButtons();
+    if (!this.currentItem || this.pendingStatusMutations.has("read")) return;
+    this.setStatusMutationPending("read", true);
+    try {
+      const nextRead = !this.currentItem.read;
+      const didUpdate = await this.onArticleUpdate(
+        this.currentItem,
+        { read: nextRead },
+        false,
+      );
+      if (!didUpdate) return;
+      this.updateToggleButtons();
+    } finally {
+      this.setStatusMutationPending("read", false);
+    }
   }
 
   public applyExternalUpdate(
@@ -2987,14 +2993,35 @@ export class ReaderView extends ItemView {
   }
 
   private async toggleStarStatus(): Promise<void> {
-    if (!this.currentItem) return;
-    const nextStarred = !this.currentItem.starred;
-    const didUpdate = await this.onArticleUpdate(
-      this.currentItem,
-      { starred: nextStarred },
-    );
-    if (!didUpdate) return;
-    this.updateToggleButtons();
+    if (!this.currentItem || this.pendingStatusMutations.has("starred")) return;
+    this.setStatusMutationPending("starred", true);
+    try {
+      const nextStarred = !this.currentItem.starred;
+      const didUpdate = await this.onArticleUpdate(
+        this.currentItem,
+        { starred: nextStarred },
+      );
+      if (!didUpdate) return;
+      this.updateToggleButtons();
+    } finally {
+      this.setStatusMutationPending("starred", false);
+    }
+  }
+
+  private setStatusMutationPending(
+    mutation: "read" | "starred",
+    pending: boolean,
+  ): void {
+    if (pending) {
+      this.pendingStatusMutations.add(mutation);
+    } else {
+      this.pendingStatusMutations.delete(mutation);
+    }
+    const button = mutation === "read"
+      ? this.readToggleButton
+      : this.starToggleButton;
+    button?.classList.toggle("pending", pending);
+    button?.setAttr("aria-disabled", pending ? "true" : "false");
   }
 
   private async updateSavedLabel(saved: boolean): Promise<void> {

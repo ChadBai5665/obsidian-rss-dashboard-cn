@@ -6,6 +6,7 @@ import { FEED_REQUEST_TIMEOUT_MS } from "../../../src/services/feed-timeout";
 import { CollectionService } from "../../../src/services/collection-service";
 import { CollectionRepository } from "../../../src/collection/collection-repository";
 import { RssDashboardView } from "../../../src/views/dashboard-view";
+import { ReaderView } from "../../../src/views/reader-view";
 import type { CollectedItem } from "../../../src/collection/collected-item";
 
 let consoleLogSpy: ReturnType<typeof vi.spyOn>;
@@ -664,6 +665,9 @@ describe("refreshFeeds() pipeline behavior", () => {
     ]);
 
     expect(validateSpy).toHaveBeenCalledTimes(1);
+    expect(validateSpy).toHaveBeenCalledWith({
+      suppressCollectionBroadcast: true,
+    });
     expect(plugin.saveData).toHaveBeenCalledTimes(1);
     expect(sidebarRefreshSpy).toHaveBeenCalledTimes(2);
     expect(viewRefreshSpy).toHaveBeenCalledTimes(0);
@@ -706,6 +710,9 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.feedParser.refreshAllFeeds).not.toHaveBeenCalled();
     expect(plugin.settings.feeds[0].lastUpdated).toBe(100);
     expect(plugin.settings.feeds[1].lastUpdated).toBe(777);
+    expect(plugin.validateSavedArticles).toHaveBeenCalledWith({
+      suppressCollectionBroadcast: true,
+    });
     expect(plugin.saveData).toHaveBeenCalledTimes(1);
     expect(refreshAllDashboards).toHaveBeenCalledTimes(1);
 
@@ -815,7 +822,7 @@ describe("refreshFeeds() pipeline behavior", () => {
       starred: true,
       saved: false,
     });
-    const source = createFeed({ items: [article] });
+    const source = createFeed({ feedId: "source-replay", items: [article] });
     const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
       updateArticle: (
         guid: string,
@@ -901,6 +908,135 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.syncReaderArticleUpdate).toHaveBeenCalledTimes(1);
   });
 
+  it("continues notifying later dashboard and reader leaves after one leaf fails", async () => {
+    const plugin = createPluginWithSettings([]);
+    const dashboardPlugin = { settings: plugin.settings, saveSettings: vi.fn() };
+    const firstDashboard = new RssDashboardView(
+      { app: plugin.app } as unknown as import("obsidian").WorkspaceLeaf,
+      dashboardPlugin as never,
+    );
+    const secondDashboard = new RssDashboardView(
+      { app: plugin.app } as unknown as import("obsidian").WorkspaceLeaf,
+      dashboardPlugin as never,
+    );
+    firstDashboard.applyExternalArticleUpdate = vi.fn(() => {
+      throw new Error("first dashboard failed");
+    });
+    secondDashboard.applyExternalArticleUpdate = vi.fn();
+
+    const readerArgs = [
+      plugin.settings,
+      { saveArticle: vi.fn() },
+      vi.fn(),
+      vi.fn(),
+    ] as const;
+    const firstReader = new ReaderView(
+      { app: plugin.app } as unknown as import("obsidian").WorkspaceLeaf,
+      ...readerArgs as never,
+    );
+    const secondReader = new ReaderView(
+      { app: plugin.app } as unknown as import("obsidian").WorkspaceLeaf,
+      ...readerArgs as never,
+    );
+    firstReader.applyExternalUpdate = vi.fn(() => {
+      throw new Error("first reader failed");
+    });
+    secondReader.applyExternalUpdate = vi.fn();
+    plugin.app.workspace.getLeavesOfType = vi.fn((type: string) => {
+      const views = type === "rss-dashboard-view"
+        ? [firstDashboard, secondDashboard]
+        : [firstReader, secondReader];
+      return views.map((view) => ({ view, loadIfDeferred: vi.fn() }));
+    });
+    const internals = plugin as unknown as {
+      syncDashboardArticleUpdate: (
+        guid: string,
+        feedUrl: string,
+        updates: Partial<FeedItem>,
+        rerender: boolean,
+      ) => Promise<void>;
+      syncReaderArticleUpdate: (
+        guid: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<void>;
+    };
+
+    await expect(internals.syncDashboardArticleUpdate(
+      "guid", "feed", { read: true }, false,
+    )).resolves.toBeUndefined();
+    await expect(internals.syncReaderArticleUpdate(
+      "guid", { read: true },
+    )).resolves.toBeUndefined();
+
+    expect(secondDashboard.applyExternalArticleUpdate).toHaveBeenCalledTimes(1);
+    expect(secondReader.applyExternalUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an entire read batch when any requested target is missing", async () => {
+    const article = createItem({ read: false });
+    const source = createFeed({ items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticlesReadBatch: (
+        targets: Array<{ articleGuid: string; feedUrl: string }>,
+        read: boolean,
+      ) => Promise<boolean>;
+    };
+
+    await expect(plugin.updateArticlesReadBatch([
+      { articleGuid: article.guid, feedUrl: source.url },
+      { articleGuid: "missing", feedUrl: source.url },
+    ], true)).resolves.toBe(false);
+
+    expect(article.read).toBe(false);
+    expect(plugin.saveData).not.toHaveBeenCalled();
+  });
+
+  it("keeps valid stable-id items feed-only when no collection record exists", async () => {
+    const article = createItem({ rssDashboardId: "7".repeat(64), read: false });
+    const source = createFeed({ items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticlesReadBatch: (
+        targets: Array<{ articleGuid: string; feedUrl: string }>,
+        read: boolean,
+      ) => Promise<boolean>;
+    };
+    vi.spyOn(CollectionRepository.prototype, "findById").mockResolvedValue(null);
+    const collectionEvent = vi.spyOn(
+      plugin as never,
+      "emitCollectionFlagsUpdated" as never,
+    );
+
+    await expect(plugin.updateArticlesReadBatch([
+      { articleGuid: article.guid, feedUrl: source.url },
+    ], true)).resolves.toBe(true);
+
+    expect(article.read).toBe(true);
+    expect(plugin.saveData).toHaveBeenCalledTimes(1);
+    expect(collectionEvent).not.toHaveBeenCalled();
+  });
+
+  it("contains collection lookup failures for read batches without mutation", async () => {
+    const article = createItem({ rssDashboardId: "6".repeat(64), read: false });
+    const source = createFeed({ items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticlesReadBatch: (
+        targets: Array<{ articleGuid: string; feedUrl: string }>,
+        read: boolean,
+      ) => Promise<boolean>;
+    };
+    vi.spyOn(CollectionRepository.prototype, "findById").mockRejectedValue(
+      new Error("vault/private?token=secret"),
+    );
+
+    await expect(plugin.updateArticlesReadBatch([
+      { articleGuid: article.guid, feedUrl: source.url },
+    ], true)).resolves.toBe(false);
+
+    expect(article.read).toBe(false);
+    expect(plugin.saveData).not.toHaveBeenCalled();
+    expect(getNoticeMessages(consoleLogSpy).join(" ")).not.toContain("secret");
+  });
+
   it("broadcasts one collection reload after validating multiple missing notes", async () => {
     const first = createItem({
       guid: "first",
@@ -917,13 +1053,13 @@ describe("refreshFeeds() pipeline behavior", () => {
     const source = createFeed({ items: [first, second] });
     const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
       articleSaver: { checkSavedFileExists: ReturnType<typeof vi.fn> };
-      updateArticle: ReturnType<typeof vi.fn>;
-      validateSavedArticles: () => Promise<void>;
+      updateArticleWithOutcome: ReturnType<typeof vi.fn>;
+      validateSavedArticles: () => Promise<boolean>;
     };
     plugin.articleSaver = {
       checkSavedFileExists: vi.fn().mockResolvedValue(false),
     };
-    plugin.updateArticle = vi.fn().mockResolvedValue(true);
+    plugin.updateArticleWithOutcome = vi.fn().mockResolvedValue("collection");
     delete (plugin as unknown as Record<string, unknown>).validateSavedArticles;
     const collectionLoad = vi.fn();
     const collectionEvent = vi
@@ -932,9 +1068,36 @@ describe("refreshFeeds() pipeline behavior", () => {
 
     await plugin.validateSavedArticles();
 
-    expect(plugin.updateArticle).toHaveBeenCalledTimes(2);
+    expect(plugin.updateArticleWithOutcome).toHaveBeenCalledTimes(2);
     expect(collectionEvent).toHaveBeenCalledTimes(1);
     expect(collectionLoad).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not broadcast collection reload for validation feed-only updates", async () => {
+    const article = createItem({
+      rssDashboardId: "5".repeat(64),
+      saved: true,
+      savedFilePath: "Information/Saved/Missing.md",
+    });
+    const source = createFeed({ items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      articleSaver: { checkSavedFileExists: ReturnType<typeof vi.fn> };
+      updateArticleWithOutcome: ReturnType<typeof vi.fn>;
+      validateSavedArticles: () => Promise<boolean>;
+    };
+    plugin.articleSaver = {
+      checkSavedFileExists: vi.fn().mockResolvedValue(false),
+    };
+    plugin.updateArticleWithOutcome = vi.fn().mockResolvedValue("feed-only");
+    delete (plugin as unknown as Record<string, unknown>).validateSavedArticles;
+    const collectionEvent = vi.spyOn(
+      plugin as never,
+      "emitCollectionFlagsUpdated" as never,
+    );
+
+    await expect(plugin.validateSavedArticles()).resolves.toBe(false);
+
+    expect(collectionEvent).not.toHaveBeenCalled();
   });
 
   it("keeps a safe prepared journal when collection persistence fails", async () => {
@@ -959,7 +1122,7 @@ describe("refreshFeeds() pipeline behavior", () => {
 
     await expect(plugin.updateArticle(article.guid, source.url, { read: true })).resolves.toBe(false);
 
-    const adapter = plugin.app.vault.adapter;
+    const adapter = plugin.app.vault.adapter as unknown as AsyncVaultAdapter;
     const journalPath = ".rss-dashboard-data/state/status-repair.json";
     expect(await adapter.exists(journalPath)).toBe(true);
     const journal = await adapter.read(journalPath);
@@ -969,12 +1132,59 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(journal).not.toContain("Desc");
   });
 
+  it("verifies successful compensation before clearing its status journal", async () => {
+    const article = createItem({ read: false });
+    const source = createFeed({ feedId: "source-compensate", items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn()
+      .mockRejectedValueOnce(new Error("primary write failed"))
+      .mockResolvedValue(undefined);
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+
+    await expect(
+      plugin.updateArticle(article.guid, source.url, { read: true }),
+    ).resolves.toBe(false);
+
+    expect(article.read).toBe(false);
+    expect(plugin.saveSettings).toHaveBeenCalledTimes(2);
+    expect(await plugin.app.vault.adapter.exists(canonical)).toBe(false);
+    expect(await plugin.app.vault.adapter.exists(`${canonical}.tmp`)).toBe(false);
+  });
+
+  it("journals an explicitly undefined optional feed field without data loss", async () => {
+    const article = createItem({ saved: true, savedFilePath: undefined });
+    const source = createFeed({ feedId: "source-undefined", items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
+    };
+
+    await expect(plugin.updateArticle(article.guid, source.url, {
+      saved: false,
+      savedFilePath: undefined,
+    })).resolves.toBe(true);
+
+    expect(article.saved).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(article, "savedFilePath")).toBe(true);
+    expect(article.savedFilePath).toBeUndefined();
+  });
+
   it("replays a prepared journal to the previous feed state before clearing it", async () => {
     const stableId = "d".repeat(64);
     const article = createItem({ rssDashboardId: stableId, read: true });
-    const source = createFeed({ items: [article] });
+    const source = createFeed({ feedId: "source-replay", items: [article] });
     const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
-      replayStatusRepairJournalIfNeeded: () => Promise<void>;
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
       saveSettings: ReturnType<typeof vi.fn>;
     };
     plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
@@ -987,8 +1197,8 @@ describe("refreshFeeds() pipeline behavior", () => {
     );
     const path = ".rss-dashboard-data/state/status-repair.json";
     await plugin.app.vault.adapter.write(path, JSON.stringify({
-      version: 1, txId: "tx-safe", phase: "collection-written", items: [{
-        feedIndex: 0, itemIndex: 0, stableId,
+      version: 1, txId: "tx-4-safe", phase: "collection-written", items: [{
+        feedIndex: 0, itemIndex: 0, sourceId: "source-replay", stableId,
         previousFeed: [{ key: "read", exists: true, value: false }],
         previousCollection: { read: false, starred: false, saved: false },
       }],
@@ -1003,18 +1213,20 @@ describe("refreshFeeds() pipeline behavior", () => {
   it("retains the journal when a replay record cannot be resolved", async () => {
     const source = createFeed({ items: [createItem()] });
     const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
-      replayStatusRepairJournalIfNeeded: () => Promise<void>;
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
       saveSettings: ReturnType<typeof vi.fn>;
     };
     plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
     const path = ".rss-dashboard-data/state/status-repair.json";
     await plugin.app.vault.adapter.write(path, JSON.stringify({
       version: 1,
-      txId: "tx-missing",
+      txId: "tx-5-missing",
       phase: "prepared",
       items: [{
         feedIndex: 9,
         itemIndex: 9,
+        sourceId: "missing-source",
+        stableId: "b".repeat(64),
         previousFeed: [{ key: "read", exists: true, value: false }],
       }],
     }));
@@ -1023,6 +1235,157 @@ describe("refreshFeeds() pipeline behavior", () => {
 
     expect(await plugin.app.vault.adapter.exists(path)).toBe(true);
     expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("recovers a corrupt canonical journal from a valid temporary record", async () => {
+    const stableId = "e".repeat(64);
+    const article = createItem({ rssDashboardId: stableId, read: true });
+    const source = createFeed({ feedId: "source-safe", items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+    await plugin.app.vault.adapter.write(canonical, "{broken");
+    await plugin.app.vault.adapter.write(`${canonical}.tmp`, JSON.stringify({
+      version: 1,
+      txId: "tx-1-safe",
+      phase: "prepared",
+      items: [{
+        feedIndex: 9,
+        itemIndex: 9,
+        sourceId: "source-safe",
+        stableId,
+        previousFeed: [{ key: "read", exists: true, value: false }],
+      }],
+    }));
+
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(true);
+
+    expect(article.read).toBe(false);
+    expect(await plugin.app.vault.adapter.exists(canonical)).toBe(false);
+    expect(await plugin.app.vault.adapter.exists(`${canonical}.tmp`)).toBe(false);
+  });
+
+  it("relocates journal items by source and stable identity after reordering", async () => {
+    const stableId = "9".repeat(64);
+    const target = createItem({ guid: "target", rssDashboardId: stableId, read: true });
+    const decoy = createItem({ guid: "decoy", rssDashboardId: "8".repeat(64), read: true });
+    const source = createFeed({ feedId: "source-relocated", items: [decoy, target] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+    await plugin.app.vault.adapter.write(canonical, JSON.stringify({
+      version: 1,
+      txId: "tx-6-relocate",
+      phase: "prepared",
+      items: [{
+        feedIndex: 99,
+        itemIndex: 0,
+        sourceId: "source-relocated",
+        stableId,
+        previousFeed: [{ key: "read", exists: true, value: false }],
+      }],
+    }));
+
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(true);
+
+    expect(target.read).toBe(false);
+    expect(decoy.read).toBe(true);
+    expect(await plugin.app.vault.adapter.exists(canonical)).toBe(false);
+  });
+
+  it("keeps canonical evidence when temporary journal cleanup fails", async () => {
+    const plugin = createPluginWithSettings([createFeed()]) as unknown as TestPlugin & {
+      clearStatusJournal: () => Promise<void>;
+    };
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+    await plugin.app.vault.adapter.write(canonical, "canonical");
+    await plugin.app.vault.adapter.write(`${canonical}.tmp`, "temporary");
+    const adapter = plugin.app.vault.adapter as unknown as AsyncVaultAdapter & {
+      remove(path: string): Promise<void>;
+    };
+    const originalRemove = adapter.remove.bind(adapter);
+    vi.spyOn(adapter, "remove").mockImplementation(async (path) => {
+      if (path.endsWith(".tmp")) throw new Error("temporary cleanup failed");
+      await originalRemove(path);
+    });
+
+    await expect(plugin.clearStatusJournal()).rejects.toThrow(
+      "Status journal cleanup incomplete",
+    );
+
+    expect(await adapter.exists(canonical)).toBe(true);
+  });
+
+  it("refuses to overwrite an unresolved prior journal with a new mutation", async () => {
+    const article = createItem({ read: false });
+    const source = createFeed({ feedId: "source-safe", items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
+    };
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+    const unresolved = JSON.stringify({
+      version: 1,
+      txId: "tx-2-safe",
+      phase: "prepared",
+      items: [{
+        feedIndex: 9,
+        itemIndex: 9,
+        sourceId: "missing-source",
+        stableId: "f".repeat(64),
+        previousFeed: [{ key: "read", exists: true, value: false }],
+      }],
+    });
+    await plugin.app.vault.adapter.write(canonical, unresolved);
+
+    await expect(
+      plugin.updateArticle(article.guid, source.url, { read: true }),
+    ).resolves.toBe(false);
+
+    expect(article.read).toBe(false);
+    expect(await plugin.app.vault.adapter.read(canonical)).toBe(unresolved);
+  });
+
+  it("rejects malicious journal fields without mutating identity", async () => {
+    const stableId = "a".repeat(64);
+    const article = createItem({ rssDashboardId: stableId, read: true });
+    const source = createFeed({ feedId: "source-safe", items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+    };
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+    await plugin.app.vault.adapter.write(canonical, JSON.stringify({
+      version: 1,
+      txId: "tx-3-safe",
+      phase: "prepared",
+      items: [{
+        feedIndex: 0,
+        itemIndex: 0,
+        sourceId: "source-safe",
+        stableId,
+        previousFeed: [{
+          key: "feedUrl",
+          exists: true,
+          value: "https://attacker.invalid",
+        }],
+        __protoPollution: true,
+      }],
+    }));
+
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(false);
+
+    expect(article.feedUrl).toBe(source.url);
+    expect(article.read).toBe(true);
+    expect(await plugin.app.vault.adapter.exists(canonical)).toBe(true);
   });
 
   it("clears both journal files after success on an adapter without rename", async () => {
@@ -1050,6 +1413,42 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(
       await adapter.exists(".rss-dashboard-data/state/status-repair.json.tmp"),
     ).toBe(false);
+  });
+
+  it("replays retained temp evidence after a no-rename canonical write failure", async () => {
+    const article = createItem({ read: false });
+    const source = createFeed({ feedId: "source-temp", items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+    const adapter = plugin.app.vault.adapter as unknown as AsyncVaultAdapter;
+    adapter.rename = undefined;
+    const originalWrite = adapter.write.bind(adapter);
+    const writeSpy = vi.spyOn(adapter, "write").mockImplementation(
+      async (path, contents) => {
+        if (path === canonical) throw new Error("canonical unavailable");
+        await originalWrite(path, contents);
+      },
+    );
+
+    await expect(
+      plugin.updateArticle(article.guid, source.url, { read: true }),
+    ).resolves.toBe(false);
+    expect(await adapter.exists(canonical)).toBe(false);
+    expect(await adapter.exists(`${canonical}.tmp`)).toBe(true);
+
+    writeSpy.mockRestore();
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(true);
+    expect(article.read).toBe(false);
+    expect(await adapter.exists(`${canonical}.tmp`)).toBe(false);
   });
 
   it("contains failed-source ledger errors without exposing raw source data", async () => {

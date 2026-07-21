@@ -82,9 +82,10 @@ describe("ReaderView full-article nav/breadcrumb stripping", () => {
 
   it("awaits durable read status before refreshing reader controls", async () => {
     let resolveUpdate!: (value: boolean) => void;
-    const update = vi.fn(
-      () => new Promise<boolean>((resolve) => { resolveUpdate = resolve; }),
-    );
+    const durableUpdate = new Promise<boolean>((resolve) => {
+      resolveUpdate = resolve;
+    });
+    const update = vi.fn(() => durableUpdate);
     const mockApp = {
       workspace: { getLeavesOfType: vi.fn().mockReturnValue([]) },
       vault: { getAbstractFileByPath: vi.fn() },
@@ -99,17 +100,23 @@ describe("ReaderView full-article nav/breadcrumb stripping", () => {
     const controls = vi.fn();
     const internals = view as unknown as {
       currentItem: FeedItem | null;
+      readToggleButton: HTMLElement | null;
       toggleReadStatus: () => Promise<void>;
       updateToggleButtons: () => void;
     };
     internals.currentItem = makeItem({ read: false });
+    internals.readToggleButton = document.createElement("button");
     internals.updateToggleButtons = controls;
 
     const pending = internals.toggleReadStatus();
+    const duplicate = internals.toggleReadStatus();
     expect(pending).toBeInstanceOf(Promise);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(internals.readToggleButton.classList.contains("pending")).toBe(true);
+    expect(internals.readToggleButton.getAttribute("aria-disabled")).toBe("true");
     expect(controls).not.toHaveBeenCalled();
     resolveUpdate(false);
-    await pending;
+    await Promise.all([pending, duplicate]);
 
     expect(update).toHaveBeenCalledWith(
       internals.currentItem,
@@ -117,6 +124,8 @@ describe("ReaderView full-article nav/breadcrumb stripping", () => {
       false,
     );
     expect(controls).not.toHaveBeenCalled();
+    expect(internals.readToggleButton.classList.contains("pending")).toBe(false);
+    expect(internals.readToggleButton.getAttribute("aria-disabled")).toBe("false");
   });
 
   it("removes breadcrumb nav near the top but preserves article text", async () => {

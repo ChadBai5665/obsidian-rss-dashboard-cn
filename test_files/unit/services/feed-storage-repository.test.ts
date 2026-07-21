@@ -478,6 +478,55 @@ describe("FeedStorageRepository", () => {
     ).toBe(false);
   });
 
+  it("restores exact legacy metadata targets when the second callback write fails", async () => {
+    const settings = cloneSettings();
+    settings.storageMode = "legacy-json";
+    settings.feeds = [makeFeed({ feedId: "legacy-feed" })];
+    let vaultData = "vault-old-bytes";
+    let pluginPointer = "pointer-old-bytes";
+    repository = new FeedStorageRepository(app, {
+      metadataTransaction: {
+        capture: async () => ({ vaultData, pluginPointer }),
+        restore: async (snapshot) => {
+          const old = snapshot as { vaultData: string; pluginPointer: string };
+          vaultData = old.vaultData;
+          pluginPointer = old.pluginPointer;
+        },
+      },
+    });
+    const failingSave = vi.fn(async () => {
+      vaultData = "vault-new-bytes";
+      throw new Error("pointer unavailable");
+    });
+
+    await expect(repository.persistSettings(settings, failingSave)).rejects.toThrow(
+      "pointer unavailable",
+    );
+
+    expect(vaultData).toBe("vault-old-bytes");
+    expect(pluginPointer).toBe("pointer-old-bytes");
+  });
+
+  it("raises typed incomplete rollback when legacy metadata cannot be restored", async () => {
+    const settings = cloneSettings();
+    settings.storageMode = "legacy-json";
+    settings.feeds = [makeFeed({ feedId: "legacy-feed" })];
+    repository = new FeedStorageRepository(app, {
+      metadataTransaction: {
+        capture: async () => "old-bytes",
+        restore: async () => {
+          throw new Error("restore unavailable");
+        },
+      },
+    });
+
+    await expect(
+      repository.persistSettings(settings, async () => {
+        throw new Error("metadata unavailable");
+      }),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+  });
+
   it("migrates legacy settings to shard storage and strips items from persisted metadata", async () => {
     const settings = cloneSettings();
     settings.storageMode = "legacy-json";

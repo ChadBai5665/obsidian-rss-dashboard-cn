@@ -82,7 +82,11 @@ import { CollectionRepository } from "./src/collection/collection-repository";
 import { DailyIndexService } from "./src/collection/daily-index-service";
 import { CollectionService } from "./src/services/collection-service";
 import { isTimeoutFeedError } from "./src/services/feed-parser/feed-errors";
-import { bindFeedItemsToSourceIdentity } from "./src/collection/item-identity";
+import {
+  bindFeedItemsToSourceIdentity,
+  isStableItemId,
+  resolveFeedItemStableId,
+} from "./src/collection/item-identity";
 import type { CollectedItem } from "./src/collection/collected-item";
 
 export interface FeedRefreshResult {
@@ -147,6 +151,8 @@ type ArticleMutationSnapshot = Map<keyof FeedItem, {
   value: FeedItem[keyof FeedItem];
 }>;
 
+type ArticleUpdateOutcome = "failed" | "feed-only" | "collection";
+
 const STATUS_REPAIR_JOURNAL_PATH =
   ".rss-dashboard-data/state/status-repair.json";
 
@@ -161,11 +167,13 @@ type StatusJournalItem = {
   // source URLs, article content, titles, or API material.
   feedIndex: number;
   itemIndex: number;
-  stableId?: string;
+  sourceId: string;
+  stableId: string;
   previousFeed: Array<{
     key: string;
     exists: boolean;
-    value: unknown;
+    value?: unknown;
+    valueType?: "undefined";
   }>;
   previousCollection?: CollectionFlagState;
   desired?: CollectionFlagState;
@@ -182,6 +190,141 @@ type MetadataPersistenceSnapshot = Array<{
   path: string;
   contents: string | null;
 }>;
+
+const STATUS_JOURNAL_PHASES = new Set<StatusJournalPhase>([
+  "prepared",
+  "collection-written",
+  "feed-write-uncertain",
+  "feed-written",
+]);
+const STATUS_JOURNAL_FEED_KEYS = new Set([
+  "read",
+  "starred",
+  "saved",
+  "savedFilePath",
+  "tags",
+  "playbackProgress",
+  "restrictedReason",
+]);
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+): boolean {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function isJournalFlagState(value: unknown): value is CollectionFlagState {
+  if (!isRecord(value)) return false;
+  if (!hasOnlyKeys(value, new Set(["read", "starred", "saved", "savedNotePath"]))) {
+    return false;
+  }
+  return (
+    typeof value.read === "boolean" &&
+    typeof value.starred === "boolean" &&
+    typeof value.saved === "boolean" &&
+    (value.savedNotePath === undefined ||
+      (typeof value.savedNotePath === "string" && value.savedNotePath.length <= 4096))
+  );
+}
+
+function isJournalFeedValue(key: string, value: unknown): boolean {
+  if (key === "read" || key === "starred" || key === "saved") {
+    return typeof value === "boolean";
+  }
+  if (key === "savedFilePath" || key === "restrictedReason") {
+    return typeof value === "string" && value.length <= 4096;
+  }
+  if (key === "tags") {
+    return Array.isArray(value) && value.length <= 256 && value.every((tag) =>
+      isRecord(tag) &&
+      hasOnlyKeys(tag, new Set(["name", "color"])) &&
+      typeof tag.name === "string" && tag.name.length <= 256 &&
+      typeof tag.color === "string" && tag.color.length <= 128,
+    );
+  }
+  if (key === "playbackProgress") {
+    return (
+      isRecord(value) &&
+      hasOnlyKeys(value, new Set(["position", "duration", "lastUpdated"])) &&
+      typeof value.position === "number" && Number.isFinite(value.position) &&
+      typeof value.duration === "number" && Number.isFinite(value.duration) &&
+      typeof value.lastUpdated === "number" && Number.isFinite(value.lastUpdated)
+    );
+  }
+  return false;
+}
+
+function parseStatusRepairJournal(value: unknown): StatusRepairJournal | null {
+  if (!isRecord(value)) return null;
+  if (!hasOnlyKeys(value, new Set(["version", "txId", "phase", "items"]))) {
+    return null;
+  }
+  if (
+    value.version !== 1 ||
+    typeof value.txId !== "string" ||
+    !/^tx-\d{1,16}-[a-z0-9]{1,16}$/.test(value.txId) ||
+    typeof value.phase !== "string" ||
+    !STATUS_JOURNAL_PHASES.has(value.phase as StatusJournalPhase) ||
+    !Array.isArray(value.items) ||
+    value.items.length === 0 ||
+    value.items.length > 10000
+  ) {
+    return null;
+  }
+  const items: StatusJournalItem[] = [];
+  for (const rawItem of value.items) {
+    if (!isRecord(rawItem)) return null;
+    if (!hasOnlyKeys(rawItem, new Set([
+      "feedIndex", "itemIndex", "sourceId", "stableId", "previousFeed",
+      "previousCollection", "desired",
+    ]))) return null;
+    if (
+      !Number.isInteger(rawItem.feedIndex) || Number(rawItem.feedIndex) < 0 ||
+      !Number.isInteger(rawItem.itemIndex) || Number(rawItem.itemIndex) < 0 ||
+      typeof rawItem.sourceId !== "string" ||
+      !/^[A-Za-z0-9._-]{1,200}$/.test(rawItem.sourceId) ||
+      typeof rawItem.stableId !== "string" ||
+      !isStableItemId(rawItem.stableId) ||
+      !Array.isArray(rawItem.previousFeed) ||
+      rawItem.previousFeed.length === 0 ||
+      rawItem.previousFeed.length > STATUS_JOURNAL_FEED_KEYS.size
+    ) return null;
+    const seenKeys = new Set<string>();
+    for (const rawPrevious of rawItem.previousFeed) {
+      if (!isRecord(rawPrevious)) return null;
+      if (!hasOnlyKeys(rawPrevious, new Set([
+        "key", "exists", "value", "valueType",
+      ]))) return null;
+      if (
+        typeof rawPrevious.key !== "string" ||
+        !STATUS_JOURNAL_FEED_KEYS.has(rawPrevious.key) ||
+        seenKeys.has(rawPrevious.key) ||
+        typeof rawPrevious.exists !== "boolean"
+      ) return null;
+      seenKeys.add(rawPrevious.key);
+      const hasValue = Object.prototype.hasOwnProperty.call(rawPrevious, "value");
+      if (rawPrevious.exists && rawPrevious.valueType === "undefined") {
+        if (hasValue) return null;
+      } else if (rawPrevious.exists) {
+        if (rawPrevious.valueType !== undefined || !hasValue ||
+          !isJournalFeedValue(rawPrevious.key, rawPrevious.value)) return null;
+      } else if (hasValue || rawPrevious.valueType !== undefined) {
+        return null;
+      }
+    }
+    if (rawItem.previousCollection !== undefined &&
+      !isJournalFlagState(rawItem.previousCollection)) return null;
+    if (rawItem.desired !== undefined && !isJournalFlagState(rawItem.desired)) return null;
+    items.push(rawItem as unknown as StatusJournalItem);
+  }
+  return {
+    version: 1,
+    txId: value.txId,
+    phase: value.phase as StatusJournalPhase,
+    items,
+  };
+}
 
 function captureArticleMutationSnapshot(
   article: FeedItem,
@@ -214,11 +357,14 @@ function restoreArticleMutationSnapshot(
 function serializeArticleMutationSnapshot(
   snapshot: ArticleMutationSnapshot,
 ): StatusJournalItem["previousFeed"] {
-  return [...snapshot].map(([key, value]) => ({
-    key,
-    exists: value.exists,
-    value: value.value,
-  }));
+  return [...snapshot].map(([key, value]) => {
+    if (value.exists && value.value === undefined) {
+      return { key, exists: true, valueType: "undefined" as const };
+    }
+    return value.exists
+      ? { key, exists: true, value: value.value }
+      : { key, exists: false };
+  });
 }
 
 function restoreSerializedArticleSnapshot(
@@ -228,7 +374,7 @@ function restoreSerializedArticleSnapshot(
   for (const previous of snapshot) {
     if (previous.exists) {
       (article as unknown as Record<string, unknown>)[previous.key] =
-        previous.value;
+        previous.valueType === "undefined" ? undefined : previous.value;
     } else {
       delete (article as unknown as Record<string, unknown>)[previous.key];
     }
@@ -1524,12 +1670,16 @@ export default class RssDashboardPlugin extends Plugin {
   ): Promise<void> {
     const leaves = this.app.workspace.getLeavesOfType(RSS_READER_VIEW_TYPE);
     for (const leaf of leaves) {
-      if (requireApiVersion("1.7.2")) {
-        await leaf.loadIfDeferred();
-      }
-      const view = leaf.view;
-      if (view instanceof ReaderView) {
-        view.applyExternalUpdate(articleGuid, updates);
+      try {
+        if (requireApiVersion("1.7.2")) {
+          await leaf.loadIfDeferred();
+        }
+        const view = leaf.view;
+        if (view instanceof ReaderView) {
+          view.applyExternalUpdate(articleGuid, updates);
+        }
+      } catch {
+        // Each reader leaf is an independent best-effort observer.
       }
     }
   }
@@ -1542,17 +1692,21 @@ export default class RssDashboardPlugin extends Plugin {
   ): Promise<void> {
     const leaves = this.app.workspace.getLeavesOfType(RSS_DASHBOARD_VIEW_TYPE);
     for (const leaf of leaves) {
-      if (requireApiVersion("1.7.2")) {
-        await leaf.loadIfDeferred();
-      }
-      const view = leaf.view;
-      if (view instanceof RssDashboardView) {
-        view.applyExternalArticleUpdate(
-          articleGuid,
-          feedUrl,
-          updates,
-          shouldRerender,
-        );
+      try {
+        if (requireApiVersion("1.7.2")) {
+          await leaf.loadIfDeferred();
+        }
+        const view = leaf.view;
+        if (view instanceof RssDashboardView) {
+          view.applyExternalArticleUpdate(
+            articleGuid,
+            feedUrl,
+            updates,
+            shouldRerender,
+          );
+        }
+      } catch {
+        // Each dashboard leaf is an independent best-effort observer.
       }
     }
   }
@@ -1728,6 +1882,25 @@ export default class RssDashboardPlugin extends Plugin {
       forceCollectionPathSync?: boolean;
     },
   ): Promise<boolean> {
+    return (await this.updateArticleWithOutcome(
+      articleGuid,
+      feedUrl,
+      updates,
+      shouldRefreshView,
+      options,
+    )) !== "failed";
+  }
+
+  private async updateArticleWithOutcome(
+    articleGuid: string,
+    feedUrl: string,
+    updates: Partial<FeedItem>,
+    shouldRefreshView = true,
+    options?: {
+      suppressCollectionBroadcast?: boolean;
+      forceCollectionPathSync?: boolean;
+    },
+  ): Promise<ArticleUpdateOutcome> {
     const isCollectionFlagMutation =
       updates.read !== undefined ||
       updates.starred !== undefined ||
@@ -1745,7 +1918,7 @@ export default class RssDashboardPlugin extends Plugin {
           : "failed";
     });
     if (transactionResult === "failed") {
-      return false;
+      return "failed";
     }
 
     if (
@@ -1773,7 +1946,7 @@ export default class RssDashboardPlugin extends Plugin {
     } catch {
       // UI observers are best-effort after both durable stores commit.
     }
-    return true;
+    return transactionResult;
   }
 
   private async enqueueStatusTransaction<T>(work: () => Promise<T>): Promise<T> {
@@ -1810,14 +1983,20 @@ export default class RssDashboardPlugin extends Plugin {
   ): Promise<boolean> {
     let collectionChanged = false;
     const success = await this.enqueueStatusTransaction(async () => {
-      const resolved = targets.flatMap((target) => {
-        const feed = this.settings.feeds.find((candidate) => candidate.url === target.feedUrl);
-        const article = feed?.items.find((candidate) => candidate.guid === target.articleGuid);
-        return article ? [{ feed, article }] : [];
-      }).filter((entry, index, all) =>
-        all.findIndex((candidate) => candidate.article === entry.article) === index,
-      );
-      if (resolved.length === 0) return false;
+      if (targets.length === 0) return false;
+      const resolved: Array<{ feed: Feed; article: FeedItem }> = [];
+      for (const target of targets) {
+        const feed = this.settings.feeds.find(
+          (candidate) => candidate.url === target.feedUrl,
+        );
+        const article = feed?.items.find(
+          (candidate) => candidate.guid === target.articleGuid,
+        );
+        if (!feed || !article) return false;
+        if (!resolved.some((entry) => entry.article === article)) {
+          resolved.push({ feed, article });
+        }
+      }
 
       const repository = new CollectionRepository(
         this.app.vault,
@@ -1835,18 +2014,22 @@ export default class RssDashboardPlugin extends Plugin {
         let previousCollection: CollectionFlagState | undefined;
         let desired: CollectionFlagState | undefined;
         if (/^[a-f0-9]{64}$/.test(article.rssDashboardId ?? "")) {
-          const item = await repository.findById(article.rssDashboardId!);
-          if (!item) {
+          let item;
+          try {
+            item = await repository.findById(article.rssDashboardId!);
+          } catch {
             new Notice("Collection status could not be saved. Please try again.");
             return false;
           }
-          previousCollection = collectionFlagsFromItem(item);
-          desired = {
-            read,
-            starred: article.starred ?? false,
-            saved: article.saved ?? false,
-            savedNotePath: article.savedFilePath,
-          };
+          if (item) {
+            previousCollection = collectionFlagsFromItem(item);
+            desired = {
+              read,
+              starred: article.starred ?? false,
+              saved: article.saved ?? false,
+              savedNotePath: article.savedFilePath,
+            };
+          }
         }
         entries.push({ article, snapshot, previousCollection, desired });
       }
@@ -1883,7 +2066,7 @@ export default class RssDashboardPlugin extends Plugin {
             // The durable journal remains available for startup replay.
           }
         }
-        await this.tryPersistRestoredStatus();
+        await this.replayStatusRepairJournalIfNeeded();
         new Notice("Article status could not be saved. Please try again.");
         return false;
       }
@@ -1908,7 +2091,7 @@ export default class RssDashboardPlugin extends Plugin {
       return true;
     } catch {
       restoreArticleMutationSnapshot(article, snapshot);
-      await this.tryPersistRestoredStatus();
+      await this.replayStatusRepairJournalIfNeeded();
       new Notice("Article status could not be saved. Please try again.");
       return false;
     }
@@ -1967,6 +2150,7 @@ export default class RssDashboardPlugin extends Plugin {
       await repository.updateFlags(itemId, desired);
       await this.updateStatusJournalPhase(journal, "collection-written");
     } catch {
+      await this.replayStatusRepairJournalIfNeeded();
       new Notice("Collection status could not be saved. Please try again.");
       return "failed";
     }
@@ -1986,27 +2170,34 @@ export default class RssDashboardPlugin extends Plugin {
         new Notice("Collection status repair is required. Please try again.");
         return "failed";
       }
-      await this.tryPersistRestoredStatus();
+      await this.replayStatusRepairJournalIfNeeded();
       new Notice("Article status could not be saved. Please try again.");
       return "failed";
-    }
-  }
-
-  private async tryPersistRestoredStatus(): Promise<void> {
-    try {
-      await this.saveSettings({ forceAllShards: true, forceMetadata: true });
-    } catch {
-      // The prepared journal remains durable for startup reconciliation.
     }
   }
 
   private getStatusJournalItemLocator(article: FeedItem): {
     feedIndex: number;
     itemIndex: number;
+    sourceId: string;
+    stableId: string;
   } | null {
+    this.feedStorageRepository.ensureFeedIds(this.settings);
     for (let feedIndex = 0; feedIndex < this.settings.feeds.length; feedIndex++) {
-      const itemIndex = this.settings.feeds[feedIndex].items.indexOf(article);
-      if (itemIndex >= 0) return { feedIndex, itemIndex };
+      const feed = this.settings.feeds[feedIndex];
+      const itemIndex = feed.items.indexOf(article);
+      if (itemIndex >= 0 && feed.feedId) {
+        try {
+          return {
+            feedIndex,
+            itemIndex,
+            sourceId: feed.feedId,
+            stableId: resolveFeedItemStableId(article),
+          };
+        } catch {
+          return null;
+        }
+      }
     }
     return null;
   }
@@ -2028,6 +2219,10 @@ export default class RssDashboardPlugin extends Plugin {
     previousCollection?: CollectionFlagState;
     desired?: CollectionFlagState;
   }>): Promise<StatusRepairJournal | null> {
+    if (!(await this.reconcileExistingStatusJournalBeforeMutation())) {
+      new Notice("Article status repair is required. Please try again.");
+      return null;
+    }
     const items: StatusJournalItem[] = [];
     for (const entry of entries) {
       const locator = this.getStatusJournalItemLocator(entry.article);
@@ -2037,9 +2232,6 @@ export default class RssDashboardPlugin extends Plugin {
       }
       items.push({
         ...locator,
-        stableId: /^[a-f0-9]{64}$/.test(entry.article.rssDashboardId ?? "")
-          ? entry.article.rssDashboardId
-          : undefined,
         previousFeed: serializeArticleMutationSnapshot(entry.snapshot),
         previousCollection: entry.previousCollection,
         desired: entry.desired,
@@ -2080,12 +2272,21 @@ export default class RssDashboardPlugin extends Plugin {
       rename?: (from: string, to: string) => Promise<void>;
     };
     await adapter.write(temporaryPath, contents);
-    if (typeof adapter.rename === "function") {
+    if (
+      typeof adapter.rename === "function" &&
+      !(await adapter.exists(STATUS_REPAIR_JOURNAL_PATH))
+    ) {
       await adapter.rename(temporaryPath, STATUS_REPAIR_JOURNAL_PATH);
     } else {
-      // Legacy adapters without rename still retain the fully-written temp
-      // record. This fallback is only used where atomic rename is unavailable.
+      // The fully-written temp remains recovery evidence until canonical bytes
+      // are installed and verified.
       await adapter.write(STATUS_REPAIR_JOURNAL_PATH, contents);
+    }
+    const verified = parseStatusRepairJournal(JSON.parse(
+      await adapter.read(STATUS_REPAIR_JOURNAL_PATH),
+    ));
+    if (!verified || verified.txId !== journal.txId || verified.phase !== journal.phase) {
+      throw new Error("Status journal verification failed");
     }
   }
 
@@ -2093,25 +2294,20 @@ export default class RssDashboardPlugin extends Plugin {
     const adapter = this.app.vault.adapter as typeof this.app.vault.adapter & {
       remove?: (path: string) => Promise<void>;
     };
-    let failed = false;
-    for (const path of [
-      STATUS_REPAIR_JOURNAL_PATH,
-      `${STATUS_REPAIR_JOURNAL_PATH}.tmp`,
-    ]) {
-      try {
-        if (!(await adapter.exists(path))) continue;
-        if (typeof adapter.remove === "function") {
-          await adapter.remove(path);
-        } else {
-          await (this.app.vault as unknown as {
-            delete: (target: string) => Promise<void>;
-          }).delete(path);
-        }
-      } catch {
-        failed = true;
+    const remove = async (path: string): Promise<void> => {
+      if (!(await adapter.exists(path))) return;
+      if (typeof adapter.remove === "function") {
+        await adapter.remove(path);
+      } else {
+        await (this.app.vault as unknown as {
+          delete: (target: string) => Promise<void>;
+        }).delete(path);
       }
-    }
-    if (failed) {
+    };
+    try {
+      await remove(`${STATUS_REPAIR_JOURNAL_PATH}.tmp`);
+      await remove(STATUS_REPAIR_JOURNAL_PATH);
+    } catch {
       throw new Error("Status journal cleanup incomplete");
     }
   }
@@ -2980,53 +3176,107 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  private async replayStatusRepairJournalIfNeeded(): Promise<void> {
+  private async reconcileExistingStatusJournalBeforeMutation(): Promise<boolean> {
+    const adapter = this.app.vault.adapter;
+    if (
+      !(await adapter.exists(STATUS_REPAIR_JOURNAL_PATH)) &&
+      !(await adapter.exists(`${STATUS_REPAIR_JOURNAL_PATH}.tmp`))
+    ) return true;
+    if (!(await this.replayStatusRepairJournalIfNeeded())) return false;
+    return (
+      !(await adapter.exists(STATUS_REPAIR_JOURNAL_PATH)) &&
+      !(await adapter.exists(`${STATUS_REPAIR_JOURNAL_PATH}.tmp`))
+    );
+  }
+
+  private async readRecoverableStatusJournal(): Promise<StatusRepairJournal | null> {
+    const adapter = this.app.vault.adapter;
+    const read = async (path: string): Promise<StatusRepairJournal | null> => {
+      if (!(await adapter.exists(path))) return null;
+      try {
+        return parseStatusRepairJournal(JSON.parse(await adapter.read(path)));
+      } catch {
+        return null;
+      }
+    };
+    const canonical = await read(STATUS_REPAIR_JOURNAL_PATH);
+    if (canonical) return canonical;
+    const temporaryPath = `${STATUS_REPAIR_JOURNAL_PATH}.tmp`;
+    const temporary = await read(temporaryPath);
+    if (!temporary) return null;
+    const contents = await adapter.read(temporaryPath);
+    await adapter.write(STATUS_REPAIR_JOURNAL_PATH, contents);
+    const promoted = await read(STATUS_REPAIR_JOURNAL_PATH);
+    return promoted?.txId === temporary.txId && promoted.phase === temporary.phase
+      ? promoted
+      : null;
+  }
+
+  private resolveStatusJournalItem(entry: StatusJournalItem): FeedItem | null {
+    const matches: FeedItem[] = [];
+    for (const feed of this.settings.feeds) {
+      if (feed.feedId !== entry.sourceId) continue;
+      for (const item of feed.items) {
+        try {
+          if (resolveFeedItemStableId(item) === entry.stableId) matches.push(item);
+        } catch {
+          // An unrelated malformed item cannot satisfy the stable locator.
+        }
+      }
+    }
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  private async replayStatusRepairJournalIfNeeded(): Promise<boolean> {
     try {
-      if (!(await this.app.vault.adapter.exists(STATUS_REPAIR_JOURNAL_PATH))) {
-        return;
-      }
-      const parsed = JSON.parse(
-        await this.app.vault.adapter.read(STATUS_REPAIR_JOURNAL_PATH),
-      ) as Partial<StatusRepairJournal>;
+      const adapter = this.app.vault.adapter;
       if (
-        parsed.version !== 1 ||
-        !Array.isArray(parsed.items) ||
-        !["prepared", "collection-written", "feed-write-uncertain", "feed-written"].includes(
-          String(parsed.phase),
-        )
-      ) {
-        throw new Error("invalid status repair journal");
-      }
-      const journal = parsed as StatusRepairJournal;
+        !(await adapter.exists(STATUS_REPAIR_JOURNAL_PATH)) &&
+        !(await adapter.exists(`${STATUS_REPAIR_JOURNAL_PATH}.tmp`))
+      ) return true;
+      const journal = await this.readRecoverableStatusJournal();
+      if (!journal) throw new Error("invalid status repair journal");
       const repository = new CollectionRepository(
         this.app.vault,
         this.settings.collection.dataFolder.trim(),
         () => new Date(),
       );
+      const resolved: Array<{ entry: StatusJournalItem; item: FeedItem }> = [];
       for (const entry of journal.items) {
-        const feed = this.settings.feeds[entry.feedIndex];
-        const item = feed?.items[entry.itemIndex];
-        if (!item || (entry.stableId && item.rssDashboardId !== entry.stableId)) {
+        const item = this.resolveStatusJournalItem(entry);
+        if (!item) {
           new Notice("Article status repair is required. Please try again.");
-          return;
+          return false;
         }
-        restoreSerializedArticleSnapshot(item, entry.previousFeed);
-        if (entry.stableId && entry.previousCollection) {
+        if (entry.previousCollection) {
           const existing = await repository.findById(entry.stableId);
           if (!existing) {
             new Notice("Article status repair is required. Please try again.");
-            return;
+            return false;
           }
+        }
+        resolved.push({ entry, item });
+      }
+      for (const { entry, item } of resolved) {
+        restoreSerializedArticleSnapshot(item, entry.previousFeed);
+        if (entry.previousCollection) {
           await repository.updateFlags(entry.stableId, entry.previousCollection);
         }
       }
       await this.saveSettings({ forceAllShards: true, forceMetadata: true });
       // Verify after both stores have been restored before deleting the only
       // recovery record. A failed check deliberately leaves it for retry.
-      for (const entry of journal.items) {
-        const item = this.settings.feeds[entry.feedIndex]?.items[entry.itemIndex];
-        if (!item) throw new Error("missing repaired item");
-        if (entry.stableId && entry.previousCollection) {
+      for (const { entry, item } of resolved) {
+        for (const previous of entry.previousFeed) {
+          const hasValue = Object.prototype.hasOwnProperty.call(item, previous.key);
+          if (hasValue !== previous.exists) throw new Error("unverified feed repair");
+          if (previous.exists &&
+            JSON.stringify((item as unknown as Record<string, unknown>)[previous.key]) !==
+              JSON.stringify(previous.value)) {
+            throw new Error("unverified feed repair");
+          }
+        }
+        if (entry.previousCollection) {
           const verified = await repository.findById(entry.stableId);
           if (
             !verified ||
@@ -3040,10 +3290,12 @@ export default class RssDashboardPlugin extends Plugin {
         }
       }
       await this.clearStatusJournal();
+      return true;
     } catch {
       // Keep the journal for an idempotent later retry. Deliberately fixed,
       // content-free feedback prevents a broken record from leaking source data.
       new Notice("Article status repair is required. Please try again.");
+      return false;
     }
   }
 
@@ -3492,7 +3744,7 @@ export default class RssDashboardPlugin extends Plugin {
     const result = await this.refreshFeedPipeline(feed);
     this.mergeRefreshedFeed(result.feed);
 
-    await this.validateSavedArticles();
+    await this.validateSavedArticles({ suppressCollectionBroadcast: true });
     this.settings.lastRefreshTimestamp = Date.now();
     await this.saveSettings();
     await this.refreshDashboardViews();
@@ -3588,7 +3840,7 @@ export default class RssDashboardPlugin extends Plugin {
       await Promise.all(workers);
       await Promise.all(backgroundPromises);
 
-      await this.validateSavedArticles();
+      await this.validateSavedArticles({ suppressCollectionBroadcast: true });
       this.settings.lastRefreshTimestamp = Date.now();
       await this.saveSettings();
       this.activeRefreshState.clear();
@@ -3851,15 +4103,17 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  private async validateSavedArticles(): Promise<void> {
-    let updatedCount = 0;
+  private async validateSavedArticles(options?: {
+    suppressCollectionBroadcast?: boolean;
+  }): Promise<boolean> {
+    let collectionChanged = false;
 
     for (const feed of this.settings.feeds) {
       for (const item of feed.items) {
         if (item.saved) {
           const fileExists = await this.articleSaver.checkSavedFileExists(item);
           if (!fileExists) {
-            const updated = await this.updateArticle(
+            const outcome = await this.updateArticleWithOutcome(
               item.guid,
               feed.url,
               {
@@ -3872,21 +4126,16 @@ export default class RssDashboardPlugin extends Plugin {
               false,
               { suppressCollectionBroadcast: true },
             );
-            if (
-              updated &&
-              typeof item.rssDashboardId === "string" &&
-              /^[a-f0-9]{64}$/.test(item.rssDashboardId)
-            ) {
-              updatedCount++;
-            }
+            if (outcome === "collection") collectionChanged = true;
           }
         }
       }
     }
 
-    if (updatedCount > 0) {
+    if (collectionChanged && !options?.suppressCollectionBroadcast) {
       this.emitCollectionFlagsUpdated();
     }
+    return collectionChanged;
   }
 
   private getAllArticles(): FeedItem[] {
