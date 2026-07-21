@@ -837,10 +837,7 @@ export class FeedParser {
       refreshedFeed.lastFetchError = undefined;
       return refreshedFeed;
     } catch (error) {
-      console.error(
-        `[RSS dashboard] Error parsing feed ${feed.title} (${feed.url}):`,
-        error,
-      );
+      console.error("[RSS dashboard] Source parsing failed.");
       // Persist the clean error message so the sidebar can show the badge
       feed.lastFetchError = parseFetchErrorMessage(error);
       return feed;
@@ -871,11 +868,8 @@ export class FeedParser {
           .then((refreshedFeed) => {
             updatedFeeds.push(refreshedFeed);
           })
-          .catch((error) => {
-            console.error(
-              `[RSS dashboard] Error refreshing feed ${feed.title}:`,
-              error,
-            );
+          .catch(() => {
+            console.error("[RSS dashboard] Source refresh failed.");
             updatedFeeds.push(feed);
           })
           .finally(() => {

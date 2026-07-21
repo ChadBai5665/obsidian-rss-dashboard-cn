@@ -190,30 +190,34 @@ describe("Feed Error Badge Rendering", () => {
 });
 
 describe("parseFetchErrorMessage", () => {
-  it("should strip Error: prefix", () => {
+  it("returns a fixed safe message instead of raw parser details", () => {
     expect(parseFetchErrorMessage("Error: Not a valid RSS/Atom feed"))
-      .toBe("Not a valid RSS/Atom feed");
+      .toBe("Source refresh failed.");
       
     expect(parseFetchErrorMessage("Error: Request failed, status 429"))
-      .toBe("Request failed, status 429");
+      .toBe("Source refresh failed.");
   });
 
   it("should handle Error objects", () => {
     const err = new Error("Timed out");
-    expect(parseFetchErrorMessage(err)).toBe("Timed out");
+    expect(parseFetchErrorMessage(err)).toBe("Source refresh timed out.");
     
     const errWithPrefix = new Error("Error: Some internal issue");
-    expect(parseFetchErrorMessage(errWithPrefix)).toBe("Some internal issue");
+    expect(parseFetchErrorMessage(errWithPrefix)).toBe("Source refresh failed.");
   });
 
   it("should return Unknown error for non-strings", () => {
-    expect(parseFetchErrorMessage(null)).toBe("Unknown error");
+    expect(parseFetchErrorMessage(null)).toBe("Source refresh failed.");
   });
 
-  it("should truncate very long messages", () => {
-    const longError = "A".repeat(200);
-    const parsed = parseFetchErrorMessage(longError);
-    expect(parsed.length).toBeLessThanOrEqual(120);
-    expect(parsed.endsWith("...")).toBe(true);
+  it("does not expose URL queries, headers, API keys, or body fragments", () => {
+    const parsed = parseFetchErrorMessage(
+      "https://example.com/feed?token=query Authorization: Bearer auth x-api-key=header body-fragment",
+    );
+    expect(parsed).toBe("Source refresh failed.");
+    expect(parsed).not.toContain("query");
+    expect(parsed).not.toContain("auth");
+    expect(parsed).not.toContain("header");
+    expect(parsed).not.toContain("body-fragment");
   });
 });

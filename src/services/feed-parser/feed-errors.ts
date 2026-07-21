@@ -20,7 +20,9 @@ export function getFeedErrorMessage(error: unknown): string {
     return EMPTY_FEED_ERROR_MESSAGE;
   }
 
-  return error instanceof Error ? error.message : "Unknown error";
+  return isTimeoutFeedError(error)
+    ? "Source refresh timed out."
+    : "Source refresh failed.";
 }
 
 export function formatFeedParseNoticeMessage(
@@ -34,42 +36,22 @@ export function formatFeedParseNoticeMessage(
   return `${prefix}: ${getFeedErrorMessage(error)}`;
 }
 
-/**
- * Extract a concise, user-readable error message from a feed refresh error.
- *
- * The raw error message may contain verbose context like:
- *   "Error parsing feed Some Feed (https://...): Error: Not a valid RSS/Atom feed"
- * This function strips that prefix and returns only the core reason:
- *   "Not a valid RSS/Atom feed"
- *
- * Examples:
- *   Error: Not a valid RSS/Atom feed  →  "Not a valid RSS/Atom feed"
- *   Error: Request failed, status 429  →  "Request failed, status 429"
- *   Error: Timed out  →  "Timed out"
- */
+/** Convert an untrusted parser error into a fixed, non-sensitive UI message. */
 export function parseFetchErrorMessage(error: unknown): string {
-  if (!error) {
-    return "Unknown error";
-  }
-
   if (isEmptyFeedError(error)) {
     return EMPTY_FEED_ERROR_MESSAGE;
   }
+  return isTimeoutFeedError(error)
+    ? "Source refresh timed out."
+    : "Source refresh failed.";
+}
 
-  const raw =
+export function isTimeoutFeedError(error: unknown): boolean {
+  const message =
     error instanceof Error
       ? error.message
       : typeof error === "string"
         ? error
-        : "Unknown error";
-
-  // Strip leading "Error: " prefix if present (normalises thrown Error messages)
-  const withoutPrefix = raw.replace(/^Error:\s*/i, "").trim();
-
-  // Truncate to 120 chars so very long messages don't break the tooltip
-  if (withoutPrefix.length > 120) {
-    return withoutPrefix.substring(0, 117) + "...";
-  }
-
-  return withoutPrefix || "Unknown error";
+        : "";
+  return message === "Timed out" || message === "Source refresh timed out.";
 }

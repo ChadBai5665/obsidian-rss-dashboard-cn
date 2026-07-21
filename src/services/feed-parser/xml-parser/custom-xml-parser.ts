@@ -511,10 +511,9 @@ export class CustomXMLParser {
                 return parseAtom(extractedDoc, this.getAtomParserDeps());
               }
             }
-          } catch (extractError) {
+          } catch {
             console.error(
-              "[RSS dashboard] parseString: Error in fallback extraction",
-              extractError,
+              "[RSS dashboard] Feed fallback extraction failed.",
             );
           }
         }
@@ -541,19 +540,12 @@ export class CustomXMLParser {
       } else {
         return fallbackParse(xmlString, this.getFallbackParseDeps());
       }
-    } catch (error) {
-      console.error("[RSS dashboard] parseString error:", error);
+    } catch {
+      console.error("[RSS dashboard] Feed XML parsing failed.");
       try {
         return fallbackParse(xmlString, this.getFallbackParseDeps());
-      } catch (fallbackError) {
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        const fallbackMsg =
-          fallbackError instanceof Error
-            ? fallbackError.message
-            : String(fallbackError);
-        throw new Error(
-          `All parsing attempts failed: ${errorMsg}. Fallback error: ${fallbackMsg}`,
-        );
+      } catch {
+        throw new Error("All feed parsing attempts failed.");
       }
     }
   }

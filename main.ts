@@ -80,6 +80,7 @@ import { SourceRefreshLedger } from "./src/refresh/source-refresh-ledger";
 import { CollectionRepository } from "./src/collection/collection-repository";
 import { DailyIndexService } from "./src/collection/daily-index-service";
 import { CollectionService } from "./src/services/collection-service";
+import { isTimeoutFeedError } from "./src/services/feed-parser/feed-errors";
 
 export interface FeedRefreshResult {
   feed: Feed;
@@ -118,21 +119,73 @@ type LegacyPlaybackProgressEntry = {
   duration: number;
 };
 
-type FeedItemWithMetrics = FeedItem & {
-  metrics?: Record<string, number>;
-};
+type FeedRefreshFailureCode =
+  | "refresh-failed"
+  | "timed-out"
+  | "collection-failed"
+  | "state-failed";
 
-function snapshotFeedItems(items: FeedItem[]): FeedItem[] {
-  return items.map((item) => {
-    const itemWithMetrics = item as FeedItemWithMetrics;
-    return {
-      ...item,
-      tags: item.tags?.map((tag) => ({ ...tag })),
-      metrics: itemWithMetrics.metrics
-        ? { ...itemWithMetrics.metrics }
-        : undefined,
-    } as FeedItemWithMetrics;
-  });
+class FeedRefreshPipelineError extends Error {
+  constructor(
+    readonly code: FeedRefreshFailureCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "FeedRefreshPipelineError";
+  }
+}
+
+class RefreshAttemptToken {
+  private active = true;
+
+  cancel(): void {
+    this.active = false;
+  }
+
+  assertActive(): void {
+    if (!this.active) {
+      throw new FeedRefreshPipelineError(
+        "timed-out",
+        "Source refresh timed out.",
+      );
+    }
+  }
+}
+
+function cloneRefreshData<T>(value: T, seen = new WeakMap<object, object>()): T {
+  if (Array.isArray(value)) {
+    const entries = value as unknown[];
+    return entries.map((entry) => cloneRefreshData(entry, seen)) as T;
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  if (value instanceof Date) {
+    return new Date(value.getTime()) as T;
+  }
+  const existing = seen.get(value);
+  if (existing) {
+    return existing as T;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype) {
+    return value;
+  }
+
+  const clone: Record<string, unknown> = {};
+  seen.set(value, clone);
+  for (const [key, entry] of Object.entries(value)) {
+    clone[key] = cloneRefreshData(entry, seen);
+  }
+  return clone as T;
+}
+
+function toFeedRefreshPipelineError(error: unknown): FeedRefreshPipelineError {
+  if (error instanceof FeedRefreshPipelineError) {
+    return error;
+  }
+  return isTimeoutFeedError(error)
+    ? new FeedRefreshPipelineError("timed-out", "Source refresh timed out.")
+    : new FeedRefreshPipelineError("refresh-failed", "Source refresh failed.");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1348,11 +1401,9 @@ export default class RssDashboardPlugin extends Plugin {
       }
 
       await this.refreshFeedBatch(feedsToRefresh, feedNoticeText);
-    } catch (error) {
+    } catch {
       console.error("[RSS dashboard] Refresh request failed.");
-      new Notice(
-        `Error refreshing  ${error instanceof Error ? error.message : "Unknown error"}`,
-      );
+      new Notice("Source refresh failed. Check the source status for details.");
     }
   }
 
@@ -1415,11 +1466,9 @@ export default class RssDashboardPlugin extends Plugin {
 
       new Notice(`Refreshing ${feed.title}...`);
       await this.refreshSingleFeed(feed, feed.title);
-    } catch (error) {
+    } catch {
       console.error("[RSS dashboard] Refresh request failed.");
-      new Notice(
-        `Error refreshing  ${error instanceof Error ? error.message : "Unknown error"}`,
-      );
+      new Notice("Source refresh failed. Check the source status for details.");
     }
   }
 
@@ -2143,9 +2192,7 @@ export default class RssDashboardPlugin extends Plugin {
       }
     } catch (error) {
       if (showNotice) {
-        new Notice(
-          `Error adding feed: ${error instanceof Error ? error.message : "Unknown error"}`,
-        );
+        new Notice(formatFeedParseNoticeMessage(error, "Unable to add feed"));
       }
       return false;
     }
@@ -2171,10 +2218,8 @@ export default class RssDashboardPlugin extends Plugin {
         feedUrl,
         this.settings.media.defaultYouTubeFolder,
       );
-    } catch (error) {
-      new Notice(
-        `Error adding YouTube feed: ${error instanceof Error ? error.message : "Unknown error"}`,
-      );
+    } catch {
+      new Notice("Unable to add YouTube feed.");
     }
   }
 
@@ -2913,7 +2958,7 @@ export default class RssDashboardPlugin extends Plugin {
       this.mergeRefreshedFeed(result.feed);
     } catch (error) {
       const isTimedOut =
-        error instanceof Error && error.message === "Timed out";
+        error instanceof FeedRefreshPipelineError && error.code === "timed-out";
       if (isTimedOut) {
         refreshSummary.timedOut += 1;
       } else {
@@ -2940,62 +2985,142 @@ export default class RssDashboardPlugin extends Plugin {
     const sourceId = feed.feedId ?? feed.url;
     const attemptedAt = new Date();
     const ledger = this.getSourceRefreshLedger();
-    await ledger.recordAttempt(sourceId, attemptedAt);
+    try {
+      await ledger.recordAttempt(sourceId, attemptedAt);
+    } catch {
+      throw new FeedRefreshPipelineError(
+        "state-failed",
+        "Refresh state is unavailable.",
+      );
+    }
 
+    const attempt = new RefreshAttemptToken();
     let result: FeedRefreshResult;
     try {
-      result = await this.refreshFeedWithTimeout(feed);
+      result = await this.refreshFeedWithTimeout(feed, attempt);
+      attempt.assertActive();
     } catch (error) {
-      await ledger.recordError(sourceId, attemptedAt, {
-        code:
-          error instanceof Error && error.message === "Timed out"
-            ? "timed-out"
-            : "refresh-failed",
-        message:
-          error instanceof Error && error.message === "Timed out"
-            ? "Source refresh timed out."
-            : "Source refresh failed.",
-      });
-      throw error;
+      const failure = toFeedRefreshPipelineError(error);
+      await this.recordRefreshErrorSafely(
+        ledger,
+        sourceId,
+        attemptedAt,
+        failure,
+      );
+      throw failure;
     }
 
     if (!this.settings.collection.enabled) {
-      await ledger.recordSuccess(sourceId, result.fetchedAt);
+      try {
+        await ledger.recordSuccess(sourceId, result.fetchedAt);
+      } catch {
+        const failure = new FeedRefreshPipelineError(
+          "state-failed",
+          "Refresh state is unavailable.",
+        );
+        await this.recordRefreshErrorSafely(
+          ledger,
+          sourceId,
+          attemptedAt,
+          failure,
+        );
+        throw failure;
+      }
       return result;
     }
 
     try {
+      attempt.assertActive();
       await this.getCollectionService().collectFeedRefresh(result);
+      attempt.assertActive();
     } catch (error) {
-      await ledger.recordError(sourceId, attemptedAt, {
-        code: "collection-failed",
-        message: "Collection persistence failed.",
-      });
-      throw error;
+      const failure =
+        error instanceof FeedRefreshPipelineError &&
+        error.code === "timed-out"
+          ? error
+          : new FeedRefreshPipelineError(
+              "collection-failed",
+              "Collection persistence failed.",
+            );
+      await this.recordRefreshErrorSafely(
+        ledger,
+        sourceId,
+        attemptedAt,
+        failure,
+      );
+      throw failure;
     }
     return result;
   }
 
-  private async refreshFeedWithTimeout(feed: Feed): Promise<FeedRefreshResult> {
-    return await Promise.race([
-      this.refreshFeedDirect(feed),
-      new Promise<FeedRefreshResult>((_, reject) => {
-        window.setTimeout(
-          () => reject(new Error("Timed out")),
-          FEED_REQUEST_TIMEOUT_MS,
-        );
-      }),
-    ]);
+  private async recordRefreshErrorSafely(
+    ledger: SourceRefreshLedger,
+    sourceId: string,
+    attemptedAt: Date,
+    failure: FeedRefreshPipelineError,
+  ): Promise<void> {
+    try {
+      await ledger.recordError(sourceId, attemptedAt, {
+        code: failure.code,
+        message: failure.message,
+      });
+    } catch {
+      console.error("[RSS dashboard] Refresh error state could not be saved.");
+    }
   }
 
-  private async refreshFeedDirect(feed: Feed): Promise<FeedRefreshResult> {
-    const previousItems = snapshotFeedItems(feed.items);
+  private async refreshFeedWithTimeout(
+    feed: Feed,
+    attempt: RefreshAttemptToken,
+  ): Promise<FeedRefreshResult> {
+    let timeoutId: number | null = null;
+    try {
+      return await Promise.race([
+        this.refreshFeedDirect(feed, attempt),
+        new Promise<FeedRefreshResult>((_, reject) => {
+          timeoutId = window.setTimeout(() => {
+            attempt.cancel();
+            reject(
+              new FeedRefreshPipelineError(
+                "timed-out",
+                "Source refresh timed out.",
+              ),
+            );
+          }, FEED_REQUEST_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  private async refreshFeedDirect(
+    feed: Feed,
+    attempt: RefreshAttemptToken,
+  ): Promise<FeedRefreshResult> {
+    const parserInput = cloneRefreshData(feed);
+    parserInput.lastFetchError = undefined;
+    const previousItems = cloneRefreshData(feed.items);
     let updatedFeed: Feed;
     if (typeof this.feedParser.refreshFeed === "function") {
-      updatedFeed = await this.feedParser.refreshFeed(feed);
+      updatedFeed = await this.feedParser.refreshFeed(parserInput);
     } else {
-      const updatedFeeds = await this.feedParser.refreshAllFeeds([feed]);
-      updatedFeed = updatedFeeds[0] ?? feed;
+      const updatedFeeds = await this.feedParser.refreshAllFeeds([parserInput]);
+      updatedFeed = updatedFeeds[0] ?? parserInput;
+    }
+    attempt.assertActive();
+    if (updatedFeed.lastFetchError) {
+      throw isTimeoutFeedError(updatedFeed.lastFetchError)
+        ? new FeedRefreshPipelineError(
+            "timed-out",
+            "Source refresh timed out.",
+          )
+        : new FeedRefreshPipelineError(
+            "refresh-failed",
+            "Source refresh failed.",
+          );
     }
     return {
       feed: updatedFeed,

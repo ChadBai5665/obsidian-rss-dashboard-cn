@@ -70,11 +70,9 @@ export async function loadFeedForPreview(
       hasEntries: (data.items?.length || 0) > 0,
       feedUrl,
     };
-  } catch (e) {
-    console.error("[RSS Dashboard] rss2json failed:", e);
-    throw new Error(
-      `Failed to load feed: ${e instanceof Error ? e.message : String(e)}`,
-    );
+  } catch {
+    console.error("[RSS Dashboard] Feed preview request failed.");
+    throw new Error("Failed to load feed.");
   }
 }
 

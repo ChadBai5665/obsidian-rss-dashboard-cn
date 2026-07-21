@@ -23,9 +23,14 @@ describe("EmptyFeedError", () => {
   });
 
   it("formatFeedParseNoticeMessage gives prefixed message for regular errors", () => {
-    const err = new Error("network failed");
+    const err = new Error(
+      "https://example.com/feed?token=secret Authorization: Bearer hidden body-fragment",
+    );
     const msg = formatFeedParseNoticeMessage(err, "Failed to load");
     expect(msg).toContain("Failed to load");
-    expect(msg).toContain("network failed");
+    expect(msg).toContain("Source refresh failed.");
+    expect(msg).not.toContain("secret");
+    expect(msg).not.toContain("hidden");
+    expect(msg).not.toContain("body-fragment");
   });
 });

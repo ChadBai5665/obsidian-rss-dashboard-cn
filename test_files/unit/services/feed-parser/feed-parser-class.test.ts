@@ -749,3 +749,37 @@ describe("FeedParser.parseFeed", () => {
     requestUrlSpy.mockRestore();
   });
 });
+
+describe("FeedParser.refreshFeed failure contract", () => {
+  it("returns a fixed safe lastFetchError and never logs raw source details", async () => {
+    const parser = new FeedParser(
+      DEFAULT_SETTINGS.display,
+      [],
+      DEFAULT_SETTINGS.media,
+    );
+    const source: Feed = {
+      feedId: "source-a",
+      title: "Private source title",
+      url: "https://example.com/feed.xml?api_key=query-secret",
+      folder: "Research",
+      items: [],
+      lastUpdated: 1,
+    };
+    const raw =
+      "Authorization: Bearer auth-secret x-api-key=header-secret body-fragment";
+    vi.spyOn(parser, "parseFeed").mockRejectedValue(new Error(raw));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await parser.refreshFeed(source);
+
+    expect(result).toBe(source);
+    expect(result.lastFetchError).toBe("Source refresh failed.");
+    const logged = JSON.stringify(errorSpy.mock.calls);
+    expect(logged).not.toContain("Private source title");
+    expect(logged).not.toContain("https://example.com");
+    expect(logged).not.toContain("query-secret");
+    expect(logged).not.toContain("auth-secret");
+    expect(logged).not.toContain("header-secret");
+    expect(logged).not.toContain("body-fragment");
+  });
+});

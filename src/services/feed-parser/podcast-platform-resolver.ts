@@ -195,10 +195,8 @@ async function resolveApplePodcastUrl(
       throw new Error("Podcast not found in Apple Podcasts directory");
     }
     return data.results[0].feedUrl;
-  } catch (e) {
-    console.error("[RSS Dashboard] iTunes API error:", e);
-    throw new Error(
-      `Failed to lookup podcast: ${e instanceof Error ? e.message : String(e)}`,
-    );
+  } catch {
+    console.error("[RSS Dashboard] Podcast directory request failed.");
+    throw new Error("Failed to lookup podcast.");
   }
 }

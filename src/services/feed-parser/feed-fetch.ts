@@ -493,10 +493,8 @@ export async function fetchFeedXml(
           throw new Error("Not a valid RSS/Atom feed");
         }
       } catch (proxyError) {
-        console.error(
-          `[RSS dashboard] AllOrigins proxy fetch failed for ${targetUrl}:`,
-          proxyError,
-        );
+        void proxyError;
+        console.error("[RSS dashboard] Feed proxy request failed.");
 
         // Try allOrigins raw endpoint
         if (signal?.aborted) throw new Error("Timed out");

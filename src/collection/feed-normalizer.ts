@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import type { Feed, FeedItem } from "../types/types";
 import type { CollectedItem, SourceType } from "./collected-item";
 import { canonicalizeUrl, createCollectedItemId } from "./item-identity";
@@ -53,9 +54,9 @@ export function normalizeFeedItem(
     guid,
     observationType: "new",
     topics: uniqueTopicNames(item),
-    excerpt: nonEmpty(item.summary) ?? nonEmpty(item.description),
+    excerpt: normalizeFeedItemExcerpt(item),
     contentBasis: sourceType === "youtube" ? "title-description" : "feed",
-    metrics: finiteMetrics((item as FeedItemWithMetrics).metrics),
+    metrics: normalizeFeedItemMetrics(item),
     read: item.read ?? false,
     starred: item.starred ?? false,
     saved: item.saved ?? false,
@@ -64,7 +65,16 @@ export function normalizeFeedItem(
   };
 }
 
-function finiteMetrics(value: unknown): Record<string, number> | undefined {
+export function normalizeFeedItemExcerpt(
+  item: FeedItem,
+): string | undefined {
+  return nonEmpty(item.summary) ?? nonEmpty(item.description);
+}
+
+export function normalizeFeedItemMetrics(
+  item: FeedItem,
+): Record<string, number> | undefined {
+  const value = (item as FeedItemWithMetrics).metrics;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
@@ -74,6 +84,25 @@ function finiteMetrics(value: unknown): Record<string, number> | undefined {
       typeof entry[1] === "number" && Number.isFinite(entry[1]),
   );
   return metrics.length > 0 ? Object.fromEntries(metrics) : undefined;
+}
+
+export function createFeedItemMaterialFingerprint(item: FeedItem): string {
+  const metrics = normalizeFeedItemMetrics(item);
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        title: item.title,
+        excerpt: normalizeFeedItemExcerpt(item),
+        content: nonEmpty(item.content),
+        publishedAt: nonEmpty(item.pubDate),
+        metrics: metrics
+          ? Object.entries(metrics).sort(([left], [right]) =>
+              left.localeCompare(right),
+            )
+          : undefined,
+      }),
+    )
+    .digest("hex");
 }
 
 function resolveSourceType(feed: Feed, item: FeedItem): SourceType {

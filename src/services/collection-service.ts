@@ -1,8 +1,9 @@
-import { createHash } from "crypto";
 import type { CollectedItem } from "../collection/collected-item";
-import { normalizeFeedItem } from "../collection/feed-normalizer";
+import {
+  createFeedItemMaterialFingerprint,
+  normalizeFeedItem,
+} from "../collection/feed-normalizer";
 import { toLocalCalendarDate } from "../refresh/local-calendar-day";
-import type { SourceRefreshState } from "../refresh/source-refresh-ledger";
 import type { Feed, FeedItem } from "../types/types";
 
 interface CollectionRepositoryPort {
@@ -21,7 +22,6 @@ interface DailyIndexPort {
 }
 
 interface RefreshLedgerPort {
-  getState(sourceId: string): Promise<SourceRefreshState | undefined>;
   recordSuccess(sourceId: string, succeededAt: Date): Promise<void>;
 }
 
@@ -31,10 +31,6 @@ interface CollectionServiceDependencies {
   ledger: RefreshLedgerPort;
   normalize?: typeof normalizeFeedItem;
 }
-
-type FeedItemWithMetrics = FeedItem & {
-  metrics?: Record<string, number>;
-};
 
 export class CollectionService {
   private readonly normalize: typeof normalizeFeedItem;
@@ -69,10 +65,8 @@ export class CollectionService {
       source: item,
       collected: this.normalize(input.feed, item, input.fetchedAt),
     }));
-    const priorState = await this.dependencies.ledger.getState(sourceId);
     const hasSuccessfulBootstrap =
-      Boolean(priorState?.lastSuccessAt) &&
-      (await this.dependencies.repository.hasItemsForSource(sourceId));
+      await this.dependencies.repository.hasItemsForSource(sourceId);
     const collected = hasSuccessfulBootstrap
       ? this.collectChanges(input, normalizedItems)
       : normalizedItems.map(({ collected }) => collected);
@@ -122,35 +116,12 @@ export class CollectionService {
       }
 
       if (
-        materialFingerprint(previousItem) !==
-        materialFingerprint(refreshedItem)
+        createFeedItemMaterialFingerprint(previousItem) !==
+        createFeedItemMaterialFingerprint(refreshedItem)
       ) {
         changes.push({ ...normalized, observationType: "updated" });
       }
     }
     return changes;
   }
-}
-
-function materialFingerprint(item: FeedItem): string {
-  const itemWithMetrics = item as FeedItemWithMetrics;
-  return createHash("sha256")
-    .update(
-      JSON.stringify({
-        title: item.title,
-        excerpt: item.summary ?? item.description,
-        content: item.content,
-        publishedAt: item.pubDate,
-        metrics: sortedMetrics(itemWithMetrics.metrics),
-      }),
-    )
-    .digest("hex");
-}
-
-function sortedMetrics(
-  metrics: Record<string, number> | undefined,
-): Array<[string, number]> | undefined {
-  return metrics
-    ? Object.entries(metrics).sort(([left], [right]) => left.localeCompare(right))
-    : undefined;
 }

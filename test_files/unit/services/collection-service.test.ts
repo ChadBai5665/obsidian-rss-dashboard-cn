@@ -49,7 +49,9 @@ function collected(source: FeedItem, fetchedAt: Date): CollectedItem {
     guid: source.guid,
     observationType: "new",
     topics: [],
-    excerpt: source.summary || source.description,
+    excerpt: source.summary?.trim()
+      ? source.summary.trim()
+      : source.description.trim() || undefined,
     contentBasis: "feed",
     read: source.read ?? false,
     starred: source.starred ?? false,
@@ -174,6 +176,39 @@ describe("CollectionService", () => {
     expect(result[0].observationType).toBe("new");
   });
 
+  it("uses durable source observations as bootstrap truth when the ledger is missing", async () => {
+    const unchanged = item();
+    const test = harness({ bootstrapped: false, stored: true });
+
+    const result = await test.service.collectFeedRefresh({
+      feed: feed([unchanged]),
+      previousItems: [unchanged],
+      refreshedItems: [unchanged],
+      fetchedAt: new Date(2026, 6, 21, 10, 0, 0),
+    });
+
+    expect(result).toEqual([]);
+  });
+
+  it("uses description when summary is blank while detecting material changes", async () => {
+    const previous = item({ summary: "   ", description: "Old description" });
+    const refreshed = { ...previous, description: "New description" };
+    const test = harness({ stored: true });
+
+    const result = await test.service.collectFeedRefresh({
+      feed: feed([refreshed]),
+      previousItems: [previous],
+      refreshedItems: [refreshed],
+      fetchedAt: new Date(2026, 6, 21, 10, 0, 0),
+    });
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      excerpt: "New description",
+      observationType: "updated",
+    });
+  });
+
   it.each([
     ["excerpt", { description: "Changed description" }],
     ["content", { content: "Changed full content" }],
@@ -250,6 +285,35 @@ describe("CollectionService", () => {
 
     expect(test.repository.upsertDaily).toHaveBeenCalled();
     expect(test.ledger.recordSuccess).not.toHaveBeenCalled();
+  });
+
+  it("keeps durable JSONL and Markdown when success-ledger persistence fails", async () => {
+    const current = item();
+    const test = harness({ stored: false });
+    test.ledger.recordSuccess.mockRejectedValueOnce(
+      new Error("ledger unavailable"),
+    );
+
+    await expect(
+      test.service.collectFeedRefresh({
+        feed: feed([current]),
+        previousItems: [],
+        refreshedItems: [current],
+        fetchedAt: new Date(2026, 6, 21, 10, 0, 0),
+      }),
+    ).rejects.toThrow("ledger unavailable");
+
+    expect(test.repository.upsertDaily).toHaveBeenCalledTimes(1);
+    expect(test.dailyIndex.writeDailyIndex).toHaveBeenCalledTimes(1);
+
+    test.repository.hasItemsForSource.mockResolvedValue(true);
+    const retry = await test.service.collectFeedRefresh({
+      feed: feed([current]),
+      previousItems: [current],
+      refreshedItems: [current],
+      fetchedAt: new Date(2026, 6, 21, 10, 5, 0),
+    });
+    expect(retry).toEqual([]);
   });
 
   it("serializes concurrent source persistence through the complete durable sequence", async () => {
