@@ -17,9 +17,18 @@ beforeEach(() => {
 });
 
 describe("TemplateNameModal", () => {
+  it("renders template controls in Chinese when requested", () => {
+    const app = obsidian.App.createMock();
+    const modal = new TemplateNameModal(app, "zh-CN");
+
+    modal.open();
+
+    expect(modal.contentEl.textContent).toContain("保存模板");
+    expect(modal.contentEl.textContent).toContain("取消");
+  });
   it("resolves trimmed input when Enter is pressed", async () => {
     const app = obsidian.App.createMock();
-    const modal = new TemplateNameModal(app);
+    const modal = new TemplateNameModal(app, "en");
     const resultPromise = modal.waitForClose();
 
     modal.open();
@@ -38,7 +47,7 @@ describe("TemplateNameModal", () => {
 
   it("resolves null when Cancel is clicked", async () => {
     const app = obsidian.App.createMock();
-    const modal = new TemplateNameModal(app);
+    const modal = new TemplateNameModal(app, "en");
     const resultPromise = modal.waitForClose();
 
     modal.open();
@@ -53,7 +62,7 @@ describe("TemplateNameModal", () => {
 
   it("resolves null when Save is clicked with empty input", async () => {
     const app = obsidian.App.createMock();
-    const modal = new TemplateNameModal(app);
+    const modal = new TemplateNameModal(app, "en");
     const resultPromise = modal.waitForClose();
 
     modal.open();
@@ -75,7 +84,7 @@ describe("TemplateNameModal", () => {
 describe("HighlightWordEditModal", () => {
   it("prefills input and resolves edited value on Save", async () => {
     const app = obsidian.App.createMock();
-    const modal = new HighlightWordEditModal(app, "initial");
+    const modal = new HighlightWordEditModal(app, "initial", "en");
     const resultPromise = modal.waitForClose();
 
     modal.open();
@@ -95,7 +104,7 @@ describe("HighlightWordEditModal", () => {
 
   it("resolves null on Cancel", async () => {
     const app = obsidian.App.createMock();
-    const modal = new HighlightWordEditModal(app, "initial");
+    const modal = new HighlightWordEditModal(app, "initial", "en");
     const resultPromise = modal.waitForClose();
 
     modal.open();
@@ -109,10 +118,19 @@ describe("HighlightWordEditModal", () => {
 });
 
 describe("ConfirmDeleteModal", () => {
+  it("renders highlight deletion confirmation in Chinese when requested", () => {
+    const app = obsidian.App.createMock();
+    const modal = new ConfirmDeleteModal(app, "abc", "zh-CN");
+
+    modal.open();
+
+    expect(modal.contentEl.textContent).toContain("删除高亮词");
+    expect(modal.contentEl.textContent).toContain("abc");
+  });
   it("resolves true when Delete is clicked, false when Cancel is clicked", async () => {
     const app = obsidian.App.createMock();
 
-    const modal1 = new ConfirmDeleteModal(app, "abc");
+    const modal1 = new ConfirmDeleteModal(app, "abc", "en");
     const p1 = modal1.waitForClose();
     modal1.open();
     expect(modal1.contentEl.textContent).toContain('"abc"');
@@ -122,7 +140,7 @@ describe("ConfirmDeleteModal", () => {
     deleteBtn.click();
     await expect(p1).resolves.toBe(true);
 
-    const modal2 = new ConfirmDeleteModal(app, "abc");
+    const modal2 = new ConfirmDeleteModal(app, "abc", "en");
     const p2 = modal2.waitForClose();
     modal2.open();
     const cancelBtn = Array.from(modal2.contentEl.querySelectorAll("button")).find(

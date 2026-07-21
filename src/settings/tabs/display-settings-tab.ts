@@ -800,10 +800,10 @@ export function renderDisplaySettingsTab(
     .setDesc(t("settings.display.fontDesc"))
     .addDropdown((dropdown) =>
       dropdown
-        .addOption("default", "Theme default")
-        .addOption("serif", "Serif")
-        .addOption("sans", "Sans")
-        .addOption("mono", "Mono")
+        .addOption("default", t("settings.display.themeDefault"))
+        .addOption("serif", t("settings.display.serif"))
+        .addOption("sans", t("settings.display.sans"))
+        .addOption("mono", t("settings.display.mono"))
         .setValue(plugin.settings.readerFormat.fontFamily)
         .onChange(async (value: string) => {
           plugin.settings.readerFormat.fontFamily = value as
@@ -820,8 +820,8 @@ export function renderDisplaySettingsTab(
     .setDesc(t("settings.display.alignmentDesc"))
     .addDropdown((dropdown) =>
       dropdown
-        .addOption("justify", "Justify")
-        .addOption("left", "Left")
+        .addOption("justify", t("settings.display.justify"))
+        .addOption("left", t("settings.display.left"))
         .setValue(plugin.settings.readerFormat.textAlign)
         .onChange(async (value: string) => {
           plugin.settings.readerFormat.textAlign = value as "justify" | "left";
@@ -834,10 +834,10 @@ export function renderDisplaySettingsTab(
     .setDesc(t("settings.display.paragraphSpacingDesc"))
     .addDropdown((dropdown) =>
       dropdown
-        .addOption("default", "Theme default")
-        .addOption("tight", "Tight")
-        .addOption("normal", "Normal")
-        .addOption("loose", "Loose")
+        .addOption("default", t("settings.display.themeDefault"))
+        .addOption("tight", t("settings.display.tight"))
+        .addOption("normal", t("settings.display.normal"))
+        .addOption("loose", t("settings.display.loose"))
         .setValue(plugin.settings.readerFormat.paragraphSpacing)
         .onChange(async (value: string) => {
           plugin.settings.readerFormat.paragraphSpacing = value as
@@ -917,9 +917,9 @@ export function renderDisplaySettingsTab(
     .setDesc(t("settings.display.mobileListStyleDesc"))
     .addDropdown((dropdown) =>
       dropdown
-        .addOption("left-grid", "Left grid (2x2)")
-        .addOption("bottom-row", "Bottom row")
-        .addOption("minimal", "Minimal (read/unread only)")
+        .addOption("left-grid", t("settings.display.leftGrid"))
+        .addOption("bottom-row", t("settings.display.bottomRow"))
+        .addOption("minimal", t("settings.display.minimal"))
         .setValue(plugin.settings.display.mobileListToolbarStyle || "minimal")
         .onChange(async (value: string) => {
           plugin.settings.display.mobileListToolbarStyle = value as

@@ -8,12 +8,14 @@
 import { Notice, Setting, normalizePath } from "obsidian";
 import type { App } from "obsidian";
 import { DEFAULT_SETTINGS, type SavedTemplate } from "../../types/types";
+import type { Locale } from "../../i18n";
 import { VaultFolderSuggest } from "../../components/folder-suggest";
 import { TemplateNameModal } from "../modals/settings-modals";
 
 export interface ArticleSavingPluginLike {
   app: App;
   settings: {
+    locale: Locale;
     articleSaving: {
       defaultFolder: string;
       addSavedTag: boolean;
@@ -157,7 +159,7 @@ export function renderArticleSavingSettingsTab(
     cls: "rss-dashboard-template-btn",
   });
   saveAsTemplateBtn.onclick = async () => {
-    const modal = new TemplateNameModal(plugin.app);
+    const modal = new TemplateNameModal(plugin.app, plugin.settings.locale);
     modal.open();
     const name = await modal.waitForClose();
     if (name) {

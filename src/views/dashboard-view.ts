@@ -1426,7 +1426,7 @@ export class RssDashboardView extends ItemView {
       setIcon(filterEditBtn, "cog");
       filterEditBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        void this.plugin.openSettingsToTab("Rules");
+        void this.plugin.openSettingsToTab("rules");
       });
 
       // Keyword rules stats text
@@ -1460,7 +1460,7 @@ export class RssDashboardView extends ItemView {
       setIcon(highlightEditBtn, "pencil");
       highlightEditBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        void this.plugin.openSettingsToTab("Highlights");
+        void this.plugin.openSettingsToTab("highlights");
       });
 
       highlightRow.createSpan({

@@ -58,6 +58,29 @@ export function getSettingsTabLabel(tab: SettingsTabId, t: Translator): string {
   return t(TAB_LABEL_KEYS[tab]);
 }
 
+const LEGACY_TAB_NAMES: Readonly<Record<string, SettingsTabId>> = {
+  General: "general",
+  Storage: "storage",
+  Display: "display",
+  Sidebar: "sidebar",
+  Media: "media",
+  "Article saving": "article-saving",
+  Rules: "rules",
+  Highlights: "highlights",
+  "Import/Export": "import-export",
+  Tags: "tags",
+  About: "about",
+};
+
+/** Accepts stable IDs and pre-localization names at the public navigation seam. */
+export function normalizeSettingsTabId(name: string): SettingsTabId | null {
+  if (isValidSettingsTab(name)) {
+    return name;
+  }
+
+  return LEGACY_TAB_NAMES[name] ?? null;
+}
+
 /** Returns true only for tabs rendered by the current settings UI. */
 export function isValidSettingsTab(name: string): name is SettingsTabId {
   return (SETTINGS_TAB_IDS as readonly string[]).includes(name);

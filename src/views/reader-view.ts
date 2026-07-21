@@ -3382,7 +3382,7 @@ export class ReaderView extends ItemView {
 
     const plugin = pluginByGetter || pluginByRegistry;
     if (typeof plugin?.openSettingsToTab === "function") {
-      await plugin.openSettingsToTab("Display", "Reader");
+      await plugin.openSettingsToTab("display", "Reader");
       return;
     }
 

@@ -74,7 +74,7 @@ type MediaFolderSettingKey =
 function renderFolderSetting(
   containerEl: HTMLElement,
   plugin: StorageSettingsPlugin,
-  t: Translator,
+  _t: Translator,
   name: string,
   desc: string,
   key: MediaFolderSettingKey,
@@ -107,20 +107,19 @@ export function renderStorageSettingsTab(
   const renderStorageStatus = (): string => {
     const status = plugin.getStorageStatus();
     const migrationState = status.migrationReady
-      ? "Migration ready"
+      ? t("settings.storage.migrationReady")
       : status.mode === "vault-shards-v2"
-        ? "Shard Storage v2 active"
+        ? t("settings.storage.v2Active")
         : status.mode === "vault-shards"
-          ? "Shard Storage v1 active"
-          : "Legacy JSON active";
-    return [
-      `Mode: ${status.mode}`,
-      `Folder: ${status.folder}`,
-      `Feeds: ${status.feedCount}`,
-      `Shards: ${status.shardCount}`,
-      migrationState,
-      status.lastRepairResult,
-    ].join(" • ");
+          ? t("settings.storage.v1Active")
+          : t("settings.storage.legacyActive");
+    return t("settings.storage.statusSummary", {
+      mode: status.mode,
+      folder: status.folder,
+      feedCount: status.feedCount,
+      shardCount: status.shardCount,
+      state: migrationState,
+    });
   };
 
   const runShardDeletionFailureFlow = async (
@@ -143,11 +142,7 @@ export function renderStorageSettingsTab(
           storageError("Open shard folder action failed", error, {
             storageFolder,
           });
-          new Notice(
-            `Could not open shard folder${
-              error instanceof Error ? `: ${error.message}` : ""
-            }`,
-          );
+          new Notice(t("settings.storage.openFolderFailed"));
         }
         continue;
       }
@@ -200,17 +195,13 @@ export function renderStorageSettingsTab(
     try {
       const deleted = await deleteMetadataFileAtPath(previousDataFilePath);
       if (deleted) {
-        new Notice("Previous metadata data.json copy deleted.");
+        new Notice(t("settings.storage.metadataDeleted"));
       }
     } catch (error) {
       storageError("Failed to delete previous metadata copy", error, {
         previousDataFilePath,
       });
-      new Notice(
-        `Failed to delete previous metadata copy${
-          error instanceof Error ? `: ${error.message}` : ""
-        }`,
-      );
+      new Notice(t("settings.storage.metadataDeleteFailed"));
     }
   };
 
@@ -268,11 +259,7 @@ export function renderStorageSettingsTab(
         previousFolder,
         nextFolder,
       });
-      new Notice(
-        `Metadata storage update failed${
-          error instanceof Error ? `: ${error.message}` : ""
-        }`,
-      );
+      new Notice(t("settings.storage.metadataUpdateFailed"));
       throw error;
     }
   };
@@ -280,25 +267,19 @@ export function renderStorageSettingsTab(
   const descFragment = activeDocument.createDocumentFragment();
   const legacyDiv = activeDocument.createElement("div");
   setCssProps(legacyDiv, { "margin-bottom": "10px" });
-  legacyDiv.createEl("strong", { text: "Legacy JSON:" });
-  legacyDiv.appendText(
-    " large monolith file. does not sync across devices (often exceeds 5mb limit)",
-  );
+  legacyDiv.createEl("strong", { text: `${t("settings.storage.legacy")}:` });
+  legacyDiv.appendText(` ${t("settings.storage.legacyInfo")}`);
   descFragment.appendChild(legacyDiv);
 
   const v1Div = activeDocument.createElement("div");
   setCssProps(v1Div, { "margin-bottom": "10px" });
-  v1Div.createEl("strong", { text: "Shard storage v1:" });
-  v1Div.appendText(
-    " Creates individual vault files for each feed to improve syncing, but stores state (read, starred) inside the feed file, which can still cause minor sync conflicts.",
-  );
+  v1Div.createEl("strong", { text: `${t("settings.storage.shardsV1")}:` });
+  v1Div.appendText(` ${t("settings.storage.v1Info")}`);
   descFragment.appendChild(v1Div);
 
   const v2Div = activeDocument.createElement("div");
-  v2Div.createEl("strong", { text: "Shard storage v2:" });
-  v2Div.appendText(
-    " Splits feed content and user state (read, starred, tags) into separate files, providing the most robust sync experience.",
-  );
+  v2Div.createEl("strong", { text: `${t("settings.storage.shardsV2")}:` });
+  v2Div.appendText(` ${t("settings.storage.v2Info")}`);
   descFragment.appendChild(v2Div);
 
   new Setting(containerEl)
@@ -342,9 +323,7 @@ export function renderStorageSettingsTab(
 
   new Setting(containerEl)
     .setName(t("settings.storage.repair"))
-    .setDesc(
-      "Use this when shard storage seems out of sync, incomplete, or after manual folder moves. This will: 1. Re-check and normalize your storage folder path. 2. Force-rewrite all shard files from current feed data. 3. Force-save storage metadata. 4. Refresh storage status. Think of this as a safe 're-generate all shard files' action.'",
-    );
+    .setDesc(t("settings.storage.repairDesc"));
 
   const storageActions = new Setting(containerEl);
   storageActions.settingEl.addClass("rss-dashboard-storage-actions");
@@ -374,7 +353,7 @@ export function renderStorageSettingsTab(
             });
 
             if (!modeChanged && !folderChanged) {
-              new Notice("No storage changes to apply.");
+              new Notice(t("settings.storage.noChanges"));
               return;
             }
 
@@ -386,19 +365,13 @@ export function renderStorageSettingsTab(
                 } else {
                   await plugin.saveSettings();
                 }
-                new Notice(
-                  `Storage folder updated to "${pendingStorageFolder}".`,
-                );
+                new Notice(t("settings.storage.folderUpdated", { folder: pendingStorageFolder }));
               } catch (error) {
                 storageError("Storage folder apply failed", error, {
                   pendingStorageFolder,
                   mode: plugin.settings.storageMode,
                 });
-                new Notice(
-                  `Storage folder update failed${
-                    error instanceof Error ? `: ${error.message}` : ""
-                  }`,
-                );
+                new Notice(t("settings.storage.folderUpdateFailed"));
               }
               return;
             }
@@ -437,20 +410,16 @@ export function renderStorageSettingsTab(
               if (pendingStorageMode === "vault-shards") {
                 await plugin.migrateToVaultStorage();
                 if (folderChanged) {
-                  new Notice(
-                    `Storage folder updated to "${pendingStorageFolder}" and vault storage migration completed.`,
-                  );
+                  new Notice(t("settings.storage.v1MigrationComplete"));
                 } else {
-                  new Notice("Vault storage migration completed.");
+                  new Notice(t("settings.storage.v1MigrationComplete"));
                 }
               } else if (pendingStorageMode === "vault-shards-v2") {
                 await plugin.migrateToVaultShardsV2();
                 if (folderChanged) {
-                  new Notice(
-                    `Storage folder updated to "${pendingStorageFolder}" and vault storage v2 migration completed.`,
-                  );
+                  new Notice(t("settings.storage.v2MigrationComplete"));
                 } else {
-                  new Notice("Vault storage v2 migration completed.");
+                  new Notice(t("settings.storage.v2MigrationComplete"));
                 }
               } else {
                 if (action === "apply-delete-shards") {
@@ -480,11 +449,9 @@ export function renderStorageSettingsTab(
                   });
                 }
                 if (folderChanged) {
-                  new Notice(
-                    `Storage folder updated to "${pendingStorageFolder}" and legacy JSON storage enabled.`,
-                  );
+                  new Notice(t("settings.storage.legacyEnabled"));
                 } else {
-                  new Notice("Legacy JSON storage enabled.");
+                  new Notice(t("settings.storage.legacyEnabled"));
                 }
               }
 
@@ -497,11 +464,7 @@ export function renderStorageSettingsTab(
                 pendingStorageFolder,
                 currentFolder: plugin.settings.storageFolder,
               });
-              new Notice(
-                `Storage change failed${
-                  error instanceof Error ? `: ${error.message}` : ""
-                }`,
-              );
+              new Notice(t("settings.storage.changeFailed"));
             }
           })();
         }),
@@ -519,15 +482,13 @@ export function renderStorageSettingsTab(
             if (plugin.settingTab) {
               plugin.settingTab.display();
             }
-            new Notice("Storage repair completed.");
+            new Notice(t("settings.storage.repairComplete"));
           } catch (error) {
             storageError("Repair button action failed", error, {
               currentMode: plugin.settings.storageMode,
               folder: plugin.settings.storageFolder,
             });
-            new Notice(
-              `Storage repair failed${error instanceof Error ? `: ${error.message}` : ""}`,
-            );
+            new Notice(t("settings.storage.repairFailed"));
           }
         })();
       }),
@@ -552,11 +513,7 @@ export function renderStorageSettingsTab(
                 currentMode: plugin.settings.storageMode,
                 folder: plugin.settings.storageFolder,
               });
-              new Notice(
-                `Shard data import failed${
-                  error instanceof Error ? `: ${error.message}` : ""
-                }`,
-              );
+              new Notice(t("settings.storage.importFailed"));
             }
           })();
         };
@@ -577,11 +534,7 @@ export function renderStorageSettingsTab(
               currentMode: plugin.settings.storageMode,
               folder: plugin.settings.storageFolder,
             });
-            new Notice(
-              `Shard data export failed${
-                error instanceof Error ? `: ${error.message}` : ""
-              }`,
-            );
+              new Notice(t("settings.storage.exportFailed"));
           }
         })();
       }),
@@ -625,7 +578,7 @@ export function renderStorageSettingsTab(
               pendingMetadataStorageFolder.trim() !==
               lastSavedMetadataStorageFolder;
             if (!metadataChanged) {
-              new Notice("Metadata location is already active.");
+              new Notice(t("settings.storage.metadataAlreadyActive"));
               return;
             }
 
@@ -701,7 +654,7 @@ export function renderStorageSettingsTab(
         plugin.settings.media.defaultRssFolder = d.defaultRssFolder;
         plugin.settings.media.defaultSmallwebFolder = d.defaultSmallwebFolder;
         await plugin.saveSettings();
-        new Notice("Folder names restored to defaults.");
+        new Notice(t("settings.storage.foldersReset"));
         const view = await plugin.getActiveDashboardView();
         if (view) view.render();
         containerEl.empty();

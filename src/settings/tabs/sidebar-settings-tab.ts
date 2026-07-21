@@ -350,13 +350,13 @@ export function renderSidebarSettingsTab(
       dragHandle.type = "button";
       dragHandle.addClass("rss-dashboard-icon-drag-handle");
       dragHandle.setAttribute("draggable", "true");
-      dragHandle.setAttribute("aria-label", `Drag to reorder ${icon.label}`);
+      dragHandle.setAttribute("aria-label", t("settings.sidebar.dragIcon", { label: icon.label }));
       setIcon(dragHandle, "grip-vertical");
       iconSetting.nameEl.prepend(dragHandle);
 
       const upBtn = activeDocument.createElement("button");
       upBtn.addClass("rss-dashboard-icon-order-btn");
-      upBtn.setAttribute("aria-label", `Move ${icon.label} up`);
+      upBtn.setAttribute("aria-label", t("settings.sidebar.moveIconUp", { label: icon.label }));
       upBtn.textContent = "↑";
       upBtn.disabled = i === 0;
       upBtn.addEventListener("click", () => {
@@ -382,7 +382,7 @@ export function renderSidebarSettingsTab(
 
       const downBtn = activeDocument.createElement("button");
       downBtn.addClass("rss-dashboard-icon-order-btn");
-      downBtn.setAttribute("aria-label", `Move ${icon.label} down`);
+      downBtn.setAttribute("aria-label", t("settings.sidebar.moveIconDown", { label: icon.label }));
       downBtn.textContent = "↓";
       downBtn.disabled = i === order.length - 1;
       downBtn.addEventListener("click", () => {
@@ -781,7 +781,11 @@ export function renderSidebarSettingsTab(
                 );
                 await plugin.saveSettings();
                 new Notice(
-                  `Profile images loaded for ${entries.filter((e) => e.needsRefresh).length} ${domainName} feed${entries.filter((e) => e.needsRefresh).length === 1 ? "" : "s"}.`,
+                  t("settings.sidebar.profileImagesLoaded", {
+                    count: entries.filter((e) => e.needsRefresh).length,
+                    source: domainName,
+                    plural: entries.filter((e) => e.needsRefresh).length === 1 ? "" : "s",
+                  }),
                 );
                 const view = await plugin.getActiveDashboardView();
                 if (view) {
@@ -851,13 +855,12 @@ export function renderSidebarSettingsTab(
   };
 
   setupDomainIconToggle(containerEl, plugin, {
-    settingName: "Use site icons/favicons for RSS feeds",
-    settingDesc:
-      "Replace the standard RSS feed icon with the site icon/favicon when one is available",
+    settingName: t("settings.sidebar.rssIcons"),
+    settingDesc: t("settings.sidebar.rssIconsDesc"),
     settingKey: "useDomainIconsRss",
     domainName: "RSS",
-    heading: "Clear RSS site icons?",
-    confirmLabel: "Clear site icons",
+    heading: t("settings.sidebar.clearRss"),
+    confirmLabel: t("settings.sidebar.clearIcons"),
     matchesDomain: (feed) =>
       !MastodonService.isResolvedFeedUrl(feed.url) &&
       !MediaService.isYouTubeFeed(feed.url) &&
@@ -873,13 +876,12 @@ export function renderSidebarSettingsTab(
   });
 
   setupDomainIconToggle(containerEl, plugin, {
-    settingName: "Use album/show artwork for Podcast feeds",
-    settingDesc:
-      "Replace the standard podcast mic icon with the album/show artwork when one is available",
+    settingName: t("settings.sidebar.podcastArtwork"),
+    settingDesc: t("settings.sidebar.podcastArtworkDesc"),
     settingKey: "useDomainIconsPodcast",
     domainName: "Podcast",
-    heading: "Clear Podcast artwork?",
-    confirmLabel: "Clear artwork",
+    heading: t("settings.sidebar.clearPodcast"),
+    confirmLabel: t("settings.sidebar.clearArtwork"),
     matchesDomain: (feed) => feed.mediaType === "podcast",
     clearIconOnDisable: (entries) => {
       for (const { feed } of entries) {
@@ -891,13 +893,12 @@ export function renderSidebarSettingsTab(
   });
 
   setupDomainIconToggle(containerEl, plugin, {
-    settingName: "Use profile images for Twitter/Nitter feeds",
-    settingDesc:
-      "Replace the standard Twitter/X icon with the feed profile image when one is available",
+    settingName: t("settings.sidebar.twitterImages"),
+    settingDesc: t("settings.sidebar.twitterImagesDesc"),
     settingKey: "useDomainIconsTwitter",
     domainName: "Twitter",
-    heading: "Clear Twitter profile images?",
-    confirmLabel: "Clear profile images",
+    heading: t("settings.sidebar.clearTwitter"),
+    confirmLabel: t("settings.sidebar.clearImages"),
     matchesDomain: (feed) => MediaService.isTwitterOrNitterFeed(feed.url),
     clearIconOnDisable: (entries) => {
       for (const { feed } of entries) {
@@ -909,13 +910,12 @@ export function renderSidebarSettingsTab(
   });
 
   setupDomainIconToggle(containerEl, plugin, {
-    settingName: "Use profile images for Mastodon feeds",
-    settingDesc:
-      "Replace the standard Mastodon feed icon with the feed profile image when one is available",
+    settingName: t("settings.sidebar.mastodonImages"),
+    settingDesc: t("settings.sidebar.mastodonImagesDesc"),
     settingKey: "useDomainIconsMastodon",
     domainName: "Mastodon",
-    heading: "Clear Mastodon profile images?",
-    confirmLabel: "Clear profile images",
+    heading: t("settings.sidebar.clearMastodon"),
+    confirmLabel: t("settings.sidebar.clearImages"),
     matchesDomain: (feed) => MastodonService.isResolvedFeedUrl(feed.url),
     clearIconOnDisable: (entries) => {
       for (const { feed } of entries) {

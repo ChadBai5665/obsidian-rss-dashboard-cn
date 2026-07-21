@@ -17,21 +17,22 @@ export class TemplateNameModal extends Modal {
   private result: string | null = null;
   private resolvePromise: ((value: string | null) => void) | null = null;
 
-  constructor(app: App) {
+  constructor(app: App, private readonly locale: Locale = "zh-CN") {
     super(app);
   }
 
   onOpen() {
+    const t = createTranslator(this.locale);
     const { contentEl } = this;
     contentEl.empty();
 
-    contentEl.createEl("h2", { text: "Save template" });
-    contentEl.createEl("p", { text: "Enter a name for this template:" });
+    contentEl.createEl("h2", { text: t("settings.modal.saveTemplate") });
+    contentEl.createEl("p", { text: t("settings.modal.saveTemplateDesc") });
 
     let inputComponent: TextComponent;
-    new Setting(contentEl).setName("Template name").addText((text) => {
+    new Setting(contentEl).setName(t("settings.modal.templateName")).addText((text) => {
       inputComponent = text;
-      text.setPlaceholder("My template");
+      text.setPlaceholder(t("settings.modal.templatePlaceholder"));
       text.inputEl.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
           e.preventDefault();
@@ -43,14 +44,14 @@ export class TemplateNameModal extends Modal {
 
     new Setting(contentEl)
       .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => {
+        btn.setButtonText(t("common.cancel")).onClick(() => {
           this.result = null;
           this.close();
         }),
       )
       .addButton((btn) =>
         btn
-          .setButtonText("Save")
+          .setButtonText(t("common.save"))
           .setCta()
           .onClick(() => {
             this.result = inputComponent.getValue().trim() || null;
@@ -85,19 +86,24 @@ export class HighlightWordEditModal extends Modal {
   private result: string | null = null;
   private resolvePromise: ((value: string | null) => void) | null = null;
 
-  constructor(app: App, initialValue: string) {
+  constructor(
+    app: App,
+    initialValue: string,
+    private readonly locale: Locale = "zh-CN",
+  ) {
     super(app);
     this.value = initialValue;
   }
 
   onOpen() {
+    const t = createTranslator(this.locale);
     const { contentEl } = this;
     contentEl.empty();
 
-    contentEl.createEl("h2", { text: "Edit highlight word" });
+    contentEl.createEl("h2", { text: t("settings.modal.editHighlight") });
 
     let inputComponent: TextComponent;
-    new Setting(contentEl).setName("Word or phrase").addText((text) => {
+    new Setting(contentEl).setName(t("settings.modal.wordOrPhrase")).addText((text) => {
       inputComponent = text;
       text.setValue(this.value);
       text.inputEl.addEventListener("keydown", (e) => {
@@ -111,14 +117,14 @@ export class HighlightWordEditModal extends Modal {
 
     new Setting(contentEl)
       .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => {
+        btn.setButtonText(t("common.cancel")).onClick(() => {
           this.result = null;
           this.close();
         }),
       )
       .addButton((btn) =>
         btn
-          .setButtonText("Save")
+          .setButtonText(t("common.save"))
           .setCta()
           .onClick(() => {
             this.result = inputComponent.getValue();
@@ -154,30 +160,35 @@ export class ConfirmDeleteModal extends Modal {
   private confirmed = false;
   private resolvePromise: ((value: boolean) => void) | null = null;
 
-  constructor(app: App, targetLabel: string) {
+  constructor(
+    app: App,
+    targetLabel: string,
+    private readonly locale: Locale = "zh-CN",
+  ) {
     super(app);
     this.targetLabel = targetLabel;
   }
 
   onOpen() {
+    const t = createTranslator(this.locale);
     const { contentEl } = this;
     contentEl.empty();
 
-    contentEl.createEl("h2", { text: "Delete highlight word?" });
+    contentEl.createEl("h2", { text: t("settings.modal.deleteHighlight") });
     contentEl.createEl("p", {
-      text: `Are you sure you want to delete "${this.targetLabel}"?`,
+      text: t("settings.modal.deleteHighlightDesc", { label: this.targetLabel }),
     });
 
     new Setting(contentEl)
       .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => {
+        btn.setButtonText(t("common.cancel")).onClick(() => {
           this.confirmed = false;
           this.close();
         }),
       )
       .addButton((btn) =>
         btn
-          .setButtonText("Delete")
+          .setButtonText(t("common.delete"))
           .setWarning()
           .onClick(() => {
             this.confirmed = true;
@@ -207,23 +218,24 @@ export class FactoryResetConfirmModal extends Modal {
   private confirmed = false;
   private resolvePromise: ((value: boolean) => void) | null = null;
 
-  constructor(app: App) {
+  constructor(app: App, private readonly locale: Locale = "zh-CN") {
     super(app);
   }
 
   onOpen() {
+    const t = createTranslator(this.locale);
     const { contentEl } = this;
     contentEl.empty();
 
     this.modalEl.addClass("rss-dashboard-modal");
     this.modalEl.addClass("rss-dashboard-modal-container");
 
-    contentEl.createEl("h2", { text: "Factory reset?" });
+    contentEl.createEl("h2", { text: t("settings.modal.factoryReset") });
     contentEl.createEl("p", {
-      text: "This restores all plugin settings to their default values and clears your feeds, folders, tags, and plugin-managed local state.",
+      text: t("settings.modal.factoryResetDesc"),
     });
     contentEl.createEl("p", {
-      text: "Existing backup files and saved article markdown files in your vault will not be deleted.",
+      text: t("settings.modal.factoryResetSavedNotes"),
     });
 
     const buttonsSetting = new Setting(contentEl);
@@ -231,7 +243,7 @@ export class FactoryResetConfirmModal extends Modal {
     buttonsSetting
       .addButton((btn) =>
         btn
-          .setButtonText("Cancel")
+          .setButtonText(t("common.cancel"))
           .setClass("rss-confirm-modal-cancel")
           .onClick(() => {
             this.confirmed = false;
@@ -240,7 +252,7 @@ export class FactoryResetConfirmModal extends Modal {
       )
       .addButton((btn) =>
         btn
-          .setButtonText("Factory reset")
+          .setButtonText(t("settings.modal.factoryReset"))
           .setWarning()
           .setClass("rss-dashboard-danger-button")
           .onClick(() => {

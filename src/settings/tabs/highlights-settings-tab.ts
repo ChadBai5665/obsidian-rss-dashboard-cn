@@ -210,7 +210,7 @@ export function renderHighlightsSettingsTab(
 
       const openEditModal = () => {
         void (async () => {
-          const modal = new HighlightWordEditModal(plugin.app, word.text);
+          const modal = new HighlightWordEditModal(plugin.app, word.text, plugin.settings.locale);
           modal.open();
           const nextTextRaw = await modal.waitForClose();
           if (nextTextRaw === null) return;
@@ -300,7 +300,7 @@ export function renderHighlightsSettingsTab(
             .setIcon("trash")
             .setTooltip(`Delete "${word.text}"`)
             .onClick(async () => {
-              const confirmModal = new ConfirmDeleteModal(plugin.app, word.text);
+              const confirmModal = new ConfirmDeleteModal(plugin.app, word.text, plugin.settings.locale);
               confirmModal.open();
               const shouldDelete = await confirmModal.waitForClose();
               if (!shouldDelete) return;

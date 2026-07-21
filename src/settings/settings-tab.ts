@@ -20,6 +20,7 @@ export {
   getInitialTab,
   getSettingsTabLabel,
   isValidSettingsTab,
+  normalizeSettingsTabId,
 } from "./tab-names";
 export type { SettingsTabId } from "./tab-names";
 
@@ -39,7 +40,7 @@ import {
   SETTINGS_TAB_IDS,
   SettingsTabId,
   getSettingsTabLabel,
-  isValidSettingsTab,
+  normalizeSettingsTabId,
   getInitialTab,
 } from "./tab-names";
 import { createTranslator } from "../i18n";
@@ -58,8 +59,9 @@ export class RssDashboardSettingTab extends PluginSettingTab {
 
   /** Programmatically switch to a named tab and re-render. */
   public activateTab(tabName: string, sectionName?: string): void {
-    if (isValidSettingsTab(tabName)) {
-      this.currentTab = tabName;
+    const tabId = normalizeSettingsTabId(tabName);
+    if (tabId) {
+      this.currentTab = tabId;
       this.pendingSection = sectionName ?? null;
       this.display();
     }

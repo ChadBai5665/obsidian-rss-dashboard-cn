@@ -111,6 +111,24 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
     expect(vi.mocked(rules.renderRulesSettingsTab)).toHaveBeenCalledTimes(0);
   });
 
+  it.each([
+    ["Display", "display"],
+    ["Rules", "rules"],
+    ["Highlights", "highlights"],
+  ])("accepts legacy %s navigation and renders its stable %s tab", async (legacyName, stableId) => {
+    const { RssDashboardSettingTab } = await import("../../../src/settings/settings-tab");
+    const app = obsidian.App.createMock();
+    const plugin = { app, settings: { locale: "zh-CN" } } as unknown as RssDashboardPlugin;
+    const tab = new RssDashboardSettingTab(app, plugin);
+    tab.containerEl = document.body.appendChild(document.createElement("div"));
+
+    tab.activateTab(legacyName);
+
+    expect(tab.containerEl.querySelector(".rss-dashboard-settings-tab-btn.active")?.textContent).toBe(
+      stableId === "display" ? "显示" : stableId === "rules" ? "规则" : "高亮",
+    );
+  });
+
   it("responds to 'rss-settings-refresh' event by re-rendering", async () => {
     const { RssDashboardSettingTab } = await import(
       "../../../src/settings/settings-tab"

@@ -582,7 +582,7 @@ export function renderGeneralSettingsTab(
       if (!validation.valid) {
         pendingProxyUrl = lastSavedProxyUrl;
         textComponent.setValue(lastSavedProxyUrl);
-        new Notice(validation.error || t("settings.general.invalidUrl"));
+        new Notice(t("settings.general.invalidUrl"));
         return;
       }
 
@@ -692,7 +692,7 @@ export function renderGeneralSettingsTab(
                 new CustomEvent("rss-settings-refresh"),
               );
             } else {
-              new Notice(validation.error || t("settings.general.invalidUrl"));
+              new Notice(t("settings.general.invalidUrl"));
             }
           });
 

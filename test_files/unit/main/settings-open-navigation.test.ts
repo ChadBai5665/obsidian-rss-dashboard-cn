@@ -48,8 +48,23 @@ describe("openSettingsToTab()", () => {
     expect(setting.openTabById).toHaveBeenCalledWith("rss-dashboard");
      
     expect(plugin.settingTab.activateTab).toHaveBeenCalledWith(
-      "Display",
+      "display",
       "Reader",
     );
+  });
+
+  it.each([
+    ["display", "display"],
+    ["Rules", "rules"],
+    ["Highlights", "highlights"],
+  ])("normalizes %s to the stable %s settings tab id", async (input, expected) => {
+    const app = (App as unknown as { createMock: () => TestApp }).createMock();
+    app.setting = { open: vi.fn(), openTabById: vi.fn() };
+    const plugin = new RssDashboardPlugin(app, createManifest()) as TestPlugin;
+    plugin.settingTab = { activateTab: vi.fn() } as unknown as TestPlugin["settingTab"];
+
+    await plugin.openSettingsToTab(input);
+
+    expect(plugin.settingTab.activateTab).toHaveBeenCalledWith(expected, undefined);
   });
 });

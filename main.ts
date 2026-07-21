@@ -11,6 +11,7 @@ import {
 } from "obsidian";
 
 import { getSettingManager } from "./src/utils/settings-manager";
+import { normalizeSettingsTabId } from "./src/settings/tab-names";
 
 import {
   RssDashboardSettings,
@@ -1172,7 +1173,10 @@ export default class RssDashboardPlugin extends Plugin {
       setting.open();
       setting.openTabById(this.manifest.id);
       if (this.settingTab) {
-        this.settingTab.activateTab(tabName, sectionName);
+        const tabId = normalizeSettingsTabId(tabName);
+        if (tabId) {
+          this.settingTab.activateTab(tabId, sectionName);
+        }
       }
     }
   }
