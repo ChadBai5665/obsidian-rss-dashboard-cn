@@ -15,7 +15,6 @@ interface PreviewArticle {
 export class FeedPreviewModal extends Modal {
     private feed: FeedMetadata;
     private articles: PreviewArticle[] = [];
-    private isLoading = true;
     private error: string | null = null;
 
     private corsProxyEnabled: boolean;
@@ -37,6 +36,10 @@ export class FeedPreviewModal extends Modal {
         contentEl.empty();
         
         this.renderHeader(contentEl);
+        contentEl.createDiv({
+            cls: "feed-preview-loading",
+            text: createTranslator(this.locale)("common.loading"),
+        });
         void this.loadFeedPreview();
     }
 
@@ -89,7 +92,6 @@ export class FeedPreviewModal extends Modal {
 
     private async loadFeedPreview(): Promise<void> {
         try {
-            this.isLoading = true;
             this.error = null;
 
             const xmlString = await fetchFeedXml(this.feed.url, this.corsProxyEnabled);
@@ -100,8 +102,6 @@ export class FeedPreviewModal extends Modal {
             
             this.error = error instanceof Error ? error.message : 'Unknown error occurred';
             this.renderError();
-        } finally {
-            this.isLoading = false;
         }
     }
 
@@ -229,6 +229,7 @@ export class FeedPreviewModal extends Modal {
     }
 
     private renderError(): void {
+        this.contentEl.querySelector(".feed-preview-loading")?.remove();
         const t = createTranslator(this.locale);
         const container = this.contentEl;
         const errorEl = container.createDiv({ cls: "feed-preview-error" });
@@ -241,6 +242,7 @@ export class FeedPreviewModal extends Modal {
     }
 
     private renderContent(): void {
+        this.contentEl.querySelector(".feed-preview-loading")?.remove();
         const t = createTranslator(this.locale);
         const container = this.contentEl;
         

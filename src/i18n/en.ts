@@ -979,4 +979,12 @@ export const en = {
   "modal.feed.podcastResolve": "Could not resolve podcast feed URL",
   "modal.feed.xConversion": " (X > Nitter conversion)",
   "modal.feed.mastodonConversion": " (Mastodon > RSS auto-discovery)",
+  "modal.feed.day": "1 day",
+  "modal.feed.days": "{count} days",
+  "modal.feed.week": "1 week",
+  "modal.feed.weeks": "{count} weeks",
+  "modal.feed.month": "1 month",
+  "modal.feed.months": "{count} months",
+  "modal.feed.hour": "1 hour",
+  "modal.feed.hours": "{count} hours",
 } as const;

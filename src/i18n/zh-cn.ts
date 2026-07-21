@@ -933,4 +933,12 @@ export const zhCN = {
   "modal.feed.podcastResolve": "无法解析播客订阅源 URL",
   "modal.feed.xConversion": "（X > Nitter 转换）",
   "modal.feed.mastodonConversion": "（Mastodon > RSS 自动发现）",
+  "modal.feed.day": "1 天",
+  "modal.feed.days": "{count} 天",
+  "modal.feed.week": "1 周",
+  "modal.feed.weeks": "{count} 周",
+  "modal.feed.month": "1 个月",
+  "modal.feed.months": "{count} 个月",
+  "modal.feed.hour": "1 小时",
+  "modal.feed.hours": "{count} 小时",
 } satisfies TranslationCatalog;
