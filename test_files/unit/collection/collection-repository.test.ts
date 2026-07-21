@@ -8,8 +8,13 @@ const NOW = new Date("2026-07-21T12:00:00.000Z");
 
 class InMemoryAdapter {
   private readonly files = new Map<string, string>();
+  private readonly mtimes = new Map<string, number>();
   private readonly directories = new Set<string>();
+  private time = 0;
   private nextWriteFailure: ((path: string) => boolean) | null = null;
+  private nextRenameFailure: ((from: string, to: string) => boolean) | null =
+    null;
+  private nextRemoveFailure: ((path: string) => boolean) | null = null;
 
   async exists(path: string): Promise<boolean> {
     return this.files.has(path) || this.directories.has(path);
@@ -31,6 +36,11 @@ class InMemoryAdapter {
     return content;
   }
 
+  async stat(path: string): Promise<{ mtime: number } | null> {
+    const mtime = this.mtimes.get(path);
+    return mtime === undefined ? null : { mtime };
+  }
+
   async write(path: string, content: string): Promise<void> {
     if (this.nextWriteFailure?.(path)) {
       this.nextWriteFailure = null;
@@ -42,9 +52,14 @@ class InMemoryAdapter {
       throw new Error(`Missing parent directory: ${parent}`);
     }
     this.files.set(path, content);
+    this.mtimes.set(path, ++this.time);
   }
 
   async rename(from: string, to: string): Promise<void> {
+    if (this.nextRenameFailure?.(from, to)) {
+      this.nextRenameFailure = null;
+      throw new Error(`Injected rename failure: ${from} -> ${to}`);
+    }
     const content = this.files.get(from);
     if (content === undefined) {
       throw new Error(`Missing rename source: ${from}`);
@@ -58,11 +73,21 @@ class InMemoryAdapter {
       throw new Error(`Missing parent directory: ${parent}`);
     }
     this.files.set(to, content);
+    const mtime = this.mtimes.get(from);
+    if (mtime !== undefined) {
+      this.mtimes.set(to, mtime);
+    }
     this.files.delete(from);
+    this.mtimes.delete(from);
   }
 
   async remove(path: string): Promise<void> {
+    if (this.nextRemoveFailure?.(path)) {
+      this.nextRemoveFailure = null;
+      throw new Error(`Injected remove failure: ${path}`);
+    }
     this.files.delete(path);
+    this.mtimes.delete(path);
   }
 
   async list(path: string): Promise<{ files: string[]; folders: string[] }> {
@@ -89,6 +114,14 @@ class InMemoryAdapter {
     this.nextWriteFailure = predicate;
   }
 
+  failNextRenameWhere(predicate: (from: string, to: string) => boolean): void {
+    this.nextRenameFailure = predicate;
+  }
+
+  failNextRemoveWhere(predicate: (path: string) => boolean): void {
+    this.nextRemoveFailure = predicate;
+  }
+
   hasDirectory(path: string): boolean {
     return this.directories.has(path);
   }
@@ -106,9 +139,20 @@ function createHarness(
   repository: CollectionRepository;
 } {
   const adapter = new InMemoryAdapter();
+  return {
+    adapter,
+    repository: createRepository(adapter, options),
+  };
+}
+
+function createRepository(
+  adapter: InMemoryAdapter,
+  options: { withoutRename?: boolean; dataRoot?: string } = {},
+): CollectionRepository {
   const boundary = options.withoutRename
     ? {
         exists: adapter.exists.bind(adapter),
+        stat: adapter.stat.bind(adapter),
         mkdir: adapter.mkdir.bind(adapter),
         read: adapter.read.bind(adapter),
         write: adapter.write.bind(adapter),
@@ -117,14 +161,11 @@ function createHarness(
       }
     : adapter;
   const vault = { adapter: boundary } as unknown as Vault;
-  return {
-    adapter,
-    repository: new CollectionRepository(
-      vault,
-      options.dataRoot ?? DATA_ROOT,
-      () => NOW,
-    ),
-  };
+  return new CollectionRepository(
+    vault,
+    options.dataRoot ?? DATA_ROOT,
+    () => NOW,
+  );
 }
 
 function createItem(overrides: Partial<CollectedItem> = {}): CollectedItem {
@@ -556,5 +597,139 @@ describe("CollectionRepository", () => {
     "unsafe\0root",
   ])("rejects unsafe data root %j before filesystem access", (dataRoot) => {
     expect(() => createHarness({ dataRoot })).toThrow("Invalid data root");
+  });
+
+  it("restores an interrupted collection replacement from its durable backup", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const backupPath = `${dailyPath}.backup-100-1`;
+    const tempPath = `${dailyPath}.tmp-100-1`;
+    await adapter.write(
+      tempPath,
+      `${JSON.stringify(createItem({ title: "Uncommitted replacement" }))}\n`,
+    );
+    await adapter.rename(dailyPath, backupPath);
+
+    const recovered = createRepository(adapter);
+    await expect(recovered.listByDate("2026-07-21")).resolves.toEqual([
+      createItem(),
+    ]);
+    expect(await adapter.exists(dailyPath)).toBe(true);
+    expect(await adapter.exists(backupPath)).toBe(false);
+    expect(await adapter.exists(tempPath)).toBe(false);
+  });
+
+  it("restores an interrupted item-index replacement before lookup", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const indexPath = `${DATA_ROOT}/state/item-index.json`;
+    const backupPath = `${indexPath}.backup-100-2`;
+    const tempPath = `${indexPath}.tmp-100-2`;
+    await adapter.write(tempPath, "{uncommitted");
+    await adapter.rename(indexPath, backupPath);
+
+    const recovered = createRepository(adapter);
+    await expect(recovered.findById("item-1")).resolves.toMatchObject({
+      id: "item-1",
+    });
+    expect(await adapter.exists(indexPath)).toBe(true);
+    expect(await adapter.exists(backupPath)).toBe(false);
+    expect(await adapter.exists(tempPath)).toBe(false);
+  });
+
+  it("restores the canonical file when installing a prepared rename fails", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    adapter.failNextRenameWhere(
+      (from, to) => from.startsWith(`${dailyPath}.tmp-`) && to === dailyPath,
+    );
+
+    await expect(
+      repository.upsertDaily(
+        [createItem({ title: "Replacement title" })],
+        "2026-07-21",
+      ),
+    ).rejects.toThrow("Injected rename failure");
+    await expect(repository.listByDate("2026-07-21")).resolves.toEqual([
+      createItem(),
+    ]);
+  });
+
+  it("treats backup cleanup failure as debt after flags are committed", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    await repository.upsertDaily([createItem()], "2026-07-22");
+    adapter.failNextRemoveWhere((path) =>
+      path.startsWith(`${DATA_ROOT}/collections/2026-07-21.jsonl.backup-`),
+    );
+
+    await expect(
+      repository.updateFlags("item-1", {
+        read: true,
+        starred: true,
+        saved: true,
+        savedNotePath: "Saved/item-1.md",
+      }),
+    ).resolves.toBeUndefined();
+
+    for (const date of ["2026-07-21", "2026-07-22"]) {
+      await expect(repository.listByDate(date)).resolves.toEqual([
+        expect.objectContaining({
+          read: true,
+          starred: true,
+          saved: true,
+          savedNotePath: "Saved/item-1.md",
+        }),
+      ]);
+    }
+    const listed = await adapter.list(`${DATA_ROOT}/collections`);
+    expect(listed.files.some((path) => path.includes(".backup-"))).toBe(false);
+  });
+
+  it("treats fallback temp cleanup failure as debt after the final write", async () => {
+    const { adapter, repository } = createHarness({ withoutRename: true });
+    adapter.failNextRemoveWhere((path) =>
+      path.startsWith(`${DATA_ROOT}/collections/2026-07-21.jsonl.tmp-`),
+    );
+
+    await expect(
+      repository.upsertDaily([createItem()], "2026-07-21"),
+    ).resolves.toEqual([createItem()]);
+    await expect(repository.listByDate("2026-07-21")).resolves.toEqual([
+      createItem(),
+    ]);
+    const listed = await adapter.list(`${DATA_ROOT}/collections`);
+    expect(listed.files.some((path) => path.includes(".tmp-"))).toBe(false);
+  });
+
+  it("appends a genuinely new identical corrupt line to historical sidecar data", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const valid = await adapter.read(dailyPath);
+    await adapter.write(dailyPath, `${valid}bad\n`);
+    await repository.listByDate("2026-07-21");
+    expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\n");
+
+    await adapter.write(dailyPath, `${valid}bad\n`);
+    await repository.listByDate("2026-07-21");
+
+    expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\nbad\n");
+  });
+
+  it("does not duplicate corrupt lines when quarantine cleanup is retried", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    await adapter.write(dailyPath, `${await adapter.read(dailyPath)}bad\n`);
+    adapter.failNextWriteWhere((path) => path.startsWith(`${dailyPath}.tmp-`));
+
+    await expect(repository.listByDate("2026-07-21")).rejects.toThrow(
+      "Injected write failure",
+    );
+    await expect(repository.listByDate("2026-07-21")).resolves.toHaveLength(1);
+    expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\n");
   });
 });

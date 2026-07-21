@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { normalizePath, type DataAdapter, type Vault } from "obsidian";
 import type { CollectedItem } from "./collected-item";
 import { mergeCollectedItems } from "./collection-merge";
@@ -21,6 +22,14 @@ interface PreparedRewrite {
   path: string;
   before: string;
   after: string;
+}
+
+interface QuarantineJournal {
+  schemaVersion: 1;
+  sourceFingerprint: string;
+  sourceMtime: number | null;
+  sidecarAfter: string;
+  cleanedCollection: string;
 }
 
 type FlagPatch = Pick<
@@ -227,6 +236,7 @@ export class CollectionRepository {
   }
 
   private async loadIndex(): Promise<ItemIndex> {
+    await this.recoverAtomicTarget(this.indexPath);
     const rebuilt = await this.rebuildIndex();
     let stored: ItemIndex | null = null;
 
@@ -277,7 +287,23 @@ export class CollectionRepository {
       return [];
     }
 
-    const listed = await this.vault.adapter.list(this.collectionsPath);
+    let listed = await this.vault.adapter.list(this.collectionsPath);
+    const interruptedTargets = new Set<string>();
+    for (const path of listed.files) {
+      const match = path.match(
+        /^(.*\/\d{4}-\d{2}-\d{2}\.jsonl)\.(?:backup|tmp)-[^/]+$/,
+      );
+      if (match) {
+        interruptedTargets.add(match[1]);
+      }
+    }
+    for (const path of interruptedTargets) {
+      await this.recoverAtomicTarget(path);
+    }
+    if (interruptedTargets.size > 0) {
+      listed = await this.vault.adapter.list(this.collectionsPath);
+    }
+
     return listed.files
       .map((path) => path.slice(this.collectionsPath.length + 1))
       .filter((name) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
@@ -295,72 +321,83 @@ export class CollectionRepository {
   }
 
   private async readCollection(path: string): Promise<ParsedCollection> {
+    await this.recoverAtomicTarget(path);
     if (!(await this.vault.adapter.exists(path))) {
       return { items: [], corruptLines: [] };
     }
 
     const raw = await this.vault.adapter.read(path);
-    const items: CollectedItem[] = [];
-    const corruptLines: string[] = [];
+    const parsed = parseCollection(raw);
 
-    for (const segment of splitLinesPreservingEndings(raw)) {
-      const line = segment.replace(/(?:\r\n|\n|\r)$/, "");
-      if (!line.trim()) {
-        continue;
-      }
-      try {
-        const parsed: unknown = JSON.parse(line);
-        if (isCollectedItem(parsed)) {
-          items.push(parsed);
-        } else {
-          corruptLines.push(segment);
-        }
-      } catch {
-        corruptLines.push(segment);
-      }
+    if (parsed.corruptLines.length > 0) {
+      const stat = await this.vault.adapter.stat(path);
+      await this.quarantineCorruptLines(path, raw, stat?.mtime ?? null, parsed);
+      return { items: parsed.items, corruptLines: [] };
     }
 
-    if (corruptLines.length > 0) {
-      await this.preserveCorruptLines(path, corruptLines);
-      await this.atomicWrite(path, serializeCollection(items));
-      return { items, corruptLines: [] };
-    }
-
-    return { items, corruptLines };
+    await this.cleanupQuarantineJournal(path);
+    return parsed;
   }
 
-  private async preserveCorruptLines(
+  private async quarantineCorruptLines(
     dailyPath: string,
-    corruptLines: string[],
+    sourceRaw: string,
+    sourceMtime: number | null,
+    parsed: ParsedCollection,
   ): Promise<void> {
     const sidecarPath = `${dailyPath}.corrupt`;
+    const journalPath = `${dailyPath}.quarantine-journal.json`;
+    await this.recoverAtomicTarget(sidecarPath);
+    await this.recoverAtomicTarget(journalPath);
+
     const existing = (await this.vault.adapter.exists(sidecarPath))
       ? await this.vault.adapter.read(sidecarPath)
       : "";
-    const existingCounts = countOccurrences(
-      splitLinesPreservingEndings(existing),
-    );
-    const incomingCounts = new Map<string, number>();
-    let next = existing;
+    const sourceFingerprint = fingerprint(sourceRaw);
+    const pending = await this.readQuarantineJournal(journalPath);
+    const samePendingBatch =
+      pending?.sourceFingerprint === sourceFingerprint &&
+      pending.sourceMtime === sourceMtime;
+    const sidecarAfter = samePendingBatch
+      ? pending.sidecarAfter
+      : appendRawLines(existing, parsed.corruptLines);
+    const cleanedCollection = serializeCollection(parsed.items);
+    const journal: QuarantineJournal = {
+      schemaVersion: 1,
+      sourceFingerprint,
+      sourceMtime,
+      sidecarAfter,
+      cleanedCollection,
+    };
 
-    for (const line of corruptLines) {
-      const occurrence = (incomingCounts.get(line) ?? 0) + 1;
-      incomingCounts.set(line, occurrence);
-      if (occurrence <= (existingCounts.get(line) ?? 0)) {
-        continue;
-      }
-      if (next && !/(?:\r\n|\n|\r)$/.test(next)) {
-        next += "\n";
-      }
-      next += line;
+    await this.atomicWrite(journalPath, `${JSON.stringify(journal)}\n`);
+    await this.atomicWrite(sidecarPath, sidecarAfter);
+    await this.atomicWrite(dailyPath, cleanedCollection);
+    await this.bestEffortRemove(journalPath);
+  }
+
+  private async readQuarantineJournal(
+    path: string,
+  ): Promise<QuarantineJournal | null> {
+    if (!(await this.vault.adapter.exists(path))) {
+      return null;
     }
-
-    if (next !== existing) {
-      await this.atomicWrite(sidecarPath, next);
+    try {
+      const parsed: unknown = JSON.parse(await this.vault.adapter.read(path));
+      return isQuarantineJournal(parsed) ? parsed : null;
+    } catch {
+      return null;
     }
   }
 
+  private async cleanupQuarantineJournal(dailyPath: string): Promise<void> {
+    const journalPath = `${dailyPath}.quarantine-journal.json`;
+    await this.recoverAtomicTarget(journalPath);
+    await this.bestEffortRemove(journalPath);
+  }
+
   private async atomicWrite(path: string, content: string): Promise<void> {
+    await this.recoverAtomicTarget(path);
     const writeId = `${this.clock().getTime()}-${this.tempSequence++}`;
     const tempPath = `${path}.tmp-${writeId}`;
     await this.vault.adapter.write(tempPath, content);
@@ -392,13 +429,78 @@ export class CollectionRepository {
         }
         throw replaceError;
       }
-      await adapter.remove.call(this.vault.adapter, backupPath);
+      await this.bestEffortRemove(backupPath);
       return;
     }
 
     await this.vault.adapter.write(path, content);
-    if (typeof adapter.remove === "function") {
-      await adapter.remove.call(this.vault.adapter, tempPath);
+    await this.bestEffortRemove(tempPath);
+  }
+
+  private async recoverAtomicTarget(path: string): Promise<void> {
+    const parent = parentPath(path);
+    if (!parent || !(await this.vault.adapter.exists(parent))) {
+      return;
+    }
+
+    const listed = await this.vault.adapter.list(parent);
+    const backups = listed.files
+      .filter((candidate) => candidate.startsWith(`${path}.backup-`))
+      .sort()
+      .reverse();
+    const temps = listed.files.filter((candidate) =>
+      candidate.startsWith(`${path}.tmp-`),
+    );
+
+    if (await this.vault.adapter.exists(path)) {
+      await this.cleanupSiblings([...backups, ...temps]);
+      return;
+    }
+
+    let restored: string | null = null;
+    for (const backup of backups) {
+      let content: string;
+      try {
+        content = await this.vault.adapter.read(backup);
+      } catch {
+        continue;
+      }
+      if (!isValidAtomicContent(path, content)) {
+        continue;
+      }
+
+      const adapter = this.vault.adapter as Partial<DataAdapter>;
+      if (typeof adapter.rename === "function") {
+        await adapter.rename.call(this.vault.adapter, backup, path);
+      } else {
+        await this.vault.adapter.write(path, content);
+        await this.bestEffortRemove(backup);
+      }
+      restored = backup;
+      break;
+    }
+
+    const staleSiblings = [...backups, ...temps].filter(
+      (candidate) => candidate !== restored,
+    );
+    await this.cleanupSiblings(staleSiblings);
+  }
+
+  private async cleanupSiblings(paths: string[]): Promise<void> {
+    for (const path of paths) {
+      await this.bestEffortRemove(path);
+    }
+  }
+
+  private async bestEffortRemove(path: string): Promise<void> {
+    const adapter = this.vault.adapter as Partial<DataAdapter>;
+    if (typeof adapter.remove !== "function") {
+      return;
+    }
+    try {
+      await adapter.remove.call(this.vault.adapter, path);
+    } catch {
+      // Canonical content is already durable; retry cleanup on a later access.
     }
   }
 }
@@ -429,12 +531,69 @@ function splitLinesPreservingEndings(value: string): string[] {
   return value.match(/[^\r\n]*(?:\r\n|\n|\r|$)/g)?.filter(Boolean) ?? [];
 }
 
-function countOccurrences(values: string[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const value of values) {
-    counts.set(value, (counts.get(value) ?? 0) + 1);
+function parseCollection(raw: string): ParsedCollection {
+  const items: CollectedItem[] = [];
+  const corruptLines: string[] = [];
+  for (const segment of splitLinesPreservingEndings(raw)) {
+    const line = segment.replace(/(?:\r\n|\n|\r)$/, "");
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (isCollectedItem(parsed)) {
+        items.push(parsed);
+      } else {
+        corruptLines.push(segment);
+      }
+    } catch {
+      corruptLines.push(segment);
+    }
   }
-  return counts;
+  return { items, corruptLines };
+}
+
+function appendRawLines(existing: string, additions: string[]): string {
+  let result = existing;
+  for (const addition of additions) {
+    if (result && !/(?:\r\n|\n|\r)$/.test(result)) {
+      result += "\n";
+    }
+    result += addition;
+  }
+  return result;
+}
+
+function fingerprint(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function parentPath(path: string): string {
+  const separator = path.lastIndexOf("/");
+  return separator === -1 ? "" : path.slice(0, separator);
+}
+
+function isValidAtomicContent(path: string, content: string): boolean {
+  if (/\/collections\/\d{4}-\d{2}-\d{2}\.jsonl$/.test(path)) {
+    return parseCollection(content).corruptLines.length === 0;
+  }
+  if (path.endsWith("/state/item-index.json")) {
+    try {
+      const parsed: unknown = JSON.parse(content);
+      return isItemIndex(parsed);
+    } catch {
+      return false;
+    }
+  }
+  if (path.endsWith(".quarantine-journal.json")) {
+    try {
+      const parsed: unknown = JSON.parse(content);
+      return isQuarantineJournal(parsed);
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 function updateIndexEntry(
@@ -465,6 +624,17 @@ function isItemIndex(value: unknown): value is ItemIndex {
       isLocalDate(entry.earliestDate) &&
       isLocalDate(entry.latestDate) &&
       entry.earliestDate <= entry.latestDate,
+  );
+}
+
+function isQuarantineJournal(value: unknown): value is QuarantineJournal {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === 1 &&
+    typeof value.sourceFingerprint === "string" &&
+    (value.sourceMtime === null || typeof value.sourceMtime === "number") &&
+    typeof value.sidecarAfter === "string" &&
+    typeof value.cleanedCollection === "string"
   );
 }
 
