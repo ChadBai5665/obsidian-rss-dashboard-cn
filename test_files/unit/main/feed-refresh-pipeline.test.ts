@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "crypto";
 import { App } from "obsidian";
 import RssDashboardPlugin from "../../../main";
 import { DEFAULT_SETTINGS, type Feed, type FeedItem } from "../../../src/types/types";
@@ -125,6 +126,10 @@ function getNoticeMessages(spy: ReturnType<typeof vi.spyOn>): string[] {
   return calls
     .filter((call) => call[0] === "[Stub Notice]")
     .map((call) => String(call[1]));
+}
+
+function createTestSourceLocator(sourceId: string): string {
+  return createHash("sha256").update(sourceId.trim()).digest("hex");
 }
 
 async function flushMicrotasks(): Promise<void> {
@@ -1136,11 +1141,6 @@ describe("refreshFeeds() pipeline behavior", () => {
     const article = createItem({ read: false });
     const source = createFeed({ feedId: "source-compensate", items: [article] });
     const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
-      updateArticle: (
-        guid: string,
-        url: string,
-        updates: Partial<FeedItem>,
-      ) => Promise<boolean>;
       saveSettings: ReturnType<typeof vi.fn>;
     };
     plugin.saveSettings = vi.fn()
@@ -1185,6 +1185,11 @@ describe("refreshFeeds() pipeline behavior", () => {
     const source = createFeed({ feedId: "source-replay", items: [article] });
     const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
       replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
       saveSettings: ReturnType<typeof vi.fn>;
     };
     plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
@@ -1198,7 +1203,8 @@ describe("refreshFeeds() pipeline behavior", () => {
     const path = ".rss-dashboard-data/state/status-repair.json";
     await plugin.app.vault.adapter.write(path, JSON.stringify({
       version: 1, txId: "tx-4-safe", phase: "collection-written", items: [{
-        feedIndex: 0, itemIndex: 0, sourceId: "source-replay", stableId,
+        feedIndex: 0, itemIndex: 0,
+        sourceLocator: createTestSourceLocator("source-replay"), stableId,
         previousFeed: [{ key: "read", exists: true, value: false }],
         previousCollection: { read: false, starred: false, saved: false },
       }],
@@ -1208,6 +1214,129 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(article.read).toBe(false);
     expect(clearSpy).toHaveBeenCalled();
     expect(await plugin.app.vault.adapter.exists(path)).toBe(false);
+  });
+
+  it("retains conflicting canonical and temporary journals with different transactions", async () => {
+    const stableId = "4".repeat(64);
+    const article = createItem({ rssDashboardId: stableId, read: true });
+    const source = createFeed({ feedId: "source-conflict", items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+    const item = {
+      feedIndex: 0,
+      itemIndex: 0,
+      sourceLocator: createTestSourceLocator("source-conflict"),
+      stableId,
+      previousFeed: [{ key: "read", exists: true, value: false }],
+    };
+    const canonicalBytes = JSON.stringify({
+      version: 1, txId: "tx-10-alpha", phase: "prepared", items: [item],
+    });
+    const temporaryBytes = JSON.stringify({
+      version: 1, txId: "tx-11-beta", phase: "feed-written", items: [item],
+    });
+    await plugin.app.vault.adapter.write(canonical, canonicalBytes);
+    await plugin.app.vault.adapter.write(`${canonical}.tmp`, temporaryBytes);
+
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(false);
+    await expect(
+      plugin.updateArticle(article.guid, source.url, { starred: true }),
+    ).resolves.toBe(false);
+
+    expect(article.read).toBe(true);
+    expect(article.starred).toBe(false);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.read(canonical)).toBe(canonicalBytes);
+    expect(await plugin.app.vault.adapter.read(`${canonical}.tmp`)).toBe(temporaryBytes);
+  });
+
+  it("retains same-transaction journals when immutable payloads differ", async () => {
+    const stableId = "3".repeat(64);
+    const article = createItem({ rssDashboardId: stableId, read: true });
+    const source = createFeed({ feedId: "source-payload", items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+    const baseItem = {
+      feedIndex: 0,
+      itemIndex: 0,
+      sourceLocator: createTestSourceLocator("source-payload"),
+      stableId,
+    };
+    const canonicalBytes = JSON.stringify({
+      version: 1,
+      txId: "tx-12-same",
+      phase: "prepared",
+      items: [{
+        ...baseItem,
+        previousFeed: [{ key: "read", exists: true, value: false }],
+      }],
+    });
+    const temporaryBytes = JSON.stringify({
+      version: 1,
+      txId: "tx-12-same",
+      phase: "collection-written",
+      items: [{
+        ...baseItem,
+        previousFeed: [{ key: "read", exists: true, value: true }],
+      }],
+    });
+    await plugin.app.vault.adapter.write(canonical, canonicalBytes);
+    await plugin.app.vault.adapter.write(`${canonical}.tmp`, temporaryBytes);
+
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(false);
+
+    expect(article.read).toBe(true);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.read(canonical)).toBe(canonicalBytes);
+    expect(await plugin.app.vault.adapter.read(`${canonical}.tmp`)).toBe(temporaryBytes);
+  });
+
+  it("chooses the more advanced phase for matching canonical and temporary journals", async () => {
+    const stableId = "2".repeat(64);
+    const article = createItem({ rssDashboardId: stableId, read: true });
+    const source = createFeed({ feedId: "source-progress", items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      readRecoverableStatusJournal: () => Promise<{ phase: string } | null>;
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+    const item = {
+      feedIndex: 0,
+      itemIndex: 0,
+      sourceLocator: createTestSourceLocator("source-progress"),
+      stableId,
+      previousFeed: [{ key: "read", exists: true, value: false }],
+    };
+    await plugin.app.vault.adapter.write(canonical, JSON.stringify({
+      version: 1, txId: "tx-13-progress", phase: "prepared", items: [item],
+    }));
+    await plugin.app.vault.adapter.write(`${canonical}.tmp`, JSON.stringify({
+      version: 1, txId: "tx-13-progress", phase: "feed-written", items: [item],
+    }));
+
+    await expect(plugin.readRecoverableStatusJournal()).resolves.toMatchObject({
+      phase: "feed-written",
+    });
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(true);
+
+    expect(article.read).toBe(false);
+    expect(await plugin.app.vault.adapter.exists(canonical)).toBe(false);
+    expect(await plugin.app.vault.adapter.exists(`${canonical}.tmp`)).toBe(false);
   });
 
   it("retains the journal when a replay record cannot be resolved", async () => {
@@ -1225,7 +1354,7 @@ describe("refreshFeeds() pipeline behavior", () => {
       items: [{
         feedIndex: 9,
         itemIndex: 9,
-        sourceId: "missing-source",
+        sourceLocator: createTestSourceLocator("missing-source"),
         stableId: "b".repeat(64),
         previousFeed: [{ key: "read", exists: true, value: false }],
       }],
@@ -1255,7 +1384,7 @@ describe("refreshFeeds() pipeline behavior", () => {
       items: [{
         feedIndex: 9,
         itemIndex: 9,
-        sourceId: "source-safe",
+        sourceLocator: createTestSourceLocator("source-safe"),
         stableId,
         previousFeed: [{ key: "read", exists: true, value: false }],
       }],
@@ -1286,7 +1415,7 @@ describe("refreshFeeds() pipeline behavior", () => {
       items: [{
         feedIndex: 99,
         itemIndex: 0,
-        sourceId: "source-relocated",
+        sourceLocator: createTestSourceLocator("source-relocated"),
         stableId,
         previousFeed: [{ key: "read", exists: true, value: false }],
       }],
@@ -1340,7 +1469,7 @@ describe("refreshFeeds() pipeline behavior", () => {
       items: [{
         feedIndex: 9,
         itemIndex: 9,
-        sourceId: "missing-source",
+        sourceLocator: createTestSourceLocator("missing-source"),
         stableId: "f".repeat(64),
         previousFeed: [{ key: "read", exists: true, value: false }],
       }],
@@ -1370,7 +1499,7 @@ describe("refreshFeeds() pipeline behavior", () => {
       items: [{
         feedIndex: 0,
         itemIndex: 0,
-        sourceId: "source-safe",
+        sourceLocator: createTestSourceLocator("source-safe"),
         stableId,
         previousFeed: [{
           key: "feedUrl",
@@ -1386,6 +1515,89 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(article.feedUrl).toBe(source.url);
     expect(article.read).toBe(true);
     expect(await plugin.app.vault.adapter.exists(canonical)).toBe(true);
+  });
+
+  it("rejects duplicate stable locators before writing a new journal", async () => {
+    const stableId = "1".repeat(64);
+    const first = createItem({ guid: "first", rssDashboardId: stableId, read: false });
+    const duplicate = createItem({ guid: "duplicate", rssDashboardId: stableId, read: false });
+    const source = createFeed({ feedId: "source-duplicate", items: [first, duplicate] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
+    };
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+
+    await expect(
+      plugin.updateArticle(first.guid, source.url, { read: true }),
+    ).resolves.toBe(false);
+
+    expect(first.read).toBe(false);
+    expect(duplicate.read).toBe(false);
+    expect(plugin.saveData).not.toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.exists(canonical)).toBe(false);
+    expect(await plugin.app.vault.adapter.exists(`${canonical}.tmp`)).toBe(false);
+  });
+
+  it("rejects a journal containing duplicate source and item locators", async () => {
+    const stableId = "0".repeat(64);
+    const article = createItem({ rssDashboardId: stableId, read: true });
+    const source = createFeed({ feedId: "source-parser-duplicate", items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+    const item = {
+      feedIndex: 0,
+      itemIndex: 0,
+      sourceLocator: createTestSourceLocator("source-parser-duplicate"),
+      stableId,
+      previousFeed: [{ key: "read", exists: true, value: false }],
+    };
+    await plugin.app.vault.adapter.write(canonical, JSON.stringify({
+      version: 1,
+      txId: "tx-14-duplicate",
+      phase: "prepared",
+      items: [item, { ...item, itemIndex: 1 }],
+    }));
+
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(false);
+
+    expect(article.read).toBe(true);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.exists(canonical)).toBe(true);
+  });
+
+  it("hashes arbitrary durable source identities in retained journal evidence", async () => {
+    const sourceIdentity = "  中文 source: https://private.example/feed  ";
+    const expectedLocator = createTestSourceLocator(sourceIdentity);
+    const article = createItem({ read: false });
+    const source = createFeed({ feedId: sourceIdentity, items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockRejectedValue(new Error("retain journal"));
+    const canonical = ".rss-dashboard-data/state/status-repair.json";
+
+    await expect(
+      plugin.updateArticle(article.guid, source.url, { read: true }),
+    ).resolves.toBe(false);
+
+    const journal = await plugin.app.vault.adapter.read(canonical);
+    expect(journal).toContain(`"sourceLocator":"${expectedLocator}"`);
+    expect(journal).not.toContain(sourceIdentity.trim());
+    expect(journal).not.toContain(source.url);
+    expect(journal).not.toContain('"sourceId"');
   });
 
   it("clears both journal files after success on an adapter without rename", async () => {

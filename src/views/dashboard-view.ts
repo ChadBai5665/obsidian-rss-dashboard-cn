@@ -122,6 +122,7 @@ export class RssDashboardView extends ItemView {
   private mobileSidebarModal: MobileNavigationModal | null = null;
   private lastViewportMobileSidebarMode: boolean | null = null;
   private inlineArticle: FeedItem | null = null;
+  private readonly inlineActionPendingKeys = new Set<string>();
   private articleRenderer: ArticleRenderer | null = null;
   private lastClickAnchorKey: string | null = null;
   private readonly collectionQueryService = new CollectionQueryService();
@@ -2956,7 +2957,7 @@ export class RssDashboardView extends ItemView {
     return await this.updateArticleStatus(article, updates, shouldRerender);
   }
 
-  private async handleArticleSave(article: FeedItem): Promise<void> {
+  private async handleArticleSave(article: FeedItem): Promise<boolean> {
     // Find the feed to check for custom template
     const feed = this.settings.feeds.find(
       (f: Feed) => f.url === article.feedUrl,
@@ -3005,7 +3006,7 @@ export class RssDashboardView extends ItemView {
         this.inlineArticle.guid === article.guid,
       );
 
-      await this.updateArticleStatus(
+      const didUpdate = await this.updateArticleStatus(
         article,
         {
           saved: true,
@@ -3015,10 +3016,14 @@ export class RssDashboardView extends ItemView {
         shouldRerenderAfterSave,
       );
 
+      if (!didUpdate) return false;
+
       if (!shouldRerenderAfterSave) {
         this.updateArticleSaveButton(article.guid);
       }
+      return true;
     }
+    return false;
   }
 
   // --- Article mutation, sync, and persistence ---
@@ -3644,6 +3649,7 @@ export class RssDashboardView extends ItemView {
   async onClose(): Promise<void> {
     this.collectionViewDisposed = true;
     this.collectionLoadGeneration += 1;
+    this.inlineActionPendingKeys.clear();
     this.articleRenderer?.dispose();
     this.articleRenderer = null;
     this.closeMobileSidebarModal();
@@ -4275,6 +4281,53 @@ export class RssDashboardView extends ItemView {
     await this.openArticleInNewTab(article);
   }
 
+  private getInlineActionKey(
+    article: FeedItem,
+    action: "save" | "read" | "starred",
+  ): string {
+    return `${article.rssDashboardId ?? `${article.feedUrl}\u0000${article.guid}`}\u0000${action}`;
+  }
+
+  private setInlineActionPending(
+    button: HTMLButtonElement,
+    key: string,
+    pending: boolean,
+  ): void {
+    const apply = (candidate: HTMLButtonElement): void => {
+      candidate.disabled = pending;
+      candidate.classList.toggle("pending", pending);
+      candidate.setAttr("aria-disabled", pending ? "true" : "false");
+    };
+    apply(button);
+    this.containerEl
+      .querySelectorAll<HTMLButtonElement>(".rss-inline-article-action")
+      .forEach((candidate) => {
+        if (candidate.dataset.inlineActionKey === key && candidate !== button) {
+          apply(candidate);
+        }
+      });
+  }
+
+  private async runInlineArticleAction(
+    button: HTMLButtonElement,
+    article: FeedItem,
+    action: "save" | "read" | "starred",
+    mutation: () => Promise<boolean>,
+  ): Promise<boolean> {
+    const key = this.getInlineActionKey(article, action);
+    if (this.inlineActionPendingKeys.has(key)) return false;
+    this.inlineActionPendingKeys.add(key);
+    this.setInlineActionPending(button, key, true);
+    try {
+      return await mutation();
+    } catch {
+      return false;
+    } finally {
+      this.inlineActionPendingKeys.delete(key);
+      this.setInlineActionPending(button, key, false);
+    }
+  }
+
   private renderInlineArticle(container: HTMLElement): void {
     const header = container.createDiv({
       cls: "rss-reader-header inline-reader-header",
@@ -4297,51 +4350,110 @@ export class RssDashboardView extends ItemView {
     if (this.inlineArticle) {
       const actions = header.createDiv({ cls: "rss-reader-actions" });
 
-      const saveButton = actions.createDiv({
+      const saveButton = actions.createEl("button", {
         cls: `rss-reader-action-button${this.inlineArticle.saved ? " saved" : ""}`,
-        attr: { title: "Save article" },
+        attr: { type: "button", title: "Save article" },
       });
+      const saveKey = this.getInlineActionKey(this.inlineArticle, "save");
+      saveButton.addClass("rss-inline-article-action");
+      saveButton.dataset.inlineActionKey = saveKey;
+      this.setInlineActionPending(
+        saveButton,
+        saveKey,
+        this.inlineActionPendingKeys.has(saveKey),
+      );
       setIcon(saveButton, "save");
       saveButton.addEventListener("click", () => {
-        if (this.inlineArticle) {
-          void this.handleArticleSave(this.inlineArticle);
-        }
+        const article = this.inlineArticle;
+        if (!article) return;
+        void this.runInlineArticleAction(
+          saveButton,
+          article,
+          "save",
+          async () => {
+            const didSave = await this.handleArticleSave(article);
+            if (didSave) saveButton.addClass("saved");
+            return didSave;
+          },
+        );
       });
 
-      const readToggleButton = actions.createDiv({
+      const readToggleButton = actions.createEl("button", {
         cls: `rss-reader-action-button rss-reader-read-toggle${this.inlineArticle.read ? " read" : ""}`,
-        attr: { title: "Mark as read/unread" },
+        attr: { type: "button", title: "Mark as read/unread" },
       });
+      const readKey = this.getInlineActionKey(this.inlineArticle, "read");
+      readToggleButton.addClass("rss-inline-article-action");
+      readToggleButton.dataset.inlineActionKey = readKey;
+      this.setInlineActionPending(
+        readToggleButton,
+        readKey,
+        this.inlineActionPendingKeys.has(readKey),
+      );
       setIcon(
         readToggleButton,
         this.inlineArticle.read ? "check-circle" : "circle",
       );
       readToggleButton.addEventListener("click", () => {
-        if (this.inlineArticle) {
-          void this.handleArticleUpdate(
-            this.inlineArticle,
-            { read: !this.inlineArticle.read },
-            true,
-          );
-        }
+        const article = this.inlineArticle;
+        if (!article) return;
+        const nextRead = !article.read;
+        void this.runInlineArticleAction(
+          readToggleButton,
+          article,
+          "read",
+          async () => {
+            const didUpdate = await this.handleArticleUpdate(
+              article,
+              { read: nextRead },
+              false,
+            );
+            if (didUpdate) {
+              readToggleButton.toggleClass("read", nextRead);
+              setIcon(readToggleButton, nextRead ? "check-circle" : "circle");
+            }
+            return didUpdate;
+          },
+        );
       });
 
-      const starToggleButton = actions.createDiv({
+      const starToggleButton = actions.createEl("button", {
         cls: `rss-reader-action-button rss-reader-star-toggle${this.inlineArticle.starred ? " starred" : ""}`,
-        attr: { title: "Star/unstar article" },
+        attr: { type: "button", title: "Star/unstar article" },
       });
+      const starKey = this.getInlineActionKey(this.inlineArticle, "starred");
+      starToggleButton.addClass("rss-inline-article-action");
+      starToggleButton.dataset.inlineActionKey = starKey;
+      this.setInlineActionPending(
+        starToggleButton,
+        starKey,
+        this.inlineActionPendingKeys.has(starKey),
+      );
       setIcon(
         starToggleButton,
         this.inlineArticle.starred ? "star" : "star-off",
       );
       starToggleButton.addEventListener("click", () => {
-        if (this.inlineArticle) {
-          void this.handleArticleUpdate(
-            this.inlineArticle,
-            { starred: !this.inlineArticle.starred },
-            true,
-          );
-        }
+        const article = this.inlineArticle;
+        if (!article) return;
+        const nextStarred = !article.starred;
+        void this.runInlineArticleAction(
+          starToggleButton,
+          article,
+          "starred",
+          async () => {
+            const didUpdate = await this.handleArticleUpdate(
+              article,
+              { starred: nextStarred },
+              false,
+            );
+            if (didUpdate) {
+              starToggleButton.toggleClass("starred", nextStarred);
+              setIcon(starToggleButton, nextStarred ? "star" : "star-off");
+            }
+            return didUpdate;
+          },
+        );
       });
 
       const browserButton = actions.createDiv({

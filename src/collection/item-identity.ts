@@ -67,6 +67,10 @@ export function createCollectedItemId(input: {
   return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
 }
 
+export function createSourceLocator(sourceId: string): string {
+  return createHash("sha256").update(sourceId.trim()).digest("hex");
+}
+
 export function resolveFeedSourceId(
   feed: Pick<Feed, "feedId" | "url">,
 ): string {

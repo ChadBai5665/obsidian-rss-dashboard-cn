@@ -84,6 +84,7 @@ import { CollectionService } from "./src/services/collection-service";
 import { isTimeoutFeedError } from "./src/services/feed-parser/feed-errors";
 import {
   bindFeedItemsToSourceIdentity,
+  createSourceLocator,
   isStableItemId,
   resolveFeedItemStableId,
 } from "./src/collection/item-identity";
@@ -167,7 +168,7 @@ type StatusJournalItem = {
   // source URLs, article content, titles, or API material.
   feedIndex: number;
   itemIndex: number;
-  sourceId: string;
+  sourceLocator: string;
   stableId: string;
   previousFeed: Array<{
     key: string;
@@ -212,6 +213,24 @@ function hasOnlyKeys(
   allowed: ReadonlySet<string>,
 ): boolean {
   return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function stableJsonStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableJsonStringify(entry)).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort().map((key) =>
+      `${JSON.stringify(key)}:${stableJsonStringify(value[key])}`,
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+function getStatusJournalImmutablePayload(journal: StatusRepairJournal): string {
+  return stableJsonStringify({ version: journal.version, items: journal.items });
 }
 
 function isJournalFlagState(value: unknown): value is CollectionFlagState {
@@ -276,14 +295,14 @@ function parseStatusRepairJournal(value: unknown): StatusRepairJournal | null {
   for (const rawItem of value.items) {
     if (!isRecord(rawItem)) return null;
     if (!hasOnlyKeys(rawItem, new Set([
-      "feedIndex", "itemIndex", "sourceId", "stableId", "previousFeed",
+      "feedIndex", "itemIndex", "sourceLocator", "stableId", "previousFeed",
       "previousCollection", "desired",
     ]))) return null;
     if (
       !Number.isInteger(rawItem.feedIndex) || Number(rawItem.feedIndex) < 0 ||
       !Number.isInteger(rawItem.itemIndex) || Number(rawItem.itemIndex) < 0 ||
-      typeof rawItem.sourceId !== "string" ||
-      !/^[A-Za-z0-9._-]{1,200}$/.test(rawItem.sourceId) ||
+      typeof rawItem.sourceLocator !== "string" ||
+      !isStableItemId(rawItem.sourceLocator) ||
       typeof rawItem.stableId !== "string" ||
       !isStableItemId(rawItem.stableId) ||
       !Array.isArray(rawItem.previousFeed) ||
@@ -317,6 +336,12 @@ function parseStatusRepairJournal(value: unknown): StatusRepairJournal | null {
       !isJournalFlagState(rawItem.previousCollection)) return null;
     if (rawItem.desired !== undefined && !isJournalFlagState(rawItem.desired)) return null;
     items.push(rawItem as unknown as StatusJournalItem);
+  }
+  const locatorKeys = new Set<string>();
+  for (const item of items) {
+    const locatorKey = `${item.sourceLocator}:${item.stableId}`;
+    if (locatorKeys.has(locatorKey)) return null;
+    locatorKeys.add(locatorKey);
   }
   return {
     version: 1,
@@ -2179,7 +2204,7 @@ export default class RssDashboardPlugin extends Plugin {
   private getStatusJournalItemLocator(article: FeedItem): {
     feedIndex: number;
     itemIndex: number;
-    sourceId: string;
+    sourceLocator: string;
     stableId: string;
   } | null {
     this.feedStorageRepository.ensureFeedIds(this.settings);
@@ -2188,12 +2213,25 @@ export default class RssDashboardPlugin extends Plugin {
       const itemIndex = feed.items.indexOf(article);
       if (itemIndex >= 0 && feed.feedId) {
         try {
-          return {
+          const locator = {
             feedIndex,
             itemIndex,
-            sourceId: feed.feedId,
+            sourceLocator: createSourceLocator(feed.feedId),
             stableId: resolveFeedItemStableId(article),
           };
+          let matchCount = 0;
+          for (const candidateFeed of this.settings.feeds) {
+            if (!candidateFeed.feedId ||
+              createSourceLocator(candidateFeed.feedId) !== locator.sourceLocator) {
+              continue;
+            }
+            for (const candidateItem of candidateFeed.items) {
+              if (resolveFeedItemStableId(candidateItem) === locator.stableId) {
+                matchCount += 1;
+              }
+            }
+          }
+          return matchCount === 1 ? locator : null;
         } catch {
           return null;
         }
@@ -2285,7 +2323,13 @@ export default class RssDashboardPlugin extends Plugin {
     const verified = parseStatusRepairJournal(JSON.parse(
       await adapter.read(STATUS_REPAIR_JOURNAL_PATH),
     ));
-    if (!verified || verified.txId !== journal.txId || verified.phase !== journal.phase) {
+    if (
+      !verified ||
+      verified.txId !== journal.txId ||
+      verified.phase !== journal.phase ||
+      getStatusJournalImmutablePayload(verified) !==
+        getStatusJournalImmutablePayload(journal)
+    ) {
       throw new Error("Status journal verification failed");
     }
   }
@@ -3199,10 +3243,28 @@ export default class RssDashboardPlugin extends Plugin {
         return null;
       }
     };
-    const canonical = await read(STATUS_REPAIR_JOURNAL_PATH);
-    if (canonical) return canonical;
     const temporaryPath = `${STATUS_REPAIR_JOURNAL_PATH}.tmp`;
+    const canonical = await read(STATUS_REPAIR_JOURNAL_PATH);
     const temporary = await read(temporaryPath);
+    if (canonical && temporary) {
+      if (
+        canonical.txId !== temporary.txId ||
+        getStatusJournalImmutablePayload(canonical) !==
+          getStatusJournalImmutablePayload(temporary)
+      ) {
+        return null;
+      }
+      const phaseOrder: Record<StatusJournalPhase, number> = {
+        prepared: 0,
+        "collection-written": 1,
+        "feed-write-uncertain": 2,
+        "feed-written": 3,
+      };
+      return phaseOrder[temporary.phase] > phaseOrder[canonical.phase]
+        ? temporary
+        : canonical;
+    }
+    if (canonical) return canonical;
     if (!temporary) return null;
     const contents = await adapter.read(temporaryPath);
     await adapter.write(STATUS_REPAIR_JOURNAL_PATH, contents);
@@ -3215,7 +3277,8 @@ export default class RssDashboardPlugin extends Plugin {
   private resolveStatusJournalItem(entry: StatusJournalItem): FeedItem | null {
     const matches: FeedItem[] = [];
     for (const feed of this.settings.feeds) {
-      if (feed.feedId !== entry.sourceId) continue;
+      if (!feed.feedId ||
+        createSourceLocator(feed.feedId) !== entry.sourceLocator) continue;
       for (const item of feed.items) {
         try {
           if (resolveFeedItemStableId(item) === entry.stableId) matches.push(item);
