@@ -46,6 +46,13 @@ export class ShardFolderDeletionError extends Error {
   }
 }
 
+export class FeedStorageRollbackIncompleteError extends Error {
+  constructor() {
+    super("Feed storage rollback incomplete");
+    this.name = "FeedStorageRollbackIncompleteError";
+  }
+}
+
 interface MigrationSnapshot {
   storageMode: RssDashboardSettings["storageMode"];
   storageFolder: string;
@@ -406,14 +413,31 @@ export class FeedStorageRepository {
           : null,
       );
     };
-    const restoreRollbackFiles = async (): Promise<void> => {
+    const restoreRollbackFiles = async (): Promise<boolean> => {
+      let didRestoreEveryFile = true;
       for (const [path, contents] of [...rollbackFileBytes.entries()].reverse()) {
-        if (contents !== null) {
-          await this.app.vault.adapter.write(path, contents);
-        } else {
-          await this.app.vault.adapter.remove(path);
+        try {
+          if (contents !== null) {
+            await this.app.vault.adapter.write(path, contents);
+          } else {
+            const adapter = this.app.vault.adapter as typeof this.app.vault.adapter & {
+              remove?: (target: string) => Promise<void>;
+            };
+            if (typeof adapter.remove === "function") {
+              await adapter.remove(path);
+            } else {
+              await (this.app.vault as unknown as {
+                delete: (target: string) => Promise<void>;
+              }).delete(path);
+            }
+          }
+        } catch {
+          // Keep restoring later targets even if one filesystem operation is
+          // broken; the caller must retain a recovery journal in that case.
+          didRestoreEveryFile = false;
         }
       }
+      return didRestoreEveryFile;
     };
     const storageFolderChanged =
       this.lastStorageFolderPath !== null &&
@@ -541,14 +565,24 @@ export class FeedStorageRepository {
       shardDeleteCount,
     };
     } catch (error) {
+      let didRestore = false;
       try {
-        await restoreRollbackFiles();
+        didRestore = await restoreRollbackFiles();
         if (previousMetadataCache !== null) {
           await saveData(withSyncNonce(JSON.parse(previousMetadataCache)));
         }
       } catch {
         // The caller records a repair marker. Never include vault paths or
         // source data in the user-visible failure message.
+        didRestore = false;
+      }
+      if (!didRestore) {
+        // A cache that still claims the failed generation was written could
+        // skip the only corrective write. Clear it rather than guessing.
+        this.lastPersistedShardJsonByFeedId.clear();
+        this.lastPersistedMetadataJson = null;
+        this.lastStorageFolderPath = null;
+        throw new FeedStorageRollbackIncompleteError();
       }
       this.lastPersistedShardJsonByFeedId = previousShardCache;
       this.lastPersistedMetadataJson = previousMetadataCache;

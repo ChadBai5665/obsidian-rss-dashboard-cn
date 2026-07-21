@@ -147,6 +147,37 @@ type ArticleMutationSnapshot = Map<keyof FeedItem, {
   value: FeedItem[keyof FeedItem];
 }>;
 
+const STATUS_REPAIR_JOURNAL_PATH =
+  ".rss-dashboard-data/state/status-repair.json";
+
+type StatusJournalPhase =
+  | "prepared"
+  | "collection-written"
+  | "feed-write-uncertain"
+  | "feed-written";
+
+type StatusJournalItem = {
+  // Locators deliberately use storage positions/IDs only; they never contain
+  // source URLs, article content, titles, or API material.
+  feedIndex: number;
+  itemIndex: number;
+  stableId?: string;
+  previousFeed: Array<{
+    key: string;
+    exists: boolean;
+    value: unknown;
+  }>;
+  previousCollection?: CollectionFlagState;
+  desired?: CollectionFlagState;
+};
+
+type StatusRepairJournal = {
+  version: 1;
+  txId: string;
+  phase: StatusJournalPhase;
+  items: StatusJournalItem[];
+};
+
 function captureArticleMutationSnapshot(
   article: FeedItem,
   updates: Partial<FeedItem>,
@@ -171,6 +202,30 @@ function restoreArticleMutationSnapshot(
       (article as unknown as Record<string, unknown>)[key] = previous.value;
     } else {
       delete (article as unknown as Record<string, unknown>)[key];
+    }
+  }
+}
+
+function serializeArticleMutationSnapshot(
+  snapshot: ArticleMutationSnapshot,
+): StatusJournalItem["previousFeed"] {
+  return [...snapshot].map(([key, value]) => ({
+    key,
+    exists: value.exists,
+    value: value.value,
+  }));
+}
+
+function restoreSerializedArticleSnapshot(
+  article: FeedItem,
+  snapshot: StatusJournalItem["previousFeed"],
+): void {
+  for (const previous of snapshot) {
+    if (previous.exists) {
+      (article as unknown as Record<string, unknown>)[previous.key] =
+        previous.value;
+    } else {
+      delete (article as unknown as Record<string, unknown>)[previous.key];
     }
   }
 }
@@ -1670,14 +1725,107 @@ export default class RssDashboardPlugin extends Plugin {
     );
   }
 
+  public async updateArticlesReadBatch(
+    targets: Array<{ articleGuid: string; feedUrl: string }>,
+    read: boolean,
+  ): Promise<boolean> {
+    let collectionChanged = false;
+    const success = await this.enqueueStatusTransaction(async () => {
+      const resolved = targets.flatMap((target) => {
+        const feed = this.settings.feeds.find((candidate) => candidate.url === target.feedUrl);
+        const article = feed?.items.find((candidate) => candidate.guid === target.articleGuid);
+        return article ? [{ feed, article }] : [];
+      }).filter((entry, index, all) =>
+        all.findIndex((candidate) => candidate.article === entry.article) === index,
+      );
+      if (resolved.length === 0) return false;
+
+      const repository = new CollectionRepository(
+        this.app.vault,
+        this.settings.collection.dataFolder.trim(),
+        () => new Date(),
+      );
+      const entries: Array<{
+        article: FeedItem;
+        snapshot: ArticleMutationSnapshot;
+        previousCollection?: CollectionFlagState;
+        desired?: CollectionFlagState;
+      }> = [];
+      for (const { article } of resolved) {
+        const snapshot = captureArticleMutationSnapshot(article, { read });
+        let previousCollection: CollectionFlagState | undefined;
+        let desired: CollectionFlagState | undefined;
+        if (/^[a-f0-9]{64}$/.test(article.rssDashboardId ?? "")) {
+          const item = await repository.findById(article.rssDashboardId!);
+          if (!item) {
+            new Notice("Collection status could not be saved. Please try again.");
+            return false;
+          }
+          previousCollection = collectionFlagsFromItem(item);
+          desired = {
+            read,
+            starred: article.starred ?? false,
+            saved: article.saved ?? false,
+            savedNotePath: article.savedFilePath,
+          };
+        }
+        entries.push({ article, snapshot, previousCollection, desired });
+      }
+      const journal = await this.prepareStatusJournalEntries(entries);
+      if (!journal) return false;
+      const changedCollections = entries.filter(
+        (entry) => entry.previousCollection && entry.desired,
+      );
+      try {
+        for (const entry of changedCollections) {
+          await repository.updateFlags(entry.article.rssDashboardId!, entry.desired!);
+        }
+        if (changedCollections.length > 0) {
+          await this.updateStatusJournalPhase(journal, "collection-written");
+        }
+        for (const entry of entries) entry.article.read = read;
+        await this.updateStatusJournalPhase(journal, "feed-write-uncertain");
+        await this.saveSettings();
+        await this.updateStatusJournalPhase(journal, "feed-written");
+        await this.clearStatusJournal();
+        collectionChanged = changedCollections.length > 0;
+        return true;
+      } catch {
+        for (const entry of entries) {
+          restoreArticleMutationSnapshot(entry.article, entry.snapshot);
+        }
+        for (const entry of changedCollections) {
+          try {
+            await repository.updateFlags(
+              entry.article.rssDashboardId!,
+              entry.previousCollection!,
+            );
+          } catch {
+            // The durable journal remains available for startup replay.
+          }
+        }
+        await this.tryPersistRestoredStatus();
+        new Notice("Article status could not be saved. Please try again.");
+        return false;
+      }
+    });
+    if (success && collectionChanged) this.emitCollectionFlagsUpdated();
+    return success;
+  }
+
   private async commitFeedOnlyArticleUpdate(
     article: FeedItem,
     updates: Partial<FeedItem>,
   ): Promise<boolean> {
     const snapshot = captureArticleMutationSnapshot(article, updates);
+    const journal = await this.prepareStatusJournal(article, snapshot);
+    if (!journal) return false;
     Object.assign(article, updates);
     try {
+      await this.updateStatusJournalPhase(journal, "feed-write-uncertain");
       await this.saveSettings();
+      await this.updateStatusJournalPhase(journal, "feed-written");
+      await this.clearStatusJournal();
       return true;
     } catch {
       restoreArticleMutationSnapshot(article, snapshot);
@@ -1728,24 +1876,34 @@ export default class RssDashboardPlugin extends Plugin {
           ? undefined
           : updates.savedFilePath ?? article.savedFilePath ?? previous.savedNotePath,
     };
+    const feedSnapshot = captureArticleMutationSnapshot(article, updates);
+    const journal = await this.prepareStatusJournal(
+      article,
+      feedSnapshot,
+      previousCollectionState,
+      desired,
+    );
+    if (!journal) return "failed";
     try {
       await repository.updateFlags(itemId, desired);
+      await this.updateStatusJournalPhase(journal, "collection-written");
     } catch {
       new Notice("Collection status could not be saved. Please try again.");
       return "failed";
     }
 
-    const feedSnapshot = captureArticleMutationSnapshot(article, updates);
     Object.assign(article, updates);
     try {
+      await this.updateStatusJournalPhase(journal, "feed-write-uncertain");
       await this.saveSettings();
+      await this.updateStatusJournalPhase(journal, "feed-written");
+      await this.clearStatusJournal();
       return "collection";
     } catch {
       restoreArticleMutationSnapshot(article, feedSnapshot);
       try {
         await repository.updateFlags(itemId, previousCollectionState);
       } catch {
-        await this.writeStatusRepairJournal();
         new Notice("Collection status repair is required. Please try again.");
         return "failed";
       }
@@ -1759,19 +1917,109 @@ export default class RssDashboardPlugin extends Plugin {
     try {
       await this.saveSettings({ forceAllShards: true, forceMetadata: true });
     } catch {
-      await this.writeStatusRepairJournal();
+      // The prepared journal remains durable for startup reconciliation.
     }
   }
 
-  private async writeStatusRepairJournal(): Promise<void> {
+  private getStatusJournalItemLocator(article: FeedItem): {
+    feedIndex: number;
+    itemIndex: number;
+  } | null {
+    for (let feedIndex = 0; feedIndex < this.settings.feeds.length; feedIndex++) {
+      const itemIndex = this.settings.feeds[feedIndex].items.indexOf(article);
+      if (itemIndex >= 0) return { feedIndex, itemIndex };
+    }
+    return null;
+  }
+
+  private async prepareStatusJournal(
+    article: FeedItem,
+    snapshot: ArticleMutationSnapshot,
+    previousCollection?: CollectionFlagState,
+    desired?: CollectionFlagState,
+  ): Promise<StatusRepairJournal | null> {
+    return await this.prepareStatusJournalEntries([
+      { article, snapshot, previousCollection, desired },
+    ]);
+  }
+
+  private async prepareStatusJournalEntries(entries: Array<{
+    article: FeedItem;
+    snapshot: ArticleMutationSnapshot;
+    previousCollection?: CollectionFlagState;
+    desired?: CollectionFlagState;
+  }>): Promise<StatusRepairJournal | null> {
+    const items: StatusJournalItem[] = [];
+    for (const entry of entries) {
+      const locator = this.getStatusJournalItemLocator(entry.article);
+      if (!locator) {
+        new Notice("Article status could not be saved. Please try again.");
+        return null;
+      }
+      items.push({
+        ...locator,
+        stableId: /^[a-f0-9]{64}$/.test(entry.article.rssDashboardId ?? "")
+          ? entry.article.rssDashboardId
+          : undefined,
+        previousFeed: serializeArticleMutationSnapshot(entry.snapshot),
+        previousCollection: entry.previousCollection,
+        desired: entry.desired,
+      });
+    }
+    const journal: StatusRepairJournal = {
+      version: 1,
+      txId: `tx-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      phase: "prepared",
+      items,
+    };
     try {
-      await this.app.vault.adapter.write(
-        ".rss-dashboard-data/status-repair-required.json",
-        JSON.stringify({ version: 1, repairRequiredAt: Date.now() }),
-      );
+      await this.writeStatusJournal(journal);
+      return journal;
     } catch {
-      // The warning below intentionally remains content-free even when a
-      // damaged vault adapter cannot accept the recovery marker.
+      new Notice("Article status could not be saved. Please try again.");
+      return null;
+    }
+  }
+
+  private async updateStatusJournalPhase(
+    journal: StatusRepairJournal,
+    phase: StatusJournalPhase,
+  ): Promise<void> {
+    journal.phase = phase;
+    await this.writeStatusJournal(journal);
+  }
+
+  private async writeStatusJournal(journal: StatusRepairJournal): Promise<void> {
+    for (const folder of [".rss-dashboard-data", ".rss-dashboard-data/state"]) {
+      if (!(await this.app.vault.adapter.exists(folder))) {
+        await this.app.vault.createFolder(folder);
+      }
+    }
+    const temporaryPath = `${STATUS_REPAIR_JOURNAL_PATH}.tmp`;
+    const contents = JSON.stringify(journal);
+    const adapter = this.app.vault.adapter as typeof this.app.vault.adapter & {
+      rename?: (from: string, to: string) => Promise<void>;
+    };
+    await adapter.write(temporaryPath, contents);
+    if (typeof adapter.rename === "function") {
+      await adapter.rename(temporaryPath, STATUS_REPAIR_JOURNAL_PATH);
+    } else {
+      // Legacy adapters without rename still retain the fully-written temp
+      // record. This fallback is only used where atomic rename is unavailable.
+      await adapter.write(STATUS_REPAIR_JOURNAL_PATH, contents);
+    }
+  }
+
+  private async clearStatusJournal(): Promise<void> {
+    const adapter = this.app.vault.adapter as typeof this.app.vault.adapter & {
+      remove?: (path: string) => Promise<void>;
+    };
+    if (typeof adapter.remove === "function") {
+      await adapter.remove(STATUS_REPAIR_JOURNAL_PATH);
+    } else {
+      await (this.app.vault as unknown as {
+        delete: (path: string) => Promise<void>;
+      }).delete(STATUS_REPAIR_JOURNAL_PATH);
     }
   }
 
@@ -2640,14 +2888,69 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private async replayStatusRepairJournalIfNeeded(): Promise<void> {
-    const repairPath = ".rss-dashboard-data/status-repair-required.json";
     try {
-      if (!(await this.app.vault.adapter.exists(repairPath))) return;
+      if (!(await this.app.vault.adapter.exists(STATUS_REPAIR_JOURNAL_PATH))) {
+        return;
+      }
+      const parsed = JSON.parse(
+        await this.app.vault.adapter.read(STATUS_REPAIR_JOURNAL_PATH),
+      ) as Partial<StatusRepairJournal>;
+      if (
+        parsed.version !== 1 ||
+        !Array.isArray(parsed.items) ||
+        !["prepared", "collection-written", "feed-write-uncertain", "feed-written"].includes(
+          String(parsed.phase),
+        )
+      ) {
+        throw new Error("invalid status repair journal");
+      }
+      const journal = parsed as StatusRepairJournal;
+      const repository = new CollectionRepository(
+        this.app.vault,
+        this.settings.collection.dataFolder.trim(),
+        () => new Date(),
+      );
+      for (const entry of journal.items) {
+        const feed = this.settings.feeds[entry.feedIndex];
+        const item = feed?.items[entry.itemIndex];
+        if (!item || (entry.stableId && item.rssDashboardId !== entry.stableId)) {
+          new Notice("Article status repair is required. Please try again.");
+          return;
+        }
+        restoreSerializedArticleSnapshot(item, entry.previousFeed);
+        if (entry.stableId && entry.previousCollection) {
+          const existing = await repository.findById(entry.stableId);
+          if (!existing) {
+            new Notice("Article status repair is required. Please try again.");
+            return;
+          }
+          await repository.updateFlags(entry.stableId, entry.previousCollection);
+        }
+      }
       await this.saveSettings({ forceAllShards: true, forceMetadata: true });
-      await this.app.vault.adapter.remove(repairPath);
+      // Verify after both stores have been restored before deleting the only
+      // recovery record. A failed check deliberately leaves it for retry.
+      for (const entry of journal.items) {
+        const item = this.settings.feeds[entry.feedIndex]?.items[entry.itemIndex];
+        if (!item) throw new Error("missing repaired item");
+        if (entry.stableId && entry.previousCollection) {
+          const verified = await repository.findById(entry.stableId);
+          if (
+            !verified ||
+            verified.read !== entry.previousCollection.read ||
+            verified.starred !== entry.previousCollection.starred ||
+            verified.saved !== entry.previousCollection.saved ||
+            verified.savedNotePath !== entry.previousCollection.savedNotePath
+          ) {
+            throw new Error("unverified collection repair");
+          }
+        }
+      }
+      await this.clearStatusJournal();
     } catch {
-      // Keep the marker for the next startup. No source metadata belongs in
-      // this recovery path or its user-visible diagnostics.
+      // Keep the journal for an idempotent later retry. Deliberately fixed,
+      // content-free feedback prevents a broken record from leaking source data.
+      new Notice("Article status repair is required. Please try again.");
     }
   }
 

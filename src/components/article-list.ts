@@ -39,7 +39,7 @@ interface ArticleListCallbacks {
     article: FeedItem,
     updates: Partial<FeedItem>,
     shouldRerender?: boolean,
-  ) => void;
+  ) => Promise<boolean>;
   onArticleSave?: (article: FeedItem) => Promise<void> | void;
   onOpenSavedArticle?: (article: FeedItem) => Promise<void> | void;
   onOpenInReaderView?: (article: FeedItem) => void;
@@ -1391,7 +1391,7 @@ export class ArticleList {
 
       this.updateArticleInPlace(article);
 
-      this.callbacks.onArticleUpdate(
+      void this.callbacks.onArticleUpdate(
         article,
         { tags: [...article.tags] },
         false,

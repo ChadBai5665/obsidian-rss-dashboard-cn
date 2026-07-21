@@ -557,20 +557,18 @@ export class RssDashboardView extends ItemView {
    * Action: Mark all filtered articles as read.
    * @internal
    */
-  public actionMarkAllAsRead(): void {
+  public async actionMarkAllAsRead(): Promise<void> {
     const articles = this.getFilteredArticles();
-    let count = 0;
-    articles.forEach((item) => {
-      if (!item.read) {
-        item.read = true;
-        count++;
-      }
-    });
+    const unread = articles.filter((item) => !item.read);
 
-    if (count > 0) {
-      void this.plugin.saveSettings();
+    if (unread.length > 0) {
+      const updated = await this.plugin.updateArticlesReadBatch(
+        unread.map((item) => ({ articleGuid: item.guid, feedUrl: item.feedUrl })),
+        true,
+      );
+      if (!updated) return;
       this.scheduleRender();
-      new Notice(`Marked ${count} items as read`);
+      new Notice(`Marked ${unread.length} items as read`);
     } else {
       new Notice("No unread items in current view");
     }
@@ -972,7 +970,7 @@ export class RssDashboardView extends ItemView {
             }
           },
           onArticleUpdate: (article, updates, shouldRerender) => {
-            void this.handleArticleUpdate(article, updates, shouldRerender);
+            return this.handleArticleUpdate(article, updates, shouldRerender);
           },
           onArticleSave: (article) => {
             void this.handleArticleSave(article);
@@ -1010,25 +1008,23 @@ export class RssDashboardView extends ItemView {
             await this.plugin.saveSettings();
           },
           onMarkAllAsRead: () => {
-            this.actionMarkAllAsRead();
+            void this.actionMarkAllAsRead();
           },
           onMarkAllAsUnread: () => {
             const articles = this.getFilteredArticles();
-            let count = 0;
-            articles.forEach((item) => {
-              if (item.read) {
-                item.read = false;
-                count++;
-              }
-            });
-
-            if (count > 0) {
-              void this.plugin.saveSettings();
-              this.scheduleRender();
-              new Notice(`Marked ${count} items as unread`);
-            } else {
+            const read = articles.filter((item) => item.read);
+            if (read.length === 0) {
               new Notice("No read items in current view");
+              return;
             }
+            void this.plugin.updateArticlesReadBatch(
+              read.map((item) => ({ articleGuid: item.guid, feedUrl: item.feedUrl })),
+              false,
+            ).then((updated) => {
+              if (!updated) return;
+              this.scheduleRender();
+              new Notice(`Marked ${read.length} items as unread`);
+            });
           },
         },
         currentPage,
@@ -2956,8 +2952,8 @@ export class RssDashboardView extends ItemView {
     article: FeedItem,
     updates: Partial<FeedItem>,
     shouldRerender = true,
-  ): Promise<void> {
-    await this.updateArticleStatus(article, updates, shouldRerender);
+  ): Promise<boolean> {
+    return await this.updateArticleStatus(article, updates, shouldRerender);
   }
 
   private async handleArticleSave(article: FeedItem): Promise<void> {
@@ -3030,7 +3026,7 @@ export class RssDashboardView extends ItemView {
     article: FeedItem,
     updates: Partial<FeedItem>,
     shouldRerender = true,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const normalizedUpdates = applyAutomaticArticleTags(
       article,
       updates,
@@ -3042,13 +3038,13 @@ export class RssDashboardView extends ItemView {
         f.items.some((item: FeedItem) => item.guid === article.guid),
       );
 
-    if (!feed) return;
+    if (!feed) return false;
 
     const originalArticle = feed.items.find(
       (item: FeedItem) => item.guid === article.guid,
     );
 
-    if (!originalArticle) return;
+    if (!originalArticle) return false;
 
     const didUpdate = await this.plugin.updateArticle(
       originalArticle.guid,
@@ -3058,7 +3054,7 @@ export class RssDashboardView extends ItemView {
     );
     if (didUpdate === false) {
       Object.assign(article, originalArticle);
-      return;
+      return false;
     }
 
     Object.assign(article, normalizedUpdates);
@@ -3075,6 +3071,7 @@ export class RssDashboardView extends ItemView {
       }
       this.syncArticleListAfterUpdate(article);
     }
+    return true;
   }
 
   public applyExternalArticleUpdate(
@@ -3190,15 +3187,9 @@ export class RssDashboardView extends ItemView {
 
     const updatedArticles: FeedItem[] = [];
     currentPageArticles.forEach((article) => {
-      if (article.read) {
-        return;
-      }
-
+      if (article.read) return;
       const originalArticle = this.findBackingArticleForDisplayItem(article);
-      if (!originalArticle || originalArticle.read) {
-        return;
-      }
-
+      if (!originalArticle || originalArticle.read) return;
       originalArticle.read = true;
       article.read = true;
       updatedArticles.push(article);

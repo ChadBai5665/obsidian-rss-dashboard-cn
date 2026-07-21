@@ -818,6 +818,38 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(getNoticeMessages(consoleLogSpy).join(" ")).not.toContain("secret");
   });
 
+  it("keeps a safe prepared journal when collection persistence fails", async () => {
+    const stableId = "c".repeat(64);
+    const article = createItem({ rssDashboardId: stableId, read: false });
+    const source = createFeed({ items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<boolean>;
+    };
+    vi.spyOn(CollectionRepository.prototype, "findById").mockResolvedValue({
+      read: false,
+      starred: false,
+      saved: false,
+    } as never);
+    vi.spyOn(CollectionRepository.prototype, "updateFlags").mockRejectedValue(
+      new Error("write failed"),
+    );
+
+    await expect(plugin.updateArticle(article.guid, source.url, { read: true })).resolves.toBe(false);
+
+    const adapter = plugin.app.vault.adapter;
+    const journalPath = ".rss-dashboard-data/state/status-repair.json";
+    expect(await adapter.exists(journalPath)).toBe(true);
+    const journal = await adapter.read(journalPath);
+    expect(journal).toContain('"phase":"prepared"');
+    expect(journal).toContain(stableId);
+    expect(journal).not.toContain("https://example.com");
+    expect(journal).not.toContain("Desc");
+  });
+
   it("contains failed-source ledger errors without exposing raw source data", async () => {
     const plugin = createPluginWithSettings([createFeed()]);
     plugin.getSourceRefreshLedger = vi.fn(() => ({
