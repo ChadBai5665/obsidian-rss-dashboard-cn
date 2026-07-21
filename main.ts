@@ -6,7 +6,6 @@ import {
   Platform,
   requireApiVersion,
   TFolder,
-  normalizePath,
   type EventRef,
   type ObsidianProtocolData,
 } from "obsidian";
@@ -78,6 +77,16 @@ import {
 import { applyAutomaticArticleTags } from "./src/utils/tag-utils";
 import { shouldRunDailyRefresh } from "./src/refresh/local-calendar-day";
 import { SourceRefreshLedger } from "./src/refresh/source-refresh-ledger";
+import { CollectionRepository } from "./src/collection/collection-repository";
+import { DailyIndexService } from "./src/collection/daily-index-service";
+import { CollectionService } from "./src/services/collection-service";
+
+export interface FeedRefreshResult {
+  feed: Feed;
+  previousItems: FeedItem[];
+  refreshedItems: FeedItem[];
+  fetchedAt: Date;
+}
 
 export interface FiltersUpdatedEventPayload {
   source: string;
@@ -108,6 +117,23 @@ type LegacyPlaybackProgressEntry = {
   position: number;
   duration: number;
 };
+
+type FeedItemWithMetrics = FeedItem & {
+  metrics?: Record<string, number>;
+};
+
+function snapshotFeedItems(items: FeedItem[]): FeedItem[] {
+  return items.map((item) => {
+    const itemWithMetrics = item as FeedItemWithMetrics;
+    return {
+      ...item,
+      tags: item.tags?.map((tag) => ({ ...tag })),
+      metrics: itemWithMetrics.metrics
+        ? { ...itemWithMetrics.metrics }
+        : undefined,
+    } as FeedItemWithMetrics;
+  });
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -283,6 +309,9 @@ export default class RssDashboardPlugin extends Plugin {
   private sourceRefreshLedger:
     | { dataRoot: string; ledger: SourceRefreshLedger }
     | null = null;
+  private collectionService:
+    | { dataRoot: string; dailyIndexFolder: string; service: CollectionService }
+    | null = null;
   private progressSaveDebounce: number | null = null;
   private suppressWatcherUntil = 0;
   private static readonly FEED_REFRESH_RENDER_THROTTLE_MS = 250;
@@ -421,7 +450,7 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private getSourceRefreshLedger(): SourceRefreshLedger {
-    const dataRoot = normalizePath(this.settings.collection.dataFolder.trim());
+    const dataRoot = this.settings.collection.dataFolder.trim();
     if (this.sourceRefreshLedger?.dataRoot === dataRoot) {
       return this.sourceRefreshLedger.ledger;
     }
@@ -429,6 +458,29 @@ export default class RssDashboardPlugin extends Plugin {
     const ledger = new SourceRefreshLedger(this.app.vault, dataRoot);
     this.sourceRefreshLedger = { dataRoot, ledger };
     return ledger;
+  }
+
+  private getCollectionService(): CollectionService {
+    const dataRoot = this.settings.collection.dataFolder.trim();
+    const dailyIndexFolder = this.settings.collection.dailyIndexFolder.trim();
+    if (
+      this.collectionService?.dataRoot === dataRoot &&
+      this.collectionService.dailyIndexFolder === dailyIndexFolder
+    ) {
+      return this.collectionService.service;
+    }
+
+    const service = new CollectionService({
+      repository: new CollectionRepository(
+        this.app.vault,
+        dataRoot,
+        () => new Date(),
+      ),
+      dailyIndex: new DailyIndexService(this.app.vault, dailyIndexFolder),
+      ledger: this.getSourceRefreshLedger(),
+    });
+    this.collectionService = { dataRoot, dailyIndexFolder, service };
+    return service;
   }
 
   private getRefreshSourceIds(): string[] {
@@ -1297,10 +1349,22 @@ export default class RssDashboardPlugin extends Plugin {
 
       await this.refreshFeedBatch(feedsToRefresh, feedNoticeText);
     } catch (error) {
-      console.error(`[RSS dashboard] Error refreshing feeds:`, error);
+      console.error("[RSS dashboard] Refresh request failed.");
       new Notice(
         `Error refreshing  ${error instanceof Error ? error.message : "Unknown error"}`,
       );
+    }
+  }
+
+  async refreshFailedSources(): Promise<void> {
+    const failedSourceIds = new Set(
+      await this.getSourceRefreshLedger().getSourceIdsWithStatus("error"),
+    );
+    const failedFeeds = this.getRefreshableFeeds(this.settings.feeds).filter(
+      (feed) => failedSourceIds.has(feed.feedId ?? feed.url),
+    );
+    if (failedFeeds.length > 0) {
+      await this.refreshFeeds(failedFeeds);
     }
   }
 
@@ -1352,7 +1416,7 @@ export default class RssDashboardPlugin extends Plugin {
       new Notice(`Refreshing ${feed.title}...`);
       await this.refreshSingleFeed(feed, feed.title);
     } catch (error) {
-      console.error(`[RSS dashboard] Error refreshing feeds:`, error);
+      console.error("[RSS dashboard] Refresh request failed.");
       new Notice(
         `Error refreshing  ${error instanceof Error ? error.message : "Unknown error"}`,
       );
@@ -2695,8 +2759,8 @@ export default class RssDashboardPlugin extends Plugin {
     feed: Feed,
     feedNoticeText: string,
   ): Promise<void> {
-    const updatedFeed = await this.refreshFeedWithTimeout(feed);
-    this.mergeRefreshedFeed(updatedFeed);
+    const result = await this.refreshFeedPipeline(feed);
+    this.mergeRefreshedFeed(result.feed);
 
     await this.validateSavedArticles();
     this.settings.lastRefreshTimestamp = Date.now();
@@ -2845,8 +2909,8 @@ export default class RssDashboardPlugin extends Plugin {
     });
 
     try {
-      const updatedFeed = await this.refreshFeedWithTimeout(currentFeed);
-      this.mergeRefreshedFeed(updatedFeed);
+      const result = await this.refreshFeedPipeline(currentFeed);
+      this.mergeRefreshedFeed(result.feed);
     } catch (error) {
       const isTimedOut =
         error instanceof Error && error.message === "Timed out";
@@ -2856,10 +2920,7 @@ export default class RssDashboardPlugin extends Plugin {
         refreshSummary.failed += 1;
       }
 
-      console.error(
-        `[RSS dashboard] Error refreshing feed ${currentFeed.title}:`,
-        error,
-      );
+      console.error("[RSS dashboard] A source refresh failed.");
     } finally {
       this.activeRefreshState.delete(currentFeed.url);
 
@@ -2875,10 +2936,50 @@ export default class RssDashboardPlugin extends Plugin {
     });
   }
 
-  private async refreshFeedWithTimeout(feed: Feed): Promise<Feed> {
+  private async refreshFeedPipeline(feed: Feed): Promise<FeedRefreshResult> {
+    const sourceId = feed.feedId ?? feed.url;
+    const attemptedAt = new Date();
+    const ledger = this.getSourceRefreshLedger();
+    await ledger.recordAttempt(sourceId, attemptedAt);
+
+    let result: FeedRefreshResult;
+    try {
+      result = await this.refreshFeedWithTimeout(feed);
+    } catch (error) {
+      await ledger.recordError(sourceId, attemptedAt, {
+        code:
+          error instanceof Error && error.message === "Timed out"
+            ? "timed-out"
+            : "refresh-failed",
+        message:
+          error instanceof Error && error.message === "Timed out"
+            ? "Source refresh timed out."
+            : "Source refresh failed.",
+      });
+      throw error;
+    }
+
+    if (!this.settings.collection.enabled) {
+      await ledger.recordSuccess(sourceId, result.fetchedAt);
+      return result;
+    }
+
+    try {
+      await this.getCollectionService().collectFeedRefresh(result);
+    } catch (error) {
+      await ledger.recordError(sourceId, attemptedAt, {
+        code: "collection-failed",
+        message: "Collection persistence failed.",
+      });
+      throw error;
+    }
+    return result;
+  }
+
+  private async refreshFeedWithTimeout(feed: Feed): Promise<FeedRefreshResult> {
     return await Promise.race([
       this.refreshFeedDirect(feed),
-      new Promise<Feed>((_, reject) => {
+      new Promise<FeedRefreshResult>((_, reject) => {
         window.setTimeout(
           () => reject(new Error("Timed out")),
           FEED_REQUEST_TIMEOUT_MS,
@@ -2887,13 +2988,21 @@ export default class RssDashboardPlugin extends Plugin {
     ]);
   }
 
-  private async refreshFeedDirect(feed: Feed): Promise<Feed> {
+  private async refreshFeedDirect(feed: Feed): Promise<FeedRefreshResult> {
+    const previousItems = snapshotFeedItems(feed.items);
+    let updatedFeed: Feed;
     if (typeof this.feedParser.refreshFeed === "function") {
-      return await this.feedParser.refreshFeed(feed);
+      updatedFeed = await this.feedParser.refreshFeed(feed);
+    } else {
+      const updatedFeeds = await this.feedParser.refreshAllFeeds([feed]);
+      updatedFeed = updatedFeeds[0] ?? feed;
     }
-
-    const updatedFeeds = await this.feedParser.refreshAllFeeds([feed]);
-    return updatedFeeds[0] ?? feed;
+    return {
+      feed: updatedFeed,
+      previousItems,
+      refreshedItems: updatedFeed.items,
+      fetchedAt: new Date(),
+    };
   }
 
   public async performAutoBackups(): Promise<void> {

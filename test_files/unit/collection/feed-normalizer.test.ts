@@ -110,4 +110,16 @@ describe("normalizeFeedItem", () => {
     expect(collected.sourceType).toBe("youtube");
     expect(collected.contentBasis).toBe("title-description");
   });
+
+  it("copies finite source metrics into the durable observation", () => {
+    const sourceItem = createItem() as FeedItem & {
+      metrics: Record<string, number>;
+    };
+    sourceItem.metrics = { likes: 12, replies: 3 };
+
+    const collected = normalizeFeedItem(createFeed(), sourceItem, now);
+
+    expect(collected.metrics).toEqual({ likes: 12, replies: 3 });
+    expect(collected.metrics).not.toBe(sourceItem.metrics);
+  });
 });

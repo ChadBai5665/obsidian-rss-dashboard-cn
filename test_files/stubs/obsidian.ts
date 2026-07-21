@@ -314,6 +314,9 @@ export class MockDataVault {
       write: async (path: string, content: string) => {
         this.adapterFiles.set(path, content);
       },
+      mkdir: async (path: string) => {
+        await this.createFolder(path);
+      },
       on: (
         _name: string,
         _callback: (...args: unknown[]) => unknown,

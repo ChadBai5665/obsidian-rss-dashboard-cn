@@ -68,6 +68,10 @@ interface TestPlugin {
   activeRefreshState: Map<string, unknown>;
   getActiveDashboardView: ReturnType<typeof vi.fn>;
   validateSavedArticles: ReturnType<typeof vi.fn>;
+  getSourceRefreshLedger: ReturnType<typeof vi.fn>;
+  getCollectionService: ReturnType<typeof vi.fn>;
+  refreshFailedSources: () => Promise<void>;
+  refreshSelectedFeed: (feed: Feed) => Promise<void>;
 }
 
 function createPluginWithSettings(feeds: Feed[]): TestPlugin {
@@ -90,6 +94,14 @@ function createPluginWithSettings(feeds: Feed[]): TestPlugin {
 
   testPlugin.getActiveDashboardView = vi.fn();
   testPlugin.validateSavedArticles = vi.fn();
+  testPlugin.getSourceRefreshLedger = vi.fn(() => ({
+    getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+    recordAttempt: vi.fn().mockResolvedValue(undefined),
+    recordError: vi.fn().mockResolvedValue(undefined),
+  }));
+  testPlugin.getCollectionService = vi.fn(() => ({
+    collectFeedRefresh: vi.fn().mockResolvedValue([]),
+  }));
 
   return testPlugin;
 }
@@ -115,6 +127,157 @@ beforeEach(() => {
 });
 
 describe("refreshFeeds() pipeline behavior", () => {
+  it("runs parser then the shared collection pipeline for a successful source", async () => {
+    const source = createFeed({ feedId: "source-a" });
+    const refreshed = {
+      ...source,
+      items: [...source.items, createItem({ guid: "article-2" })],
+      lastUpdated: 2,
+    };
+    const plugin = createPluginWithSettings([source]);
+    const events: string[] = [];
+    const ledger = {
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn(async () => events.push("attempt")),
+      recordError: vi.fn(),
+    };
+    const collectFeedRefresh = vi.fn(async () => events.push("collect"));
+    plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (fn: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async () => {
+      events.push("parser");
+      return refreshed;
+    });
+
+    await plugin.refreshFeeds([source]);
+
+    expect(events).toEqual(["attempt", "parser", "collect"]);
+    expect(collectFeedRefresh).toHaveBeenCalledWith({
+      feed: refreshed,
+      previousItems: source.items,
+      refreshedItems: refreshed.items,
+      fetchedAt: expect.any(Date),
+    });
+    expect(ledger.recordError).not.toHaveBeenCalled();
+  });
+
+  it("records parser errors without touching collection persistence", async () => {
+    const source = createFeed({ feedId: "source-a" });
+    const plugin = createPluginWithSettings([source]);
+    const ledger = {
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    };
+    const collectFeedRefresh = vi.fn();
+    plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+    plugin.feedParser.refreshFeed.mockRejectedValue(new Error("offline"));
+
+    await expect(plugin.refreshFeeds([source])).resolves.toBeUndefined();
+
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(ledger.recordError).toHaveBeenCalledWith(
+      "source-a",
+      expect.any(Date),
+      { code: "refresh-failed", message: "Source refresh failed." },
+    );
+  });
+
+  it("snapshots previous material fields before a parser mutates items in place", async () => {
+    const source = createFeed({ feedId: "source-a" });
+    const plugin = createPluginWithSettings([source]);
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (fn: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (parsedFeed) => {
+      parsedFeed.items[0].description = "Mutated description";
+      return parsedFeed;
+    });
+
+    await plugin.refreshFeeds([source]);
+
+    expect(collectFeedRefresh).toHaveBeenCalledWith(
+      expect.objectContaining({
+        previousItems: [expect.objectContaining({ description: "<p>Desc</p>" })],
+        refreshedItems: [
+          expect.objectContaining({ description: "Mutated description" }),
+        ],
+      }),
+    );
+  });
+
+  it("records persistence errors, preserves the previous feed, and does not stop later sources", async () => {
+    const sourceA = createFeed({ feedId: "source-a", url: "https://example.com/a.xml" });
+    const sourceB = createFeed({
+      feedId: "source-b",
+      title: "Feed B",
+      url: "https://example.com/b.xml",
+      items: [createItem({ guid: "b-1", feedTitle: "Feed B", feedUrl: "https://example.com/b.xml" })],
+    });
+    const plugin = createPluginWithSettings([sourceA, sourceB]);
+    const ledger = {
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    };
+    const collectFeedRefresh = vi.fn(async ({ feed }: { feed: Feed }) => {
+      if (feed.feedId === "source-a") throw new Error("disk full");
+      return [];
+    });
+    plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (fn: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (source: Feed) => ({
+        ...source,
+        lastUpdated: source.feedId === "source-a" ? 10 : 20,
+      }));
+
+    await plugin.refreshFeeds();
+
+    expect(plugin.settings.feeds[0].lastUpdated).toBe(1);
+    expect(plugin.settings.feeds[1].lastUpdated).toBe(20);
+    expect(ledger.recordError).toHaveBeenCalledWith(
+      "source-a",
+      expect.any(Date),
+      { code: "collection-failed", message: "Collection persistence failed." },
+    );
+    expect(collectFeedRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("routes all, failed-only, and selected-source refreshes through the same parser pipeline", async () => {
+    const sourceA = createFeed({ feedId: "source-a", url: "https://example.com/a.xml" });
+    const sourceB = createFeed({ feedId: "source-b", url: "https://example.com/b.xml" });
+    const plugin = createPluginWithSettings([sourceA, sourceB]);
+    const ledger = {
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue(["source-b", "deleted-source"]),
+      recordAttempt: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    };
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (fn: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (source: Feed) => ({ ...source }));
+
+    await plugin.refreshFeeds();
+    await plugin.refreshFailedSources();
+    await plugin.refreshSelectedFeed(sourceA);
+
+    expect(plugin.feedParser.refreshFeed.mock.calls.map((call: unknown[]) => (call[0] as Feed).feedId)).toEqual([
+      "source-a",
+      "source-b",
+      "source-b",
+      "source-a",
+    ]);
+    expect(collectFeedRefresh).toHaveBeenCalledTimes(4);
+  });
+
   it("refreshes multi-feed selections with bounded concurrency, incremental merges, and a final save + refresh", async () => {
     vi.useFakeTimers();
     const feedA = createFeed({

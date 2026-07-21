@@ -14,6 +14,7 @@ const SOURCE_TYPES = new Set<SourceType>([
 ]);
 
 type FeedWithOptionalSourceType = Feed & { sourceType?: unknown };
+type FeedItemWithMetrics = FeedItem & { metrics?: unknown };
 
 export function normalizeFeedItem(
   feed: Feed,
@@ -54,12 +55,25 @@ export function normalizeFeedItem(
     topics: uniqueTopicNames(item),
     excerpt: nonEmpty(item.summary) ?? nonEmpty(item.description),
     contentBasis: sourceType === "youtube" ? "title-description" : "feed",
+    metrics: finiteMetrics((item as FeedItemWithMetrics).metrics),
     read: item.read ?? false,
     starred: item.starred ?? false,
     saved: item.saved ?? false,
     savedNotePath: nonEmpty(item.savedFilePath),
     collectionStatus: "collected",
   };
+}
+
+function finiteMetrics(value: unknown): Record<string, number> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const metrics = Object.entries(value).filter(
+    (entry): entry is [string, number] =>
+      typeof entry[1] === "number" && Number.isFinite(entry[1]),
+  );
+  return metrics.length > 0 ? Object.fromEntries(metrics) : undefined;
 }
 
 function resolveSourceType(feed: Feed, item: FeedItem): SourceType {

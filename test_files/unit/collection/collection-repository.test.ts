@@ -318,6 +318,36 @@ describe("CollectionRepository", () => {
     });
   });
 
+  it("preserves an explicit material-update observation on a later date", async () => {
+    const { repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+
+    const result = await repository.upsertDaily(
+      [
+        createItem({
+          title: "Materially changed title",
+          observationType: "updated",
+          fetchedAt: "2026-07-22T08:00:00.000Z",
+          firstSeenAt: "2026-07-22T08:00:00.000Z",
+          lastSeenAt: "2026-07-22T08:00:00.000Z",
+        }),
+      ],
+      "2026-07-22",
+    );
+
+    expect(result[0].observationType).toBe("updated");
+  });
+
+  it("detects whether a source has any durable collection observation", async () => {
+    const { repository } = createHarness();
+    expect(await repository.hasItemsForSource("feed-1")).toBe(false);
+
+    await repository.upsertDaily([createItem()], "2026-07-21");
+
+    expect(await repository.hasItemsForSource("feed-1")).toBe(true);
+    expect(await repository.hasItemsForSource("deleted-source")).toBe(false);
+  });
+
   it("quarantines malformed lines exactly once without erasing valid records", async () => {
     const { adapter, repository } = createHarness();
     await repository.upsertDaily([createItem()], "2026-07-21");

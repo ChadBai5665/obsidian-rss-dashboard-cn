@@ -110,9 +110,10 @@ export class CollectionRepository {
         indexEntry !== undefined && indexEntry.earliestDate < localDate;
       let prepared: CollectedItem = {
         ...incoming,
-        observationType: wasSeenEarlier
-          ? "rediscovered"
-          : incoming.observationType,
+        observationType:
+          wasSeenEarlier && incoming.observationType === "new"
+            ? "rediscovered"
+            : incoming.observationType,
       };
 
       if (wasSeenEarlier) {
@@ -146,6 +147,19 @@ export class CollectionRepository {
     return indexedEntry
       ? this.findItemOnDate(id, indexedEntry.latestDate)
       : null;
+  }
+
+  async hasItemsForSource(sourceId: string): Promise<boolean> {
+    const dates = await this.collectionDates();
+    for (let index = dates.length - 1; index >= 0; index -= 1) {
+      const items = (
+        await this.readCollection(this.dailyPath(dates[index]))
+      ).items;
+      if (items.some((item) => item.sourceId === sourceId)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   async listByDate(localDate: string): Promise<CollectedItem[]> {
