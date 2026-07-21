@@ -30,7 +30,68 @@
   padding: 0 10px 10px 10px;
   overflow-y: auto;
   flex: 1 1 0;
+  min-height: 8rem;
+}
+
+/* A bounded, independently scrollable collection snapshot. It must never
+   consume the feed reader's flex space when a busy source yields many items. */
+.rss-dashboard-collection-sections {
+  flex: 0 1 auto;
   min-height: 0;
+  max-height: 35vh;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.rss-dashboard-collection-controls,
+.rss-dashboard-collection-filter-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.rss-dashboard-collection-controls button,
+.rss-dashboard-collection-filter-controls button,
+.rss-dashboard-collection-source-refresh {
+  cursor: pointer;
+}
+
+.rss-dashboard-collection-section-button.is-active,
+.rss-dashboard-collection-source-type-filter.is-active,
+.rss-dashboard-collection-topic-filter.is-active {
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.rss-dashboard-collection-results {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rss-dashboard-collection-list {
+  max-height: 16rem;
+  overflow: auto;
+}
+
+.rss-dashboard-collection-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.rss-dashboard-collection-item-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rss-dashboard-collection-sections.is-collapsed > :not(.rss-dashboard-collection-title):not(.rss-dashboard-collection-controls) {
+  display: none;
 }
 
 /* ============================================

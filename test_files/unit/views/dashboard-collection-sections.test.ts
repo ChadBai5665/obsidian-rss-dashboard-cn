@@ -84,6 +84,7 @@ interface CollectionDashboardTestApi {
   setCollectionSection(section: "today" | "subscriptions" | "starred" | "saved"): void;
   getCollectionSectionItems(): CollectedItem[];
   setCollectionQueryText(text: string): void;
+  renderCollectionSections(container: HTMLElement): void;
   actionRefreshAllSources(): Promise<void>;
   actionRefreshFailedSources(): Promise<void>;
   actionRefreshCollectionSource(sourceId: string): Promise<void>;
@@ -96,9 +97,9 @@ async function makeView(input: { items: CollectedItem[]; feeds?: Feed[] }) {
     settings: { ...settings(), feeds: input.feeds ?? [feed("subscribed")] },
     saveSettings: vi.fn(async () => {}),
     getCollectedItemsForDate: vi.fn(async () => input.items),
-    refreshFeeds: vi.fn(async () => {}),
-    refreshFailedSources: vi.fn(async () => {}),
-    refreshSourceById: vi.fn(async () => {}),
+    manualRefreshAllSources: vi.fn(async () => {}),
+    manualRefreshFailedSources: vi.fn(async () => {}),
+    manualRefreshSourceById: vi.fn(async () => {}),
   };
   const leaf = { app } as unknown as import("obsidian").WorkspaceLeaf;
   const view = new RssDashboardView(leaf, plugin as never) as unknown as CollectionDashboardTestApi;
@@ -156,6 +157,22 @@ describe("Dashboard collection sections", () => {
     ]);
   });
 
+  it("reflects a reloaded durable flag snapshot in the active section immediately", async () => {
+    const { view, plugin } = await makeView({ items: [item({ id: "stable", starred: false })] });
+    await view.loadCollectionItems();
+    view.setCollectionSection("starred");
+    expect(view.getCollectionSectionItems()).toEqual([]);
+
+    plugin.getCollectedItemsForDate.mockResolvedValueOnce([
+      item({ id: "stable", starred: true }),
+    ]);
+    await view.loadCollectionItems();
+
+    expect(view.getCollectionSectionItems().map((entry) => entry.id)).toEqual([
+      "stable",
+    ]);
+  });
+
   it("routes all, failed, and a source-row refresh through the plugin pipeline", async () => {
     const { view, plugin } = await makeView({ items: [] });
 
@@ -163,9 +180,9 @@ describe("Dashboard collection sections", () => {
     await view.actionRefreshFailedSources();
     await view.actionRefreshCollectionSource("subscribed");
 
-    expect(plugin.refreshFeeds).toHaveBeenCalledTimes(1);
-    expect(plugin.refreshFailedSources).toHaveBeenCalledTimes(1);
-    expect(plugin.refreshSourceById).toHaveBeenCalledWith("subscribed");
+    expect(plugin.manualRefreshAllSources).toHaveBeenCalledTimes(1);
+    expect(plugin.manualRefreshFailedSources).toHaveBeenCalledTimes(1);
+    expect(plugin.manualRefreshSourceById).toHaveBeenCalledWith("subscribed");
   });
 
   it("does not render after a collection read completes for a closed dashboard", async () => {
@@ -177,10 +194,127 @@ describe("Dashboard collection sections", () => {
     plugin.getCollectedItemsForDate.mockReturnValueOnce(itemsPromise);
 
     const loading = view.loadCollectionItems();
+    view.render.mockClear();
     await view.onClose();
     resolveItems?.([item({ id: "late" })]);
     await loading;
 
     expect(view.render).not.toHaveBeenCalled();
+  });
+
+  it("renders source type, topic, and read controls that compose with text filtering", async () => {
+    const { view } = await makeView({
+      items: [
+        item({
+          id: "youtube-read",
+          sourceType: "youtube",
+          topics: ["AI"],
+          read: true,
+          title: "AI video",
+        }),
+        item({
+          id: "youtube-unread",
+          sourceType: "youtube",
+          topics: ["Markets"],
+          read: false,
+          title: "AI market video",
+        }),
+        item({ id: "rss-read", sourceType: "rss", topics: ["AI"], read: true, title: "AI RSS" }),
+      ],
+    });
+    await view.loadCollectionItems();
+    view.render.mockClear();
+    const root = document.body.createDiv();
+    view.renderCollectionSections(root);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-collection-source-type="youtube"]')
+      ?.click();
+    root
+      .querySelector<HTMLButtonElement>('[data-collection-topic="AI"]')
+      ?.click();
+    const read = root.querySelector<HTMLSelectElement>(".rss-dashboard-collection-read-filter");
+    expect(read).not.toBeNull();
+    if (read) {
+      read.value = "read";
+      read.dispatchEvent(new Event("change"));
+    }
+
+    expect(view.getCollectionSectionItems().map((entry) => entry.id)).toEqual([
+      "youtube-read",
+    ]);
+  });
+
+  it("updates collection search results without destroying the active input or its cursor", async () => {
+    const { view } = await makeView({
+      items: [item({ id: "one", title: "AI field note" }), item({ id: "two", title: "AI workflow" })],
+    });
+    await view.loadCollectionItems();
+    view.render.mockClear();
+    const root = document.body.createDiv();
+    view.renderCollectionSections(root);
+    const search = root.querySelector<HTMLInputElement>(".rss-dashboard-collection-search");
+    expect(search).not.toBeNull();
+    if (!search) return;
+
+    search.focus();
+    search.value = "AI";
+    search.setSelectionRange(2, 2);
+    search.dispatchEvent(new Event("input"));
+    search.value = "AI w";
+    search.setSelectionRange(4, 4);
+    search.dispatchEvent(new Event("input"));
+
+    expect(root.querySelector(".rss-dashboard-collection-search")).toBe(search);
+    expect(document.activeElement).toBe(search);
+    expect(search.selectionStart).toBe(4);
+    expect(view.render).not.toHaveBeenCalled();
+    expect(root.querySelectorAll(".rss-dashboard-collection-row")).toHaveLength(1);
+  });
+
+  it("shows a visible loading state immediately and gives the collection area independent layout classes", async () => {
+    let resolveItems: ((items: CollectedItem[]) => void) | undefined;
+    const pending = new Promise<CollectedItem[]>((resolve) => {
+      resolveItems = resolve;
+    });
+    const { view, plugin } = await makeView({ items: [] });
+    plugin.getCollectedItemsForDate.mockReturnValueOnce(pending);
+    view.render.mockClear();
+
+    const loading = view.loadCollectionItems();
+    expect(view.render).toHaveBeenCalledTimes(1);
+    const loadingRoot = document.body.createDiv();
+    view.renderCollectionSections(loadingRoot);
+    expect(loadingRoot.textContent).toContain("Loading today's collection…");
+    resolveItems?.([]);
+    await loading;
+
+    const root = document.body.createDiv();
+    view.renderCollectionSections(root);
+    expect(root.querySelector(".rss-dashboard-collection-sections")).not.toBeNull();
+    expect(root.querySelector(".rss-dashboard-collection-collapse")).not.toBeNull();
+    expect(root.querySelector(".rss-dashboard-collection-list")).not.toBeNull();
+  });
+
+  it("renders external collection text as text and leaves no stale rows after local result refreshes", async () => {
+    const { view } = await makeView({
+      items: [
+        item({ id: "safe", title: "<img src=x onerror=alert(1)>", sourceName: "<script>bad</script>" }),
+        item({ id: "other", title: "Other" }),
+      ],
+    });
+    await view.loadCollectionItems();
+    const root = document.body.createDiv();
+    view.renderCollectionSections(root);
+    const search = root.querySelector<HTMLInputElement>(".rss-dashboard-collection-search");
+    if (!search) return;
+
+    expect(root.querySelector("img, script")).toBeNull();
+    expect(root.textContent).toContain("<img src=x onerror=alert(1)>");
+    search.value = "Other";
+    search.dispatchEvent(new Event("input"));
+
+    expect(root.querySelectorAll(".rss-dashboard-collection-row")).toHaveLength(1);
+    expect(root.textContent).not.toContain("<script>bad</script>");
   });
 });

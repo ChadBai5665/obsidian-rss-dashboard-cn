@@ -1524,6 +1524,10 @@ guid: "{{guid}}"
         saved: true,
         savedNotePath: filePath,
       });
+      const workspace = this.app.workspace as typeof this.app.workspace & {
+        trigger?: (name: string) => void;
+      };
+      workspace.trigger?.("rss-dashboard:collection-flags-updated");
     } catch {
       console.warn(SAVED_NOTE_SYNC_WARNING);
     }

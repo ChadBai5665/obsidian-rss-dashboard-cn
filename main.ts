@@ -941,8 +941,7 @@ export default class RssDashboardPlugin extends Plugin {
         id: "refresh-feeds",
         name: "Refresh all sources",
         callback: () => {
-          this.cancelPendingStartupRefresh();
-          void this.refreshFeeds();
+          void this.manualRefreshAllSources();
         },
       });
 
@@ -950,8 +949,7 @@ export default class RssDashboardPlugin extends Plugin {
         id: "refresh-failed-sources",
         name: "Refresh failed sources",
         callback: () => {
-          this.cancelPendingStartupRefresh();
-          void this.refreshFailedSources();
+          void this.manualRefreshFailedSources();
         },
       });
 
@@ -1311,6 +1309,7 @@ export default class RssDashboardPlugin extends Plugin {
             savedFilePath: originalItem.savedFilePath,
             tags: originalItem.tags ? [...originalItem.tags] : [],
           });
+          await this.refreshDashboardViews();
         }
       }
     }
@@ -1440,15 +1439,38 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   async refreshFailedSources(): Promise<void> {
-    const failedSourceIds = new Set(
-      await this.getSourceRefreshLedger().getSourceIdsWithStatus("error"),
-    );
-    const failedFeeds = this.getRefreshableFeeds(this.settings.feeds).filter(
-      (feed) => failedSourceIds.has(feed.feedId ?? feed.url),
-    );
-    if (failedFeeds.length > 0) {
-      await this.refreshFeeds(failedFeeds);
+    try {
+      const failedSourceIds = new Set(
+        await this.getSourceRefreshLedger().getSourceIdsWithStatus("error"),
+      );
+      const failedFeeds = this.getRefreshableFeeds(this.settings.feeds).filter(
+        (feed) => failedSourceIds.has(feed.feedId ?? feed.url),
+      );
+      if (failedFeeds.length > 0) {
+        await this.refreshFeeds(failedFeeds);
+      }
+    } catch {
+      console.error("[RSS dashboard] Failed-source refresh request failed.");
+      new Notice("Could not refresh failed sources. Check source status and try again.");
     }
+  }
+
+  /** Public manual entry point used by commands and dashboard controls. */
+  public async manualRefreshAllSources(): Promise<void> {
+    this.cancelPendingStartupRefresh();
+    await this.refreshFeeds();
+  }
+
+  /** Public manual entry point used by commands and dashboard controls. */
+  public async manualRefreshFailedSources(): Promise<void> {
+    this.cancelPendingStartupRefresh();
+    await this.refreshFailedSources();
+  }
+
+  /** Public manual entry point used by collection source rows. */
+  public async manualRefreshSourceById(sourceId: string): Promise<void> {
+    this.cancelPendingStartupRefresh();
+    await this.refreshSourceById(sourceId);
   }
 
   /**
@@ -1485,10 +1507,7 @@ export default class RssDashboardPlugin extends Plugin {
       }
 
       await this.saveSettings();
-      const view = await this.getActiveDashboardView();
-      if (view) {
-        view.refresh();
-      }
+      await this.refreshDashboardViews();
 
       if (updatedCount > 0) {
         new Notice(`Applied limits to ${updatedCount} feeds`);
@@ -1549,15 +1568,40 @@ export default class RssDashboardPlugin extends Plugin {
     Object.assign(article, updates);
 
     await this.saveSettings();
+    if (
+      article.rssDashboardId &&
+      (updates.read !== undefined ||
+        updates.starred !== undefined ||
+        (updates.saved !== undefined && updates.saved !== true))
+    ) {
+      await this.syncCollectionFlags(article);
+    }
 
     if (shouldRefreshView) {
-      const view = await this.getActiveDashboardView();
-      if (view) {
-        view.refresh();
-      }
+      await this.refreshDashboardViews();
     }
 
     await this.syncReaderArticleUpdate(articleGuid, updates);
+  }
+
+  private async syncCollectionFlags(article: FeedItem): Promise<void> {
+    if (!article.rssDashboardId) return;
+    try {
+      await new CollectionRepository(
+        this.app.vault,
+        this.settings.collection.dataFolder.trim(),
+        () => new Date(),
+      ).updateFlags(article.rssDashboardId, {
+        read: article.read ?? false,
+        starred: article.starred ?? false,
+        saved: article.saved ?? false,
+        savedNotePath: article.savedFilePath,
+      });
+    } catch {
+      // Never put vault paths, URLs, or source content into a user-visible error.
+      console.warn("[RSS Dashboard] Collection status sync failed.");
+      new Notice("Collection status could not be saved. Please try again.");
+    }
   }
 
   importOpml(): void {
@@ -2857,11 +2901,8 @@ export default class RssDashboardPlugin extends Plugin {
     await this.validateSavedArticles();
     this.settings.lastRefreshTimestamp = Date.now();
     await this.saveSettings();
-    const view = await this.getActiveDashboardView();
-    if (view) {
-      view.refresh();
-      new Notice(`Feeds refreshed: ${feedNoticeText}`);
-    }
+    await this.refreshDashboardViews();
+    new Notice(`Feeds refreshed: ${feedNoticeText}`);
   }
 
   private async refreshFeedBatch(
@@ -2958,10 +2999,7 @@ export default class RssDashboardPlugin extends Plugin {
       await this.saveSettings();
       this.activeRefreshState.clear();
       this.isMultiFeedRefreshRunning = false;
-      const view = await this.getActiveDashboardView();
-      if (view) {
-        view.refresh();
-      }
+      await this.refreshDashboardViews();
 
       const failureSuffix = this.buildRefreshFailureSummary(refreshSummary);
       new Notice(`Feeds refreshed: ${feedNoticeText}${failureSuffix}`);

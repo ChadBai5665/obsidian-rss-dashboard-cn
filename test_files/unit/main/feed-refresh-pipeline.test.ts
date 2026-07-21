@@ -4,6 +4,8 @@ import RssDashboardPlugin from "../../../main";
 import { DEFAULT_SETTINGS, type Feed, type FeedItem } from "../../../src/types/types";
 import { FEED_REQUEST_TIMEOUT_MS } from "../../../src/services/feed-timeout";
 import { CollectionService } from "../../../src/services/collection-service";
+import { CollectionRepository } from "../../../src/collection/collection-repository";
+import { RssDashboardView } from "../../../src/views/dashboard-view";
 import type { CollectedItem } from "../../../src/collection/collected-item";
 
 let consoleLogSpy: ReturnType<typeof vi.spyOn>;
@@ -537,6 +539,9 @@ describe("refreshFeeds() pipeline behavior", () => {
       refreshSidebarOnly: sidebarRefreshSpy,
       refresh: viewRefreshSpy,
     } as unknown as Awaited<ReturnType<typeof RssDashboardPlugin.prototype.getActiveDashboardView>>);
+    const refreshAllDashboards = vi
+      .spyOn(plugin as unknown as RssDashboardPlugin, "refreshDashboardViews")
+      .mockResolvedValue(undefined);
 
     const resolvers: Array<() => void> = [];
     (plugin.feedParser.refreshFeed as unknown as { mockImplementation: (fn: (feed: Feed) => Promise<Feed>) => void }).mockImplementation((feed: Feed) => {
@@ -606,7 +611,8 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(validateSpy).toHaveBeenCalledTimes(1);
     expect(plugin.saveData).toHaveBeenCalledTimes(1);
     expect(sidebarRefreshSpy).toHaveBeenCalledTimes(2);
-    expect(viewRefreshSpy).toHaveBeenCalledTimes(1);
+    expect(viewRefreshSpy).toHaveBeenCalledTimes(0);
+    expect(refreshAllDashboards).toHaveBeenCalledTimes(1);
     expect(plugin.feedParser.refreshAllFeeds).not.toHaveBeenCalled();
 
     const notices = getNoticeMessages(consoleLogSpy);
@@ -635,6 +641,9 @@ describe("refreshFeeds() pipeline behavior", () => {
     (plugin.feedParser.refreshFeed as unknown as { mockResolvedValue: (value: Feed) => void }).mockResolvedValue(updatedB);
 
     vi.spyOn(plugin, "getActiveDashboardView").mockResolvedValue(null);
+    const refreshAllDashboards = vi
+      .spyOn(plugin as unknown as RssDashboardPlugin, "refreshDashboardViews")
+      .mockResolvedValue(undefined);
 
     await plugin.refreshFeeds([feedB]);
 
@@ -643,10 +652,11 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.settings.feeds[0].lastUpdated).toBe(100);
     expect(plugin.settings.feeds[1].lastUpdated).toBe(777);
     expect(plugin.saveData).toHaveBeenCalledTimes(1);
+    expect(refreshAllDashboards).toHaveBeenCalledTimes(1);
 
     const notices = getNoticeMessages(consoleLogSpy);
     expect(notices[0]).toBe("Refreshing Feed B...");
-    expect(notices.some((m) => m.startsWith("Feeds refreshed:"))).toBe(false);
+    expect(notices).toContain("Feeds refreshed: Feed B");
   });
 
   it("times out a stalled feed without blocking the rest of a multi-feed refresh", async () => {
@@ -668,6 +678,9 @@ describe("refreshFeeds() pipeline behavior", () => {
       refreshSidebarOnly: sidebarRefreshSpy,
       refresh: viewRefreshSpy,
     } as unknown as Awaited<ReturnType<typeof RssDashboardPlugin.prototype.getActiveDashboardView>>);
+    const refreshAllDashboards = vi
+      .spyOn(plugin as unknown as RssDashboardPlugin, "refreshDashboardViews")
+      .mockResolvedValue(undefined);
 
     (plugin.feedParser.refreshFeed as unknown as { mockImplementation: (fn: (feed: Feed) => Promise<Feed>) => void }).mockImplementation((feed: Feed) => {
       if (feed.url === feedA.url) {
@@ -689,7 +702,8 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.settings.feeds[1].lastUpdated).toBe(777);
     expect(plugin.saveData).toHaveBeenCalledTimes(1);
     expect(sidebarRefreshSpy).toHaveBeenCalledTimes(1);
-    expect(viewRefreshSpy).toHaveBeenCalledTimes(1);
+    expect(viewRefreshSpy).toHaveBeenCalledTimes(0);
+    expect(refreshAllDashboards).toHaveBeenCalledTimes(1);
     expect(plugin.activeRefreshState.size).toBe(0);
 
     const notices = getNoticeMessages(consoleLogSpy);
@@ -737,5 +751,80 @@ describe("refreshFeeds() pipeline behavior", () => {
     );
     expect(plugin.saveData).not.toHaveBeenCalled();
     expect(getNoticeMessages(consoleLogSpy)).toEqual([]);
+  });
+
+  it("writes durable read/starred/saved cancellation flags by stable collection ID and refreshes every dashboard", async () => {
+    const article = createItem({
+      rssDashboardId: "stable-item-id",
+      read: true,
+      starred: true,
+      saved: false,
+    });
+    const source = createFeed({ items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      updateArticle: (
+        guid: string,
+        url: string,
+        updates: Partial<FeedItem>,
+      ) => Promise<void>;
+      refreshDashboardViews: ReturnType<typeof vi.fn>;
+    };
+    const updateFlags = vi
+      .spyOn(CollectionRepository.prototype, "updateFlags")
+      .mockResolvedValue(undefined);
+    plugin.refreshDashboardViews = vi.fn().mockResolvedValue(undefined);
+
+    await plugin.updateArticle(article.guid, source.url, { saved: false });
+
+    expect(updateFlags).toHaveBeenCalledWith("stable-item-id", {
+      read: true,
+      starred: true,
+      saved: false,
+      savedNotePath: undefined,
+    });
+    expect(plugin.refreshDashboardViews).toHaveBeenCalledTimes(1);
+  });
+
+  it("contains failed-source ledger errors without exposing raw source data", async () => {
+    const plugin = createPluginWithSettings([createFeed()]);
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockRejectedValue(
+        new Error("https://example.com/private?token=secret"),
+      ),
+    }));
+
+    await expect(plugin.refreshFailedSources()).resolves.toBeUndefined();
+
+    const notices = getNoticeMessages(consoleLogSpy);
+    expect(notices).toContain(
+      "Could not refresh failed sources. Check source status and try again.",
+    );
+    expect(notices.join(" ")).not.toContain("secret");
+    expect(notices.join(" ")).not.toContain("example.com");
+  });
+
+  it("refreshes every open dashboard leaf after a completed collection update", async () => {
+    const plugin = createPluginWithSettings([]);
+    const dashboardPlugin = plugin as unknown as RssDashboardPlugin;
+    const viewPlugin = { settings: plugin.settings, saveSettings: vi.fn() };
+    const first = new RssDashboardView(
+      { app: plugin.app } as unknown as import("obsidian").WorkspaceLeaf,
+      viewPlugin as never,
+    );
+    const second = new RssDashboardView(
+      { app: plugin.app } as unknown as import("obsidian").WorkspaceLeaf,
+      viewPlugin as never,
+    );
+    first.refresh = vi.fn();
+    second.refresh = vi.fn();
+    plugin.app.workspace.getLeavesOfType = vi.fn(() => [
+      { view: first, loadIfDeferred: vi.fn() },
+      { view: second, loadIfDeferred: vi.fn() },
+    ]);
+
+    await dashboardPlugin.refreshDashboardViews();
+
+    expect(first.refresh).toHaveBeenCalledTimes(1);
+    expect(second.refresh).toHaveBeenCalledTimes(1);
   });
 });

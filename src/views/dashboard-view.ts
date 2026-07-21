@@ -128,6 +128,10 @@ export class RssDashboardView extends ItemView {
   private collectionSection: CollectionSection = "today";
   private collectionItems: CollectedItem[] = [];
   private collectionQueryText = "";
+  private collectionSourceTypes = new Set<CollectedItem["sourceType"]>();
+  private collectionTopics = new Set<string>();
+  private collectionRead: boolean | undefined;
+  private collectionCollapsed = false;
   private collectionLoading = false;
   private collectionLoadError = false;
   private collectionLoadGeneration = 0;
@@ -203,17 +207,17 @@ export class RssDashboardView extends ItemView {
 
   /** Refresh all current subscriptions through the shared refresh pipeline. */
   public async actionRefreshAllSources(): Promise<void> {
-    await this.plugin.refreshFeeds();
+    await this.plugin.manualRefreshAllSources();
   }
 
   /** Retry only currently subscribed sources with a durable error state. */
   public async actionRefreshFailedSources(): Promise<void> {
-    await this.plugin.refreshFailedSources();
+    await this.plugin.manualRefreshFailedSources();
   }
 
   /** Refreshes the current subscription represented by a collection source row. */
   public async actionRefreshCollectionSource(sourceId: string): Promise<void> {
-    await this.plugin.refreshSourceById(sourceId);
+    await this.plugin.manualRefreshSourceById(sourceId);
   }
 
   private getSidebarKeyboardController(): SidebarKeyboardController | null {
@@ -690,6 +694,16 @@ export class RssDashboardView extends ItemView {
         this.app.workspace as unknown as {
           on: (name: string, callback: () => void) => unknown;
         }
+      ).on("rss-dashboard:collection-flags-updated", () => {
+        void this.loadCollectionItems();
+      }) as never,
+    );
+
+    this.registerEvent(
+      (
+        this.app.workspace as unknown as {
+          on: (name: string, callback: () => void) => unknown;
+        }
       ).on("rss-dashboard:tags-mutated", () => {
         const availableTagNames = new Set(
           this.settings.availableTags.map((t) => t.name),
@@ -1081,6 +1095,7 @@ export class RssDashboardView extends ItemView {
     const generation = ++this.collectionLoadGeneration;
     this.collectionLoading = true;
     this.collectionLoadError = false;
+    this.render();
 
     try {
       const items = await this.plugin.getCollectedItemsForDate(
@@ -1118,6 +1133,9 @@ export class RssDashboardView extends ItemView {
     const input: CollectionQueryInput = {
       items: this.collectionItems,
       text: this.collectionQueryText,
+      sourceTypes: [...this.collectionSourceTypes],
+      topics: [...this.collectionTopics],
+      read: this.collectionRead,
     };
 
     if (this.collectionSection === "subscriptions") {
@@ -1138,6 +1156,7 @@ export class RssDashboardView extends ItemView {
     const section = container.createDiv({
       cls: "rss-dashboard-collection-sections",
     });
+    section.toggleClass("is-collapsed", this.collectionCollapsed);
     section.createDiv({
       cls: "rss-dashboard-collection-title",
       text: "Collection",
@@ -1162,13 +1181,23 @@ export class RssDashboardView extends ItemView {
       button.addEventListener("click", () => this.setCollectionSection(option.section));
     }
 
+    const collapse = controls.createEl("button", {
+      text: this.collectionCollapsed ? "Expand collection" : "Collapse collection",
+      cls: "rss-dashboard-collection-collapse",
+      attr: { type: "button", "aria-expanded": String(!this.collectionCollapsed) },
+    });
+    collapse.addEventListener("click", () => {
+      this.collectionCollapsed = !this.collectionCollapsed;
+      this.render();
+    });
+
     const refreshAll = controls.createEl("button", {
       text: "Refresh all",
       cls: "rss-dashboard-collection-refresh-all",
       attr: { type: "button" },
     });
     refreshAll.addEventListener("click", () => {
-      void this.actionRefreshAllSources();
+      this.runCollectionRefreshAction(() => this.actionRefreshAllSources());
     });
     const refreshFailed = controls.createEl("button", {
       text: "Refresh failed",
@@ -1176,7 +1205,7 @@ export class RssDashboardView extends ItemView {
       attr: { type: "button" },
     });
     refreshFailed.addEventListener("click", () => {
-      void this.actionRefreshFailedSources();
+      this.runCollectionRefreshAction(() => this.actionRefreshFailedSources());
     });
 
     const search = section.createEl("input", {
@@ -1188,19 +1217,93 @@ export class RssDashboardView extends ItemView {
       },
     });
     search.value = this.collectionQueryText;
-    search.addEventListener("input", () => this.setCollectionQueryText(search.value));
+    search.addEventListener("input", () => {
+      this.collectionQueryText = search.value;
+      this.renderCollectionResults(results);
+    });
+
+    const filterControls = section.createDiv({
+      cls: "rss-dashboard-collection-filter-controls",
+    });
+    const sourceTypes = [...new Set(this.collectionItems.map((item) => item.sourceType))].sort();
+    for (const sourceType of sourceTypes) {
+      const sourceTypeButton = filterControls.createEl("button", {
+        text: sourceType,
+        cls: "rss-dashboard-collection-source-type-filter",
+        attr: {
+          type: "button",
+          "data-collection-source-type": sourceType,
+          "aria-pressed": String(this.collectionSourceTypes.has(sourceType)),
+        },
+      });
+      sourceTypeButton.toggleClass("is-active", this.collectionSourceTypes.has(sourceType));
+      sourceTypeButton.addEventListener("click", () => {
+        if (this.collectionSourceTypes.has(sourceType)) {
+          this.collectionSourceTypes.delete(sourceType);
+        } else {
+          this.collectionSourceTypes.add(sourceType);
+        }
+        this.render();
+      });
+    }
+
+    const topics = [...new Set(this.collectionItems.flatMap((item) => item.topics))].sort();
+    for (const topic of topics) {
+      const topicButton = filterControls.createEl("button", {
+        text: topic,
+        cls: "rss-dashboard-collection-topic-filter",
+        attr: {
+          type: "button",
+          "data-collection-topic": topic,
+          "aria-pressed": String(this.collectionTopics.has(topic)),
+        },
+      });
+      topicButton.toggleClass("is-active", this.collectionTopics.has(topic));
+      topicButton.addEventListener("click", () => {
+        if (this.collectionTopics.has(topic)) {
+          this.collectionTopics.delete(topic);
+        } else {
+          this.collectionTopics.add(topic);
+        }
+        this.render();
+      });
+    }
+
+    const read = filterControls.createEl("select", {
+      cls: "rss-dashboard-collection-read-filter",
+      attr: { "aria-label": "Read state" },
+    });
+    for (const option of [
+      { value: "all", label: "All" },
+      { value: "read", label: "Read" },
+      { value: "unread", label: "Unread" },
+    ]) {
+      read.createEl("option", { value: option.value, text: option.label });
+    }
+    read.value = this.collectionRead === true ? "read" : this.collectionRead === false ? "unread" : "all";
+    read.addEventListener("change", () => {
+      this.collectionRead = read.value === "all" ? undefined : read.value === "read";
+      this.render();
+    });
+
+    const results = section.createDiv({ cls: "rss-dashboard-collection-results" });
 
     if (this.collectionLoading) {
-      section.createDiv({ text: "Loading today's collection…" });
+      results.createDiv({ text: "Loading today's collection…" });
       return;
     }
     if (this.collectionLoadError) {
       // Do not expose a storage path or raw adapter error in the dashboard.
-      section.createDiv({ text: "Could not load today's collection." });
+      results.createDiv({ text: "Could not load today's collection." });
       return;
     }
 
-    const list = section.createDiv({ cls: "rss-dashboard-collection-list" });
+    this.renderCollectionResults(results);
+  }
+
+  private renderCollectionResults(results: HTMLElement): void {
+    results.empty();
+    const list = results.createDiv({ cls: "rss-dashboard-collection-list" });
     const items = this.getCollectionSectionItems();
     if (items.length === 0) {
       list.createDiv({ text: "No collected items." });
@@ -1223,9 +1326,18 @@ export class RssDashboardView extends ItemView {
         },
       });
       source.addEventListener("click", () => {
-        void this.actionRefreshCollectionSource(item.sourceId);
+        this.runCollectionRefreshAction(() =>
+          this.actionRefreshCollectionSource(item.sourceId),
+        );
       });
     }
+  }
+
+  private runCollectionRefreshAction(action: () => Promise<void>): void {
+    void action().catch(() => {
+      console.error("[RSS dashboard] Collection refresh control failed.");
+      new Notice("Source refresh failed. Check the source status for details.");
+    });
   }
 
   // --- Status bar / dashboard filter summary ---
