@@ -134,6 +134,12 @@ export function loadAndNormalizeSettings(
     settings.articleSaving ?? {},
   );
 
+  settings.collection = Object.assign(
+    {},
+    DEFAULT_SETTINGS.collection,
+    settings.collection ?? {},
+  );
+
   settings.media = Object.assign(
     {},
     DEFAULT_SETTINGS.media,

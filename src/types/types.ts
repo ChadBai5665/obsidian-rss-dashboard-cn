@@ -419,12 +419,23 @@ export type PersistedFeedConfig = Omit<Feed, "items"> & {
   feedId: string;
 };
 
+export type RefreshMode = "daily-on-open" | "interval" | "off";
+
+export interface CollectionSettings {
+  enabled: boolean;
+  dataFolder: string;
+  dailyIndexFolder: string;
+  savedNoteFolder: string;
+}
+
 export interface RssDashboardSettings {
   feeds: Feed[];
   folders: Folder[];
+  refreshMode: RefreshMode;
   refreshInterval: number;
   lastRefreshTimestamp: number;
   startupRefreshDelaySeconds: number;
+  collection: CollectionSettings;
   maxItems: number;
   defaultAutoDeleteDuration: number;
   viewStyle: "list" | "card" | "feed";
@@ -575,9 +586,16 @@ export const DEFAULT_SETTINGS: RssDashboardSettings = {
       modifiedAt: Date.now(),
     },
   ],
+  refreshMode: "daily-on-open",
   refreshInterval: 60,
   lastRefreshTimestamp: 0,
   startupRefreshDelaySeconds: 5,
+  collection: {
+    enabled: true,
+    dataFolder: ".rss-dashboard-data",
+    dailyIndexFolder: "信息收集/每日采集",
+    savedNoteFolder: "信息收集/已保存",
+  },
   maxItems: 50,
   defaultAutoDeleteDuration: 30,
   viewStyle: "card",

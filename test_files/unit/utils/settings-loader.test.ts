@@ -82,6 +82,41 @@ describe("settings-loader", () => {
       expect(result.refreshInterval).toBe(DEFAULT_SETTINGS.refreshInterval);
     });
 
+    it("adds RSS Dashboard CN defaults to upstream settings without replacing feeds", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const existingFeeds = [createFeed({ title: "Existing upstream feed" })];
+
+      const result = loadAndNormalizeSettings({ feeds: existingFeeds });
+
+      expect(result).toMatchObject({
+        feeds: existingFeeds,
+        refreshMode: "daily-on-open",
+        collection: {
+          enabled: true,
+          dataFolder: ".rss-dashboard-data",
+          dailyIndexFolder: "信息收集/每日采集",
+          savedNoteFolder: "信息收集/已保存",
+        },
+      });
+    });
+
+    it("merges partial collection settings with their defaults", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+
+      const result = loadAndNormalizeSettings({
+        collection: { dataFolder: "RSS data" },
+      } as unknown as Partial<RssDashboardSettings>);
+
+      expect(result.collection).toEqual({
+        enabled: true,
+        dataFolder: "RSS data",
+        dailyIndexFolder: "信息收集/每日采集",
+        savedNoteFolder: "信息收集/已保存",
+      });
+    });
+
     it("normalizes refreshInterval via normalizeRefreshIntervalMinutes", async () => {
       const { normalizeRefreshIntervalMinutes } =
         await import("../../../src/utils/validation");

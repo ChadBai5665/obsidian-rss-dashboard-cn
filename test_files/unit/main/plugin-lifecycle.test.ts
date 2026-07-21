@@ -266,6 +266,24 @@ describe("loadSettings()", () => {
     expect(plugin.settings.feeds).toHaveLength(1);
   });
 
+  it.each([
+    { refreshMode: "interval" as const, refreshInterval: 15 },
+    { refreshMode: "off" as const, refreshInterval: 0 },
+  ])(
+    "preserves an explicitly selected $refreshMode refresh mode on reload",
+    async ({ refreshMode, refreshInterval }) => {
+      (plugin.loadData as ReturnType<typeof vi.fn>).mockResolvedValue({
+        refreshMode,
+        refreshInterval,
+      });
+
+      await plugin.loadSettings();
+
+      expect(plugin.settings.refreshMode).toBe(refreshMode);
+      expect(plugin.settings.refreshInterval).toBe(refreshInterval);
+    },
+  );
+
   it("normalizes refreshInterval=0 to disabled instead of re-enabling it", async () => {
     (plugin.loadData as ReturnType<typeof vi.fn>).mockResolvedValue({
       refreshInterval: 0,
