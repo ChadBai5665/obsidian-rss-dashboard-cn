@@ -320,6 +320,7 @@ export interface DisplaySettings {
 export interface SidebarIconConfig {
   id: string;
   label: string;
+  labelKey: string;
   lucideIcon: string;
   settingKey: keyof DisplaySettings;
   neverCollapses?: boolean;

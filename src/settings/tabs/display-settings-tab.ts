@@ -266,6 +266,7 @@ export function renderDisplaySettingsTab(
       tagFilters: mf?.tagFilters ?? [],
       logic: mf?.logic ?? "OR",
       maxItems: 2,
+      t,
     });
   };
 
@@ -558,14 +559,14 @@ export function renderDisplaySettingsTab(
         };
 
         const filterOptions = [
-          { id: "unread", name: "Unread", icon: "circle" },
-          { id: "read", name: "Read", icon: "check-circle" },
-          { id: "saved", name: "Saved", icon: "save" },
-          { id: "starred", name: "Starred", icon: "star" },
-          { id: "podcasts", name: "Podcast", icon: "mic" },
-          { id: "videos", name: "Videos", icon: "play" },
-          { id: "tagged", name: "Tagged", icon: "tag" },
-          { id: "untagged", name: "Untagged", icon: "ban" },
+          { id: "unread", name: t("filter.unread"), icon: "circle" },
+          { id: "read", name: t("filter.read"), icon: "check-circle" },
+          { id: "saved", name: t("filter.saved"), icon: "save" },
+          { id: "starred", name: t("filter.starred"), icon: "star" },
+          { id: "podcasts", name: t("filter.podcasts"), icon: "mic" },
+          { id: "videos", name: t("filter.videos"), icon: "play" },
+          { id: "tagged", name: t("filter.tagged"), icon: "tag" },
+          { id: "untagged", name: t("filter.untagged"), icon: "ban" },
         ];
 
         filterOptions.forEach((opt) => {

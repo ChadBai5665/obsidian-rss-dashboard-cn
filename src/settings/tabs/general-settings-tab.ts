@@ -62,7 +62,7 @@ export function renderGeneralSettingsTab(
   const t = createTranslator(plugin.settings.locale);
   new Setting(containerEl)
     .setName(t("settings.language"))
-    .setDesc(t("settings.language"))
+    .setDesc(t("settings.languageDesc"))
     .addDropdown((dropdown) =>
       dropdown
         .addOption("zh-CN", t("settings.languageChinese"))

@@ -45,6 +45,27 @@ beforeEach(() => {
 });
 
 describe("renderSidebarSettingsTab() - domain icon toggles", () => {
+  it("localizes sidebar icon names and their reorder aria labels in Chinese", () => {
+    const containerEl = document.body.appendChild(document.createElement("div"));
+    const settings = cloneSettings();
+    settings.locale = "zh-CN";
+    const plugin = {
+      app: obsidian.App.createMock(),
+      settings,
+      saveSettings: vi.fn(async () => {}),
+      clearPlaybackProgress: vi.fn(async () => 0),
+      getActiveDashboardView: vi.fn(async () => null),
+    } as unknown as RssDashboardPlugin;
+
+    renderSidebarSettingsTab(containerEl, plugin, vi.fn());
+
+    expect(containerEl.textContent).toContain("发现");
+    expect(containerEl.textContent).toContain("添加订阅源");
+    expect(
+      containerEl.querySelector('[aria-label="拖动以重新排列 发现"]'),
+    ).toBeTruthy();
+  });
+
   it("renders and persists the RSS site icons toggle", async () => {
     const containerEl = document.body.appendChild(
       document.createElement("div"),

@@ -106,6 +106,12 @@ export function renderStorageSettingsTab(
 
   const renderStorageStatus = (): string => {
     const status = plugin.getStorageStatus();
+    const modeLabel =
+      status.mode === "vault-shards-v2"
+        ? t("settings.storage.shardsV2")
+        : status.mode === "vault-shards"
+          ? t("settings.storage.shardsV1")
+          : t("settings.storage.legacy");
     const migrationState = status.migrationReady
       ? t("settings.storage.migrationReady")
       : status.mode === "vault-shards-v2"
@@ -114,11 +120,20 @@ export function renderStorageSettingsTab(
           ? t("settings.storage.v1Active")
           : t("settings.storage.legacyActive");
     return t("settings.storage.statusSummary", {
-      mode: status.mode,
+      mode: modeLabel,
       folder: status.folder,
       feedCount: status.feedCount,
       shardCount: status.shardCount,
-      state: migrationState,
+      state: `${migrationState} • ${t("settings.storage.lastResult", {
+        result:
+          status.lastRepairResult === "Migration completed"
+            ? t("settings.storage.resultMigrationComplete")
+            : status.lastRepairResult === "Storage repair completed"
+              ? t("settings.storage.resultRepairComplete")
+              : status.lastRepairResult === "Not yet run"
+                ? t("settings.storage.resultNotYetRun")
+                : status.lastRepairResult,
+      })}`,
     });
   };
 

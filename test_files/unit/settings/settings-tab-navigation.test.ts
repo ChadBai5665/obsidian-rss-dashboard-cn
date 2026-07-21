@@ -11,13 +11,22 @@
 import { describe, it, expect } from "vitest";
 import {
   SETTINGS_TAB_IDS,
+  SETTINGS_TAB_NAMES,
   isValidSettingsTab,
   getInitialTab,
+  normalizeSettingsTabId,
 } from "../../../src/settings/tab-names";
 
 // ── SETTINGS_TAB_NAMES ───────────────────────────────────────────────────────
 
 describe("SETTINGS_TAB_IDS", () => {
+  it("keeps the deprecated public aliases compatible", () => {
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility contract
+    const oldName: import("../../../src/settings/tab-names").SettingsTabName = "general";
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility contract
+    expect(SETTINGS_TAB_NAMES).toBe(SETTINGS_TAB_IDS);
+    expect(oldName).toBe("general");
+  });
   it("contains exactly 11 tabs", () => {
     expect(SETTINGS_TAB_IDS).toHaveLength(11);
   });
@@ -44,6 +53,15 @@ describe("SETTINGS_TAB_IDS", () => {
   it("has 'general' as the first tab (default on open)", () => {
     expect(SETTINGS_TAB_IDS[0]).toBe("general");
   });
+});
+
+describe("normalizeSettingsTabId()", () => {
+  it.each(["__proto__", "constructor", "prototype", "toString"])(
+    "rejects unsafe or inherited legacy name %s",
+    (name) => {
+      expect(normalizeSettingsTabId(name)).toBeNull();
+    },
+  );
 });
 
 // ── isValidSettingsTab ───────────────────────────────────────────────────────

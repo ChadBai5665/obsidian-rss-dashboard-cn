@@ -1,3 +1,5 @@
+import { createTranslator, type Locale, type Translator } from "../i18n";
+
 export type DashboardFilterLogic = "AND" | "OR";
 
 const STATUS_ORDER: string[] = [
@@ -11,19 +13,23 @@ const STATUS_ORDER: string[] = [
   "untagged",
 ];
 
-const STATUS_LABELS: Record<string, string> = {
-  unread: "Unread",
-  read: "Read",
-  saved: "Saved",
-  starred: "Starred",
-  podcasts: "Podcasts",
-  videos: "Videos",
-  tagged: "Tagged",
-  untagged: "Untagged",
-};
+const STATUS_LABEL_KEYS = {
+  unread: "filter.unread",
+  read: "filter.read",
+  saved: "filter.saved",
+  starred: "filter.starred",
+  podcasts: "filter.podcasts",
+  videos: "filter.videos",
+  tagged: "filter.tagged",
+  untagged: "filter.untagged",
+} as const;
 
-function getLogicWord(logic: DashboardFilterLogic): "and" | "or" {
-  return logic === "AND" ? "and" : "or";
+function translatorFor(options: { t?: Translator; locale?: Locale }): Translator {
+  return options.t ?? createTranslator(options.locale ?? "en");
+}
+
+function getLogicWord(logic: DashboardFilterLogic, t: Translator): string {
+  return t(logic === "AND" ? "filter.and" : "filter.or");
 }
 
 function normalizeStringSet(values: Iterable<string>): Set<string> {
@@ -49,10 +55,13 @@ export function formatDashboardMultiFiltersTitle(options: {
   statusFilters: Iterable<string>;
   tagFilters: Iterable<string>;
   logic: DashboardFilterLogic;
+  t?: Translator;
+  locale?: Locale;
 }): { title: string; tooltip: string | null } {
+  const t = translatorFor(options);
   const status = normalizeStringSet(options.statusFilters);
   const tags = normalizeStringSet(options.tagFilters);
-  const logicWord = getLogicWord(options.logic);
+  const logicWord = getLogicWord(options.logic, t);
 
   const hasTagNames = tags.size > 0;
   if (hasTagNames) {
@@ -65,13 +74,13 @@ export function formatDashboardMultiFiltersTitle(options: {
   const parts: string[] = [];
   for (const id of STATUS_ORDER) {
     if (!status.has(id)) continue;
-    const label = STATUS_LABELS[id];
-    if (label) parts.push(label);
+    const key = STATUS_LABEL_KEYS[id as keyof typeof STATUS_LABEL_KEYS];
+    if (key) parts.push(t(key));
   }
 
   if (hasTagNames) {
     const tagNames = getSortedTagNames(tags);
-    parts.push(`Tags: ${tagNames.join(", ")}`);
+    parts.push(t("filter.tagsNamed", { tags: tagNames.join(", ") }));
   }
 
   if (parts.length === 0) {
@@ -79,16 +88,16 @@ export function formatDashboardMultiFiltersTitle(options: {
   }
 
   const phrase = parts.join(` ${logicWord} `);
-  const noun = hasMediaTypeStatuses(status) ? "items" : "articles";
+  const noun = hasMediaTypeStatuses(status) ? t("filter.items") : t("filter.articles");
 
   const base = options.baseTitle.trim();
   const lowerBase = base.toLowerCase();
   const title =
-    lowerBase === "all articles" || lowerBase === "all items"
-      ? `All ${phrase} ${noun}`
+    lowerBase === "all articles" || lowerBase === "all items" || base === t("filter.all")
+      ? t("filter.allWithPhrase", { phrase, noun })
       : `${base} — ${phrase}`;
 
-  const tooltip = `Active filters (${options.logic}): ${parts.join(", ")}`;
+  const tooltip = t("filter.activeFilters", { logic: options.logic, filters: parts.join(", ") });
   return { title, tooltip };
 }
 
@@ -96,17 +105,21 @@ export function formatDashboardMultiFiltersSummary(options: {
   statusFilters: Iterable<string>;
   tagFilters: Iterable<string>;
   logic: DashboardFilterLogic;
+  t?: Translator;
+  locale?: Locale;
 }): { text: string; tooltip: string | null } {
+  const t = translatorFor(options);
   const { title, tooltip } = formatDashboardMultiFiltersTitle({
-    baseTitle: "All articles",
+    baseTitle: t("filter.all"),
     statusFilters: options.statusFilters,
     tagFilters: options.tagFilters,
     logic: options.logic,
+    t,
   });
 
   // For settings buttons, avoid repeating the "All ..." prefix.
   if (tooltip === null) {
-    return { text: "All", tooltip: null };
+    return { text: t("filter.all"), tooltip: null };
   }
 
   const normalized = title.startsWith("All ") ? title.slice(4) : title;
@@ -124,21 +137,25 @@ export function formatDashboardMultiFiltersSummaryCompact(options: {
   tagFilters: Iterable<string>;
   logic: DashboardFilterLogic;
   maxItems?: number;
+  t?: Translator;
+  locale?: Locale;
 }): { text: string; tooltip: string | null } {
+  const t = translatorFor(options);
   const status = normalizeStringSet(options.statusFilters);
   const tags = normalizeStringSet(options.tagFilters);
-  const logicWord = getLogicWord(options.logic);
+  const logicWord = getLogicWord(options.logic, t);
   const maxItems = Math.max(1, options.maxItems ?? 2);
 
   const { tooltip } = formatDashboardMultiFiltersTitle({
-    baseTitle: "All articles",
+    baseTitle: t("filter.all"),
     statusFilters: status,
     tagFilters: tags,
     logic: options.logic,
+    t,
   });
 
   if (tooltip === null) {
-    return { text: "All", tooltip: null };
+    return { text: t("filter.all"), tooltip: null };
   }
 
   const hasTagNames = tags.size > 0;
@@ -152,17 +169,17 @@ export function formatDashboardMultiFiltersSummaryCompact(options: {
   const parts: Array<{ label: string; isTags: boolean }> = [];
   for (const id of STATUS_ORDER) {
     if (!status.has(id)) continue;
-    const label = STATUS_LABELS[id];
-    if (label) parts.push({ label, isTags: false });
+    const key = STATUS_LABEL_KEYS[id as keyof typeof STATUS_LABEL_KEYS];
+    if (key) parts.push({ label: t(key), isTags: false });
   }
 
   if (hasTagNames) {
     const tagCount = tags.size;
-    parts.push({ label: tagCount === 1 ? "Tags (1)" : `Tags (${tagCount})`, isTags: true });
+    parts.push({ label: t("filter.tagsCount", { count: tagCount }), isTags: true });
   }
 
   if (parts.length === 0) {
-    return { text: "All", tooltip };
+    return { text: t("filter.all"), tooltip };
   }
 
   let displayed: Array<{ label: string; isTags: boolean }> = [];

@@ -13,6 +13,7 @@ import {
   SIDEBAR_ICON_IDS,
   getIconById,
   SIDEBAR_ICONS,
+  getSidebarIconLabel,
 } from "../../utils/sidebar-icon-registry";
 import { MediaService } from "../../services/media-service";
 import { MastodonService } from "../../services/mastodon-service";
@@ -313,19 +314,14 @@ export function renderSidebarSettingsTab(
       const icon = getIconById(id);
       if (!icon) return;
       const hideKey = icon.settingKey;
+      const iconLabel = getSidebarIconLabel(icon, t);
 
-      const nameFrag = activeDocument.createDocumentFragment();
-      const labelWrap = activeDocument.createElement("span");
-      labelWrap.addClass("rss-settings-icon-label");
       const iconSpan = activeDocument.createElement("span");
       iconSpan.addClass("rss-settings-icon-preview");
       setIcon(iconSpan, icon.lucideIcon);
-      labelWrap.append(iconSpan);
-      labelWrap.append(` ${icon.label}`);
-      nameFrag.append(labelWrap);
 
       const iconSetting = new Setting(iconRowsContainer)
-        .setName(nameFrag)
+        .setName(iconLabel)
         .setDisabled(hideToolbar)
         .addToggle((toggle) =>
           toggle
@@ -345,18 +341,19 @@ export function renderSidebarSettingsTab(
 
       iconSetting.settingEl.addClass("rss-dashboard-icon-visibility-row");
       iconSetting.settingEl.setAttribute("data-icon-id", id);
+      iconSetting.nameEl.prepend(iconSpan);
 
       const dragHandle = activeDocument.createElement("button");
       dragHandle.type = "button";
       dragHandle.addClass("rss-dashboard-icon-drag-handle");
       dragHandle.setAttribute("draggable", "true");
-      dragHandle.setAttribute("aria-label", t("settings.sidebar.dragIcon", { label: icon.label }));
+      dragHandle.setAttribute("aria-label", t("settings.sidebar.dragIcon", { label: iconLabel }));
       setIcon(dragHandle, "grip-vertical");
       iconSetting.nameEl.prepend(dragHandle);
 
       const upBtn = activeDocument.createElement("button");
       upBtn.addClass("rss-dashboard-icon-order-btn");
-      upBtn.setAttribute("aria-label", t("settings.sidebar.moveIconUp", { label: icon.label }));
+      upBtn.setAttribute("aria-label", t("settings.sidebar.moveIconUp", { label: iconLabel }));
       upBtn.textContent = "↑";
       upBtn.disabled = i === 0;
       upBtn.addEventListener("click", () => {
@@ -382,7 +379,7 @@ export function renderSidebarSettingsTab(
 
       const downBtn = activeDocument.createElement("button");
       downBtn.addClass("rss-dashboard-icon-order-btn");
-      downBtn.setAttribute("aria-label", t("settings.sidebar.moveIconDown", { label: icon.label }));
+      downBtn.setAttribute("aria-label", t("settings.sidebar.moveIconDown", { label: iconLabel }));
       downBtn.textContent = "↓";
       downBtn.disabled = i === order.length - 1;
       downBtn.addEventListener("click", () => {
@@ -820,9 +817,15 @@ export function renderSidebarSettingsTab(
                 heading,
                 description:
                   iconCount > 0
-                    ? `${iconCount} ${domainName} feed${iconCount === 1 ? "" : "s"} currently use a profile image. Cached profile-image URLs in your feeds will be cleared. Cached favicons or domain images already shown in the feeds list are unaffected.`
-                    : `Existing feeds may have cached profile-image URLs from when the setting was enabled. Cleared feeds will revert to the standard RSS or domain/favicon icon.`,
-                cancelLabel: "Cancel",
+                    ? t("settings.sidebar.clearIconExistingDescription", {
+                        count: iconCount,
+                        domain: domainName,
+                        plural: iconCount === 1 ? "" : "s",
+                      })
+                    : t("settings.sidebar.clearIconEmptyDescription", {
+                        domain: domainName,
+                      }),
+                cancelLabel: t("common.cancel"),
                 confirmLabel,
                 onConfirm() {
                   clearIconOnDisable?.(

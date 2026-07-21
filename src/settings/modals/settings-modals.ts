@@ -244,7 +244,6 @@ export class FactoryResetConfirmModal extends Modal {
       .addButton((btn) =>
         btn
           .setButtonText(t("common.cancel"))
-          .setClass("rss-confirm-modal-cancel")
           .onClick(() => {
             this.confirmed = false;
             this.close();
@@ -254,7 +253,6 @@ export class FactoryResetConfirmModal extends Modal {
         btn
           .setButtonText(t("settings.modal.factoryReset"))
           .setWarning()
-          .setClass("rss-dashboard-danger-button")
           .onClick(() => {
             this.confirmed = true;
             this.close();

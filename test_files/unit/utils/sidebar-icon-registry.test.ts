@@ -5,6 +5,7 @@ import {
   createToolbarButton,
   getIconById,
 } from "../../../src/utils/sidebar-icon-registry";
+import { createTranslator } from "../../../src/i18n";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 
 beforeEach(() => {
@@ -60,5 +61,12 @@ describe("sidebar-icon-registry.createToolbarButton", () => {
     expect(spaceKey.defaultPrevented).toBe(true);
     expect(onClick).toHaveBeenCalledTimes(3);
   });
-});
 
+  it("uses the active locale for the toolbar aria label without changing icon IDs", () => {
+    const icon = getIconById("addFeed")!;
+    const btn = createToolbarButton(icon, vi.fn(), createTranslator("zh-CN"));
+
+    expect(icon.id).toBe("addFeed");
+    expect(btn.getAttribute("aria-label")).toBe("添加订阅源");
+  });
+});

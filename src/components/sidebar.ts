@@ -31,6 +31,7 @@ import { applyFeedSortOrder } from "../utils/sidebar-sort-utils";
 import { applyFolderSortOrder } from "../utils/sidebar-folder-sort-utils";
 import { MediaService } from "../services/media-service";
 import { MastodonService } from "../services/mastodon-service";
+import { createTranslator } from "../i18n";
 import {
   createSafeIconImage,
   failedFeedIconUrls,
@@ -2678,6 +2679,7 @@ export class Sidebar {
       cls: "rss-dashboard-header-icon-row",
     });
     const display = this.settings.display;
+    const toolbarT = createTranslator(this.settings.locale ?? "zh-CN");
     const iconOrder: string[] = display.iconOrder?.length
       ? display.iconOrder
       : [...SIDEBAR_ICON_IDS];
@@ -2727,7 +2729,7 @@ export class Sidebar {
             }
           };
           this.iconActions.set("discover", action);
-          btn = createToolbarButton(iconConfig, action);
+          btn = createToolbarButton(iconConfig, action, toolbarT);
           btn.addClass("clickable-icon");
           break;
         }
@@ -2749,7 +2751,7 @@ export class Sidebar {
             }
           };
           this.iconActions.set("addFeed", action);
-          btn = createToolbarButton(iconConfig, action);
+          btn = createToolbarButton(iconConfig, action, toolbarT);
           break;
         }
 
@@ -2760,7 +2762,7 @@ export class Sidebar {
             }
           };
           this.iconActions.set("manageFeeds", action);
-          btn = createToolbarButton(iconConfig, action);
+          btn = createToolbarButton(iconConfig, action, toolbarT);
           break;
         }
 
@@ -2782,7 +2784,7 @@ export class Sidebar {
             }
           };
           this.iconActions.set("search", action);
-          btn = createToolbarButton(iconConfig, action);
+          btn = createToolbarButton(iconConfig, action, toolbarT);
           btn.toggleClass("is-active", this.isSearchExpanded);
           btn.setAttr("aria-pressed", this.isSearchExpanded ? "true" : "false");
           break;
@@ -2794,7 +2796,7 @@ export class Sidebar {
             this.render();
           };
           this.iconActions.set("tags", action);
-          btn = createToolbarButton(iconConfig, action);
+          btn = createToolbarButton(iconConfig, action, toolbarT);
           btn.toggleClass("is-active", this.isTagsExpanded);
           btn.setAttr("aria-pressed", this.isTagsExpanded ? "true" : "false");
           break;
@@ -2813,7 +2815,7 @@ export class Sidebar {
             });
           };
           this.iconActions.set("addFolder", action);
-          btn = createToolbarButton(iconConfig, action);
+          btn = createToolbarButton(iconConfig, action, toolbarT);
           break;
         }
 
@@ -2821,7 +2823,7 @@ export class Sidebar {
           // sort requires the MouseEvent for menu positioning; action stored in fireIconAction
           btn = createToolbarButton(iconConfig, () => {
             /* keyboard: no-op */
-          });
+          }, toolbarT);
           btn.addEventListener("click", (e: MouseEvent) =>
             this.fireIconAction("sort", e),
           );
@@ -2834,7 +2836,7 @@ export class Sidebar {
             window.setTimeout(updateCollapseAllIcon, 0);
           };
           this.iconActions.set("collapseAll", action);
-          btn = createToolbarButton(iconConfig, action);
+          btn = createToolbarButton(iconConfig, action, toolbarT);
           collapseAllBtnRef = btn;
           updateCollapseAllIcon();
           break;
@@ -2847,7 +2849,7 @@ export class Sidebar {
             appWithSettings.setting?.openTabById?.(this.plugin.manifest.id);
           };
           this.iconActions.set("settings", action);
-          btn = createToolbarButton(iconConfig, action);
+          btn = createToolbarButton(iconConfig, action, toolbarT);
           break;
         }
 

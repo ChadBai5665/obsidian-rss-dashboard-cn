@@ -3,6 +3,7 @@ import {
   formatDashboardMultiFiltersTitle,
   formatDashboardMultiFiltersSummaryCompact,
 } from "../../../src/utils/filter-title-format";
+import { createTranslator } from "../../../src/i18n";
 
 describe("formatDashboardMultiFiltersTitle()", () => {
   it("formats OR logic with status filters", () => {
@@ -63,6 +64,19 @@ describe("formatDashboardMultiFiltersTitle()", () => {
 });
 
 describe("formatDashboardMultiFiltersSummaryCompact()", () => {
+  it("uses the requested locale while preserving stable filter IDs", () => {
+    const result = formatDashboardMultiFiltersSummaryCompact({
+      statusFilters: new Set(["unread", "saved"]),
+      tagFilters: new Set(["AI"]),
+      logic: "OR",
+      maxItems: 2,
+      t: createTranslator("zh-CN"),
+    });
+
+    expect(result.text).toBe("未读 或 标签（1） +1");
+    expect(result.tooltip).toBe("当前筛选（OR）：未读, 已保存, 标签：AI");
+  });
+
   it("returns All when there are no filters", () => {
     const result = formatDashboardMultiFiltersSummaryCompact({
       statusFilters: new Set(),

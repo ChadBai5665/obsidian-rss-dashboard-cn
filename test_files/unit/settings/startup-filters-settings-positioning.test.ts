@@ -12,7 +12,10 @@ type ObsidianHTMLElement = HTMLElement & {
 };
 
 function cloneSettings(): RssDashboardSettings {
-  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+  return {
+    ...(JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings),
+    locale: "en",
+  };
 }
 
 function stubRect(rect: {
@@ -30,6 +33,41 @@ describe("Startup filters settings popover positioning (integration)", () => {
   beforeEach(() => {
     installObsidianDomPolyfills();
     (document.body as ObsidianHTMLElement).empty();
+  });
+
+  it("renders Chinese startup-filter button, tooltip, and menu labels", async () => {
+    const { renderDisplaySettingsTab } =
+      await import("../../../src/settings/tabs/display-settings-tab");
+    const container = (document.body as ObsidianHTMLElement).createDiv();
+    const settings = cloneSettings();
+    settings.locale = "zh-CN";
+    settings.dashboardMultiFilters = {
+      statusFilters: ["unread", "saved"],
+      tagFilters: ["AI"],
+      logic: "OR",
+    };
+    settings.availableTags = [{ name: "AI", color: "#111111" }];
+    const plugin = {
+      settings,
+      saveSettings: vi.fn(async () => {}),
+      notifyFiltersUpdated: vi.fn(() => {}),
+      getActiveDashboardView: vi.fn(async () => null),
+      app: { workspace: { revealLeaf: vi.fn(async () => {}) } },
+    };
+
+    renderDisplaySettingsTab(container, plugin as unknown as RssDashboardPlugin, () => {});
+    const startupBtn = Array.from(container.querySelectorAll("button")).find(
+      (button) => (button.textContent ?? "").includes("未读"),
+    ) as HTMLButtonElement;
+    expect(startupBtn.textContent).toContain("标签（1）");
+    expect(startupBtn.title).toBe("当前筛选（OR）：未读, 已保存, 标签：AI");
+    startupBtn.click();
+
+    const menu = document.body.querySelector(".rss-dashboard-startup-filters-menu-portal");
+    expect(menu?.textContent).toContain("未读");
+    expect(menu?.textContent).toContain("已保存");
+    expect(menu?.textContent).toContain("已标记");
+    expect(menu?.textContent).toContain("应用");
   });
 
   it("opens above when anchor is near bottom and follows scroll reposition", async () => {

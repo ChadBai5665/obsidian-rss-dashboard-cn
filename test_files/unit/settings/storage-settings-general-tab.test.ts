@@ -120,6 +120,27 @@ describe("General settings storage section", () => {
     expect(containerEl.textContent).toContain("Storage mode");
   });
 
+  it("keeps stored mode IDs stable while localizing status mode and repair result", () => {
+    const containerEl = createTestContainer();
+    const plugin = createPlugin();
+    plugin.settings.locale = "zh-CN";
+    vi.mocked(plugin.getStorageStatus).mockReturnValue({
+      mode: "legacy-json",
+      folder: ".rss-dashboard-data/feeds",
+      feedCount: 2,
+      shardCount: 0,
+      migrationReady: false,
+      lastRepairResult: "Migration completed",
+    });
+
+    renderStorageSettingsTab(containerEl, plugin as never);
+
+    const select = getSettingByName(containerEl, "存储模式").querySelector("select");
+    expect(select?.querySelector('option[value="legacy-json"]')).toBeTruthy();
+    expect(containerEl.textContent).toContain("模式：旧版 JSON");
+    expect(containerEl.textContent).toContain("上次结果：迁移已完成");
+  });
+
   it("marks the storage transition modal for mobile safe-area positioning", () => {
     const app = obsidian.App.createMock();
     const modal = new StorageTransitionModal(app, {

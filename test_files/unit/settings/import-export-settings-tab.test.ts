@@ -153,6 +153,31 @@ describe("Auto Backup Helpers", () => {
   });
 
   describe("renderImportExportSettingsTab() factory reset section", () => {
+    it("opens the shared localized modal from the real factory-reset button", async () => {
+      const containerEl = createContainerEl();
+      const plugin = createPlugin();
+      plugin.settings.locale = "zh-CN";
+      const openSpy = vi
+        .spyOn(FactoryResetConfirmModal.prototype, "open")
+        .mockImplementation(function openSharedModal() {
+          this.onOpen();
+          return this;
+        });
+      vi.spyOn(FactoryResetConfirmModal.prototype, "waitForClose").mockResolvedValue(false);
+
+      renderImportExportSettingsTab(containerEl, plugin as unknown as RssDashboardPlugin);
+      const resetButton = Array.from(
+        containerEl.querySelectorAll<HTMLButtonElement>("button"),
+      ).find((button) => button.textContent === "Factory reset") as HTMLButtonElement;
+      resetButton.click();
+      await flushPromises();
+
+      const modal = openSpy.mock.instances[0] as FactoryResetConfirmModal;
+      expect(modal.contentEl.textContent).toContain("恢复出厂设置？");
+      expect(modal.contentEl.textContent).toContain("取消");
+      expect(modal.contentEl.textContent).toContain("不会被删除");
+    });
+
     it("renders shard data actions", () => {
       const containerEl = createContainerEl();
       const plugin = createPlugin();

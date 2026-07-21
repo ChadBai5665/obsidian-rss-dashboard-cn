@@ -22,7 +22,11 @@ export {
   isValidSettingsTab,
   normalizeSettingsTabId,
 } from "./tab-names";
+// eslint-disable-next-line @typescript-eslint/no-deprecated -- public compatibility re-export
+export { SETTINGS_TAB_NAMES } from "./tab-names";
 export type { SettingsTabId } from "./tab-names";
+// eslint-disable-next-line @typescript-eslint/no-deprecated -- public compatibility re-export
+export type { SettingsTabName } from "./tab-names";
 
 // Tab renderer imports
 import { renderGeneralSettingsTab } from "./tabs/general-settings-tab";

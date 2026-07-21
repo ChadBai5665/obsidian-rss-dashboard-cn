@@ -36,6 +36,11 @@ export const SETTINGS_TAB_IDS = [
   "about",
 ] as const satisfies readonly SettingsTabId[];
 
+/** @deprecated Use SETTINGS_TAB_IDS. Kept for third-party settings integrations. */
+export const SETTINGS_TAB_NAMES = SETTINGS_TAB_IDS;
+/** @deprecated Use SettingsTabId. */
+export type SettingsTabName = SettingsTabId;
+
 const TAB_LABEL_KEYS: Record<SettingsTabId, TranslationKey> = {
   general: "settings.tab.general",
   sources: "navigation.subscriptions",
@@ -58,7 +63,7 @@ export function getSettingsTabLabel(tab: SettingsTabId, t: Translator): string {
   return t(TAB_LABEL_KEYS[tab]);
 }
 
-const LEGACY_TAB_NAMES: Readonly<Record<string, SettingsTabId>> = {
+const LEGACY_TAB_NAMES: Readonly<Record<string, SettingsTabId>> = Object.freeze({
   General: "general",
   Storage: "storage",
   Display: "display",
@@ -70,7 +75,7 @@ const LEGACY_TAB_NAMES: Readonly<Record<string, SettingsTabId>> = {
   "Import/Export": "import-export",
   Tags: "tags",
   About: "about",
-};
+});
 
 /** Accepts stable IDs and pre-localization names at the public navigation seam. */
 export function normalizeSettingsTabId(name: string): SettingsTabId | null {
@@ -78,7 +83,9 @@ export function normalizeSettingsTabId(name: string): SettingsTabId | null {
     return name;
   }
 
-  return LEGACY_TAB_NAMES[name] ?? null;
+  return Object.prototype.hasOwnProperty.call(LEGACY_TAB_NAMES, name)
+    ? LEGACY_TAB_NAMES[name] ?? null
+    : null;
 }
 
 /** Returns true only for tabs rendered by the current settings UI. */
