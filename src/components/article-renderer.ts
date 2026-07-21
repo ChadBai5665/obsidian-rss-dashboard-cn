@@ -132,7 +132,7 @@ export class ArticleRenderer {
     } else {
       const fullTextResult = this.shouldSkipFullArticleFetch(item)
         ? { content: "", failureType: "none" as const }
-        : await this.readOrFetchExplicitArticleContent(item);
+        : await this.readOrFetchExplicitArticleContent(item, renderRequest);
       if (renderRequest !== this.renderRequestSequence || this.currentItem !== item) {
         return;
       }
@@ -701,6 +701,7 @@ export class ArticleRenderer {
 
   private async readOrFetchExplicitArticleContent(
     item: FeedItem,
+    renderRequest: number,
   ): Promise<{ content: string; failureType: FullArticleFetchFailureType }> {
     const itemId = this.getCollectedItemId(item);
     const root = this.settings.collection.dataFolder.trim();
@@ -719,7 +720,11 @@ export class ArticleRenderer {
         return { content, failureType };
       },
     });
-    if (this.hasMeaningfulArticleContent(result.content)) {
+    if (
+      !this.disposed &&
+      renderRequest === this.renderRequestSequence &&
+      this.hasMeaningfulArticleContent(result.content)
+    ) {
       this.sessionContent.set(cacheKey, result);
       while (this.sessionContent.size > MAX_SESSION_CONTENT_ITEMS) {
         this.sessionContent.delete(this.sessionContent.keys().next().value as string);

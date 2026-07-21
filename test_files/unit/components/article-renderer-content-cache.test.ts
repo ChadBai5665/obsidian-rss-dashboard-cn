@@ -74,6 +74,7 @@ describe("ArticleRenderer explicit content cache", () => {
     resolveFetch?.({ content: `<article><p>${"L".repeat(260)}</p></article>`, failureType: "none" });
     await rendering;
     expect(container.childElementCount).toBe(0);
+    expect((view as unknown as { sessionContent: Map<string, unknown> }).sessionContent.size).toBe(0);
   });
 
   it.each(["https://youtube.com/watch?v=x", "https://www.youtube.com/watch?v=x", "https://m.youtube.com/watch?v=x", "https://youtu.be/x"])("never fetches a YouTube article URL: %s", async (link) => {

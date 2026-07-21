@@ -16,6 +16,13 @@ class InMemoryAdapter {
   private nextPartialWriteFailure: ((path: string) => boolean) | null = null;
   private nextRenameFailure: ((from: string, to: string) => boolean) | null =
     null;
+  private renameBarrier:
+    | {
+        predicate: (from: string, to: string) => boolean;
+        reached: () => void;
+        wait: Promise<void>;
+      }
+    | null = null;
   private nextRemoveFailure: ((path: string) => boolean) | null = null;
   private statOverride: number | null | undefined;
 
@@ -80,6 +87,12 @@ class InMemoryAdapter {
       this.nextRenameFailure = null;
       throw new Error(`Injected rename failure: ${from} -> ${to}`);
     }
+    const barrier = this.renameBarrier;
+    if (barrier?.predicate(from, to)) {
+      this.renameBarrier = null;
+      barrier.reached();
+      await barrier.wait;
+    }
     const content = this.files.get(from);
     if (content === undefined) {
       throw new Error(`Missing rename source: ${from}`);
@@ -140,6 +153,21 @@ class InMemoryAdapter {
 
   failNextRenameWhere(predicate: (from: string, to: string) => boolean): void {
     this.nextRenameFailure = predicate;
+  }
+
+  pauseNextRenameWhere(
+    predicate: (from: string, to: string) => boolean,
+  ): { reached: Promise<void>; release: () => void } {
+    let markReached!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      markReached = resolve;
+    });
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.renameBarrier = { predicate, reached: markReached, wait };
+    return { reached, release };
   }
 
   failNextRemoveWhere(predicate: (path: string) => boolean): void {
@@ -262,6 +290,45 @@ describe("CollectionRepository", () => {
     const stored = await refresh.listByDate("2026-07-21");
     expect(stored.map((item) => item.id)).toEqual(expect.arrayContaining([cachedId, freshId]));
     expect(stored.find((item) => item.id === cachedId)?.contentPath).toBe(`${DATA_ROOT}/content/${cachedId}.md`);
+  });
+
+  it("makes recovery-capable public reads wait through another instance's atomic rename window", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+    const writer = createRepository(adapter, { vault });
+    const reader = createRepository(adapter, { vault });
+    const date = "2026-07-21";
+    const dailyPath = `${DATA_ROOT}/collections/${date}.jsonl`;
+    await writer.upsertDaily([createItem()], date);
+    const barrier = adapter.pauseNextRenameWhere(
+      (from, to) => from.includes(".tmp-") && to === dailyPath,
+    );
+
+    const mutation = writer.upsertDaily([createItem({ title: "Updated safely" })], date);
+    await barrier.reached;
+    let readFinished = false;
+    const reads = Promise.all([
+      reader.listByDate(date),
+      reader.findById("item-1"),
+      reader.hasItemsForSource("feed-1"),
+    ]).then((result) => {
+      readFinished = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(readFinished).toBe(false);
+
+    barrier.release();
+    await mutation;
+    const [listed, found, hasSource] = await reads;
+    expect(listed[0].title).toBe("Updated safely");
+    expect(found?.title).toBe("Updated safely");
+    expect(hasSource).toBe(true);
+    expect(
+      (await adapter.list(`${DATA_ROOT}/collections`)).files.some(
+        (path) => path.includes(".tmp-") || path.includes(".backup-"),
+      ),
+    ).toBe(false);
   });
 
   it("links durable cached full text to every collected observation of an item", async () => {

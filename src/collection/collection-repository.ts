@@ -84,7 +84,7 @@ export class CollectionRepository {
     items: CollectedItem[],
     localDate: string,
   ): Promise<CollectedItem[]> {
-    return await this.withRootMutationLock(async () =>
+    return await this.withRootAccessLock(async () =>
       await this.upsertDailyUnlocked(items, localDate),
     );
   }
@@ -152,6 +152,12 @@ export class CollectionRepository {
   }
 
   async findById(id: string): Promise<CollectedItem | null> {
+    return await this.withRootAccessLock(async () =>
+      await this.findByIdUnlocked(id),
+    );
+  }
+
+  private async findByIdUnlocked(id: string): Promise<CollectedItem | null> {
     const index = await this.loadIndex();
     const indexedEntry = index.items[id];
     return indexedEntry
@@ -160,6 +166,12 @@ export class CollectionRepository {
   }
 
   async hasItemsForSource(sourceId: string): Promise<boolean> {
+    return await this.withRootAccessLock(async () =>
+      await this.hasItemsForSourceUnlocked(sourceId),
+    );
+  }
+
+  private async hasItemsForSourceUnlocked(sourceId: string): Promise<boolean> {
     const dates = await this.collectionDates();
     for (let index = dates.length - 1; index >= 0; index -= 1) {
       const items = (
@@ -173,12 +185,18 @@ export class CollectionRepository {
   }
 
   async listByDate(localDate: string): Promise<CollectedItem[]> {
+    return await this.withRootAccessLock(async () =>
+      await this.listByDateUnlocked(localDate),
+    );
+  }
+
+  private async listByDateUnlocked(localDate: string): Promise<CollectedItem[]> {
     assertLocalDate(localDate);
     return (await this.readCollection(this.dailyPath(localDate))).items;
   }
 
   async updateFlags(id: string, patch: FlagPatch): Promise<void> {
-    await this.withRootMutationLock(async () =>
+    await this.withRootAccessLock(async () =>
       await this.updateFlagsUnlocked(id, patch),
     );
   }
@@ -248,7 +266,7 @@ export class CollectionRepository {
    * that has not reached storage.
    */
   async updateContentMetadata(id: string, contentPath: string): Promise<void> {
-    await this.withRootMutationLock(async () =>
+    await this.withRootAccessLock(async () =>
       await this.updateContentMetadataUnlocked(id, contentPath),
     );
   }
@@ -316,7 +334,7 @@ export class CollectionRepository {
     return normalizePath(`${this.dataRoot}/collections`);
   }
 
-  private async withRootMutationLock<T>(operation: () => Promise<T>): Promise<T> {
+  private async withRootAccessLock<T>(operation: () => Promise<T>): Promise<T> {
     const queues = rootMutationQueues.get(this.vault) ?? new Map<string, Promise<void>>();
     rootMutationQueues.set(this.vault, queues);
     const prior = queues.get(this.dataRoot) ?? Promise.resolve();
