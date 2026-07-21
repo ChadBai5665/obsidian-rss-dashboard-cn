@@ -75,6 +75,8 @@ import {
   migrateSettings,
 } from "./src/utils/settings-loader";
 import { applyAutomaticArticleTags } from "./src/utils/tag-utils";
+import { shouldRunDailyRefresh } from "./src/refresh/local-calendar-day";
+import { SourceRefreshLedger } from "./src/refresh/source-refresh-ledger";
 
 export interface FiltersUpdatedEventPayload {
   source: string;
@@ -413,6 +415,66 @@ export default class RssDashboardPlugin extends Plugin {
     return normalizedMinutes * 60 * 1000;
   }
 
+  private getSourceRefreshLedger(): SourceRefreshLedger {
+    return new SourceRefreshLedger(
+      this.app.vault,
+      this.settings.collection.dataFolder,
+    );
+  }
+
+  private getRefreshSourceIds(): string[] {
+    return this.getRefreshableFeeds(this.settings.feeds).map(
+      (feed) => feed.feedId ?? feed.url,
+    );
+  }
+
+  private scheduleAutomaticRefresh(): void {
+    if (this.settings.refreshMode === "off") {
+      return;
+    }
+
+    if (this.settings.refreshMode === "interval") {
+      const intervalMs = this.getAutoRefreshIntervalMs();
+      if (intervalMs !== null) {
+        this.registerInterval(
+          window.setInterval(() => {
+            void this.refreshFeeds();
+          }, intervalMs),
+        );
+      }
+      return;
+    }
+
+    void this.refreshOnOpenIfNeeded();
+  }
+
+  private async refreshOnOpenIfNeeded(): Promise<void> {
+    if (this.settings.refreshMode !== "daily-on-open") {
+      return;
+    }
+
+    const now = new Date();
+    const lastSuccessDate = await this.getSourceRefreshLedger().getSharedSuccessDate(
+      this.getRefreshSourceIds(),
+    );
+    if (!shouldRunDailyRefresh(lastSuccessDate, now)) {
+      return;
+    }
+
+    const delay = Number.isFinite(this.settings.startupRefreshDelaySeconds)
+      ? this.settings.startupRefreshDelaySeconds
+      : DEFAULT_SETTINGS.startupRefreshDelaySeconds;
+    if (delay > 0) {
+      this.startupRefreshTimeoutId = window.setTimeout(() => {
+        this.startupRefreshTimeoutId = null;
+        void this.refreshFeeds();
+      }, delay * 1000);
+      return;
+    }
+
+    void this.refreshFeeds();
+  }
+
   private async reconcileSavedArticlesOnStartup(): Promise<void> {
     if (this.hasCompletedStartupSavedArticleValidation) {
       return;
@@ -608,14 +670,6 @@ export default class RssDashboardPlugin extends Plugin {
     await this.loadSettings();
     this.registerVaultMetadataChangeListeners();
 
-    const shouldRefreshOnOpen = (): boolean => {
-      const intervalMs = this.getAutoRefreshIntervalMs();
-      if (intervalMs === null) return false;
-      if (!this.settings.lastRefreshTimestamp) return true;
-      const elapsed = Date.now() - this.settings.lastRefreshTimestamp;
-      return elapsed >= intervalMs;
-    };
-
     const view = await this.getActiveDashboardView();
     if (view) {
       view.render();
@@ -792,28 +846,7 @@ export default class RssDashboardPlugin extends Plugin {
         },
       });
 
-      const autoRefreshIntervalMs = this.getAutoRefreshIntervalMs();
-      if (autoRefreshIntervalMs !== null) {
-        this.registerInterval(
-          window.setInterval(() => {
-            void this.refreshFeeds();
-          }, autoRefreshIntervalMs),
-        );
-      }
-
-      if (shouldRefreshOnOpen()) {
-        const delay = Number.isFinite(this.settings.startupRefreshDelaySeconds)
-          ? this.settings.startupRefreshDelaySeconds
-          : DEFAULT_SETTINGS.startupRefreshDelaySeconds;
-        if (delay > 0) {
-          this.startupRefreshTimeoutId = window.setTimeout(() => {
-            this.startupRefreshTimeoutId = null;
-            void this.refreshFeeds();
-          }, delay * 1000);
-        } else {
-          void this.refreshFeeds();
-        }
-      }
+      this.scheduleAutomaticRefresh();
     } catch (err: unknown) {
       if (err instanceof Error) {
         console.error("[RSS Dashboard] onload initialization failed:", err);

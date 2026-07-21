@@ -437,20 +437,121 @@ describe("onload() initialization", () => {
     ).toBeGreaterThanOrEqual(7);
   });
 
-  it("sets up refresh interval", async () => {
-    // When: onload is called
+  it("sets up refresh interval only in explicit interval mode", async () => {
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "interval",
+      refreshInterval: 60,
+    });
+
     await plugin.onload();
 
-    // Then: registerInterval should be called with a setInterval result
     expect(plugin.registerInterval).toHaveBeenCalled();
   });
 
   it("does not register auto refresh when refreshInterval is disabled", async () => {
-    plugin.loadData = vi.fn().mockResolvedValue({ refreshInterval: 0 });
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "interval",
+      refreshInterval: 0,
+    });
+
+    await plugin.onload();
+
+    await flushPromises();
+
+    expect(plugin.registerInterval).not.toHaveBeenCalled();
+  });
+
+  it("does not schedule startup or interval refresh in off mode", async () => {
+    vi.useFakeTimers();
+    const intervalSpy = vi.spyOn(window, "setInterval");
+    const timeoutSpy = vi.spyOn(window, "setTimeout");
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "off",
+      refreshInterval: 15,
+      startupRefreshDelaySeconds: 30,
+    });
 
     await plugin.onload();
 
     expect(plugin.registerInterval).not.toHaveBeenCalled();
+    expect(intervalSpy).not.toHaveBeenCalled();
+    expect(timeoutSpy).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("defers a daily retry without blocking plugin load after an unsuccessful same-day refresh", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 21, 9, 0, 0));
+    const sourceFeed = { ...sampleFeed, feedId: "feed-1" };
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 15,
+      feeds: [sourceFeed],
+    });
+    await plugin.app.vault.adapter.write(
+      ".rss-dashboard-data/state/source-refresh.json",
+      JSON.stringify({
+        schemaVersion: 1,
+        sources: {
+          [sourceFeed.feedId]: {
+            sourceId: sourceFeed.feedId,
+            status: "error",
+            lastAttemptAt: "2026-07-21T00:30:00.000Z",
+            lastSuccessDate: "2026-07-20",
+            errorCode: "network",
+            errorMessage: "Request failed",
+          },
+        },
+      }),
+    );
+    const refreshSpy = vi
+      .spyOn(plugin, "refreshFeeds")
+      .mockResolvedValue(undefined);
+
+    await plugin.onload();
+
+    await flushPromises();
+
+    expect(refreshSpy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("does not queue a second daily refresh when every source succeeded today", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 21, 9, 0, 0));
+    const sourceFeed = { ...sampleFeed, feedId: "feed-1" };
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 15,
+      feeds: [sourceFeed],
+    });
+    await plugin.app.vault.adapter.write(
+      ".rss-dashboard-data/state/source-refresh.json",
+      JSON.stringify({
+        schemaVersion: 1,
+        sources: {
+          [sourceFeed.feedId]: {
+            sourceId: sourceFeed.feedId,
+            status: "success",
+            lastAttemptAt: "2026-07-21T00:30:00.000Z",
+            lastSuccessAt: "2026-07-21T00:31:00.000Z",
+            lastSuccessDate: "2026-07-21",
+          },
+        },
+      }),
+    );
+    const refreshSpy = vi
+      .spyOn(plugin, "refreshFeeds")
+      .mockResolvedValue(undefined);
+
+    await plugin.onload();
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(refreshSpy).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
   it("adds setting tab", async () => {
@@ -780,6 +881,8 @@ describe("onload() initialization", () => {
       .mockResolvedValue(undefined);
 
     await plugin.onload();
+
+    await flushPromises();
 
     expect(refreshSpy).toHaveBeenCalledTimes(1);
     expect(mockRefreshAllFeeds).not.toHaveBeenCalled();
@@ -1165,73 +1268,6 @@ describe("lastRefreshTimestamp in settings", () => {
     expect(DEFAULT_SETTINGS.lastRefreshTimestamp).toBe(0);
   });
 
-  it("shouldRefreshOnOpen returns true when no timestamp exists", () => {
-    // Given: Settings with no lastRefreshTimestamp
-    const settings = { ...DEFAULT_SETTINGS, lastRefreshTimestamp: 0 };
-
-    // When: Checking if should refresh on open
-    const shouldRefresh =
-      !settings.lastRefreshTimestamp ||
-      Date.now() - settings.lastRefreshTimestamp >=
-        settings.refreshInterval * 60 * 1000;
-
-    // Then: Should return true for first-time users
-    expect(shouldRefresh).toBe(true);
-  });
-
-  it("shouldRefreshOnOpen returns false when auto refresh is disabled", () => {
-    const settings = {
-      ...DEFAULT_SETTINGS,
-      refreshInterval: 0,
-      lastRefreshTimestamp: 0,
-    };
-
-    const shouldRefresh =
-      settings.refreshInterval > 0 &&
-      (!settings.lastRefreshTimestamp ||
-        Date.now() - settings.lastRefreshTimestamp >=
-          settings.refreshInterval * 60 * 1000);
-
-    expect(shouldRefresh).toBe(false);
-  });
-
-  it("shouldRefreshOnOpen returns true when interval has elapsed", () => {
-    // Given: Settings with timestamp 90 minutes ago, interval 60 minutes
-    const ninetyMinutesAgo = Date.now() - 90 * 60 * 1000;
-    const settings = {
-      ...DEFAULT_SETTINGS,
-      lastRefreshTimestamp: ninetyMinutesAgo,
-      refreshInterval: 60,
-    };
-
-    // When: Checking if should refresh on open
-    const shouldRefresh =
-      !settings.lastRefreshTimestamp ||
-      Date.now() - settings.lastRefreshTimestamp >=
-        settings.refreshInterval * 60 * 1000;
-
-    // Then: Should return true
-    expect(shouldRefresh).toBe(true);
-  });
-
-  it("shouldRefreshOnOpen returns false when interval has not elapsed", () => {
-    // Given: Settings with timestamp 30 minutes ago, interval 60 minutes
-    const thirtyMinutesAgo = Date.now() - 30 * 60 * 1000;
-    const settings = {
-      ...DEFAULT_SETTINGS,
-      lastRefreshTimestamp: thirtyMinutesAgo,
-      refreshInterval: 60,
-    };
-
-    // When: Checking if should refresh on open
-    const shouldRefresh =
-      !settings.lastRefreshTimestamp ||
-      Date.now() - settings.lastRefreshTimestamp >=
-        settings.refreshInterval * 60 * 1000;
-
-    // Then: Should return false
-    expect(shouldRefresh).toBe(false);
-  });
 });
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
