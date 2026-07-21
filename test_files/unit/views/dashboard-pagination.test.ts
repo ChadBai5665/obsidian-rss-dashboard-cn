@@ -141,6 +141,7 @@ describe("Dashboard pagination", () => {
     const plugin = {
       settings,
       saveSettings: vi.fn(async () => {}),
+      updateArticlesReadBatch: vi.fn(async () => true),
     };
 
     const leaf = { app } as unknown as import("obsidian").WorkspaceLeaf;
@@ -252,6 +253,7 @@ describe("Dashboard pagination", () => {
     const plugin = {
       settings,
       saveSettings: vi.fn(async () => {}),
+      updateArticlesReadBatch: vi.fn(async () => true),
       openTagsSettings: vi.fn(async () => {}),
     };
 
@@ -277,11 +279,13 @@ describe("Dashboard pagination", () => {
     expect(callbacks?.onMarkPageAsRead).toBeTypeOf("function");
 
     callbacks.onMarkPageAsRead?.();
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(items.slice(0, 10).every((item) => !item.read)).toBe(true);
     expect(items.slice(10, 20).every((item) => item.read)).toBe(true);
     expect(items.slice(20).every((item) => !item.read)).toBe(true);
-    expect(plugin.saveSettings).toHaveBeenCalled();
+    expect(plugin.updateArticlesReadBatch).toHaveBeenCalledTimes(1);
     expect(renderSpy).not.toHaveBeenCalled();
     expect(
       latestArticleListInstance?.updateArticleInPlace,
@@ -317,6 +321,7 @@ describe("Dashboard pagination", () => {
     const plugin = {
       settings,
       saveSettings: vi.fn(async () => {}),
+      updateArticlesReadBatch: vi.fn(async () => true),
       openTagsSettings: vi.fn(async () => {}),
     };
 
@@ -341,11 +346,13 @@ describe("Dashboard pagination", () => {
     expect(callbacks?.onMarkPageAsRead).toBeTypeOf("function");
 
     callbacks.onMarkPageAsRead?.();
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(items.slice(0, 10).every((item) => !item.read)).toBe(true);
     expect(items.slice(10, 20).every((item) => item.read)).toBe(true);
     expect(items.slice(20).every((item) => !item.read)).toBe(true);
-    expect(plugin.saveSettings).toHaveBeenCalled();
+    expect(plugin.updateArticlesReadBatch).toHaveBeenCalledTimes(1);
     expect(renderSpy).not.toHaveBeenCalled();
     expect(
       latestArticleListInstance?.updateArticleInPlace,
@@ -391,6 +398,7 @@ describe("Dashboard pagination", () => {
     const plugin = {
       settings,
       saveSettings: vi.fn(async () => {}),
+      updateArticlesReadBatch: vi.fn(async () => true),
       openTagsSettings: vi.fn(async () => {}),
     };
 
@@ -415,9 +423,11 @@ describe("Dashboard pagination", () => {
     expect(callbacks?.onMarkPageAsRead).toBeTypeOf("function");
 
     callbacks.onMarkPageAsRead?.();
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(items.slice(0, 10).every((item) => item.read)).toBe(true);
-    expect(plugin.saveSettings).toHaveBeenCalled();
+    expect(plugin.updateArticlesReadBatch).toHaveBeenCalledTimes(1);
     expect(consoleLogSpy).toHaveBeenCalledWith(
       "[Stub Notice]",
       "Marked 10 items as read",
@@ -455,6 +465,7 @@ describe("Dashboard pagination", () => {
     const plugin = {
       settings,
       saveSettings: vi.fn(async () => {}),
+      updateArticlesReadBatch: vi.fn(async () => true),
       openTagsSettings: vi.fn(async () => {}),
     };
 
@@ -488,10 +499,12 @@ describe("Dashboard pagination", () => {
     });
 
     callbacks.onMarkPageAsRead?.();
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(items.slice(0, 10).every((item) => item.read)).toBe(true);
     expect(items.slice(10, 20).every((item) => item.read)).toBe(true);
-    expect(plugin.saveSettings).toHaveBeenCalled();
+    expect(plugin.updateArticlesReadBatch).toHaveBeenCalledTimes(1);
     expect(renderSpy).not.toHaveBeenCalled();
     expect(latestArticleListInstance?.refilter).toHaveBeenCalled();
     expect(consoleLogSpy).toHaveBeenCalledWith(

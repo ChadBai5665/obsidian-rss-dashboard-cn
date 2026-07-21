@@ -995,7 +995,7 @@ export class RssDashboardView extends ItemView {
           onPageChange: this.handlePageChange.bind(this),
           onPageSizeChange: this.handlePageSizeChange.bind(this),
           onMarkPageAsRead: () => {
-            this.markCurrentPageAsRead();
+            void this.markCurrentPageAsRead();
           },
           onOpenTagsSettings: () => {
             void this.plugin.openTagsSettings();
@@ -3174,13 +3174,13 @@ export class RssDashboardView extends ItemView {
     this.refreshFilterStatusBarOnly();
   }
 
-  private markPageArticlesAsRead(
+  private async markPageArticlesAsRead(
     currentPageArticles: FeedItem[],
     previousPage: number,
     previousTotalPages: number,
     pageSize: number,
     previousTotalArticles: number,
-  ): void {
+  ): Promise<void> {
     if (!this.articleList) {
       return;
     }
@@ -3190,8 +3190,6 @@ export class RssDashboardView extends ItemView {
       if (article.read) return;
       const originalArticle = this.findBackingArticleForDisplayItem(article);
       if (!originalArticle || originalArticle.read) return;
-      originalArticle.read = true;
-      article.read = true;
       updatedArticles.push(article);
     });
 
@@ -3200,7 +3198,16 @@ export class RssDashboardView extends ItemView {
       return;
     }
 
-    void this.plugin.saveSettings();
+    const didUpdate = await this.plugin.updateArticlesReadBatch(
+      updatedArticles.map((article) => ({ articleGuid: article.guid, feedUrl: article.feedUrl })),
+      true,
+    );
+    if (!didUpdate) return;
+    updatedArticles.forEach((article) => {
+      article.read = true;
+      const backing = this.findBackingArticleForDisplayItem(article);
+      if (backing) backing.read = true;
+    });
 
     const filtered = this.getFilteredArticles();
     const pagination = computePagination({
@@ -3255,7 +3262,7 @@ export class RssDashboardView extends ItemView {
     new Notice(`Marked ${updatedArticles.length} items as read`);
   }
 
-  private markCurrentPageAsRead(): void {
+  private async markCurrentPageAsRead(): Promise<void> {
     if (!this.articleList) {
       return;
     }
@@ -3278,7 +3285,7 @@ export class RssDashboardView extends ItemView {
       pagination.endIdx,
     );
 
-    this.markPageArticlesAsRead(
+    await this.markPageArticlesAsRead(
       currentPageArticles,
       pagination.currentPage,
       pagination.totalPages,
