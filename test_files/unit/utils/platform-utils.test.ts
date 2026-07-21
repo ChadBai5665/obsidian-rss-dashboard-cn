@@ -225,8 +225,10 @@ describe("platform-utils.misc", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-29T12:00:00Z"));
 
-    expect(formatRelativeTime("not-a-date")).toBe("Invalid date");
-    expect(formatRelativeTime(new Date("2026-03-30T12:00:00Z"))).toBe("Just now");
+    expect(formatRelativeTime("not-a-date", "en")).toBe("Invalid date");
+    expect(formatRelativeTime(new Date("2026-03-30T12:00:00Z"), "en")).toBe(
+      "Just now",
+    );
 
     vi.useRealTimers();
   });
@@ -253,7 +255,7 @@ describe("platform-utils.misc", () => {
     vi.setSystemTime(new Date("2026-05-15T12:00:00Z"));
 
     const date = new Date("2026-05-15T10:00:00Z");
-    const result = formatDateWithRelative(date);
+    const result = formatDateWithRelative(date, "en");
 
     expect(result.text).toBe("Today");
     // toLocaleDateString output can vary by environment, but we expect a string containing the date
@@ -270,17 +272,30 @@ describe("platform-utils.misc", () => {
     const date = new Date("2026-05-15T10:00:00Z");
 
     // Case 1: Relative (default)
-    const relativeResult = formatArticleDate(date, "relative");
+    const relativeResult = formatArticleDate(date, "relative", "en");
     expect(relativeResult.text).toBe("Today");
     expect(relativeResult.title).toContain("2026");
 
     // Case 2: Absolute
-    const absoluteResult = formatArticleDate(date, "absolute");
+    const absoluteResult = formatArticleDate(date, "absolute", "en");
     expect(absoluteResult.text).toContain("2026");
     expect(absoluteResult.text).toContain("May");
     expect(absoluteResult.title).toBe("Today");
 
     vi.useRealTimers();
   });
-});
 
+  it("uses Chinese relative and absolute dates by default without changing stored dates", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-15T12:00:00Z"));
+
+    const date = new Date("2026-05-15T10:00:00Z");
+    const result = formatDateWithRelative(date);
+    expect(result.text).toBe("今天");
+    expect(result.title).toContain("2026");
+    expect(result.title).toContain("5");
+    expect(date.toISOString()).toBe("2026-05-15T10:00:00.000Z");
+
+    vi.useRealTimers();
+  });
+});

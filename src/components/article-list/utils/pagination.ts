@@ -58,7 +58,7 @@ export function renderPagination(args: RenderPaginationArgs): void {
     articles,
     deps,
   } = args;
-  const t = createTranslator(deps.locale ?? "en");
+  const t = createTranslator(deps.locale ?? "zh-CN");
 
   const paginationContainer = container.createDiv({
     cls: "rss-dashboard-pagination",

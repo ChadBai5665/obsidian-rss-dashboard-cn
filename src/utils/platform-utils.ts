@@ -1,4 +1,5 @@
 import { requestUrl, RequestUrlParam, setIcon } from "obsidian";
+import type { Locale } from "../i18n";
 
 export interface RobustFetchResult {
   text: string;
@@ -9,16 +10,19 @@ export function sleep(ms: number): Promise<void> {
   return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 }
 
-export function formatRelativeTime(date: Date | string): string {
+export function formatRelativeTime(
+  date: Date | string,
+  locale: Locale = "zh-CN",
+): string {
   const now = new Date();
   const targetDate = typeof date === "string" ? new Date(date) : date;
 
   if (isNaN(targetDate.getTime())) {
-    return "Invalid date";
+    return locale === "zh-CN" ? "无效日期" : "Invalid date";
   }
 
   if (now.toDateString() === targetDate.toDateString()) {
-    return "Today";
+    return locale === "zh-CN" ? "今天" : "Today";
   }
 
   const diffInMs = now.getTime() - targetDate.getTime();
@@ -26,7 +30,7 @@ export function formatRelativeTime(date: Date | string): string {
   // Handle future dates - treat as "Just now" to avoid confusing output
   // like "in 6,638,873 seconds"
   if (diffInMs < 0) {
-    return "Just now";
+    return locale === "zh-CN" ? "刚刚" : "Just now";
   }
 
   const diffInSeconds = Math.floor(diffInMs / 1000);
@@ -39,7 +43,7 @@ export function formatRelativeTime(date: Date | string): string {
 
   if (typeof Intl !== "undefined" && Intl.RelativeTimeFormat) {
     try {
-      const rtf = new Intl.RelativeTimeFormat("en", {
+      const rtf = new Intl.RelativeTimeFormat(locale, {
         numeric: "auto",
         style: "long",
       });
@@ -64,6 +68,16 @@ export function formatRelativeTime(date: Date | string): string {
     }
   }
 
+  if (locale === "zh-CN") {
+    if (diffInYears > 0) return `${diffInYears} 年前`;
+    if (diffInMonths > 0) return `${diffInMonths} 个月前`;
+    if (diffInWeeks > 0) return `${diffInWeeks} 周前`;
+    if (diffInDays > 0) return `${diffInDays} 天前`;
+    if (diffInHours > 0) return `${diffInHours} 小时前`;
+    if (diffInMinutes > 0) return `${diffInMinutes} 分钟前`;
+    return "刚刚";
+  }
+
   if (diffInYears > 0) {
     return `${diffInYears} year${diffInYears > 1 ? "s" : ""} ago`;
   } else if (diffInMonths > 0) {
@@ -81,13 +95,16 @@ export function formatRelativeTime(date: Date | string): string {
   }
 }
 
-export function formatDateWithRelative(date: Date | string): {
+export function formatDateWithRelative(
+  date: Date | string,
+  locale: Locale = "zh-CN",
+): {
   text: string;
   title: string;
 } {
   const targetDate = typeof date === "string" ? new Date(date) : date;
-  const relativeTime = formatRelativeTime(targetDate);
-  const absoluteDate = targetDate.toLocaleDateString("en-US", {
+  const relativeTime = formatRelativeTime(targetDate, locale);
+  const absoluteDate = targetDate.toLocaleDateString(locale, {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -112,8 +129,9 @@ export function formatDateWithRelative(date: Date | string): {
 export function formatArticleDate(
   date: Date | string,
   style: "relative" | "absolute" = "relative",
+  locale: Locale = "zh-CN",
 ): { text: string; title: string } {
-  const base = formatDateWithRelative(date);
+  const base = formatDateWithRelative(date, locale);
   if (style === "absolute") {
     return { text: base.title, title: base.text };
   }

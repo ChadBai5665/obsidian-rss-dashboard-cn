@@ -987,7 +987,7 @@ export class ArticleList {
   }
 
   private syncArticleElement(articleEl: HTMLElement, article: FeedItem): void {
-    const t = createTranslator(this.settings.locale ?? "en");
+    const t = createTranslator(this.settings.locale ?? "zh-CN");
     articleEl.classList.toggle("read", !!article.read);
     articleEl.classList.toggle("unread", !article.read);
     articleEl.classList.toggle("saved", !!article.saved);

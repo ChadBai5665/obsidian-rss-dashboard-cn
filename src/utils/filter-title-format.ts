@@ -25,7 +25,7 @@ const STATUS_LABEL_KEYS = {
 } as const;
 
 function translatorFor(options: { t?: Translator; locale?: Locale }): Translator {
-  return options.t ?? createTranslator(options.locale ?? "en");
+  return options.t ?? createTranslator(options.locale ?? "zh-CN");
 }
 
 function getLogicWord(logic: DashboardFilterLogic, t: Translator): string {

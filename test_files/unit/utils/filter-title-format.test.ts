@@ -13,6 +13,7 @@ describe("formatDashboardMultiFiltersTitle()", () => {
       statusFilters: new Set(["unread", "starred"]),
       tagFilters: new Set(),
       logic: "OR",
+      locale: "en",
     });
 
     expect(result).toEqual({
@@ -27,6 +28,7 @@ describe("formatDashboardMultiFiltersTitle()", () => {
       statusFilters: new Set(["read", "tagged"]),
       tagFilters: new Set(),
       logic: "AND",
+      locale: "en",
     });
 
     expect(result).toEqual({
@@ -41,6 +43,7 @@ describe("formatDashboardMultiFiltersTitle()", () => {
       statusFilters: new Set(["unread", "tagged"]),
       tagFilters: new Set(["Work", "Home"]),
       logic: "OR",
+      locale: "en",
     });
 
     expect(result).toEqual({
@@ -55,6 +58,7 @@ describe("formatDashboardMultiFiltersTitle()", () => {
       statusFilters: new Set(["podcasts"]),
       tagFilters: new Set(),
       logic: "OR",
+      locale: "en",
     });
 
     expect(result).toEqual({
@@ -71,6 +75,8 @@ describe("formatDashboardMultiFiltersSummaryCompact()", () => {
       tagFilters: new Set(["AI"]),
       logic: "OR",
       maxItems: 2,
+      locale: "en",
+      locale: "en",
       t: createTranslator("zh-CN"),
     });
 
@@ -84,6 +90,7 @@ describe("formatDashboardMultiFiltersSummaryCompact()", () => {
       tagFilters: new Set(),
       logic: "OR",
       maxItems: 2,
+      locale: "en",
     });
 
     expect(result).toEqual({ text: "All", tooltip: null });
@@ -95,6 +102,7 @@ describe("formatDashboardMultiFiltersSummaryCompact()", () => {
       tagFilters: new Set(),
       logic: "OR",
       maxItems: 2,
+      locale: "en",
     });
 
     expect(result.text).toBe("Unread or Starred +1");
@@ -107,6 +115,7 @@ describe("formatDashboardMultiFiltersSummaryCompact()", () => {
       tagFilters: new Set(["Home", "Work"]),
       logic: "OR",
       maxItems: 2,
+      locale: "en",
     });
 
     expect(result.text).toBe("Unread or Tags (2) +2");

@@ -7,7 +7,7 @@ export function groupArticles(
   articles: FeedItem[],
   groupBy: "feed" | "date" | "folder" | "none",
   getFeedFolderFn?: (feedUrl: string) => string | undefined,
-  locale: Locale = "en",
+  locale: Locale = "zh-CN",
 ): Record<string, FeedItem[]> {
   const t = createTranslator(locale);
   if (groupBy === "none") return { [t("dashboard.allArticles")]: articles };
@@ -20,7 +20,7 @@ export function groupArticles(
           key = article.feedTitle || t("dashboard.uncategorized");
           break;
         case "date":
-          key = formatDateWithRelative(article.pubDate).text;
+          key = formatDateWithRelative(article.pubDate, locale).text;
           break;
 
         case "folder":

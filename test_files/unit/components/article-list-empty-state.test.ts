@@ -34,7 +34,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       const component = new ArticleEmptyState();
 
       // Act
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       // Assert
       const heading = container.querySelector("h2");
@@ -51,7 +51,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       const component = new ArticleEmptyState();
 
       // Act
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       // Assert
       const suggestion = container.querySelector("p");
@@ -68,7 +68,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       const component = new ArticleEmptyState();
 
       // Act
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       // Assert
       const iconDiv = container.querySelector(
@@ -92,7 +92,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       const component = new ArticleEmptyState();
 
       // Act
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       // Assert
       const heading = container.querySelector("h2");
@@ -112,7 +112,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       const component = new ArticleEmptyState();
 
       // Act
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       // Assert
       const description = container.querySelector("p");
@@ -133,7 +133,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       const component = new ArticleEmptyState();
 
       // Act
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       // Assert
       const description = container.querySelector("p");
@@ -151,7 +151,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       };
 
       const component = new ArticleEmptyState();
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       const description = container.querySelector("p");
       const button = container.querySelector('[role="button"]');
@@ -173,7 +173,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       const component = new ArticleEmptyState();
 
       // Act
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       // Assert
       const button = container.querySelector('[role="button"]');
@@ -195,7 +195,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       const component = new ArticleEmptyState();
 
       // Act
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       // Assert
       const button = container.querySelector('[role="button"]');
@@ -215,7 +215,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
 
       const component = new ArticleEmptyState();
       const onAction = vi.fn();
-      component.render(container, context, { onAction });
+      component.render(container, context, { locale: "en", onAction });
 
       const button = container.querySelector('[role="button"]') as HTMLElement;
 
@@ -239,7 +239,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
 
       const component = new ArticleEmptyState();
       const onAction = vi.fn();
-      component.render(container, context, { onAction });
+      component.render(container, context, { locale: "en", onAction });
 
       const button = container.querySelector('[role="button"]') as HTMLElement;
 
@@ -263,7 +263,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       const component = new ArticleEmptyState();
 
       // Act
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       // Assert
       const iconDiv = container.querySelector(
@@ -287,7 +287,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       const component = new ArticleEmptyState();
 
       // Act
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       // Assert - Verify scoped classes are used
       const emptyState = container.querySelector(".rss-dashboard-empty-state");
@@ -311,7 +311,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
       };
 
       const component = new ArticleEmptyState();
-      component.render(container, context);
+      component.render(container, context, { locale: "en" });
 
       const heading = container.querySelector("h2");
       const description = container.querySelector("p");
@@ -334,7 +334,7 @@ describe("ArticleEmptyState - Component Rendering", () => {
 
       const onAction = vi.fn();
       const component = new ArticleEmptyState();
-      component.render(container, context, { onAction });
+      component.render(container, context, { locale: "en", onAction });
 
       const button = container.querySelector('[role="button"]') as HTMLElement;
       button.click();

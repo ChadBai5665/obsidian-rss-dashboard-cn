@@ -465,6 +465,10 @@ export const en = {
   "dashboard.loadingCollection": "Loading today's collection…",
   "dashboard.collectionLoadFailed": "Could not load today's collection.",
   "dashboard.noCollected": "No collected items.",
+  "dashboard.topicDiscoveryBoundary":
+    "Platform Top only reflects the platform result order; it is not a recommendation or value judgement.",
+  "dashboard.noTopicCandidates":
+    "No topic candidates have been collected for the selected conditions.",
   "dashboard.refreshSource": "Refresh this source",
   "dashboard.sourceRefreshFailed":
     "Source refresh failed. Check the source status for details.",
@@ -601,6 +605,14 @@ export const en = {
     "This item appears to be a video. Open the source page to watch.",
   "reader.openVideoSource": "Open video at source",
   "reader.noFeedDescription": "No feed description available.",
+  "reader.restrictedNotice":
+    "Full article is restricted. Showing available feed excerpt.",
+  "reader.restrictedBanner":
+    "Full article text appears to be truncated, restricted or paywalled.",
+  "reader.restrictedLink": "Click here to double check.",
+  "reader.podcastNoLink": "No link is available for this podcast.",
+  "reader.applePodcastNotFound":
+    "Could not find this show in Apple Podcasts.",
   "settings.display.newest": "Newest",
   "settings.display.oldest": "Oldest",
   "settings.display.none": "None",

@@ -6,8 +6,6 @@ import { MediaService } from "../services/media-service";
 import { type FullArticleFetchFailureType } from "../utils/fetch-helpers";
 import {
   fetchFullArticleContentWithOutcome,
-  RESTRICTED_ARTICLE_BANNER,
-  RESTRICTED_ARTICLE_LINK_TEXT,
   RESTRICTED_ARTICLE_REASON,
 } from "../utils/full-article-fetch";
 import { isLikelyVideoItem } from "../utils/video-detection";
@@ -85,7 +83,7 @@ export class ArticleRenderer {
     key: Parameters<ReturnType<typeof createTranslator>>[0],
     params?: Record<string, string | number>,
   ): string {
-    return createTranslator(this.settings.locale ?? "en")(key, params);
+    return createTranslator(this.settings.locale ?? "zh-CN")(key, params);
   }
 
   constructor(options: ArticleRendererOptions) {
@@ -407,8 +405,8 @@ export class ArticleRenderer {
     });
     message.setText(
       item.restrictedReason === RESTRICTED_ARTICLE_REASON
-        ? RESTRICTED_ARTICLE_BANNER
-        : (item.restrictedReason ?? RESTRICTED_ARTICLE_BANNER),
+        ? this.t("reader.restrictedBanner")
+        : (item.restrictedReason ?? this.t("reader.restrictedBanner")),
     );
 
     if (!item.link) {
@@ -417,7 +415,7 @@ export class ArticleRenderer {
 
     const link = banner.createEl("a", {
       cls: "rss-reader-paywall-banner-link",
-      text: RESTRICTED_ARTICLE_LINK_TEXT,
+      text: this.t("reader.restrictedLink"),
       href: item.link,
     });
     link.target = "_blank";

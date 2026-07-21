@@ -55,6 +55,7 @@ export function renderListView(
     const dateInfo = formatArticleDate(
       article.pubDate,
       ctx.settings.display.articleDateStyle ?? "relative",
+      ctx.settings.locale ?? "zh-CN",
     );
     if (!useBottomRow) {
       const timeEl = mainGrid.createDiv("rss-dashboard-grid-time");

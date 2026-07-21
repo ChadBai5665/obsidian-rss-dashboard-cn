@@ -66,7 +66,12 @@ type SidebarKeyboardController = {
   renameFocusedItem: () => void;
 };
 
-type CollectionSection = "today" | "subscriptions" | "starred" | "saved";
+type CollectionSection =
+  | "today"
+  | "subscriptions"
+  | "topic-discovery"
+  | "starred"
+  | "saved";
 
 export class RssDashboardView extends ItemView {
   private static readonly CARD_LAYOUT_RELAYOUT_DELAY_MS = 90;
@@ -197,7 +202,7 @@ export class RssDashboardView extends ItemView {
   private t = (
     key: Parameters<ReturnType<typeof createTranslator>>[0],
     params?: Record<string, string | number>,
-  ): string => createTranslator(this.settings.locale ?? "en")(key, params);
+  ): string => createTranslator(this.settings.locale ?? "zh-CN")(key, params);
 
   getIcon(): string {
     return "rss";
@@ -1178,6 +1183,14 @@ export class RssDashboardView extends ItemView {
       input.items = input.items.filter((item) =>
         currentSourceIds.has(item.sourceId),
       );
+    } else if (this.collectionSection === "topic-discovery") {
+      // These stable buckets reflect TikHub/X result categories, not a plugin
+      // recommendation. Keep the raw values out of translated UI copy.
+      input.items = input.items.filter(
+        (item) =>
+          item.sourceBucket === "topic-latest" ||
+          item.sourceBucket === "topic-top",
+      );
     } else if (this.collectionSection === "starred") {
       input.starred = true;
     } else if (this.collectionSection === "saved") {
@@ -1203,6 +1216,10 @@ export class RssDashboardView extends ItemView {
     const labels: Array<{ section: CollectionSection; label: string }> = [
       { section: "today", label: this.t("navigation.todayCollection") },
       { section: "subscriptions", label: this.t("navigation.subscriptions") },
+      {
+        section: "topic-discovery",
+        label: this.t("navigation.topicDiscovery"),
+      },
       { section: "starred", label: this.t("navigation.starred") },
       { section: "saved", label: this.t("navigation.saved") },
     ];
@@ -1348,6 +1365,13 @@ export class RssDashboardView extends ItemView {
       cls: "rss-dashboard-collection-results",
     });
 
+    if (this.collectionSection === "topic-discovery") {
+      section.createDiv({
+        cls: "rss-dashboard-collection-topic-boundary",
+        text: this.t("dashboard.topicDiscoveryBoundary"),
+      });
+    }
+
     if (this.collectionLoading) {
       results.createDiv({ text: this.t("dashboard.loadingCollection") });
       return;
@@ -1366,7 +1390,12 @@ export class RssDashboardView extends ItemView {
     const list = results.createDiv({ cls: "rss-dashboard-collection-list" });
     const items = this.getCollectionSectionItems();
     if (items.length === 0) {
-      list.createDiv({ text: this.t("dashboard.noCollected") });
+      list.createDiv({
+        text:
+          this.collectionSection === "topic-discovery"
+            ? this.t("dashboard.noTopicCandidates")
+            : this.t("dashboard.noCollected"),
+      });
       return;
     }
 
@@ -1782,6 +1811,7 @@ export class RssDashboardView extends ItemView {
       statusFilters: this.activeStatusFilters,
       tagFilters: this.activeTagFilters,
       logic: this.filterLogic,
+      locale: this.settings.locale ?? "zh-CN",
     });
   }
 

@@ -215,6 +215,7 @@ export function renderCardView(
       const dateInfo = formatArticleDate(
         article.pubDate,
         ctx.settings.display.articleDateStyle ?? "relative",
+        ctx.settings.locale ?? "zh-CN",
       );
       dateEl.textContent = dateInfo.text;
       dateEl.setAttribute("title", dateInfo.title);

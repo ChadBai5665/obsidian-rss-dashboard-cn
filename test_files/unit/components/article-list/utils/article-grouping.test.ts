@@ -10,7 +10,7 @@ describe("article-grouping utils", () => {
         { guid: "2", title: "A2", feedTitle: "Feed B", feedUrl: "url-b", pubDate: "2024-01-02", read: false, starred: false, tags: [], coverImage: "" },
       ];
       
-      const result = groupArticles(articles, "none");
+      const result = groupArticles(articles, "none", undefined, "en");
       
       expect(Object.keys(result)).toEqual(["All articles"]);
       expect(result["All articles"]).toHaveLength(2);
@@ -23,7 +23,7 @@ describe("article-grouping utils", () => {
         { guid: "3", title: "B1", feedTitle: "Feed B", feedUrl: "url-b", pubDate: "2024-01-03", read: false, starred: false, tags: [], coverImage: "" },
       ];
       
-      const result = groupArticles(articles, "feed");
+      const result = groupArticles(articles, "feed", undefined, "en");
       
       expect(Object.keys(result).sort()).toEqual(["Feed A", "Feed B"]);
       expect(result["Feed A"]).toHaveLength(2);
@@ -35,7 +35,7 @@ describe("article-grouping utils", () => {
         { guid: "1", title: "A1", feedTitle: "", feedUrl: "url-a", pubDate: "2024-01-01", read: false, starred: false, tags: [], coverImage: "" },
       ];
       
-      const result = groupArticles(articles, "feed");
+      const result = groupArticles(articles, "feed", undefined, "en");
       
       expect(Object.keys(result)).toContain("Uncategorized");
     });
@@ -46,7 +46,7 @@ describe("article-grouping utils", () => {
         { guid: "2", title: "A2", feedTitle: "Feed A", feedUrl: "url-a", pubDate: new Date().toISOString(), read: false, starred: false, tags: [], coverImage: "" },
       ];
       
-      const result = groupArticles(articles, "date");
+      const result = groupArticles(articles, "date", undefined, "en");
       
       // All articles published today should be in "Today" group
       expect(Object.keys(result)).toContain("Today");
@@ -57,7 +57,7 @@ describe("article-grouping utils", () => {
         { guid: "1", title: "A1", feedTitle: "Feed A", feedUrl: "url-a", pubDate: "2024-01-01", read: false, starred: false, tags: [], coverImage: "" },
       ];
       
-      const result = groupArticles(articles, "none");
+      const result = groupArticles(articles, "none", undefined, "en");
       
       expect(result["All articles"][0]).toBe(articles[0]);
     });

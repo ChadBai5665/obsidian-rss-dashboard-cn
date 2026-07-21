@@ -31,7 +31,7 @@ import { applyFeedSortOrder } from "../utils/sidebar-sort-utils";
 import { applyFolderSortOrder } from "../utils/sidebar-folder-sort-utils";
 import { MediaService } from "../services/media-service";
 import { MastodonService } from "../services/mastodon-service";
-import { createTranslator } from "../i18n";
+import { createTranslator, type Locale } from "../i18n";
 import {
   createSafeIconImage,
   failedFeedIconUrls,
@@ -130,6 +130,7 @@ class FolderNameModal extends Modal {
     title: string;
     defaultValue?: string;
     existingNames?: string[];
+    locale?: Locale;
     onSubmit: (name: string) => void;
   };
 
@@ -139,6 +140,7 @@ class FolderNameModal extends Modal {
       title: string;
       defaultValue?: string;
       existingNames?: string[];
+      locale?: Locale;
       onSubmit: (name: string) => void;
     },
   ) {
@@ -147,6 +149,7 @@ class FolderNameModal extends Modal {
   }
 
   onOpen() {
+    const t = createTranslator(this.opts.locale ?? "zh-CN");
     const { contentEl } = this;
     contentEl.empty();
 
@@ -163,7 +166,7 @@ class FolderNameModal extends Modal {
       attr: {
         type: "text",
         value: this.opts.defaultValue ?? "",
-        placeholder: "Enter folder name",
+        placeholder: t("sidebar.folderName"),
         autocomplete: "off",
         autocorrect: "off",
         autocapitalize: "off",
@@ -177,8 +180,8 @@ class FolderNameModal extends Modal {
       cls: "rss-folder-name-modal-input-clear",
       attr: {
         type: "button",
-        "aria-label": "Clear folder name",
-        title: "Clear",
+        "aria-label": t("sidebar.clearFolderName"),
+        title: t("common.close"),
       },
     });
     setIcon(clearInputButton, "x");
@@ -208,7 +211,7 @@ class FolderNameModal extends Modal {
       const name = nameInput.value.trim();
       const validation = isValidFolderName(name);
       if (!validation.valid) {
-        showError(validation.error || "Please enter a folder name.");
+        showError(validation.error || t("sidebar.folderRequired"));
         nameInput.focus();
         return;
       }
@@ -216,7 +219,7 @@ class FolderNameModal extends Modal {
         this.opts.existingNames?.includes(name) &&
         name !== this.opts.defaultValue
       ) {
-        showError("A folder with this name already exists.");
+        showError(t("sidebar.folderExists"));
         nameInput.focus();
         return;
       }
@@ -250,14 +253,14 @@ class FolderNameModal extends Modal {
     okButton.addClass("rss-folder-name-modal-ok");
     const okIcon = okButton.createSpan();
     setIcon(okIcon, "check");
-    okButton.createSpan({ text: "OK" });
+    okButton.createSpan({ text: t("common.confirm") });
     okButton.addEventListener("click", submit);
 
     const cancelButton = buttonContainer.createEl("button");
     cancelButton.addClass("rss-folder-name-modal-cancel");
     const cancelIcon = cancelButton.createSpan();
     setIcon(cancelIcon, "x");
-    cancelButton.createSpan({ text: "Cancel" });
+    cancelButton.createSpan({ text: t("common.cancel") });
     cancelButton.addEventListener("click", () => this.close());
 
     // Single focus+select; Obsidian's Modal handles focus isolation.
@@ -296,6 +299,11 @@ export class Sidebar {
   private sidebarRows: SidebarRowDescriptor[] = [];
   private focusedSidebarTarget: SidebarFocusTarget | null = null;
   private isSidebarKeyboardFocused = false;
+
+  private t = (
+    key: Parameters<ReturnType<typeof createTranslator>>[0],
+    params?: Record<string, string | number>,
+  ): string => createTranslator(this.settings.locale ?? "zh-CN")(key, params);
 
   private renderFallbackFeedIcon(feedIcon: HTMLElement): void {
     feedIcon.empty();
@@ -670,11 +678,11 @@ export class Sidebar {
         const menu = new Menu();
         menu.addItem((item: MenuItem) => {
           item
-            .setTitle("Add folder")
+            .setTitle(this.t("sidebar.addFolder"))
             .setIcon("folder-plus")
             .onClick(() => {
               this.showFolderNameModal({
-                title: "Add folder",
+                title: this.t("sidebar.addFolder"),
                 existingNames: this.settings.folders.map((f) => f.name),
                 onSubmit: (folderName) => {
                   void this.addTopLevelFolder(folderName).then(() =>
@@ -686,7 +694,7 @@ export class Sidebar {
         });
         menu.addItem((item: MenuItem) => {
           item
-            .setTitle("Add feed")
+            .setTitle(this.t("sidebar.addFeed"))
             .setIcon("rss")
             .onClick(() => {
               this.showAddFeedModal();
@@ -780,12 +788,12 @@ export class Sidebar {
         cls: "rss-dashboard-tag-color-picker",
       });
       const input = addRow.createEl("input", {
-        attr: { type: "text", placeholder: "New tag..." },
+        attr: { type: "text", placeholder: this.t("sidebar.newTag") },
         cls: "rss-dashboard-sidebar-add-tag-input",
       });
       const addBtn = addRow.createEl("button", {
         cls: "rss-dashboard-sidebar-add-tag-btn",
-        text: "Add",
+        text: this.t("common.confirm"),
       });
       const cancelBtn = addRow.createDiv({
         cls: "rss-dashboard-sidebar-add-tag-cancel-btn",
@@ -809,7 +817,7 @@ export class Sidebar {
             (t) => t.name.toLowerCase() === val.toLowerCase(),
           )
         ) {
-          new Notice("Tag already exists");
+          new Notice(this.t("sidebar.tagExists"));
           return;
         }
         this.settings.availableTags.push({ name: val, color: cp.value });
@@ -839,7 +847,7 @@ export class Sidebar {
       });
       setIcon(addToggle, "plus");
       addToggle.createSpan({
-        text: "Add new tag...",
+        text: this.t("sidebar.addTag"),
         cls: "rss-dashboard-sidebar-add-tag-toggle-label",
       });
       addToggle.addEventListener("click", () => {
@@ -2356,7 +2364,10 @@ export class Sidebar {
   }) {
     // Delegate to FolderNameModal (extends Obsidian Modal) for focus stability.
     // See FolderNameModal class comments for context on why Modal is required.
-    new FolderNameModal(this.app, options).open();
+    new FolderNameModal(this.app, {
+      ...options,
+      locale: this.settings.locale ?? "zh-CN",
+    }).open();
   }
 
   private removeFolderByPath(path: string) {

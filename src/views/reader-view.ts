@@ -26,9 +26,6 @@ import { ArticleSaver } from "../services/article-saver";
 import { setCssProps } from "../utils/platform-utils";
 import {
   fetchFullArticleContentWithOutcome,
-  RESTRICTED_ARTICLE_BANNER,
-  RESTRICTED_ARTICLE_LINK_TEXT,
-  RESTRICTED_ARTICLE_NOTICE,
   RESTRICTED_ARTICLE_REASON,
 } from "../utils/full-article-fetch";
 import { isLikelyVideoItem } from "../utils/video-detection";
@@ -58,11 +55,6 @@ import {
 import { ExplicitContentCoordinator } from "../collection/explicit-content-coordinator";
 import { isYouTubeItem } from "../utils/youtube-detection";
 import { createTranslator } from "../i18n";
-
-const VIDEO_ARTICLE_BANNER =
-  "This item appears to be a video. Open the source page to watch.";
-const VIDEO_ARTICLE_LINK_TEXT = "Open video at source";
-const FEED_DESCRIPTION_UNAVAILABLE_TEXT = "No feed description available.";
 
 export const RSS_READER_VIEW_TYPE = "rss-reader-view";
 
@@ -766,7 +758,7 @@ export class ReaderView extends ItemView {
   private t = (
     key: Parameters<ReturnType<typeof createTranslator>>[0],
     params?: Record<string, string | number>,
-  ): string => createTranslator(this.settings.locale ?? "en")(key, params);
+  ): string => createTranslator(this.settings.locale ?? "zh-CN")(key, params);
 
   private syncReaderTitle(): void {
     if (this.titleElement) {
@@ -963,7 +955,7 @@ export class ReaderView extends ItemView {
         });
 
         if (destinations.length === 0) {
-          new Notice("No link available for this podcast.");
+          new Notice(this.t("reader.podcastNoLink"));
           return;
         }
 
@@ -982,7 +974,7 @@ export class ReaderView extends ItemView {
               menuItem.onClick(() => {
                 void (async () => {
                   if (!feedMatch?.url || !feedMatch.title) {
-                    new Notice("Could not find this show in apple podcasts.");
+                    new Notice(this.t("reader.applePodcastNotFound"));
                     return;
                   }
                   const appleUrl = await resolveApplePodcastsShowUrl(
@@ -990,7 +982,7 @@ export class ReaderView extends ItemView {
                     feedMatch.title,
                   );
                   if (!appleUrl) {
-                    new Notice("Could not find this show in apple podcasts.");
+                    new Notice(this.t("reader.applePodcastNotFound"));
                     return;
                   }
                   activeWindow.open(appleUrl, "_blank");
@@ -1737,7 +1729,7 @@ export class ReaderView extends ItemView {
           undefined,
         );
       } else {
-        descriptionBody.setText(FEED_DESCRIPTION_UNAVAILABLE_TEXT);
+        descriptionBody.setText(this.t("reader.noFeedDescription"));
       }
     }
 
@@ -1782,8 +1774,8 @@ export class ReaderView extends ItemView {
     });
     message.setText(
       item.restrictedReason === RESTRICTED_ARTICLE_REASON
-        ? RESTRICTED_ARTICLE_BANNER
-        : (item.restrictedReason ?? RESTRICTED_ARTICLE_BANNER),
+        ? this.t("reader.restrictedBanner")
+        : (item.restrictedReason ?? this.t("reader.restrictedBanner")),
     );
 
     if (!item.link) {
@@ -1792,7 +1784,7 @@ export class ReaderView extends ItemView {
 
     const link = banner.createEl("a", {
       cls: "rss-reader-paywall-banner-link",
-      text: RESTRICTED_ARTICLE_LINK_TEXT,
+      text: this.t("reader.restrictedLink"),
       href: item.link,
     });
     link.target = "_blank";
@@ -1809,7 +1801,7 @@ export class ReaderView extends ItemView {
     });
     const message = banner.createDiv({
       cls: "rss-reader-video-banner-text",
-      text: VIDEO_ARTICLE_BANNER,
+      text: this.t("reader.videoSource"),
     });
     message.setAttr("role", "note");
 
@@ -1819,7 +1811,7 @@ export class ReaderView extends ItemView {
 
     const link = banner.createEl("a", {
       cls: "rss-reader-video-banner-link",
-      text: VIDEO_ARTICLE_LINK_TEXT,
+      text: this.t("reader.openVideoSource"),
       href: item.link,
     });
     link.target = "_blank";
@@ -2953,7 +2945,7 @@ export class ReaderView extends ItemView {
       return;
     }
 
-    new Notice(RESTRICTED_ARTICLE_NOTICE);
+    new Notice(this.t("reader.restrictedNotice"));
     this.lastRestrictedNoticeGuid = item.guid;
   }
 

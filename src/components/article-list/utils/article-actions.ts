@@ -58,7 +58,7 @@ export function createReadToggle(
     "article" | "actionToolbar" | "callbacks" | "settings"
   >,
 ): HTMLElement {
-  const t = createTranslator(arg.settings.locale ?? "en");
+  const t = createTranslator(arg.settings.locale ?? "zh-CN");
   const readToggle = arg.actionToolbar.createDiv({
     cls: `rss-dashboard-read-toggle clickable-icon ${arg.article.read ? "read" : "unread"}`,
     attr: {
@@ -105,7 +105,7 @@ export function createSaveButton(
     "article" | "actionToolbar" | "settings" | "callbacks"
   >,
 ): HTMLElement {
-  const t = createTranslator(arg.settings.locale ?? "en");
+  const t = createTranslator(arg.settings.locale ?? "zh-CN");
   const saveButton = arg.actionToolbar.createDiv({
     cls: `rss-dashboard-save-toggle clickable-icon ${arg.article.saved ? "saved" : ""}`,
     attr: {
@@ -178,7 +178,7 @@ export function createStarToggle(
     "article" | "actionToolbar" | "callbacks" | "settings"
   >,
 ): HTMLElement {
-  const t = createTranslator(arg.settings.locale ?? "en");
+  const t = createTranslator(arg.settings.locale ?? "zh-CN");
   const starToggle = arg.actionToolbar.createDiv({
     cls: `rss-dashboard-star-toggle clickable-icon ${arg.article.starred ? "starred" : "unstarred"}`,
     attr: {
@@ -238,7 +238,7 @@ export function createTagsToggle(
     "article" | "actionToolbar" | "deps" | "settings"
   >,
 ): HTMLElement {
-  const t = createTranslator(arg.settings.locale ?? "en");
+  const t = createTranslator(arg.settings.locale ?? "zh-CN");
   const tagsDropdown = arg.actionToolbar.createDiv({
     cls: "rss-dashboard-tags-dropdown",
   });

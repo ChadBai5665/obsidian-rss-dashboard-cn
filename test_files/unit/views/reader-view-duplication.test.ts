@@ -58,7 +58,7 @@ describe("ReaderView Image Duplication", () => {
       },
     };
     mockLeaf = new MockLeaf(mockApp);
-    mockSettings = { ...DEFAULT_SETTINGS, useWebViewer: false };
+    mockSettings = { ...DEFAULT_SETTINGS, locale: "en", useWebViewer: false };
     mockArticleSaver = { saveArticle: vi.fn() };
 
     readerView = new ReaderView(
@@ -179,7 +179,7 @@ describe("ReaderView – summary de-duplication", () => {
     };
 
     const mockLeaf = new MockLeaf(mockApp);
-    mockSettings = { ...DEFAULT_SETTINGS, useWebViewer: false };
+    mockSettings = { ...DEFAULT_SETTINGS, locale: "en", useWebViewer: false };
 
     readerView = new ReaderView(
       mockLeaf as never,

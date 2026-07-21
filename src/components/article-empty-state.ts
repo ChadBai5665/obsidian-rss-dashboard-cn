@@ -29,7 +29,7 @@ export class ArticleEmptyState {
   ): void {
     // This standalone component historically rendered English when used
     // without settings. Dashboard callers always pass their persisted locale.
-    const t = createTranslator(options?.locale ?? "en");
+    const t = createTranslator(options?.locale ?? "zh-CN");
     const emptyState = container.createDiv({
       cls: "rss-dashboard-empty-state",
     });
