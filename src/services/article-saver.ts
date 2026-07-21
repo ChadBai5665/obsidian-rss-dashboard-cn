@@ -1,10 +1,18 @@
-import { App, Notice, TFile, moment, type TAbstractFile } from "obsidian";
+import {
+  App,
+  Notice,
+  TFile,
+  TFolder,
+  moment,
+  type TAbstractFile,
+} from "obsidian";
 import { Readability } from "@mozilla/readability";
 import TurndownService from "turndown";
 import {
   Document as YamlDocument,
   isMap,
   isScalar,
+  isSeq,
   parseDocument,
   visit,
   YAMLMap,
@@ -17,7 +25,10 @@ import {
 import type { ContentBasis } from "../collection/collected-item";
 import { CollectionRepository } from "../collection/collection-repository";
 import { ExplicitContentCoordinator } from "../collection/explicit-content-coordinator";
-import { createCollectedItemId } from "../collection/item-identity";
+import {
+  canonicalizeUrl,
+  resolveFeedItemStableId,
+} from "../collection/item-identity";
 import { type FullArticleFetchResult } from "../utils/fetch-helpers";
 import {
   fetchFullArticleContentWithOutcome,
@@ -47,6 +58,8 @@ const OWNED_FRONTMATTER_KEY_SET = new Set<string>(OWNED_FRONTMATTER_KEYS);
 const savedNoteQueues = new WeakMap<object, Map<string, Promise<void>>>();
 const SAVED_NOTE_SYNC_WARNING =
   "[RSS Dashboard] Saved-note metadata sync failed; the note remains valid and will be repaired later.";
+const LEGACY_NOTE_MIGRATION_WARNING =
+  "[RSS Dashboard] Saved note ownership could not be verified; the existing path was left unchanged for manual review.";
 
 export function sanitizeFilename(name: string): string {
   const sanitized = name
@@ -294,16 +307,7 @@ guid: "{{guid}}"
 ---`;
     }
 
-    const tagNames = (item.tags ?? [])
-      .map((tag) => tag.name)
-      .filter(
-        (name): name is string =>
-          typeof name === "string" && name.trim() !== "",
-      );
-
-    if (this.settings.addSavedTag) {
-      tagNames.splice(0, tagNames.length, ...withSavedTagName(tagNames));
-    }
+    const tagNames = this.resolveTagNames(item);
 
     const additions: Record<string, string> = {};
     if (item.mediaType === "video" && item.videoId) {
@@ -318,7 +322,7 @@ guid: "{{guid}}"
       frontmatter,
       item,
       "",
-      tagNames.join(", "),
+      tagNames,
       item.pubDate ? new Date(item.pubDate) : new Date(),
       additions,
     );
@@ -370,15 +374,8 @@ guid: "{{guid}}"
 
     const pubDate = item.pubDate ? new Date(item.pubDate) : new Date();
 
-    const tagNames = (item.tags ?? [])
-      .map((tag) => tag.name)
-      .filter(
-        (name): name is string =>
-          typeof name === "string" && name.trim() !== "",
-      );
-    const tagsString = this.settings.addSavedTag
-      ? withSavedTagName(tagNames).join(", ")
-      : tagNames.join(", ");
+    const tagNames = this.resolveTagNames(item);
+    const tagsString = tagNames.join(", ");
 
     const frontmatter = this.extractFrontmatter(template);
     if (!frontmatter) {
@@ -394,7 +391,7 @@ guid: "{{guid}}"
         frontmatter.yaml,
         item,
         content,
-        tagsString,
+        tagNames,
         pubDate,
       ) +
       this.replaceTemplateValues(
@@ -435,13 +432,14 @@ guid: "{{guid}}"
     template: string,
     item: FeedItem,
     content: string,
-    tags: string,
+    tags: string[],
     date: Date,
     additions: Record<string, string> = {},
   ): string {
     const extracted = this.extractFrontmatter(template);
     const yamlSource = extracted?.yaml ?? template;
     const replacements = new Map<string, string>();
+    const tagTokens = new Set<string>();
     let sequence = 0;
     const tokenized = yamlSource.replace(/{{[^{}\r\n]+}}/g, (placeholder) => {
       const token = `RSSDASHBOARDPLACEHOLDER${sequence++}TOKEN`;
@@ -451,16 +449,53 @@ guid: "{{guid}}"
           placeholder,
           item,
           content,
-          tags,
+          tags.join(", "),
           date,
         ),
       );
+      if (placeholder === "{{tags}}") tagTokens.add(token);
       return token;
     });
     const yamlDocument = this.parseYamlMapping(
       tokenized,
       "frontmatter template",
     );
+    const expandTagSequences = (node: unknown): void => {
+      if (isMap(node)) {
+        for (const pair of node.items) {
+          if (
+            isScalar(pair.value) &&
+            typeof pair.value.value === "string" &&
+            pair.value.type !== "BLOCK_LITERAL" &&
+            pair.value.type !== "BLOCK_FOLDED" &&
+            tagTokens.has(pair.value.value)
+          ) {
+            pair.value = yamlDocument.createNode(tags);
+          } else {
+            expandTagSequences(pair.value);
+          }
+        }
+        return;
+      }
+      if (!isSeq(node)) return;
+      for (let index = node.items.length - 1; index >= 0; index--) {
+        const child = node.items[index];
+        if (
+          isScalar(child) &&
+          typeof child.value === "string" &&
+          tagTokens.has(child.value)
+        ) {
+          node.items.splice(
+            index,
+            1,
+            ...tags.map((tag) => yamlDocument.createNode(tag)),
+          );
+        } else {
+          expandTagSequences(child);
+        }
+      }
+    };
+    expandTagSequences(yamlDocument.contents);
     visit(yamlDocument, {
       Scalar: (key, node) => {
         if (typeof node.value !== "string") return;
@@ -485,6 +520,32 @@ guid: "{{guid}}"
       yamlDocument.set(key, value);
     }
     return this.stringifyFrontmatter(yamlDocument);
+  }
+
+  private resolveTagNames(item: FeedItem): string[] {
+    const normalized: string[] = [];
+    const seen = new Set<string>();
+    for (const rawName of (item.tags ?? []).map((tag) => tag.name)) {
+      if (typeof rawName !== "string") continue;
+      const name = rawName.trim();
+      const key = name.toLocaleLowerCase();
+      if (!name || seen.has(key)) continue;
+      seen.add(key);
+      normalized.push(name);
+    }
+    const withSaved = this.settings.addSavedTag
+      ? withSavedTagName(normalized)
+      : normalized;
+    const result: string[] = [];
+    const resultSeen = new Set<string>();
+    for (const rawName of withSaved) {
+      const name = rawName.trim();
+      const key = name.toLocaleLowerCase();
+      if (!name || resultSeen.has(key)) continue;
+      resultSeen.add(key);
+      result.push(name);
+    }
+    return result;
   }
 
   private resolveTemplatePlaceholder(
@@ -781,7 +842,9 @@ guid: "{{guid}}"
       const folder = this.resolveSavedNoteFolder(customFolder);
       return await this.withSavedNoteLock(folder, async () => {
         const itemId = this.resolveStableItemId(item);
-        const existing = await this.findNoteByStableId(folder, itemId);
+        const existing =
+          (await this.findExactOwnedNote(item, itemId)) ??
+          (await this.findNoteByStableId(folder, itemId));
         if (existing) {
           return await this.returnExistingNote(item, existing, itemId);
         }
@@ -932,7 +995,9 @@ guid: "{{guid}}"
     contentBasis: ContentBasis;
     itemId: string;
   }): Promise<TFile> {
-    const existing = await this.findNoteByStableId(input.folder, input.itemId);
+    const existing =
+      (await this.findExactOwnedNote(input.item, input.itemId)) ??
+      (await this.findNoteByStableId(input.folder, input.itemId));
     if (existing) {
       return await this.returnExistingNote(input.item, existing, input.itemId);
     }
@@ -948,7 +1013,15 @@ guid: "{{guid}}"
       this.settings.defaultTemplate ||
       "# {{title}}\n\n{{content}}\n\n[Source]({{link}})";
     let contentToWrite = "";
-    const templateHasFrontmatter = template.trim().startsWith("---");
+    const templateFrontmatter = this.extractFrontmatter(template);
+    const frontmatterLike = template
+      .replace(/^\uFEFF/, "")
+      .trimStart()
+      .startsWith("---");
+    if (frontmatterLike && !templateFrontmatter) {
+      throw new Error("Invalid frontmatter template boundary.");
+    }
+    const templateHasFrontmatter = templateFrontmatter !== null;
     if (this.settings.includeFrontmatter && !templateHasFrontmatter) {
       contentToWrite += this.generateFrontmatter(input.item);
     }
@@ -988,20 +1061,26 @@ guid: "{{guid}}"
   }
 
   private resolveSavedNoteFolder(customFolder?: string): string {
+    if (customFolder !== undefined) {
+      return this.normalizeSavedNoteFolder(customFolder, true);
+    }
     if (this.collectionSettings) {
-      return this.normalizeCollectionSavedNoteFolder(
+      return this.normalizeSavedNoteFolder(
         this.collectionSettings.savedNoteFolder,
+        false,
       );
     }
 
-    const configured = customFolder ?? this.settings.defaultFolder ?? "";
+    const configured = this.settings.defaultFolder ?? "";
     if (!configured.trim()) return "";
-    const normalized = this.normalizePath(configured).normalize("NFC");
-    if (!normalized) return "";
-    return normalized;
+    return this.normalizePath(configured).normalize("NFC");
   }
 
-  private normalizeCollectionSavedNoteFolder(configured: string): string {
+  private normalizeSavedNoteFolder(
+    configured: string,
+    allowRoot: boolean,
+  ): string {
+    if (allowRoot && configured === "") return "";
     if (
       configured !== configured.trim() ||
       !configured ||
@@ -1053,22 +1132,7 @@ guid: "{{guid}}"
   }
 
   private resolveStableItemId(item: FeedItem): string {
-    if (item.rssDashboardId !== undefined) {
-      if (!STABLE_ITEM_ID.test(item.rssDashboardId)) {
-        throw new Error("Invalid RSS Dashboard item ID.");
-      }
-      return item.rssDashboardId;
-    }
-    const itemId = createCollectedItemId({
-      sourceId: item.feedUrl || item.feedTitle || "rss-dashboard",
-      guid: item.guid,
-      url: item.link,
-      title: item.title,
-      author: item.author,
-      publishedAt: item.pubDate,
-    });
-    item.rssDashboardId = itemId;
-    return itemId;
+    return resolveFeedItemStableId(item);
   }
 
   private async withSavedNoteLock<T>(
@@ -1110,6 +1174,17 @@ guid: "{{guid}}"
       if ((await this.readOwnedStableId(file)) === itemId) return file;
     }
     return null;
+  }
+
+  private async findExactOwnedNote(
+    item: FeedItem,
+    itemId: string,
+  ): Promise<TFile | null> {
+    const savedPath = item.savedFilePath?.normalize("NFC");
+    if (!savedPath) return null;
+    const file = this.getAbstractFileByCanonicalPath(savedPath);
+    if (!(file instanceof TFile)) return null;
+    return (await this.readOwnedStableId(file)) === itemId ? file : null;
   }
 
   private isPathInsideFolder(path: string, folder: string): boolean {
@@ -1178,11 +1253,18 @@ guid: "{{guid}}"
     const canonicalPath = path.normalize("NFC");
     const direct = this.app.vault.getAbstractFileByPath(canonicalPath);
     if (direct !== null) return direct;
-    return (
-      this.app.vault
-        .getFiles()
-        .find((file) => file.path.normalize("NFC") === canonicalPath) ?? null
-    );
+    const segments = canonicalPath.split("/").filter(Boolean);
+    let folder = this.app.vault.getRoot();
+    for (let index = 0; index < segments.length; index++) {
+      const match = folder.children.find(
+        (child) => child.name.normalize("NFC") === segments[index],
+      );
+      if (!match) return null;
+      if (index === segments.length - 1) return match;
+      if (!(match instanceof TFolder)) return null;
+      folder = match;
+    }
+    return null;
   }
 
   private addOwnedFrontmatter(
@@ -1223,7 +1305,7 @@ guid: "{{guid}}"
     content: string,
   ): { yaml: string; body: string } | null {
     const match = content.match(
-      /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/,
+      /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/,
     );
     if (!match) return null;
     return { yaml: match[1], body: content.slice(match[0].length) };
@@ -1367,29 +1449,40 @@ guid: "{{guid}}"
       await this.withSavedNoteLock(folder, async () => {
         try {
           const itemId = this.resolveStableItemId(article);
+          const exactOwned = await this.findExactOwnedNote(article, itemId);
+          if (exactOwned) {
+            article.savedFilePath = exactOwned.path.normalize("NFC");
+            article.savedNoteMigrationPending = undefined;
+            return;
+          }
+
           const ownedInFolder = await this.findNoteByStableId(folder, itemId);
           if (ownedInFolder) {
             article.savedFilePath = ownedInFolder.path;
+            article.savedNoteMigrationPending = undefined;
             return;
           }
 
           const explicitPath = article.savedFilePath?.normalize("NFC");
           const explicitFile = explicitPath
-            ? this.app.vault.getAbstractFileByPath(explicitPath)
+            ? this.getAbstractFileByCanonicalPath(explicitPath)
             : null;
-          if (
-            !(explicitFile instanceof TFile) ||
-            (await this.readOwnedStableId(explicitFile)) !== itemId
-          ) {
-            this.clearSavedState(article);
+          if (!(explicitFile instanceof TFile)) {
+            this.markLegacyMigrationPending(article);
+            return;
+          }
+          const raw = await this.app.vault.read(explicitFile);
+          if (!this.legacyNoteMatchesItem(raw, article)) {
+            this.markLegacyMigrationPending(article);
             return;
           }
 
-          if (this.isPathInsideFolder(explicitFile.path, folder)) {
-            article.savedFilePath = explicitFile.path.normalize("NFC");
-            return;
-          }
-
+          const migrated = this.addOwnedFrontmatter(raw, {
+            itemId,
+            item: article,
+            contentBasis: "feed",
+          });
+          await this.app.vault.modify(explicitFile, migrated);
           await this.ensureFolderExists(folder);
           const targetPath = await this.selectCollisionSafePath(
             folder,
@@ -1399,15 +1492,77 @@ guid: "{{guid}}"
           const target = this.app.vault.getAbstractFileByPath(targetPath);
           if (target instanceof TFile) {
             article.savedFilePath = target.path;
+            article.savedNoteMigrationPending = undefined;
             return;
           }
-          await this.app.fileManager.renameFile(explicitFile, targetPath);
+          if (explicitFile.path !== targetPath) {
+            await this.app.fileManager.renameFile(explicitFile, targetPath);
+          }
           article.savedFilePath = targetPath;
+          article.savedNoteMigrationPending = undefined;
         } catch {
-          this.clearSavedState(article);
+          this.markLegacyMigrationPending(article);
         }
       });
     }
+  }
+
+  private legacyNoteMatchesItem(raw: string, item: FeedItem): boolean {
+    const frontmatter = this.extractFrontmatter(raw);
+    if (!frontmatter) return false;
+    let yamlDocument: ReturnType<typeof parseDocument>;
+    try {
+      yamlDocument = this.parseYamlMapping(
+        frontmatter.yaml,
+        "legacy saved-note frontmatter",
+      );
+    } catch {
+      return false;
+    }
+    if (!isMap(yamlDocument.contents)) return false;
+    if (yamlDocument.has("rssDashboardId")) return false;
+
+    const scalar = (key: string): string | undefined => {
+      const value: unknown = yamlDocument.get(key);
+      return typeof value === "string" && value.trim()
+        ? value.trim()
+        : undefined;
+    };
+    const evidence: boolean[] = [];
+    const legacyGuid = scalar("guid");
+    if (legacyGuid && item.guid?.trim()) {
+      evidence.push(legacyGuid === item.guid.trim());
+    }
+    for (const key of ["link", "sourceUrl", "url"]) {
+      const legacyUrl = scalar(key);
+      if (!legacyUrl || !item.link?.trim()) continue;
+      const canonicalLegacy = canonicalizeUrl(legacyUrl);
+      const canonicalItem = canonicalizeUrl(item.link);
+      evidence.push(
+        canonicalLegacy && canonicalItem
+          ? canonicalLegacy === canonicalItem
+          : legacyUrl === item.link.trim(),
+      );
+    }
+    if (evidence.length === 0 || evidence.some((matches) => !matches)) {
+      return false;
+    }
+
+    const allowedSources = new Set(
+      [item.feedTitle, item.feedUrl, item.rssDashboardSourceId]
+        .map((value) => value?.trim())
+        .filter((value): value is string => Boolean(value)),
+    );
+    for (const key of ["source", "feedTitle"]) {
+      const source = scalar(key);
+      if (source && !allowedSources.has(source)) return false;
+    }
+    return true;
+  }
+
+  private markLegacyMigrationPending(article: FeedItem): void {
+    article.savedNoteMigrationPending = true;
+    console.warn(LEGACY_NOTE_MIGRATION_WARNING);
   }
 
   async verifySavedArticle(article: FeedItem): Promise<boolean> {
@@ -1451,13 +1606,16 @@ guid: "{{guid}}"
       return null;
     }
     const savedPath = article.savedFilePath?.normalize("NFC");
-    if (savedPath && this.isPathInsideFolder(savedPath, folder)) {
-      const savedFile = this.app.vault.getAbstractFileByPath(savedPath);
+    if (savedPath) {
+      const savedFile = this.getAbstractFileByCanonicalPath(savedPath);
       if (
         savedFile instanceof TFile &&
         (await this.readOwnedStableId(savedFile)) === itemId
       ) {
         article.savedFilePath = savedFile.path;
+        return savedFile;
+      }
+      if (savedFile instanceof TFile && article.savedNoteMigrationPending) {
         return savedFile;
       }
     }

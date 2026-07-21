@@ -50,7 +50,11 @@ import { RSS_DASHBOARD_VIEW_TYPE, RssDashboardView } from "./dashboard-view";
 import { VaultFolderSuggest } from "../components/folder-suggest";
 import { ShortcutHelpModal } from "../modals/shortcut-help-modal";
 import { setupReaderHotkeys } from "../hotkeys/reader-hotkeys";
-import { createCollectedItemId } from "../collection/item-identity";
+import {
+  bindFeedItemSourceIdentity,
+  bindDetachedItemSourceIdentity,
+  resolveFeedItemStableId,
+} from "../collection/item-identity";
 import {
   ExplicitContentCoordinator,
 } from "../collection/explicit-content-coordinator";
@@ -2887,14 +2891,14 @@ export class ReaderView extends ItemView {
     const feed = this.settings.feeds.find((candidate) =>
       candidate.url === item.feedUrl,
     );
-    return createCollectedItemId({
-      sourceId: feed?.feedId || item.feedUrl || item.feedTitle || "reader",
-      guid: item.guid,
-      url: item.link,
-      title: item.title,
-      author: item.author,
-      publishedAt: item.pubDate,
-    });
+    if (feed) {
+      bindFeedItemSourceIdentity(feed, item);
+    } else {
+      // Compatibility for isolated legacy items that are rendered before
+      // settings hydration can attach their owning Feed.
+      bindDetachedItemSourceIdentity(item);
+    }
+    return resolveFeedItemStableId(item);
   }
 
 

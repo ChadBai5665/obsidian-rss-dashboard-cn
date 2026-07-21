@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import type { Feed, FeedItem } from "../types/types";
 
 const TRACKING_PARAMETER_NAMES = new Set(["fbclid", "gclid"]);
 
@@ -64,6 +65,73 @@ export function createCollectedItemId(input: {
         ];
 
   return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+}
+
+export function resolveFeedSourceId(
+  feed: Pick<Feed, "feedId" | "url">,
+): string {
+  const sourceId = feed.feedId?.trim() || feed.url?.trim();
+  if (!sourceId) {
+    throw new Error("Cannot identify an RSS item without a feed ID or URL.");
+  }
+  return sourceId;
+}
+
+export function bindFeedItemSourceIdentity(
+  feed: Pick<Feed, "feedId" | "url">,
+  item: FeedItem,
+): boolean {
+  const sourceId = resolveFeedSourceId(feed);
+  if (item.rssDashboardSourceId === sourceId) return false;
+  item.rssDashboardSourceId = sourceId;
+  return true;
+}
+
+export function bindFeedItemsToSourceIdentity(feed: Feed): boolean {
+  let didChange = false;
+  for (const item of feed.items ?? []) {
+    didChange = bindFeedItemSourceIdentity(feed, item) || didChange;
+  }
+  return didChange;
+}
+
+/** Transitional support for a detached pre-migration item in reader UIs. */
+export function bindDetachedItemSourceIdentity(item: FeedItem): boolean {
+  if (item.rssDashboardSourceId?.trim()) return false;
+  const sourceId = item.feedUrl?.trim();
+  if (!sourceId) {
+    throw new Error("Detached RSS item is missing its feed URL.");
+  }
+  item.rssDashboardSourceId = sourceId;
+  return true;
+}
+
+export function resolveFeedItemStableId(item: FeedItem): string {
+  if (item.rssDashboardId !== undefined) {
+    if (!isStableItemId(item.rssDashboardId)) {
+      throw new Error("Invalid RSS Dashboard item ID.");
+    }
+    return item.rssDashboardId;
+  }
+
+  const sourceId = item.rssDashboardSourceId?.trim();
+  if (!sourceId) {
+    throw new Error("RSS item is missing its durable feed identity.");
+  }
+  const itemId = createCollectedItemId({
+    sourceId,
+    guid: item.guid,
+    url: item.link,
+    title: item.title,
+    author: item.author,
+    publishedAt: item.pubDate,
+  });
+  item.rssDashboardId = itemId;
+  return itemId;
+}
+
+export function isStableItemId(value: string | undefined): value is string {
+  return value !== undefined && /^[a-f0-9]{64}$/.test(value);
 }
 
 function isTrackingParameter(name: string): boolean {

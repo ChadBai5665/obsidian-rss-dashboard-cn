@@ -388,6 +388,10 @@ export class MockDataVault {
     const file = new TFile(path);
     this.files.set(path, file);
     this.adapterFiles.set(path, content);
+    const parentPath = path.includes("/")
+      ? path.slice(0, path.lastIndexOf("/"))
+      : "/";
+    this.folders.get(parentPath)?.children.push(file);
     return file;
   }
 
@@ -398,11 +402,19 @@ export class MockDataVault {
 
   async delete(file: TFile | string): Promise<void> {
     const path = typeof file === "string" ? file : file.path;
+    const target = this.files.get(path);
     this.files.delete(path);
     this.adapterFiles.delete(path);
+    if (target) {
+      for (const folder of this.folders.values()) {
+        folder.children = folder.children.filter((child) => child !== target);
+      }
+    }
   }
 
-  async modify(_file: TFile, _content: string): Promise<void> {}
+  async modify(file: TFile, content: string): Promise<void> {
+    this.adapterFiles.set(file.path, content);
+  }
 
   async createFolder(folderPath: string): Promise<TFolder> {
     const cleanPath = folderPath.replace(/^\/+|\/+$/g, "");
@@ -437,6 +449,7 @@ export class MockDataVault {
 
   async renameAbstractFile(file: TFile, newPath: string): Promise<void> {
     const oldPath = file.path;
+    const content = this.adapterFiles.get(oldPath);
     this.files.delete(oldPath);
     this.adapterFiles.delete(oldPath);
 
@@ -445,6 +458,14 @@ export class MockDataVault {
     file.name = file.basename;
 
     this.files.set(newPath, file);
+    if (content !== undefined) this.adapterFiles.set(newPath, content);
+    for (const folder of this.folders.values()) {
+      folder.children = folder.children.filter((child) => child !== file);
+    }
+    const parentPath = newPath.includes("/")
+      ? newPath.slice(0, newPath.lastIndexOf("/"))
+      : "/";
+    this.folders.get(parentPath)?.children.push(file);
   }
 
   getAbstractFileByPath(path: string): TFile | TFolder | null {

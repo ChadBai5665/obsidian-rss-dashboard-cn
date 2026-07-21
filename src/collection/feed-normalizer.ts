@@ -1,7 +1,12 @@
 import { createHash } from "crypto";
 import type { Feed, FeedItem } from "../types/types";
 import type { CollectedItem, SourceType } from "./collected-item";
-import { canonicalizeUrl, createCollectedItemId } from "./item-identity";
+import {
+  bindFeedItemSourceIdentity,
+  canonicalizeUrl,
+  resolveFeedItemStableId,
+  resolveFeedSourceId,
+} from "./item-identity";
 
 const SOURCE_TYPES = new Set<SourceType>([
   "rss",
@@ -22,7 +27,8 @@ export function normalizeFeedItem(
   item: FeedItem,
   now: Date,
 ): CollectedItem {
-  const sourceId = feed.feedId || feed.url;
+  const sourceId = resolveFeedSourceId(feed);
+  bindFeedItemSourceIdentity(feed, item);
   const sourceType = resolveSourceType(feed, item);
   const timestamp = now.toISOString();
   const author = nonEmpty(item.author) ?? nonEmpty(feed.author);
@@ -30,17 +36,7 @@ export function normalizeFeedItem(
   const guid = nonEmpty(item.guid);
   const url = canonicalizeUrl(item.link);
 
-  const id = isStableItemId(item.rssDashboardId)
-    ? item.rssDashboardId
-    : createCollectedItemId({
-        sourceId,
-        guid,
-        url: item.link,
-        title: item.title,
-        author,
-        publishedAt,
-      });
-  item.rssDashboardId = id;
+  const id = resolveFeedItemStableId(item);
 
   return {
     schemaVersion: 1,
@@ -68,10 +64,6 @@ export function normalizeFeedItem(
     savedNotePath: nonEmpty(item.savedFilePath),
     collectionStatus: "collected",
   };
-}
-
-function isStableItemId(value: string | undefined): value is string {
-  return value !== undefined && /^[a-f0-9]{64}$/.test(value);
 }
 
 export function normalizeFeedItemExcerpt(

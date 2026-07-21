@@ -18,7 +18,11 @@ import {
 import { PodcastPlayer } from "../views/podcast-player";
 import { VideoPlayer } from "../views/video-player";
 import { ExplicitContentCoordinator } from "../collection/explicit-content-coordinator";
-import { createCollectedItemId } from "../collection/item-identity";
+import {
+  bindFeedItemSourceIdentity,
+  bindDetachedItemSourceIdentity,
+  resolveFeedItemStableId,
+} from "../collection/item-identity";
 import { isYouTubeItem } from "../utils/youtube-detection";
 
 const VIDEO_ARTICLE_BANNER =
@@ -735,14 +739,14 @@ export class ArticleRenderer {
 
   private getCollectedItemId(item: FeedItem): string {
     const feed = this.settings.feeds.find((candidate) => candidate.url === item.feedUrl);
-    return createCollectedItemId({
-      sourceId: feed?.feedId || item.feedUrl || item.feedTitle || "reader",
-      guid: item.guid,
-      url: item.link,
-      title: item.title,
-      author: item.author,
-      publishedAt: item.pubDate,
-    });
+    if (feed) {
+      bindFeedItemSourceIdentity(feed, item);
+    } else {
+      // Compatibility for isolated legacy items that are rendered before
+      // settings hydration can attach their owning Feed.
+      bindDetachedItemSourceIdentity(item);
+    }
+    return resolveFeedItemStableId(item);
   }
 
   private prefersFeedContent(item: FeedItem): boolean {

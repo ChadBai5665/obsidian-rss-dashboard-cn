@@ -56,6 +56,24 @@ describe("FeedStorageRepository", () => {
     saveData = vi.fn<(...args: unknown[]) => Promise<void>>().mockResolvedValue(undefined);
   });
 
+  it("hydrates every item with its owning feedId source identity before persistence", async () => {
+    const settings = cloneSettings();
+    const feed = makeFeed({ feedId: "feed-source-id" });
+    settings.feeds = [feed];
+
+    await repository.persistSettings(settings, saveData, {
+      forceMetadata: true,
+    });
+
+    expect(
+      (
+        feed.items[0] as (typeof feed.items)[number] & {
+          rssDashboardSourceId?: string;
+        }
+      ).rssDashboardSourceId,
+    ).toBe("feed-source-id");
+  });
+
   it("returns data.json as the feed local address in legacy mode", () => {
     const settings = cloneSettings();
     settings.storageMode = "legacy-json";

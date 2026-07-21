@@ -81,6 +81,7 @@ import { CollectionRepository } from "./src/collection/collection-repository";
 import { DailyIndexService } from "./src/collection/daily-index-service";
 import { CollectionService } from "./src/services/collection-service";
 import { isTimeoutFeedError } from "./src/services/feed-parser/feed-errors";
+import { bindFeedItemsToSourceIdentity } from "./src/collection/item-identity";
 
 export interface FeedRefreshResult {
   feed: Feed;
@@ -2987,6 +2988,13 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private async refreshFeedPipeline(feed: Feed): Promise<FeedRefreshResult> {
+    this.feedStorageRepository.ensureFeedIds(this.settings);
+    if (!feed.feedId) {
+      feed.feedId = this.settings.feeds.find(
+        (candidate) => candidate.url === feed.url,
+      )?.feedId;
+    }
+    bindFeedItemsToSourceIdentity(feed);
     const sourceId = feed.feedId ?? feed.url;
     const attemptedAt = new Date();
     const ledger = this.getSourceRefreshLedger();
@@ -3108,6 +3116,8 @@ export default class RssDashboardPlugin extends Plugin {
     const parserInput = cloneRefreshData(feed);
     parserInput.lastFetchError = undefined;
     const previousItems = cloneRefreshData(feed.items);
+    bindFeedItemsToSourceIdentity(parserInput);
+    bindFeedItemsToSourceIdentity({ ...parserInput, items: previousItems });
     let updatedFeed: Feed;
     if (typeof this.feedParser.refreshFeed === "function") {
       updatedFeed = await this.feedParser.refreshFeed(parserInput);
@@ -3115,6 +3125,8 @@ export default class RssDashboardPlugin extends Plugin {
       const updatedFeeds = await this.feedParser.refreshAllFeeds([parserInput]);
       updatedFeed = updatedFeeds[0] ?? parserInput;
     }
+    updatedFeed.feedId ??= parserInput.feedId;
+    bindFeedItemsToSourceIdentity(updatedFeed);
     attempt.assertActive();
     if (updatedFeed.lastFetchError) {
       throw isTimeoutFeedError(updatedFeed.lastFetchError)

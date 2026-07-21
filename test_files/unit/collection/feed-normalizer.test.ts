@@ -37,7 +37,10 @@ function createItem(overrides: Partial<FeedItem> = {}): FeedItem {
 
 describe("normalizeFeedItem", () => {
   it("maps a standard feed item into a deterministic collected record", () => {
-    const collected = normalizeFeedItem(createFeed(), createItem(), now);
+    const sourceItem = createItem() as FeedItem & {
+      rssDashboardSourceId?: string;
+    };
+    const collected = normalizeFeedItem(createFeed(), sourceItem, now);
 
     expect(collected).toMatchObject({
       schemaVersion: 1,
@@ -62,6 +65,29 @@ describe("normalizeFeedItem", () => {
       collectionStatus: "collected",
     });
     expect(collected.id).toMatch(/^[a-f0-9]{64}$/);
+    expect(sourceItem.rssDashboardSourceId).toBe("feed-123");
+  });
+
+  it("uses the same feedId source for invalid-link GUID identity on every normalization", () => {
+    const feed = createFeed({
+      feedId: "stable-feed-id",
+      url: "https://example.com/changed-feed-url.xml",
+    });
+    const first = createItem({
+      link: "invalid-link",
+      guid: "stable-guid",
+      rssDashboardId: undefined,
+    });
+    const second = createItem({
+      link: "",
+      guid: "stable-guid",
+      feedUrl: "https://different.example/feed.xml",
+      rssDashboardId: undefined,
+    });
+
+    expect(normalizeFeedItem(feed, first, now).id).toBe(
+      normalizeFeedItem(feed, second, now).id,
+    );
   });
 
   it("uses feed URL as the source ID and honors valid optional source metadata", () => {

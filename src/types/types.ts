@@ -1,6 +1,10 @@
 export interface FeedItem {
   /** Stable collection identity once the item has entered the collection layer. */
   rssDashboardId?: string;
+  /** Durable identity of the owning feed used to derive rssDashboardId. */
+  rssDashboardSourceId?: string;
+  /** A legacy saved note exists, but ownership could not be proven safely. */
+  savedNoteMigrationPending?: boolean;
   title: string;
   link: string;
   description: string;

@@ -9,6 +9,7 @@ import type {
   ArticleUserState,
   UserStateFile,
 } from "../types/types";
+import { bindFeedItemsToSourceIdentity } from "../collection/item-identity";
 
 const SHARD_VERSION = 1;
 
@@ -203,6 +204,7 @@ export class FeedStorageRepository {
       }
 
       feed.items = Array.isArray(feed.items) ? feed.items : [];
+      didChange = bindFeedItemsToSourceIdentity(feed) || didChange;
     }
 
     if (didChange) {
