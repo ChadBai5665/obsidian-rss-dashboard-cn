@@ -28,7 +28,7 @@ interface QuarantineJournal {
   schemaVersion: 1;
   stage: "prepared" | "committed";
   sourceFingerprint: string;
-  sourceBackupPath: string;
+  transactionId: string;
   sidecarAfter: string;
   cleanedCollection: string;
 }
@@ -372,15 +372,19 @@ export class CollectionRepository {
           schemaVersion: 1,
           stage: "prepared",
           sourceFingerprint,
-          sourceBackupPath: `${dailyPath}.backup-quarantine-${this.nextWriteId()}`,
+          transactionId: this.nextWriteId(),
           sidecarAfter,
           cleanedCollection,
         };
+    const sourceBackupPath = quarantineBackupPath(
+      dailyPath,
+      journal.transactionId,
+    );
 
     await this.atomicWrite(journalPath, `${JSON.stringify(journal)}\n`);
     await this.atomicWrite(sidecarPath, sidecarAfter);
     await this.atomicWrite(dailyPath, cleanedCollection, {
-      retainedBackupPath: journal.sourceBackupPath,
+      retainedBackupPath: sourceBackupPath,
     });
     const committed: QuarantineJournal = { ...journal, stage: "committed" };
     try {
@@ -390,7 +394,7 @@ export class CollectionRepository {
       return;
     }
     await this.bestEffortRemove(journalPath);
-    await this.bestEffortRemove(journal.sourceBackupPath);
+    await this.bestEffortRemove(sourceBackupPath);
   }
 
   private async readQuarantineJournal(
@@ -415,31 +419,50 @@ export class CollectionRepository {
       return;
     }
 
-    const canonicalExists = await this.vault.adapter.exists(dailyPath);
-    const backupExists = await this.vault.adapter.exists(
-      journal.sourceBackupPath,
+    const sourceBackupPath = quarantineBackupPath(
+      dailyPath,
+      journal.transactionId,
     );
+    const canonicalExists = await this.vault.adapter.exists(dailyPath);
+    const backupExists = await this.vault.adapter.exists(sourceBackupPath);
 
     if (journal.stage === "committed") {
       await this.bestEffortRemove(journalPath);
-      await this.bestEffortRemove(journal.sourceBackupPath);
+      await this.bestEffortRemove(sourceBackupPath);
       return;
     }
 
     if (!canonicalExists && backupExists) {
-      await this.restoreBackup(journal.sourceBackupPath, dailyPath);
+      await this.restoreBackup(sourceBackupPath, dailyPath);
       return;
     }
 
-    if (canonicalExists && backupExists) {
+    if (!canonicalExists) {
+      return;
+    }
+
+    const canonical = await this.vault.adapter.read(dailyPath);
+    if (fingerprint(canonical) === journal.sourceFingerprint) {
+      if (backupExists) {
+        await this.bestEffortRemove(sourceBackupPath);
+      }
+      return;
+    }
+
+    if (canonical === journal.cleanedCollection) {
       const committed: QuarantineJournal = {
         ...journal,
         stage: "committed",
       };
       await this.atomicWrite(journalPath, `${JSON.stringify(committed)}\n`);
       await this.bestEffortRemove(journalPath);
-      await this.bestEffortRemove(journal.sourceBackupPath);
+      await this.bestEffortRemove(sourceBackupPath);
+      return;
     }
+
+    throw new Error(
+      "Cannot recover quarantine transaction: canonical content does not match its source or cleaned generation",
+    );
   }
 
   private async restoreBackup(backupPath: string, path: string): Promise<void> {
@@ -659,6 +682,13 @@ function fingerprint(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function quarantineBackupPath(
+  dailyPath: string,
+  transactionId: string,
+): string {
+  return `${dailyPath}.backup-quarantine-${transactionId}`;
+}
+
 function parentPath(path: string): string {
   const separator = path.lastIndexOf("/");
   return separator === -1 ? "" : path.slice(0, separator);
@@ -724,7 +754,8 @@ function isQuarantineJournal(value: unknown): value is QuarantineJournal {
     value.schemaVersion === 1 &&
     (value.stage === "prepared" || value.stage === "committed") &&
     typeof value.sourceFingerprint === "string" &&
-    typeof value.sourceBackupPath === "string" &&
+    typeof value.transactionId === "string" &&
+    /^\d{1,20}-\d{1,20}$/.test(value.transactionId) &&
     typeof value.sidecarAfter === "string" &&
     typeof value.cleanedCollection === "string"
   );

@@ -741,6 +741,158 @@ describe("CollectionRepository", () => {
     expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\n");
   });
 
+  it("never follows a prepared quarantine journal path to another note", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const journalPath = `${dailyPath}.quarantine-journal.json`;
+    const unrelatedPath = `${DATA_ROOT}/unrelated-note.md`;
+    const unrelatedContent = "This note must remain untouched.\n";
+    await adapter.write(unrelatedPath, unrelatedContent);
+    await adapter.remove(dailyPath);
+    await adapter.write(
+      journalPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        stage: "prepared",
+        sourceFingerprint: "attacker-controlled",
+        transactionId: "123-1",
+        sourceBackupPath: unrelatedPath,
+        sidecarAfter: "",
+        cleanedCollection: "",
+      })}\n`,
+    );
+
+    await expect(repository.listByDate("2026-07-21")).resolves.toEqual([]);
+    expect(await adapter.exists(unrelatedPath)).toBe(true);
+    expect(await adapter.read(unrelatedPath)).toBe(unrelatedContent);
+  });
+
+  it("never follows a committed quarantine journal path to another collection", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const otherDatePath = `${DATA_ROOT}/collections/2026-07-20.jsonl`;
+    const otherDateContent = `${JSON.stringify(createItem({ id: "other" }))}\n`;
+    await adapter.write(otherDatePath, otherDateContent);
+    await adapter.write(
+      `${dailyPath}.quarantine-journal.json`,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        stage: "committed",
+        sourceFingerprint: "attacker-controlled",
+        transactionId: "123-2",
+        sourceBackupPath: otherDatePath,
+        sidecarAfter: "",
+        cleanedCollection: "",
+      })}\n`,
+    );
+
+    await repository.listByDate("2026-07-21");
+
+    expect(await adapter.exists(otherDatePath)).toBe(true);
+    expect(await adapter.read(otherDatePath)).toBe(otherDateContent);
+  });
+
+  it("never follows a committed quarantine journal path to its canonical collection", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const dailyContent = await adapter.read(dailyPath);
+    await adapter.write(
+      `${dailyPath}.quarantine-journal.json`,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        stage: "committed",
+        sourceFingerprint: "attacker-controlled",
+        transactionId: "123-3",
+        sourceBackupPath: dailyPath,
+        sidecarAfter: "",
+        cleanedCollection: "",
+      })}\n`,
+    );
+
+    await expect(repository.listByDate("2026-07-21")).resolves.toEqual([
+      createItem(),
+    ]);
+    expect(await adapter.read(dailyPath)).toBe(dailyContent);
+  });
+
+  it("rejects a quarantine transaction ID containing path traversal", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const unrelatedPath = `${DATA_ROOT}/unrelated-note.md`;
+    const unrelatedContent = "This note must remain untouched.\n";
+    await adapter.write(unrelatedPath, unrelatedContent);
+    await adapter.write(
+      `${dailyPath}.quarantine-journal.json`,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        stage: "committed",
+        sourceFingerprint: "attacker-controlled",
+        transactionId: "../../unrelated-note.md",
+        sourceBackupPath: unrelatedPath,
+        sidecarAfter: "",
+        cleanedCollection: "",
+      })}\n`,
+    );
+
+    await repository.listByDate("2026-07-21");
+
+    expect(await adapter.read(unrelatedPath)).toBe(unrelatedContent);
+  });
+
+  it("replays a no-rename quarantine interrupted after its backup copy without duplicating the sidecar", async () => {
+    const { adapter, repository } = createHarness({ withoutRename: true });
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    const valid = await adapter.read(dailyPath);
+    await adapter.write(dailyPath, `${valid}bad\n`);
+    adapter.failNextWriteWhere((path) => path === dailyPath);
+    adapter.failNextRemoveWhere((path) =>
+      path.startsWith(`${dailyPath}.backup-quarantine-`),
+    );
+
+    await expect(repository.listByDate("2026-07-21")).rejects.toThrow(
+      "Injected write failure",
+    );
+    expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\n");
+
+    await expect(repository.listByDate("2026-07-21")).resolves.toEqual([
+      createItem(),
+    ]);
+    expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\n");
+    const listed = await adapter.list(`${DATA_ROOT}/collections`);
+    expect(
+      listed.files.some(
+        (path) =>
+          path.includes(".backup-quarantine-") ||
+          path.endsWith(".quarantine-journal.json"),
+      ),
+    ).toBe(false);
+  });
+
+  it("cleans a committed no-rename quarantine journal and retained backup", async () => {
+    const { adapter, repository } = createHarness({ withoutRename: true });
+    await repository.upsertDaily([createItem()], "2026-07-21");
+    const dailyPath = `${DATA_ROOT}/collections/2026-07-21.jsonl`;
+    await adapter.write(dailyPath, `${await adapter.read(dailyPath)}bad\n`);
+
+    await expect(repository.listByDate("2026-07-21")).resolves.toEqual([
+      createItem(),
+    ]);
+
+    const listed = await adapter.list(`${DATA_ROOT}/collections`);
+    expect(
+      listed.files.some(
+        (path) =>
+          path.includes(".backup-quarantine-") ||
+          path.endsWith(".quarantine-journal.json"),
+      ),
+    ).toBe(false);
+  });
+
   it("restores a corrupt collection backup before quarantining its raw line", async () => {
     const { adapter, repository } = createHarness();
     await repository.upsertDaily([createItem()], "2026-07-21");
@@ -786,7 +938,7 @@ describe("CollectionRepository", () => {
     },
   );
 
-  it("uses retained source backup to finish a prepared journal before a later identical occurrence", async () => {
+  it("replays a prepared journal when the canonical source fingerprint is unchanged", async () => {
     const { adapter, repository } = createHarness();
     adapter.setStatOverride(null);
     await repository.upsertDaily([createItem()], "2026-07-21");
@@ -810,6 +962,6 @@ describe("CollectionRepository", () => {
     await adapter.write(dailyPath, `${valid}bad\n`);
     await repository.listByDate("2026-07-21");
 
-    expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\nbad\n");
+    expect(await adapter.read(`${dailyPath}.corrupt`)).toBe("bad\n");
   });
 });
