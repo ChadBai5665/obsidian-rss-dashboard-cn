@@ -226,6 +226,28 @@ function createItem(overrides: Partial<CollectedItem> = {}): CollectedItem {
 }
 
 describe("CollectionRepository", () => {
+  it("links durable cached full text to every collected observation of an item", async () => {
+    const { repository } = createHarness();
+    const id = "d".repeat(64);
+    const contentPath = `${DATA_ROOT}/content/${id}.md`;
+    await repository.upsertDaily([createItem({ id })], "2026-07-20");
+    await repository.upsertDaily([createItem({ id })], "2026-07-21");
+
+    await repository.updateContentMetadata(id, contentPath);
+
+    await expect(repository.listByDate("2026-07-20")).resolves.toEqual([
+      createItem({ id, contentBasis: "full-text", contentPath }),
+    ]);
+    await expect(repository.listByDate("2026-07-21")).resolves.toEqual([
+      createItem({
+        id,
+        contentBasis: "full-text",
+        contentPath,
+        observationType: "rediscovered",
+      }),
+    ]);
+  });
+
   it("does no constructor I/O and creates only collection persistence directories", async () => {
     const { adapter, repository } = createHarness();
 

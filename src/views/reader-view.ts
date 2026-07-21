@@ -50,6 +50,10 @@ import { RSS_DASHBOARD_VIEW_TYPE, RssDashboardView } from "./dashboard-view";
 import { VaultFolderSuggest } from "../components/folder-suggest";
 import { ShortcutHelpModal } from "../modals/shortcut-help-modal";
 import { setupReaderHotkeys } from "../hotkeys/reader-hotkeys";
+import { normalizePath } from "obsidian";
+import { ContentRepository } from "../collection/content-repository";
+import { CollectionRepository } from "../collection/collection-repository";
+import { createCollectedItemId } from "../collection/item-identity";
 
 const VIDEO_ARTICLE_BANNER =
   "This item appears to be a video. Open the source page to watch.";
@@ -97,6 +101,17 @@ export class ReaderView extends ItemView {
   private tagsDropdownCleanup: (() => void) | null = null;
   private currentFullContentFailureType: FullArticleFetchFailureType = "none";
   private lastRestrictedNoticeGuid: string | null = null;
+  private displayRequestSequence = 0;
+  private readonly inFlightContentRequests = new Map<
+    string,
+    Promise<{ content: string; failureType: FullArticleFetchFailureType }>
+  >();
+  private contentRepository:
+    | { dataRoot: string; repository: ContentRepository }
+    | null = null;
+  private collectionRepository:
+    | { dataRoot: string; repository: CollectionRepository }
+    | null = null;
 
   private readerFormatPortal: { close: (flushSave: boolean) => void } | null =
     null;
@@ -1221,6 +1236,7 @@ export class ReaderView extends ItemView {
     item: FeedItem,
     relatedItems: FeedItem[] = [],
   ): Promise<void> {
+    const displayRequest = ++this.displayRequestSequence;
     if (this.currentItem?.guid !== item.guid) {
       this.lastRestrictedNoticeGuid = null;
     }
@@ -1237,6 +1253,7 @@ export class ReaderView extends ItemView {
       : undefined;
     this.currentContentIsFullArticle = false;
     this.currentFullContentFailureType = "none";
+    this.currentFullContent = undefined;
     this.syncReaderTitle();
 
     // Update toggle button states
@@ -1288,9 +1305,14 @@ export class ReaderView extends ItemView {
       }
       await this.displayPodcast(item);
     } else {
-      const fetchedContent = this.shouldSkipFullArticleFetch(item)
-        ? ""
-        : await this.fetchFullArticleContent(item.link);
+      const fullTextResult = this.shouldSkipFullArticleFetch(item)
+        ? { content: "", failureType: "none" as const }
+        : await this.readOrFetchExplicitArticleContent(item);
+      if (displayRequest !== this.displayRequestSequence || this.currentItem !== item) {
+        return;
+      }
+      const fetchedContent = fullTextResult.content;
+      this.currentFullContentFailureType = fullTextResult.failureType;
       const hasFullArticleContent =
         this.hasMeaningfulArticleContent(fetchedContent);
 
@@ -1521,7 +1543,7 @@ export class ReaderView extends ItemView {
   }
 
   private shouldSkipFullArticleFetch(item: FeedItem): boolean {
-    if (this.isVideoMediaItem(item)) {
+    if (this.isVideoMediaItem(item) || this.isYouTubeItem(item)) {
       return true;
     }
 
@@ -1530,6 +1552,24 @@ export class ReaderView extends ItemView {
 
   private isVideoMediaItem(item: FeedItem): boolean {
     return isLikelyVideoItem(item);
+  }
+
+  private isYouTubeItem(item: FeedItem): boolean {
+    return [item.link, item.feedUrl].some((value) => {
+      if (!value) return false;
+      try {
+        const host = new URL(value).hostname.toLowerCase();
+        return (
+          host === "youtu.be" ||
+          host === "youtube.com" ||
+          host.endsWith(".youtube.com") ||
+          host === "youtube-nocookie.com" ||
+          host.endsWith(".youtube-nocookie.com")
+        );
+      } catch {
+        return false;
+      }
+    });
   }
 
   private prefersFeedContent(item: FeedItem, feedHtml?: string): boolean {
@@ -2835,9 +2875,130 @@ export class ReaderView extends ItemView {
     return text.trim().length > 200;
   }
 
-  private async fetchFullArticleContent(url: string): Promise<string> {
+  /**
+   * A reader open is the sole place where ordinary RSS items may request a
+   * publisher page. Refresh and collection services never call this path.
+   */
+  private async readOrFetchExplicitArticleContent(
+    item: FeedItem,
+  ): Promise<{ content: string; failureType: FullArticleFetchFailureType }> {
+    const itemId = this.getCollectedItemId(item);
+    const existing = this.inFlightContentRequests.get(itemId);
+    if (existing) return await existing;
+
+    const operation = this.readOrFetchExplicitArticleContentInternal(item, itemId);
+    this.inFlightContentRequests.set(itemId, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.inFlightContentRequests.get(itemId) === operation) {
+        this.inFlightContentRequests.delete(itemId);
+      }
+    }
+  }
+
+  private async readOrFetchExplicitArticleContentInternal(
+    item: FeedItem,
+    itemId: string,
+  ): Promise<{ content: string; failureType: FullArticleFetchFailureType }> {
+    const repository = this.getContentRepository();
+    try {
+      const cached = await repository.read(itemId);
+      if (cached && this.hasMeaningfulArticleContent(cached.text)) {
+        await this.syncCachedContentMetadata(itemId, this.contentPath(itemId));
+        return { content: cached.text, failureType: "none" };
+      }
+    } catch {
+      // A malformed or inaccessible cache must never prevent an explicit read.
+    }
+
+    let failureType: FullArticleFetchFailureType = "none";
+    const content = await this.fetchFullArticleContent(item.link, (next) => {
+      failureType = next;
+    });
+    if (!this.hasMeaningfulArticleContent(content)) {
+      return { content, failureType };
+    }
+
+    try {
+      const contentPath = await repository.write({
+        schemaVersion: 1,
+        itemId,
+        sourceUrl: item.link || undefined,
+        fetchedAt: new Date().toISOString(),
+        contentBasis: "full-text",
+        text: content,
+      });
+      await this.syncCachedContentMetadata(itemId, contentPath);
+    } catch {
+      console.warn(
+        "[RSS Dashboard] Content cache write failed; showing fetched article without caching.",
+      );
+    }
+
+    return { content, failureType };
+  }
+
+  private getContentRepository(): ContentRepository {
+    const dataRoot = this.settings.collection.dataFolder.trim();
+    if (this.contentRepository?.dataRoot === dataRoot) {
+      return this.contentRepository.repository;
+    }
+    const repository = new ContentRepository(this.app.vault, dataRoot, () => new Date());
+    this.contentRepository = { dataRoot, repository };
+    return repository;
+  }
+
+  private getCollectionRepository(): CollectionRepository {
+    const dataRoot = this.settings.collection.dataFolder.trim();
+    if (this.collectionRepository?.dataRoot === dataRoot) {
+      return this.collectionRepository.repository;
+    }
+    const repository = new CollectionRepository(this.app.vault, dataRoot, () => new Date());
+    this.collectionRepository = { dataRoot, repository };
+    return repository;
+  }
+
+  private getCollectedItemId(item: FeedItem): string {
+    const feed = this.settings.feeds.find((candidate) =>
+      candidate.url === item.feedUrl,
+    );
+    return createCollectedItemId({
+      sourceId: feed?.feedId || item.feedUrl || item.feedTitle || "reader",
+      guid: item.guid,
+      url: item.link,
+      title: item.title,
+      author: item.author,
+      publishedAt: item.pubDate,
+    });
+  }
+
+  private contentPath(itemId: string): string {
+    return normalizePath(
+      `${this.settings.collection.dataFolder.trim()}/content/${itemId}.md`,
+    );
+  }
+
+  private async syncCachedContentMetadata(
+    itemId: string,
+    contentPath: string,
+  ): Promise<void> {
+    try {
+      await this.getCollectionRepository().updateContentMetadata(itemId, contentPath);
+    } catch {
+      console.warn(
+        "[RSS Dashboard] Content metadata sync failed; cached content will be repaired on next access.",
+      );
+    }
+  }
+
+  private async fetchFullArticleContent(
+    url: string,
+    onOutcome?: (failureType: FullArticleFetchFailureType) => void,
+  ): Promise<string> {
     if (!url) {
       this.currentFullContentFailureType = "none";
+      onOutcome?.("none");
       return "";
     }
 
@@ -2847,6 +3008,7 @@ export class ReaderView extends ItemView {
         : undefined;
     const result = await fetchFullArticleContentWithOutcome(url, proxyUrl);
     this.currentFullContentFailureType = result.failureType;
+    onOutcome?.(result.failureType);
     return result.content;
   }
 

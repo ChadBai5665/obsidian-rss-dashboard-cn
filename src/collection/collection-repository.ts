@@ -226,6 +226,67 @@ export class CollectionRepository {
     }
   }
 
+  /**
+   * Marks already-collected observations as backed by durable reader content.
+   * Callers must write the content file first: metadata never claims a cache
+   * that has not reached storage.
+   */
+  async updateContentMetadata(id: string, contentPath: string): Promise<void> {
+    assertStableContentReference(id, contentPath, this.dataRoot);
+    await this.loadIndex();
+    const dates = await this.collectionDates();
+    const rewrites: PreparedRewrite[] = [];
+
+    for (const date of dates) {
+      const path = this.dailyPath(date);
+      const parsed = await this.readCollection(path);
+      let changed = false;
+      const updated = parsed.items.map((item) => {
+        if (item.id !== id) return item;
+        if (
+          item.contentBasis === "full-text" &&
+          item.contentPath === contentPath
+        ) {
+          return item;
+        }
+        changed = true;
+        return { ...item, contentBasis: "full-text" as const, contentPath };
+      });
+      if (changed) {
+        rewrites.push({
+          path,
+          before: serializeCollection(parsed.items),
+          after: serializeCollection(updated),
+        });
+      }
+    }
+
+    const completed: PreparedRewrite[] = [];
+    try {
+      for (const rewrite of rewrites) {
+        await this.atomicWrite(rewrite.path, rewrite.after);
+        completed.push(rewrite);
+      }
+    } catch (updateError) {
+      const rollbackErrors: unknown[] = [];
+      for (const rewrite of completed.reverse()) {
+        try {
+          await this.atomicWrite(rewrite.path, rewrite.before);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+      }
+      if (rollbackErrors.length > 0) {
+        throw combinedError(
+          "Content metadata update failed and rollback was incomplete",
+          updateError,
+          rollbackErrors,
+        );
+      }
+      throw updateError;
+    }
+  }
+
   private get collectionsPath(): string {
     return normalizePath(`${this.dataRoot}/collections`);
   }
@@ -877,6 +938,20 @@ function assertSafeDataRoot(value: string): void {
     )
   ) {
     throw new Error(`Invalid data root: ${value}`);
+  }
+}
+
+function assertStableContentReference(
+  id: string,
+  contentPath: string,
+  dataRoot: string,
+): void {
+  if (!/^[a-f0-9]{64}$/.test(id)) {
+    throw new Error("Invalid collected item id");
+  }
+  const expected = normalizePath(`${dataRoot}/content/${id}.md`);
+  if (contentPath !== expected) {
+    throw new Error("Invalid collected content path");
   }
 }
 
