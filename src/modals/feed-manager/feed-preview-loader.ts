@@ -9,6 +9,7 @@ export type FeedPreviewType = "rss" | "podcast" | "youtube";
 export interface FeedPreviewLoaderOptions {
   corsProxyEnabled?: boolean;
   corsProxyUrl?: string;
+  locale?: Locale;
 }
 
 export interface FeedPreviewLoadResult {
@@ -59,13 +60,15 @@ export function formatLatestEntryLabel(
 
 export function getPreviewConversionNotice(
   preview: Pick<FeedPreviewLoadResult, "isXConversion" | "isMastodonConversion">,
+  locale: Locale = "en",
 ): string {
+  const t = createTranslator(locale);
   if (preview.isXConversion) {
-    return " (X > nitter conversion)";
+    return t("modal.feed.xConversion");
   }
 
   if (preview.isMastodonConversion) {
-    return " (Mastodon > RSS auto-discovery)";
+    return t("modal.feed.mastodonConversion");
   }
 
   return "";
@@ -130,6 +133,7 @@ export async function resolveAndLoadPreview(
   inputUrl: string,
   options?: FeedPreviewLoaderOptions,
 ): Promise<FeedPreviewLoadResult> {
+  const t = createTranslator(options?.locale ?? "en");
   let url = inputUrl;
   let finalUrl = inputUrl;
   let detectedType: FeedPreviewType = "rss";
@@ -155,7 +159,7 @@ export async function resolveAndLoadPreview(
     const mastodonFeedUrl = await MediaService.getMastodonRssFeed(url);
     if (!mastodonFeedUrl) {
       throw new Error(
-        "Could not resolve Mastodon profile feed. Please check the profile URL.",
+        t("modal.feed.mastodonResolve"),
       );
     }
 
@@ -168,7 +172,7 @@ export async function resolveAndLoadPreview(
     detectedType = "youtube";
     const rssUrl = await MediaService.getYouTubeRssFeed(url);
     if (!rssUrl) {
-      throw new Error("Could not resolve YouTube channel. Please check the URL.");
+      throw new Error(t("modal.feed.youtubeResolve"));
     }
     url = rssUrl;
     finalUrl = rssUrl;
@@ -179,7 +183,7 @@ export async function resolveAndLoadPreview(
     if (platform) {
       if (platform.id === "pocketcasts" && !options?.corsProxyEnabled) {
         throw new Error(
-          "Pocket Casts resolution requires the CORS Proxy to be enabled in Settings (due to Pocket Casts API limitations). Please enable it, or try another feed source.",
+          t("modal.feed.pocketCastsCors"),
         );
       }
 
@@ -189,7 +193,7 @@ export async function resolveAndLoadPreview(
         options?.corsProxyUrl,
       );
       if (!resolvedUrl) {
-        throw new Error("Could not resolve podcast feed URL");
+        throw new Error(t("modal.feed.podcastResolve"));
       }
       url = resolvedUrl;
       finalUrl = resolvedUrl;

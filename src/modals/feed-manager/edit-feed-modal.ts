@@ -189,9 +189,13 @@ export class EditFeedModal extends Modal {
       const preview = await resolveAndLoadPreview(this.url, {
         corsProxyEnabled: this.plugin?.settings?.corsProxyEnabled,
         corsProxyUrl: this.plugin?.settings?.corsProxyUrl,
+        locale: this.plugin?.settings.locale ?? "en",
       });
 
-      const conversionNotice = getPreviewConversionNotice(preview);
+      const conversionNotice = getPreviewConversionNotice(
+        preview,
+        this.plugin.settings.locale ?? "en",
+      );
 
       this.url = preview.finalUrl;
       if (this.urlInput) this.urlInput.value = this.url;
@@ -215,8 +219,8 @@ export class EditFeedModal extends Modal {
         this.statusDiv.removeClass("rss-dashboard-status-warning");
 
         if (preview.hasEntries) {
-          this.status = "OK";
-          this.statusDiv.textContent = `\u2705 OK${conversionNotice}`;
+          this.status = this.t("modal.feed.ok");
+          this.statusDiv.textContent = `✅ ${this.t("modal.feed.ok")}${conversionNotice}`;
           this.statusDiv.addClass("status-ok");
         } else {
           this.status = this.t("modal.feed.noContent");
@@ -244,7 +248,7 @@ export class EditFeedModal extends Modal {
       }
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : String(e);
-      this.status = "Error loading feed";
+      this.status = `${this.t("common.error")}: ${errorMsg}`;
       this.latestEntry = "-";
       if (this.latestEntryDiv) {
         this.latestEntryDiv.textContent = this.latestEntry;
@@ -338,7 +342,7 @@ export class EditFeedModal extends Modal {
     titleSetting.settingEl.addClass("rss-feed-form-row");
 
     const latestEntrySetting = new Setting(this.contentEl).setName(
-      "Latest entry",
+      this.t("modal.feed.latestEntry"),
     );
     this.latestEntryDiv = latestEntrySetting.controlEl.createDiv({
       text: this.latestEntry,
@@ -354,7 +358,7 @@ export class EditFeedModal extends Modal {
     const folderSetting = new Setting(this.contentEl)
       .setName(this.t("modal.feed.folder"))
       .addText((text) => {
-        text.setValue(this.folder).setPlaceholder("Type or select folder...");
+        text.setValue(this.folder).setPlaceholder(this.t("modal.feed.folderPlaceholder"));
         this.folderInput = text.inputEl;
         this.folderInput.autocomplete = "off";
         this.folderInput.spellcheck = false;
@@ -419,7 +423,7 @@ export class EditFeedModal extends Modal {
 
     if (inheritedTags.length > 0) {
       const inheritedTagsSetting = new Setting(perFeedControlsBody)
-        .setName("Inherited auto-tags")
+      .setName(this.t("modal.feed.inheritedTags"))
         .setDesc(
           "Global tags applied automatically based on the feed type and settings. Configure these in the 'auto tagging' settings tab.",
         );
@@ -445,19 +449,19 @@ export class EditFeedModal extends Modal {
     };
     const hasResolvedLocalAddress =
       localStorageAddressResult.address.length > 0;
-    const storageDescription = "Shows where this feed is stored.";
+    const storageDescription = this.t("modal.feed.storageDesc");
     const feedIdText = this.feed.feedId?.trim()
       ? this.feed.feedId
-      : "Not assigned";
+      : this.t("modal.feed.notAssigned");
     const storageStatusText =
       localStorageAddressResult.mode !== "legacy-json"
         ? hasResolvedLocalAddress
-          ? "Stored in shard storage"
-          : "Shard storage selected (address unavailable)"
-        : "Stored in legacy data.json";
+          ? this.t("modal.feed.storedShards")
+          : this.t("modal.feed.shardsUnavailable")
+        : this.t("modal.feed.storedLegacy");
 
     const localAddressSetting = new Setting(perFeedControlsBody)
-      .setName("Local storage address")
+      .setName(this.t("modal.feed.storageAddress"))
       .setDesc(storageDescription);
     const localAddressRow = localAddressSetting.controlEl.createDiv({
       cls: "rss-edit-feed-storage-address-row",
@@ -471,7 +475,7 @@ export class EditFeedModal extends Modal {
     });
     localAddressTextGroup.createDiv({
       cls: "rss-edit-feed-storage-feed-id",
-      text: `Feed ID: ${feedIdText}`,
+      text: this.t("modal.feed.id", { id: feedIdText }),
     });
 
     const copyStorageAddressButton = localAddressRow.createDiv({
@@ -479,15 +483,15 @@ export class EditFeedModal extends Modal {
       attr: {
         role: "button",
         tabindex: "0",
-        title: "Copy local storage address",
-        "aria-label": "Copy local storage address",
+        title: this.t("modal.feed.copyStorage"),
+        "aria-label": this.t("modal.feed.copyStorage"),
       },
     });
     setIcon(copyStorageAddressButton, "copy");
 
     const copyLocalAddress = () => {
       if (!hasResolvedLocalAddress) {
-        new Notice("Storage address unavailable for this feed.");
+        new Notice(this.t("modal.feed.storageUnavailable"));
         return;
       }
 
@@ -496,11 +500,11 @@ export class EditFeedModal extends Modal {
           localStorageAddressResult.address,
         );
         if (result === "copied") {
-          new Notice("Copied local storage address.");
+          new Notice(this.t("modal.feed.storageCopied"));
           return;
         }
 
-        new Notice("Failed to copy local storage address.");
+        new Notice(this.t("modal.feed.storageCopyFailed"));
       })();
     };
 
@@ -518,14 +522,14 @@ export class EditFeedModal extends Modal {
     const autoDeleteSetting = new Setting(perFeedControlsBody)
       .setName(this.t("modal.feed.autoDelete"))
       .setDesc(
-        "Days to keep articles before auto-delete. This will also limit the timeframe window for shown articles.",
+        this.t("modal.feed.autoDeleteDesc"),
       );
 
     let autoDeleteCustomInput: HTMLInputElement | null = null;
 
     autoDeleteSetting.addDropdown((dropdown) => {
       dropdown
-        .addOption("0", "Disabled")
+        .addOption("0", this.t("modal.feed.disabled"))
         .addOption("1", "1 day")
         .addOption("3", "3 days")
         .addOption("7", "1 week")
@@ -535,7 +539,7 @@ export class EditFeedModal extends Modal {
         .addOption("90", "3 months")
         .addOption("180", "6 months")
         .addOption("365", "1 year")
-        .addOption("custom", "Custom...")
+        .addOption("custom", this.t("modal.feed.custom"))
         .setValue(
           this.autoDeleteDuration === 0
             ? "0"
@@ -552,7 +556,7 @@ export class EditFeedModal extends Modal {
                 "input",
                 {
                   type: "number",
-                  placeholder: "Enter days",
+                  placeholder: this.t("modal.feed.enterDays"),
                   cls: "rss-custom-input",
                 },
               );
@@ -598,7 +602,7 @@ export class EditFeedModal extends Modal {
 
     maxItemsSetting.addDropdown((dropdown) => {
       dropdown
-        .addOption("0", "Unlimited")
+        .addOption("0", this.t("modal.feed.unlimited"))
         .addOption("10", "10 items")
         .addOption("25", "25 items")
         .addOption("50", "50 items")
@@ -606,7 +610,7 @@ export class EditFeedModal extends Modal {
         .addOption("200", "200 items")
         .addOption("500", "500 items")
         .addOption("1000", "1000 items")
-        .addOption("custom", "Custom...")
+        .addOption("custom", this.t("modal.feed.custom"))
         .setValue(
           this.maxItemsLimit === 0
             ? "0"
@@ -621,7 +625,7 @@ export class EditFeedModal extends Modal {
                 "input",
                 {
                   type: "number",
-                  placeholder: "Enter number",
+                  placeholder: this.t("modal.feed.enterNumber"),
                   cls: "rss-custom-input",
                 },
               );
@@ -653,7 +657,7 @@ export class EditFeedModal extends Modal {
 
     scanIntervalSetting.addDropdown((dropdown) => {
       dropdown
-        .addOption("0", "Use global setting")
+        .addOption("0", this.t("modal.feed.useGlobal"))
         .addOption(String(FEED_REFRESH_DISABLED_INTERVAL), "Off")
         .addOption("5", "5 minutes")
         .addOption("10", "10 minutes")
@@ -665,7 +669,7 @@ export class EditFeedModal extends Modal {
         .addOption("480", "8 hours")
         .addOption("720", "12 hours")
         .addOption("1440", "24 hours")
-        .addOption("custom", "Custom...")
+        .addOption("custom", this.t("modal.feed.custom"))
         .setValue(getPerFeedRefreshIntervalDropdownValue(this.scanInterval))
         .onChange((value) => {
           if (value === "custom") {
@@ -674,7 +678,7 @@ export class EditFeedModal extends Modal {
                 "input",
                 {
                   type: "number",
-                  placeholder: "Enter minutes",
+                  placeholder: this.t("modal.feed.enterMinutes"),
                   cls: "rss-custom-input",
                 },
               );
@@ -706,7 +710,7 @@ export class EditFeedModal extends Modal {
     new Setting(perFeedControlsBody)
       .setName(this.t("modal.feed.excludeRefresh"))
       .setDesc(
-        "Skip this feed during automatic refresh and bulk refresh actions. You can still refresh it directly from its feed view.",
+        this.t("modal.feed.excludeRefreshDesc"),
       )
       .addToggle((toggle) => {
         toggle.setValue(this.excludeFromRefresh).onChange((value) => {
@@ -720,9 +724,9 @@ export class EditFeedModal extends Modal {
 
     new Setting(perFeedControlsBody)
       .setName(this.t("modal.feed.articleTemplate"))
-      .setDesc("Select a template to use when saving articles from this feed")
+      .setDesc(this.t("modal.feed.articleTemplateDesc"))
       .addDropdown((dropdown) => {
-        dropdown.addOption("", "Use default template");
+        dropdown.addOption("", this.t("modal.feed.defaultTemplate"));
         savedTemplates.forEach((template: SavedTemplate) => {
           dropdown.addOption(template.id, template.name);
         });
@@ -735,15 +739,16 @@ export class EditFeedModal extends Modal {
     const autoTagSetting = new Setting(perFeedControlsBody)
       .setName(this.t("modal.feed.customTags"))
       .setDesc(
-        "Additional tags applied automatically to new articles from this feed (single feed override)",
+        this.t("modal.feed.customTagsDesc"),
       );
 
     addTagMultiSelectControl({
       setting: autoTagSetting,
       availableTags,
       selectedTagNames: this.customTags,
-      triggerEmptyLabel: "None",
-      menuTitle: "Select auto-tags",
+      triggerEmptyLabel: this.t("modal.tags.none"),
+      menuTitle: this.t("modal.feed.selectAutoTags"),
+      locale: this.plugin.settings.locale ?? "en",
       onChange: (selected) => {
         this.customTags = selected;
       },
@@ -792,6 +797,7 @@ export class EditFeedModal extends Modal {
           overrideGlobalRules: this.feedKeywordRules.overrideGlobalRules,
         },
         showOverrideToggle: true,
+        locale: this.plugin.settings.locale ?? "en",
         onChange: (nextState) => {
           this.feedKeywordRules = {
             includeLogic: nextState.includeLogic,
@@ -837,7 +843,10 @@ export class EditFeedModal extends Modal {
           this.customTags.some((t, i) => t !== this.originalCustomTags[i]);
 
         if (tagsChanged) {
-          const confirmModal = new TagApplicationConfirmModal(this.app);
+          const confirmModal = new TagApplicationConfirmModal(
+            this.app,
+            this.plugin.settings.locale ?? "en",
+          );
           const choice = confirmModal.waitForClose();
           confirmModal.open();
           const result = await choice;
@@ -910,7 +919,7 @@ export class EditFeedModal extends Modal {
             `Feed updated and trimmed to ${newMaxItemsLimit} articles`,
           );
         } else {
-          new Notice("Feed updated");
+          new Notice(this.t("modal.feed.updated"));
         }
         await this.plugin.saveSettings();
         if (didAutoDeleteDurationChange) {

@@ -1,15 +1,64 @@
 import { Modal, App, setIcon, Notice } from "obsidian";
 import type { RssDashboardSettings } from "../types/types";
+import { createTranslator } from "../i18n";
 
 export class ShortcutHelpModal extends Modal {
-  private settings: RssDashboardSettings;
+  private settings?: RssDashboardSettings;
 
-  constructor(app: App, settings: RssDashboardSettings) {
+  /** Shortcut labels are data, not command values; keys remain unchanged. */
+  private readonly chineseShortcutText: Readonly<Record<string, string>> = {
+    "General Navigation": "常规导航",
+    "Open Help Dialog": "打开帮助对话框",
+    "Close Dialog / Clear Selection": "关闭对话框 / 清除选择",
+    "Refresh Feed": "刷新订阅源",
+    "Dashboard View": "仪表盘视图",
+    "Focus sidebar": "聚焦侧边栏",
+    "Focus reader view": "聚焦阅读器视图",
+    "All articles filter": "全部文章筛选",
+    "Unread articles filter": "未读文章筛选",
+    "Read articles filter": "已读文章筛选",
+    "List view": "列表视图",
+    "Card view": "卡片视图",
+    "Feed view": "订阅源视图",
+    "Reader View": "阅读器视图",
+    "Focus dashboard view": "聚焦仪表盘视图",
+    "Scroll article up/down": "向上/向下滚动文章",
+    "Scroll article left/right": "向左/向右滚动文章",
+    "Scroll by one page": "按一页滚动",
+    "Jump to start/end of article": "跳至文章开头/结尾",
+    "Increase font size": "增大字体",
+    "Decrease font size": "减小字体",
+    "Reset font size": "重置字体大小",
+    "Article Manipulation": "文章操作",
+    "Card view navigation": "卡片视图导航",
+    "Open article in reader pane": "在阅读器窗格中打开文章",
+    "Close reader pane": "关闭阅读器窗格",
+    "Open prior article in feed": "打开订阅源中的上一篇文章",
+    "Open next article in feed": "打开订阅源中的下一篇文章",
+    "Mark article read/unread toggle": "切换文章已读/未读状态",
+    "Mark article read and open next": "标记文章为已读并打开下一篇",
+    "Mark all as read": "全部标为已读",
+    "Star/Unstar article": "添加/取消文章星标",
+    "Add tags to article": "为文章添加标签",
+    "Save full content to notes": "将完整内容保存到笔记",
+    "Sidebar Navigation": "侧边栏导航",
+    "Next item": "下一项",
+    "Previous item": "上一项",
+    "Move focused item": "移动聚焦项",
+    "Jump between folders": "在文件夹间跳转",
+    "Open focused item": "打开聚焦项",
+    "Open/Collapse folder": "打开/折叠文件夹",
+    "Delete folder/feed": "删除文件夹/订阅源",
+    "Rename folder/feed": "重命名文件夹/订阅源",
+  };
+
+  constructor(app: App, settings?: RssDashboardSettings) {
     super(app);
     this.settings = settings;
   }
 
   onOpen() {
+    const t = createTranslator(this.settings?.locale ?? "en");
     const { contentEl } = this;
     contentEl.empty();
     this.modalEl.addClass("rss-dashboard-modal");
@@ -19,13 +68,13 @@ export class ShortcutHelpModal extends Modal {
     const header = contentEl.createDiv({ cls: "rss-dashboard-header" });
     header.createDiv({
       cls: "rss-dashboard-header-title",
-      text: "Keyboard Shortcuts",
+      text: t("modal.shortcuts.title"),
     });
 
     // Add save link below title
     const saveLink = header.createEl("a", {
       cls: "rss-dashboard-save-shortcuts-link",
-      text: "Save keyboard shortcuts to a vault note",
+      text: t("modal.shortcuts.save"),
       href: "#",
     });
     saveLink.addEventListener("click", (e: Event) => {
@@ -38,7 +87,7 @@ export class ShortcutHelpModal extends Modal {
       attr: {
         role: "button",
         tabindex: "0",
-        "aria-label": "Close",
+        "aria-label": t("common.close"),
       },
     });
     setIcon(closeBtn, "x");
@@ -112,6 +161,7 @@ export class ShortcutHelpModal extends Modal {
   }
 
   private async saveShortcutsToVault(): Promise<void> {
+    const t = createTranslator(this.settings?.locale ?? "en");
     try {
       // Build the markdown content
       const shortcutsData = [
@@ -185,19 +235,19 @@ export class ShortcutHelpModal extends Modal {
         },
       ];
 
-      let content = "# Keyboard Shortcuts\n\n";
+      let content = `# ${t("modal.shortcuts.markdownTitle")}\n\n`;
       shortcutsData.forEach((section) => {
-        content += `## ${section.section}\n\n`;
-        content += "| Shortcut | Action |\n";
+        content += `## ${this.localizeShortcut(section.section)}\n\n`;
+        content += `| ${t("modal.shortcuts.shortcut")} | ${t("modal.shortcuts.action")} |\n`;
         content += "|----------|--------|\n";
         section.items.forEach((item) => {
-          content += `| ${item.key} | ${item.desc} |\n`;
+          content += `| ${item.key} | ${this.localizeShortcut(item.desc)} |\n`;
         });
         content += "\n";
       });
 
       // Determine the save folder - default to vault root if not configured
-      let saveFolder = this.settings.articleSaving.defaultFolder;
+      let saveFolder = this.settings?.articleSaving.defaultFolder;
       if (!saveFolder || saveFolder.trim() === "") {
         saveFolder = "/";
       }
@@ -247,14 +297,14 @@ export class ShortcutHelpModal extends Modal {
       // Create the file
       const file = await vault.create(filePath, content);
 
-      new Notice(`Keyboard shortcuts saved to "${file.path}"`);
+      new Notice(t("modal.shortcuts.saved", { path: file.path }));
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error(
         "[RSS Dashboard] Failed to save keyboard shortcuts:",
         errorMsg,
       );
-      new Notice(`Failed to save shortcuts: ${errorMsg}`);
+      new Notice(t("modal.shortcuts.saveFailed", { error: errorMsg }));
     }
   }
 
@@ -264,12 +314,12 @@ export class ShortcutHelpModal extends Modal {
     items: Array<{ key: string; desc: string }>,
   ) {
     const section = container.createDiv({ cls: "rss-shortcut-section" });
-    section.createEl("h3", { text: title });
+    section.createEl("h3", { text: this.localizeShortcut(title) });
 
     const grid = section.createDiv({ cls: "rss-shortcut-grid" });
     items.forEach((item) => {
       const row = grid.createDiv({ cls: "rss-shortcut-row" });
-      row.createDiv({ cls: "rss-shortcut-desc", text: item.desc });
+      row.createDiv({ cls: "rss-shortcut-desc", text: this.localizeShortcut(item.desc) });
       const keyContainer = row.createDiv({
         cls: "rss-shortcut-key-container",
       });
@@ -279,5 +329,11 @@ export class ShortcutHelpModal extends Modal {
 
   onClose() {
     this.contentEl.empty();
+  }
+
+  private localizeShortcut(value: string): string {
+    return this.settings?.locale === "zh-CN"
+      ? this.chineseShortcutText[value] ?? value
+      : value;
   }
 }

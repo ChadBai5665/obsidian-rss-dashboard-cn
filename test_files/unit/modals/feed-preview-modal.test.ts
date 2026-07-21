@@ -28,6 +28,21 @@ const baseFeed = {
 };
 
 describe("FeedPreviewModal", () => {
+  it("renders localized retry and empty copy in Simplified Chinese", async () => {
+    const { FeedPreviewModal } = await import("../../../src/modals/feed-preview-modal");
+    fetchFeedXmlMock.mockResolvedValueOnce("<rss><channel></channel></rss>");
+    const modal = new FeedPreviewModal(
+      new obsidian.App(),
+      baseFeed,
+      true,
+      "zh-CN",
+    );
+    modal.open();
+    await flushPromises();
+
+    expect(modal.contentEl.textContent).toContain("此订阅源中未找到文章");
+  });
+
   beforeEach(() => {
     installObsidianDomPolyfills();
     document.body.empty();

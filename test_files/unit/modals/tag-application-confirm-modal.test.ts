@@ -4,6 +4,16 @@ import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import { TagApplicationConfirmModal } from "../../../src/modals/feed-manager/tag-application-confirm-modal";
 
 describe("TagApplicationConfirmModal", () => {
+  it("renders the three choices in Simplified Chinese when requested", () => {
+    const app = createMockApp();
+    const modal = new TagApplicationConfirmModal(app, "zh-CN");
+    modal.open();
+
+    expect(modal.contentEl.textContent).toContain("更新订阅源标签");
+    expect(modal.contentEl.textContent).toContain("仅应用到后续文章");
+    expect(modal.contentEl.textContent).toContain("应用到已有文章");
+  });
+
   beforeEach(() => {
     installObsidianDomPolyfills();
     document.body.empty();

@@ -4,6 +4,7 @@ import type { Tag } from "../../types/types";
 import type { FolderExistingArticleAction } from "../../utils/folder-tag-sync";
 import { shouldUseMobileSidebarLayout } from "../../utils/platform-utils";
 import { addTagMultiSelectControl } from "../../components/tag-multi-select-control";
+import { createTranslator } from "../../i18n";
 
 export class FolderAutoTagModal extends Modal {
   plugin: RssDashboardPlugin;
@@ -36,6 +37,7 @@ export class FolderAutoTagModal extends Modal {
   }
 
   onOpen() {
+    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     const { contentEl } = this;
     this.modalEl.className +=
       " rss-dashboard-modal rss-dashboard-modal-container";
@@ -49,37 +51,38 @@ export class FolderAutoTagModal extends Modal {
     }
 
     contentEl.empty();
-    new Setting(contentEl).setName("Auto tag feeds in folder").setHeading();
+    new Setting(contentEl).setName(t("modal.folderAuto.title")).setHeading();
 
     contentEl.createDiv({
       cls: "add-feed-subtitle",
-      text: `Configure auto-tags for "${this.folderPath}". Feeds here and in descendant folders inherit these tags on future refreshes.`,
+      text: t("modal.folderAuto.desc", { folder: this.folderPath }),
     });
 
     const autoTagSetting = new Setting(contentEl)
-      .setName("Folder auto-tags")
+      .setName(t("modal.folderAuto.tags"))
       .setDesc(
-        "Stored on this folder only. Child folders and feeds inherit parent tags automatically.",
+        t("modal.folderAuto.tagsDesc"),
       );
 
     addTagMultiSelectControl({
       setting: autoTagSetting,
       availableTags: this.plugin.settings.availableTags,
       selectedTagNames: this.selectedTagNames,
-      triggerEmptyLabel: "None",
-      menuTitle: "Select folder auto-tags",
-      mobileSheetTitle: "Folder auto-tags",
+      triggerEmptyLabel: t("modal.tags.none"),
+      menuTitle: t("modal.folderAuto.select"),
+      mobileSheetTitle: t("modal.folderAuto.tags"),
+      locale: this.plugin.settings.locale ?? "zh-CN",
       onChange: (selected) => {
         this.selectedTagNames = selected;
       },
     });
 
-    new Setting(contentEl).setName("Options").setHeading();
+    new Setting(contentEl).setName(t("modal.folderAuto.options")).setHeading();
 
     new Setting(contentEl)
-      .setName("Include subfolders")
+      .setName(t("modal.folderAuto.includeSubfolders"))
       .setDesc(
-        "When updating existing articles, include articles in descendant folders.",
+        t("modal.folderAuto.includeSubfoldersDesc"),
       )
       .addToggle((toggle) =>
         toggle.setValue(this.includeSubfolders).onChange((value) => {
@@ -88,15 +91,15 @@ export class FolderAutoTagModal extends Modal {
       );
 
     new Setting(contentEl)
-      .setName("Existing articles")
+      .setName(t("modal.folderAuto.existing"))
       .setDesc(
-        "Choose how to update articles already in this folder. Future refreshes always follow the saved folder rule.",
+        t("modal.folderAuto.existingDesc"),
       )
       .addDropdown((dropdown) => {
         dropdown
-          .addOption("none", "Don't update")
-          .addOption("sync", "Sync folder auto-tags")
-          .addOption("remove_all", "Remove all tags")
+          .addOption("none", t("modal.folderAuto.dontUpdate"))
+          .addOption("sync", t("modal.folderAuto.sync"))
+          .addOption("remove_all", t("modal.folderAuto.removeAll"))
           .setValue(this.existingArticlesAction)
           .onChange((value) => {
             this.existingArticlesAction =
@@ -109,13 +112,13 @@ export class FolderAutoTagModal extends Modal {
     });
 
     const cancelButton = buttonContainer.createEl("button", {
-      text: "Cancel",
+      text: t("common.cancel"),
       cls: "rss-dashboard-cancel-button",
     });
     cancelButton.addEventListener("click", () => this.close());
 
     const saveButton = buttonContainer.createEl("button", {
-      text: "Save",
+      text: t("common.save"),
       cls: "rss-dashboard-primary-button",
     });
 
@@ -134,9 +137,9 @@ export class FolderAutoTagModal extends Modal {
           this.close();
         } catch (error) {
           console.error("Error applying folder auto-tags:", error);
-          new Notice(
-            `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
-          );
+          new Notice(t("modal.folderAuto.error", {
+            error: error instanceof Error ? error.message : "Unknown error",
+          }));
         }
       })();
     });

@@ -1,6 +1,7 @@
 import { Modal, App, setIcon, Setting } from "obsidian";
 import { FeedMetadata } from "../types/discover-types";
 import { fetchFeedXml } from "../services/feed-parser";
+import { createTranslator, type Locale } from "../i18n";
 
 interface PreviewArticle {
     title: string;
@@ -19,7 +20,12 @@ export class FeedPreviewModal extends Modal {
 
     private corsProxyEnabled: boolean;
 
-    constructor(app: App, feed: FeedMetadata, corsProxyEnabled: boolean = true) {
+    constructor(
+        app: App,
+        feed: FeedMetadata,
+        corsProxyEnabled: boolean = true,
+        private locale: Locale = "en",
+    ) {
         super(app);
         this.feed = feed;
         this.corsProxyEnabled = corsProxyEnabled;
@@ -223,30 +229,34 @@ export class FeedPreviewModal extends Modal {
     }
 
     private renderError(): void {
+        const t = createTranslator(this.locale);
         const container = this.contentEl;
         const errorEl = container.createDiv({ cls: "feed-preview-error" });
         setIcon(errorEl, "alert-triangle");
-        errorEl.appendText(` Error: ${this.error}`);
+        errorEl.appendText(` ${t("modal.preview.error", { error: this.error ?? "" })}`);
         
         const retryBtn = errorEl.createEl("button", { cls: "mod-cta" });
-        retryBtn.textContent = "Retry";
+        retryBtn.textContent = t("common.retry");
         retryBtn.addEventListener("click", () => { void this.loadFeedPreview(); });
     }
 
     private renderContent(): void {
+        const t = createTranslator(this.locale);
         const container = this.contentEl;
         
         if (this.articles.length === 0) {
             const emptyEl = container.createDiv({ cls: "feed-preview-empty" });
             setIcon(emptyEl, "rss");
-            emptyEl.appendText(" No articles found in this feed");
+            emptyEl.appendText(` ${t("modal.preview.empty")}`);
             return;
         }
 
         const contentSection = container.createDiv({ cls: "feed-preview-content" });
         
         const header = contentSection.createDiv({ cls: "feed-preview-articles-header" });
-        const headerSetting = new Setting(header).setName(`Latest ${this.articles.length} articles`).setHeading();
+        const headerSetting = new Setting(header)
+            .setName(t("modal.preview.latest", { count: this.articles.length }))
+            .setHeading();
         headerSetting.settingEl.addClass("feed-preview-articles-title");
         
         const grid = contentSection.createDiv({ cls: "feed-preview-grid" });

@@ -305,7 +305,7 @@ export class ImportOpmlModal extends Modal {
       const errorDiv = this.errorContainer.createDiv({
         cls: "import-error-message",
       });
-      errorDiv.textContent = "No feeds found in the OPML file.";
+      errorDiv.textContent = this.t("modal.opml.noFeeds");
       this.validationErrorKind = "no_feeds";
       this.previewContainer.removeClass("import-visible");
       this.previewContainer.addClass("import-hidden");
@@ -334,21 +334,21 @@ export class ImportOpmlModal extends Modal {
     const header = this.previewContainer.createDiv({
       cls: "import-preview-header",
     });
-    header.createEl("h4", { text: "Preview" });
+    header.createEl("h4", { text: this.t("modal.opml.preview") });
 
     const badges = header.createDiv({ cls: "import-preview-badges" });
     badges.createDiv({
       cls: "import-preview-count",
-      text: `${stats.totalFeeds} feeds`,
+      text: this.t("modal.opml.feedCount", { count: stats.totalFeeds }),
     });
     badges.createDiv({
       cls: "import-preview-count import-preview-count--primary",
-      text: `${stats.selectedImportableFeeds} to import`,
+      text: this.t("modal.opml.toImport", { count: stats.selectedImportableFeeds }),
     });
     if (this.importMode === "update" && stats.duplicateFeeds > 0) {
       badges.createDiv({
         cls: "import-preview-count",
-        text: `${stats.duplicateFeeds} already exist`,
+        text: this.t("modal.opml.alreadyExist", { count: stats.duplicateFeeds }),
       });
     }
 
@@ -368,33 +368,33 @@ export class ImportOpmlModal extends Modal {
       return btn;
     };
 
-    makeButton("Select all", "check-square", () => {
+    makeButton(this.t("modal.opml.selectAll"), "check-square", () => {
       const urls = this.collectAllFeedUrls(model.getFolderTree());
       urls.forEach((url) => model.toggleFeed(url, true));
       this.renderPreview();
       this.updateImportButtonFromModel();
     });
 
-    makeButton("Select none", "square", () => {
+    makeButton(this.t("modal.opml.selectNone"), "square", () => {
       const urls = this.collectAllFeedUrls(model.getFolderTree());
       urls.forEach((url) => model.toggleFeed(url, false));
       this.renderPreview();
       this.updateImportButtonFromModel();
     });
 
-    makeButton("Expand all", "chevrons-down", () => {
+    makeButton(this.t("modal.opml.expandAll"), "chevrons-down", () => {
       this.collapsedFolderPaths.clear();
       this.renderPreview();
     });
 
-    makeButton("Collapse all", "chevrons-up", () => {
+    makeButton(this.t("modal.opml.collapseAll"), "chevrons-up", () => {
       this.collapsedFolderPaths = new Set(
         this.collectAllFolderPaths(model.getFolderTree()),
       );
       this.renderPreview();
     });
 
-    makeButton("Auto-fix invalid names", "wand-2", () => {
+    makeButton(this.t("modal.opml.autoFix"), "wand-2", () => {
       model.autoFixInvalidNames();
       this.renderPreview();
       this.updateImportButtonFromModel();
@@ -414,7 +414,7 @@ export class ImportOpmlModal extends Modal {
   private updateImportButtonFromModel(): void {
     if (!this.previewModel) {
       this.importButton.disabled = true;
-      this.importButton.textContent = "Import feeds";
+      this.importButton.textContent = this.t("modal.opml.importFeeds");
       return;
     }
 
@@ -422,7 +422,9 @@ export class ImportOpmlModal extends Modal {
     const count = stats.selectedImportableFeeds;
 
     this.importButton.textContent =
-      count === 1 ? "Import 1 feed" : `Import ${count} feeds`;
+      count === 1
+        ? this.t("modal.opml.importOne")
+        : this.t("modal.opml.importCount", { count });
     this.importButton.disabled = count === 0 || stats.hasBlockingErrors;
     this.importButton.classList.toggle(
       "is-disabled",
@@ -431,9 +433,9 @@ export class ImportOpmlModal extends Modal {
 
     if (stats.hasBlockingErrors) {
       this.importButton.title =
-        "Fix invalid names (or unselect them) to import.";
+        this.t("modal.opml.fixBefore");
     } else if (count === 0) {
-      this.importButton.title = "Select at least one feed to import.";
+      this.importButton.title = this.t("modal.opml.selectBefore");
     } else {
       this.importButton.title = "";
     }
@@ -445,7 +447,7 @@ export class ImportOpmlModal extends Modal {
     });
     wrapper.createEl("div", {
       cls: "import-opml-cleaner-title",
-      text: "Tip: try cleaning/formatting your OPML file",
+      text: this.t("modal.opml.cleanTip"),
     });
     const row = wrapper.createDiv({ cls: "import-opml-cleaner-row" });
     const link = row.createEl("a", {
@@ -461,8 +463,8 @@ export class ImportOpmlModal extends Modal {
       attr: {
         role: "button",
         tabindex: "0",
-        "aria-label": "Open OPML cleaner in browser",
-        title: "Open OPML cleaner in browser",
+        "aria-label": this.t("modal.opml.openCleaner"),
+        title: this.t("modal.opml.openCleaner"),
       },
     });
     setIcon(external, "external-link");
@@ -475,7 +477,7 @@ export class ImportOpmlModal extends Modal {
       );
       if (!opened) {
         new Notice(
-          `Unable to open browser. Copy/paste: ${ImportOpmlModal.OPML_CLEANER_URL}`,
+          this.t("modal.opml.cleanerOpenFailed", { url: ImportOpmlModal.OPML_CLEANER_URL }),
         );
       }
     };
@@ -563,7 +565,7 @@ export class ImportOpmlModal extends Modal {
     const nameValidation = isValidFolderName(node.name);
     if (!nameValidation.valid) {
       folderRow.addClass("is-invalid");
-      nameText.setAttr("title", nameValidation.error ?? "Invalid folder name");
+      nameText.setAttr("title", this.t("modal.opml.invalidFolder"));
     }
 
     const edit = nameWrap.createDiv({
@@ -571,8 +573,8 @@ export class ImportOpmlModal extends Modal {
       attr: {
         role: "button",
         tabindex: "0",
-        "aria-label": "Rename folder",
-        title: "Rename folder",
+        "aria-label": this.t("modal.opml.renameFolder"),
+        title: this.t("modal.opml.renameFolder"),
       },
     });
     setIcon(edit, "pencil");
@@ -592,7 +594,7 @@ export class ImportOpmlModal extends Modal {
           input.classList.add("is-invalid");
           input.setAttribute(
             "title",
-            validation.error ?? "Invalid folder name",
+            this.t("modal.opml.invalidFolder"),
           );
           input.focus();
           return;
@@ -639,8 +641,10 @@ export class ImportOpmlModal extends Modal {
       attr: {
         role: "button",
         tabindex: hasChildren ? "0" : "-1",
-        "aria-label": collapsed ? "Expand folder" : "Collapse folder",
-        title: collapsed ? "Expand" : "Collapse",
+        "aria-label": collapsed
+          ? this.t("modal.opml.expandFolder")
+          : this.t("modal.opml.collapseFolder"),
+        title: collapsed ? this.t("modal.opml.expand") : this.t("modal.opml.collapse"),
       },
     });
     setIcon(toggle, collapsed ? "chevron-right" : "chevron-down");
@@ -717,7 +721,7 @@ export class ImportOpmlModal extends Modal {
     const titleValidation = isValidFeedTitle(feed.title);
     if (!titleValidation.valid && selected && !duplicate) {
       row.addClass("is-invalid");
-      titleText.setAttr("title", titleValidation.error ?? "Invalid feed title");
+      titleText.setAttr("title", this.t("modal.opml.invalidFeed"));
     }
 
     const edit = nameWrap.createDiv({
@@ -725,8 +729,8 @@ export class ImportOpmlModal extends Modal {
       attr: {
         role: "button",
         tabindex: "0",
-        "aria-label": "Rename feed",
-        title: "Rename feed",
+        "aria-label": this.t("modal.opml.renameFeed"),
+        title: this.t("modal.opml.renameFeed"),
       },
     });
     setIcon(edit, "pencil");
@@ -744,7 +748,7 @@ export class ImportOpmlModal extends Modal {
         const validation = isValidFeedTitle(next);
         if (!validation.valid) {
           input.classList.add("is-invalid");
-          input.setAttribute("title", validation.error ?? "Invalid feed title");
+          input.setAttribute("title", this.t("modal.opml.invalidFeed"));
           input.focus();
           return;
         }
@@ -778,10 +782,10 @@ export class ImportOpmlModal extends Modal {
 
     const meta = row.createDiv({ cls: "import-preview-meta" });
     if (this.importMode === "update" && duplicate) {
-      meta.textContent = "Already exists";
+      meta.textContent = this.t("modal.opml.alreadyExists");
       row.addClass("is-duplicate");
     } else if (!titleValidation.valid && selected) {
-      meta.textContent = "Needs fix";
+      meta.textContent = this.t("modal.opml.needsFix");
     } else {
       meta.textContent = "";
     }
@@ -794,7 +798,7 @@ export class ImportOpmlModal extends Modal {
     container.empty();
 
     const label = container.createDiv({ cls: "import-mode-label" });
-    label.textContent = "Import mode:";
+    label.textContent = this.t("modal.opml.mode");
 
     const optionsWrapper = container.createDiv({ cls: "import-mode-options" });
 
@@ -807,11 +811,11 @@ export class ImportOpmlModal extends Modal {
     });
     updateContent.createEl("div", {
       cls: "import-mode-option-title",
-      text: "Update",
+      text: this.t("modal.opml.update"),
     });
     updateContent.createEl("div", {
       cls: "import-mode-option-desc",
-      text: "Add new feeds to your existing list (duplicates will be skipped)",
+      text: this.t("modal.opml.updateDesc"),
     });
 
     // Overwrite option - click to select
@@ -823,11 +827,11 @@ export class ImportOpmlModal extends Modal {
     });
     overwriteContent.createEl("div", {
       cls: "import-mode-option-title",
-      text: "Overwrite",
+      text: this.t("modal.opml.overwrite"),
     });
     overwriteContent.createEl("div", {
       cls: "import-mode-option-desc",
-      text: "Replace all existing feeds with the imported feeds",
+      text: this.t("modal.opml.overwriteDesc"),
     });
 
     // Add click handlers after elements are created
@@ -872,14 +876,14 @@ export class ImportOpmlModal extends Modal {
       cls: "rss-dashboard-modal-content",
     });
 
-    new Setting(modalContent).setName("Overwrite all feeds").setHeading();
+    new Setting(modalContent).setName(this.t("modal.opml.overwriteTitle")).setHeading();
 
     // Warning message
     const warningDiv = modalContent.createDiv({
       cls: "delete-all-warning",
     });
     warningDiv.createEl("p", {
-      text: "This action is irreversible. All your existing feeds will be permanently replaced with the imported feeds.",
+      text: this.t("modal.opml.overwriteWarning"),
     });
 
     // Backup recommendation
@@ -887,10 +891,10 @@ export class ImportOpmlModal extends Modal {
       cls: "delete-all-backup-notice",
     });
     backupDiv.createEl("strong", {
-      text: "Recommended: export your feeds first",
+      text: this.t("modal.opml.backupTitle"),
     });
     backupDiv.createEl("p", {
-      text: "Before overwriting, we strongly recommend backing up your current feeds by exporting to an OPML file.",
+      text: this.t("modal.opml.backupDesc"),
     });
 
     // Button container
@@ -900,7 +904,7 @@ export class ImportOpmlModal extends Modal {
 
     // Export OPML button
     const exportBtn = buttonContainer.createEl("button", {
-      text: "Export OPML",
+      text: this.t("modal.feedManager.export"),
       cls: "rss-dashboard-primary-button export-opml-btn",
     });
     exportBtn.onclick = () => {
@@ -908,14 +912,14 @@ export class ImportOpmlModal extends Modal {
     };
 
     const cancelButton = buttonContainer.createEl("button", {
-      text: "Cancel",
+      text: this.t("common.cancel"),
     });
     cancelButton.onclick = () => {
       activeDocument.body.removeChild(overlay);
     };
 
     const confirmButton = buttonContainer.createEl("button", {
-      text: "Overwrite feeds",
+      text: this.t("modal.opml.overwriteFeeds"),
       cls: "rss-dashboard-danger-button",
     });
     confirmButton.onclick = () => {
@@ -948,21 +952,29 @@ export class ImportOpmlModal extends Modal {
       this.onImportStarted?.();
 
       if (this.importMode === "update" && result.addedCount === 0) {
-        new Notice("No new feeds found in the OPML file.");
+        new Notice(this.t("modal.opml.noFeeds"));
         this.close();
         return;
       }
 
-      const modeText =
-        this.importMode === "overwrite" ? "replaced with" : "updated with";
+      const modeText = this.t(
+        this.importMode === "overwrite"
+          ? "modal.opml.replaced"
+          : "modal.opml.updatedWith",
+      );
       new Notice(
-        `Feeds ${modeText} ${selectedFeeds.length} imported feeds. Articles will be fetched in the background.`,
+        this.t("modal.opml.updated", {
+          mode: modeText,
+          count: selectedFeeds.length,
+        }),
       );
 
       this.close();
     } catch (error) {
       new Notice(
-        `Error importing OPML: ${error instanceof Error ? error.message : "Unknown error"}`,
+        this.t("modal.opml.importFailed", {
+          error: error instanceof Error ? error.message : "Unknown error",
+        }),
       );
     }
   }

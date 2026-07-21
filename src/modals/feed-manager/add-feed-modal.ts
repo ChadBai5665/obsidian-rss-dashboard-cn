@@ -183,7 +183,7 @@ export class AddFeedModal extends Modal {
     this.normalizeNitterUrl();
 
     // Set loading state
-    this.status = "\u23F3 Loading...";
+    this.status = `⏳ ${this.t("modal.feed.loading")}`;
     this.loadBtn.addClass("loading");
     this.loadBtn.disabled = true;
     this.clearActiveBadge(); // Clear any previous active states
@@ -200,6 +200,7 @@ export class AddFeedModal extends Modal {
       const preview = await resolveAndLoadPreview(this.url, {
         corsProxyEnabled: this.plugin?.settings?.corsProxyEnabled,
         corsProxyUrl: this.plugin?.settings?.corsProxyUrl,
+        locale: this.plugin?.settings.locale ?? "en",
       });
 
       this.url = preview.finalUrl;
@@ -224,11 +225,14 @@ export class AddFeedModal extends Modal {
         this.statusDiv.removeClass("status-ok");
         this.statusDiv.removeClass("rss-dashboard-status-warning");
 
-        const conversionNotice = getPreviewConversionNotice(preview);
+        const conversionNotice = getPreviewConversionNotice(
+          preview,
+          this.plugin?.settings.locale ?? "en",
+        );
 
         if (preview.hasEntries) {
-          this.status = "OK";
-          this.statusDiv.textContent = `\u2705 OK${conversionNotice}`;
+          this.status = this.t("modal.feed.ok");
+          this.statusDiv.textContent = `✅ ${this.t("modal.feed.ok")}${conversionNotice}`;
           this.statusDiv.addClass("status-ok");
         } else {
           this.status = this.t("modal.feed.noContent");
@@ -257,7 +261,7 @@ export class AddFeedModal extends Modal {
       }
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : String(e);
-      this.status = `Error: ${errorMsg}`;
+      this.status = `${this.t("common.error")}: ${errorMsg}`;
       this.latestEntry = "-";
       if (this.latestEntryDiv) {
         this.latestEntryDiv.textContent = this.latestEntry;
@@ -621,6 +625,7 @@ export class AddFeedModal extends Modal {
       selectedTagNames: this.customTags,
       triggerEmptyLabel: this.t("settings.display.none"),
       menuTitle: this.t("modal.feed.selectAutoTags"),
+      locale: this.plugin?.settings.locale ?? "en",
       onChange: (selectedNames) => {
         this.customTags = selectedNames;
       },
@@ -652,6 +657,7 @@ export class AddFeedModal extends Modal {
           overrideGlobalRules: this.feedKeywordRules.overrideGlobalRules,
         },
         showOverrideToggle: true,
+        locale: this.plugin?.settings.locale ?? "en",
         onChange: (nextState) => {
           this.feedKeywordRules = {
             includeLogic: nextState.includeLogic,

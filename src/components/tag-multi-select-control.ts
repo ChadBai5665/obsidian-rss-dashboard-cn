@@ -1,5 +1,6 @@
 import { setIcon } from "obsidian";
 import type { Tag } from "../types/types";
+import { createTranslator, type Locale } from "../i18n";
 
 export interface TagMultiSelectControlOptions {
   setting: import("obsidian").Setting;
@@ -9,6 +10,7 @@ export interface TagMultiSelectControlOptions {
   triggerEmptyLabel?: string;
   menuTitle?: string;
   mobileSheetTitle?: string;
+  locale?: Locale;
   onChange: (selectedTagNames: string[]) => void | Promise<void>;
 }
 
@@ -37,7 +39,7 @@ export function addTagMultiSelectControl(
     setting,
     availableTags,
     onChange,
-    menuTitle = "Select tags",
+    menuTitle = createTranslator(opts.locale ?? "en")("modal.tags.select"),
     mobileSheetTitle = menuTitle,
   } = opts;
 
@@ -150,7 +152,7 @@ export function addTagMultiSelectControl(
       });
       const doneButton = header.createEl("button", {
         cls: CLS_MOBILE_DONE,
-        text: "Done",
+        text: createTranslator(opts.locale ?? "en")("modal.tags.done"),
         attr: { type: "button" },
       });
       doneButton.addEventListener("click", () => {
@@ -286,9 +288,10 @@ function normalizeSelection(
 function getSummaryLabel(
   selectedSet: ReadonlySet<string>,
   availableTags: ReadonlyArray<Tag>,
-  opts: Pick<TagMultiSelectControlOptions, "noneLabel" | "triggerEmptyLabel">,
+  opts: Pick<TagMultiSelectControlOptions, "noneLabel" | "triggerEmptyLabel" | "locale">,
 ): string {
-  const emptyLabel = opts.triggerEmptyLabel ?? opts.noneLabel ?? "None";
+  const t = createTranslator(opts.locale ?? "en");
+  const emptyLabel = opts.triggerEmptyLabel ?? opts.noneLabel ?? t("modal.tags.none");
   const selectedNames = availableTags
     .filter((tag) => selectedSet.has(tag.name))
     .map((tag) => tag.name);
@@ -299,7 +302,7 @@ function getSummaryLabel(
   if (selectedNames.length === 1) {
     return selectedNames[0] ?? emptyLabel;
   }
-  return `${selectedNames.length} tags selected`;
+  return t("modal.tags.selected", { count: selectedNames.length });
 }
 
 function recomputeSelected(

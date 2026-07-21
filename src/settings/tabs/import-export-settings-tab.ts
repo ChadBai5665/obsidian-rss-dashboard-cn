@@ -11,6 +11,7 @@ import { ImportOpmlModal } from "../../modals/import-opml-modal";
 import { ImportSuccessModal } from "../../modals/import-success-modal";
 import { FactoryResetConfirmModal } from "../modals/settings-modals";
 import { AutoBackupSettings, RssDashboardSettings } from "../../types/types";
+import { createTranslator } from "../../i18n";
 
 /** @deprecated Import from settings-modals; this re-export preserves integrations. */
 export { FactoryResetConfirmModal } from "../modals/settings-modals";
@@ -37,6 +38,7 @@ export function renderImportExportSettingsTab(
   containerEl: HTMLElement,
   plugin: RssDashboardPlugin,
 ): void {
+  const t = createTranslator(plugin.settings.locale ?? "zh-CN");
   // ── data.json ─────────────────────────────────────────────────────────────
   const dataSection = containerEl.createDiv();
   new Setting(dataSection)
@@ -73,7 +75,8 @@ export function renderImportExportSettingsTab(
                 }
                 new ImportSuccessModal(
                   plugin.app,
-                  "Data imported successfully! Your dashboard has been updated.",
+                  t("modal.importSuccess.data"),
+                  plugin.settings.locale,
                 ).open();
               } catch {
                 new Notice("Import failed: invalid or corrupted data file.");
@@ -128,7 +131,8 @@ export function renderImportExportSettingsTab(
                 await plugin.importPortableDataBundleFromFile(file);
                 new ImportSuccessModal(
                   plugin.app,
-                  "Shard data imported successfully!",
+                  t("modal.importSuccess.shards"),
+                  plugin.settings.locale,
                 ).open();
               } catch (e) {
                 new Notice(
@@ -175,7 +179,8 @@ export function renderImportExportSettingsTab(
                 await plugin.importUserSettingsJsonFromFile(file);
                 new ImportSuccessModal(
                   plugin.app,
-                  "User preferences imported successfully!",
+                  t("modal.importSuccess.preferences"),
+                  plugin.settings.locale,
                 ).open();
               } catch (e) {
                 new Notice(

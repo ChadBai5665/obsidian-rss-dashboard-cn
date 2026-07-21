@@ -1,4 +1,5 @@
 import { App, Modal, Setting } from "obsidian";
+import { createTranslator, type Locale } from "../../i18n";
 
 export type TagApplicationChoice = "apply_existing" | "future_only" | "cancel_save";
 
@@ -14,7 +15,7 @@ export class TagApplicationConfirmModal extends Modal {
   private _resolve: ((choice: TagApplicationChoice) => void) | null = null;
   private _settled = false;
 
-  constructor(app: App) {
+  constructor(app: App, private locale: Locale = "en") {
     super(app);
   }
 
@@ -37,20 +38,21 @@ export class TagApplicationConfirmModal extends Modal {
   }
 
   onOpen(): void {
+    const t = createTranslator(this.locale);
     const { contentEl } = this;
     contentEl.empty();
 
     this.modalEl.addClass("rss-dashboard-modal");
     this.modalEl.addClass("rss-dashboard-modal-container");
 
-    contentEl.createEl("h2", { text: "Update feed tags" });
+    contentEl.createEl("h2", { text: t("modal.tagApply.title") });
 
     contentEl.createEl("p", {
-      text: "How would you like to apply these tag changes?",
+      text: t("modal.tagApply.question"),
     });
 
     contentEl.createEl("p", {
-      text: "This will remove the selected tag names from all existing articles in this feed, including tags added manually or by other auto-tag rules.",
+      text: t("modal.tagApply.warning"),
       cls: "rss-tag-application-warning",
     });
 
@@ -59,18 +61,18 @@ export class TagApplicationConfirmModal extends Modal {
     buttonsSetting.controlEl.addClass("rss-tag-application-buttons");
     buttonsSetting
       .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => {
+        btn.setButtonText(t("common.cancel")).onClick(() => {
           this.settle("cancel_save");
         }),
       )
       .addButton((btn) =>
-        btn.setButtonText("Future only").onClick(() => {
+        btn.setButtonText(t("modal.tagApply.future")).onClick(() => {
           this.settle("future_only");
         }),
       )
       .addButton((btn) =>
         btn
-          .setButtonText("Apply to existing")
+          .setButtonText(t("modal.tagApply.existing"))
           .setCta()
           .onClick(() => {
             this.settle("apply_existing");

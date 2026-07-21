@@ -1,4 +1,5 @@
 import type { KeywordFilterRule } from "../types/types";
+import { createTranslator, type Locale } from "../i18n";
 
 export interface KeywordFilterEditorState {
   includeLogic: "AND" | "OR";
@@ -10,6 +11,7 @@ interface KeywordFilterEditorOptions {
   containerEl: HTMLElement;
   state: KeywordFilterEditorState;
   showOverrideToggle?: boolean;
+  locale?: Locale;
   onChange: (next: KeywordFilterEditorState) => void;
 }
 
@@ -32,6 +34,7 @@ export function renderKeywordFilterEditor(
   options: KeywordFilterEditorOptions,
 ): void {
   const { containerEl, state, showOverrideToggle, onChange } = options;
+  const t = createTranslator(options.locale ?? "en");
   containerEl.empty();
 
   const controlsRow = containerEl.createDiv({
@@ -48,7 +51,7 @@ export function renderKeywordFilterEditor(
     });
     overrideCheckbox.checked = !!state.overrideGlobalRules;
     const overrideLabel = overrideWrapper.createEl("label", {
-      text: "Override global rules",
+      text: t("modal.keyword.override"),
     });
     overrideLabel.addClass("rss-keyword-filter-label");
     overrideLabel.addEventListener("click", () => {
@@ -71,7 +74,7 @@ export function renderKeywordFilterEditor(
   });
   includeLogicRow.createSpan({
     cls: "rss-keyword-filter-logic-label",
-    text: "Include logic:",
+    text: t("modal.keyword.logic"),
   });
   const logicSegmented = includeLogicRow.createDiv({
     cls: "rss-keyword-filter-segmented",
@@ -105,7 +108,7 @@ export function renderKeywordFilterEditor(
 
   controlsRow.createDiv({
     cls: "rss-keyword-filter-logic-help",
-    text: "AND logic: include rules pass only when all enabled include rules match. OR logic: include rules pass when any enabled include rule matches. Exclude rules always remove matches.",
+    text: t("modal.keyword.help"),
   });
 
   const rulesContainer = containerEl.createDiv({
@@ -115,7 +118,7 @@ export function renderKeywordFilterEditor(
   if (state.rules.length === 0) {
     rulesContainer.createDiv({
       cls: "rss-keyword-filter-empty",
-      text: "No keyword rules configured.",
+      text: t("modal.keyword.empty"),
     });
   } else {
     state.rules.forEach((rule, index) => {
@@ -134,7 +137,7 @@ export function renderKeywordFilterEditor(
 
       headerLeft.createSpan({
         cls: "rss-keyword-filter-rule-title",
-        text: `Rule ${index + 1}`,
+        text: t("modal.keyword.rule", { count: index + 1 }),
       });
 
       const enabledBtn = headerLeft.createEl("button", {
@@ -144,7 +147,7 @@ export function renderKeywordFilterEditor(
         attr: {
           type: "button",
           "aria-pressed": rule.enabled ? "true" : "false",
-          "aria-label": `Toggle enabled state for rule ${index + 1}`,
+          "aria-label": t("modal.keyword.toggle", { count: index + 1 }),
         },
       });
       enabledBtn.createSpan({
@@ -155,7 +158,7 @@ export function renderKeywordFilterEditor(
       });
       enabledBtn.createSpan({
         cls: "rss-keyword-filter-enabled-btn-label",
-        text: "Enabled",
+        text: t("modal.keyword.enabled"),
       });
       enabledBtn.addEventListener("click", () => {
         onChange({
@@ -166,10 +169,10 @@ export function renderKeywordFilterEditor(
 
       const removeBtn = headerRow.createEl("button", {
         cls: "rss-keyword-filter-delete rss-keyword-filter-delete-header",
-        attr: { "aria-label": `Delete rule ${index + 1}` },
+        attr: { "aria-label": t("modal.keyword.delete", { count: index + 1 }) },
       });
 
-      removeBtn.setText("Delete rule");
+      removeBtn.setText(t("modal.keyword.deleteLabel"));
       removeBtn.addEventListener("click", () => {
         onChange({
           ...state,
@@ -186,19 +189,19 @@ export function renderKeywordFilterEditor(
       });
       typeRow.createSpan({
         cls: "rss-keyword-filter-inline-label",
-        text: "Rule type:",
+        text: t("modal.keyword.type"),
       });
       const typeSegmented = typeRow.createDiv({
         cls: "rss-keyword-filter-segmented rss-keyword-filter-rule-segmented",
       });
       const includeTypeBtn = createSegmentedButton(
         typeSegmented,
-        "Include",
+        t("modal.keyword.include"),
         "include",
       );
       const excludeTypeBtn = createSegmentedButton(
         typeSegmented,
-        "Exclude",
+        t("modal.keyword.exclude"),
         "exclude",
       );
       const isIncludeType = rule.type === "include";
@@ -226,19 +229,19 @@ export function renderKeywordFilterEditor(
       });
       matchModeRow.createSpan({
         cls: "rss-keyword-filter-inline-label",
-        text: "Match mode:",
+        text: t("modal.keyword.match"),
       });
       const matchModeSegmented = matchModeRow.createDiv({
         cls: "rss-keyword-filter-segmented rss-keyword-filter-rule-segmented",
       });
       const exactModeBtn = createSegmentedButton(
         matchModeSegmented,
-        "Exact",
+        t("modal.keyword.exact"),
         "exact",
       );
       const partialModeBtn = createSegmentedButton(
         matchModeSegmented,
-        "Partial",
+        t("modal.keyword.partial"),
         "partial",
       );
       const isExactMatch = rule.matchMode === "exact";
@@ -270,7 +273,7 @@ export function renderKeywordFilterEditor(
       });
       const keywordInput = keywordRow.createEl("input", {
         cls: "rss-keyword-filter-input",
-        attr: { type: "text", placeholder: "Keyword or phrase" },
+        attr: { type: "text", placeholder: t("modal.keyword.placeholder") },
       });
       keywordInput.value = rule.keyword || "";
       keywordInput.disabled = !rule.enabled;
@@ -289,7 +292,7 @@ export function renderKeywordFilterEditor(
 
       renderLocationToggle(
         locationsRow,
-        "Title",
+        t("modal.keyword.title"),
         rule.applyToTitle,
         !rule.enabled,
         (checked) =>
@@ -300,7 +303,7 @@ export function renderKeywordFilterEditor(
       );
       renderLocationToggle(
         locationsRow,
-        "Summary",
+        t("modal.keyword.summary"),
         rule.applyToSummary,
         !rule.enabled,
         (checked) =>
@@ -311,7 +314,7 @@ export function renderKeywordFilterEditor(
       );
       renderLocationToggle(
         locationsRow,
-        "Content",
+        t("modal.keyword.content"),
         rule.applyToContent,
         !rule.enabled,
         (checked) =>
@@ -322,7 +325,7 @@ export function renderKeywordFilterEditor(
       );
       renderLocationToggle(
         locationsRow,
-        "URL",
+        t("modal.keyword.url"),
         !!rule.applyToURL,
         !rule.enabled,
         (checked) =>
@@ -336,7 +339,7 @@ export function renderKeywordFilterEditor(
 
   const addRuleBtn = containerEl.createEl("button", {
     cls: "rss-keyword-filter-add-btn",
-    text: "Add new rule...",
+    text: t("modal.keyword.add"),
   });
   addRuleBtn.addEventListener("click", () => {
     onChange({
