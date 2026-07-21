@@ -21,9 +21,10 @@ const EMPTY_LEDGER = (): PersistedSourceRefreshLedger => ({
   sources: {},
 });
 
+const vaultMutationQueues = new WeakMap<Vault, Map<string, Promise<void>>>();
+
 export class SourceRefreshLedger {
   private readonly dataRoot: string;
-  private mutationQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly vault: Vault,
@@ -164,13 +165,28 @@ export class SourceRefreshLedger {
   private async update(
     apply: (ledger: PersistedSourceRefreshLedger) => void,
   ): Promise<void> {
-    const mutation = this.mutationQueue.then(async () => {
+    const queues =
+      vaultMutationQueues.get(this.vault) ?? new Map<string, Promise<void>>();
+    vaultMutationQueues.set(this.vault, queues);
+    const previous = queues.get(this.ledgerPath) ?? Promise.resolve();
+    const mutation = previous.then(async () => {
       const ledger = await this.readLedger();
       apply(ledger);
       await this.writeLedger(ledger);
     });
-    this.mutationQueue = mutation.catch(() => undefined);
-    await mutation;
+    const recoveredQueue = mutation.catch(() => undefined);
+    queues.set(this.ledgerPath, recoveredQueue);
+
+    try {
+      await mutation;
+    } finally {
+      if (queues.get(this.ledgerPath) === recoveredQueue) {
+        queues.delete(this.ledgerPath);
+        if (queues.size === 0) {
+          vaultMutationQueues.delete(this.vault);
+        }
+      }
+    }
   }
 
   private async ensureDirectory(path: string): Promise<void> {
@@ -181,7 +197,11 @@ export class SourceRefreshLedger {
 }
 
 function isPersistedLedger(value: unknown): value is PersistedSourceRefreshLedger {
-  if (!isRecord(value) || value.schemaVersion !== 1 || !isRecord(value.sources)) {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== 1 ||
+    !isRecord(value.sources)
+  ) {
     return false;
   }
 
@@ -199,7 +219,7 @@ function isPersistedLedger(value: unknown): value is PersistedSourceRefreshLedge
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function optionalString(value: unknown): boolean {
@@ -223,12 +243,21 @@ function assertSafeDataRoot(folder: string): void {
 }
 
 function sanitizeErrorMessage(message: string): string {
-  const withoutUrlQueries = message.replace(
+  const withoutAbsoluteUrlQueries = message.replace(
     /https?:\/\/[^\s]+/gi,
     (rawUrl) => redactUrlQuery(rawUrl),
   );
-  const withoutHeaderSecrets = withoutUrlQueries.replace(
-    /\b(authorization|proxy-authorization|x-api-key|api[-_]?key|token|cookie|set-cookie)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/gi,
+  const withoutAnyUrlQueries = withoutAbsoluteUrlQueries.replace(
+    /\/(?!\/)[^\s?#;,)]+(?:\/[^\s?#;,)]+)*\?[^\s#;,)]+/g,
+    (rawUrl) => redactUrlQuery(rawUrl),
+  );
+  const sensitiveHeaderNames =
+    "authorization|proxy-authorization|x-api-key|api[-_]?key|token|cookie|set-cookie";
+  const withoutHeaderSecrets = withoutAnyUrlQueries.replace(
+    new RegExp(
+      `\\b(${sensitiveHeaderNames})\\s*[:=]\\s*[\\s\\S]*?(?=(?:[;,]\\s*(?:${sensitiveHeaderNames})\\s*[:=])|[\\r\\n]|$)`,
+      "gi",
+    ),
     "$1: [redacted]",
   );
 

@@ -6,6 +6,7 @@ import {
   Platform,
   requireApiVersion,
   TFolder,
+  normalizePath,
   type EventRef,
   type ObsidianProtocolData,
 } from "obsidian";
@@ -278,6 +279,10 @@ export default class RssDashboardPlugin extends Plugin {
   private hasCompletedStartupSavedArticleValidation = false;
   private vaultMetadataReloadTimer: number | null = null;
   private startupRefreshTimeoutId: number | null = null;
+  private automaticRefreshGeneration = 0;
+  private sourceRefreshLedger:
+    | { dataRoot: string; ledger: SourceRefreshLedger }
+    | null = null;
   private progressSaveDebounce: number | null = null;
   private suppressWatcherUntil = 0;
   private static readonly FEED_REFRESH_RENDER_THROTTLE_MS = 250;
@@ -416,10 +421,14 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private getSourceRefreshLedger(): SourceRefreshLedger {
-    return new SourceRefreshLedger(
-      this.app.vault,
-      this.settings.collection.dataFolder,
-    );
+    const dataRoot = normalizePath(this.settings.collection.dataFolder.trim());
+    if (this.sourceRefreshLedger?.dataRoot === dataRoot) {
+      return this.sourceRefreshLedger.ledger;
+    }
+
+    const ledger = new SourceRefreshLedger(this.app.vault, dataRoot);
+    this.sourceRefreshLedger = { dataRoot, ledger };
+    return ledger;
   }
 
   private getRefreshSourceIds(): string[] {
@@ -445,11 +454,16 @@ export default class RssDashboardPlugin extends Plugin {
       return;
     }
 
-    void this.refreshOnOpenIfNeeded();
+    void this.refreshOnOpenIfNeeded().catch(() => {
+      console.warn(
+        "[RSS Dashboard] Automatic refresh scheduling skipped due to ledger access failure.",
+      );
+    });
   }
 
   private async refreshOnOpenIfNeeded(): Promise<void> {
-    if (this.settings.refreshMode !== "daily-on-open") {
+    const generation = this.automaticRefreshGeneration;
+    if (!this.isAutomaticRefreshActive(generation)) {
       return;
     }
 
@@ -457,6 +471,9 @@ export default class RssDashboardPlugin extends Plugin {
     const lastSuccessDate = await this.getSourceRefreshLedger().getSharedSuccessDate(
       this.getRefreshSourceIds(),
     );
+    if (!this.isAutomaticRefreshActive(generation)) {
+      return;
+    }
     if (!shouldRunDailyRefresh(lastSuccessDate, now)) {
       return;
     }
@@ -465,14 +482,34 @@ export default class RssDashboardPlugin extends Plugin {
       ? this.settings.startupRefreshDelaySeconds
       : DEFAULT_SETTINGS.startupRefreshDelaySeconds;
     if (delay > 0) {
-      this.startupRefreshTimeoutId = window.setTimeout(() => {
-        this.startupRefreshTimeoutId = null;
+      const timeoutId = window.setTimeout(() => {
+        if (this.startupRefreshTimeoutId === timeoutId) {
+          this.startupRefreshTimeoutId = null;
+        }
+        if (!this.isAutomaticRefreshActive(generation)) {
+          return;
+        }
         void this.refreshFeeds();
       }, delay * 1000);
+      if (!this.isAutomaticRefreshActive(generation)) {
+        window.clearTimeout(timeoutId);
+        return;
+      }
+      this.startupRefreshTimeoutId = timeoutId;
       return;
     }
 
+    if (!this.isAutomaticRefreshActive(generation)) {
+      return;
+    }
     void this.refreshFeeds();
+  }
+
+  private isAutomaticRefreshActive(generation: number): boolean {
+    return (
+      this.automaticRefreshGeneration === generation &&
+      this.settings.refreshMode === "daily-on-open"
+    );
   }
 
   private async reconcileSavedArticlesOnStartup(): Promise<void> {
@@ -2883,6 +2920,7 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   public cancelPendingStartupRefresh(): void {
+    this.automaticRefreshGeneration += 1;
     if (this.startupRefreshTimeoutId !== null) {
       window.clearTimeout(this.startupRefreshTimeoutId);
       this.startupRefreshTimeoutId = null;

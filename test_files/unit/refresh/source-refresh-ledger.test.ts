@@ -100,6 +100,37 @@ describe("SourceRefreshLedger", () => {
     expect(state?.errorMessage?.length).toBeLessThanOrEqual(300);
   });
 
+  it("redacts every credential value from compound headers and relative URLs", async () => {
+    const { adapter, ledger } = createLedger();
+    const secretValues = [
+      "cookie-session-secret",
+      "cookie-refresh-secret",
+      "digest-realm-secret",
+      "digest-nonce-secret",
+      "api-key-secret",
+      "relative-query-secret",
+    ];
+    const message = [
+      "Cookie: session=cookie-session-secret; refresh=cookie-refresh-secret",
+      "Authorization: Digest realm=digest-realm-secret, nonce=digest-nonce-secret, response=hash",
+      "X-API-Key: api-key-secret",
+      "Request /feed?session=relative-query-secret&lang=zh failed",
+    ].join("; ");
+
+    await ledger.recordError("feed-1", new Date(2026, 6, 21, 9, 0, 0), {
+      code: "request-failed",
+      message,
+    });
+
+    const persisted = adapter.files.get(
+      ".rss-dashboard-data/state/source-refresh.json",
+    ) ?? "";
+    for (const secret of secretValues) {
+      expect(persisted).not.toContain(secret);
+    }
+    expect(persisted).not.toContain("/feed?");
+  });
+
   it("does not lose a source state when independent refreshes finish together", async () => {
     const { ledger } = createLedger();
 
@@ -114,5 +145,49 @@ describe("SourceRefreshLedger", () => {
         expect.objectContaining({ sourceId: "feed-2", status: "success" }),
       ]),
     );
+  });
+
+  it("does not lose state when two ledger instances share one vault path", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+    const firstLedger = new SourceRefreshLedger(vault, ".rss-dashboard-data");
+    const secondLedger = new SourceRefreshLedger(vault, ".rss-dashboard-data");
+
+    await Promise.all([
+      firstLedger.recordSuccess("feed-1", new Date(2026, 6, 21, 9, 0, 0)),
+      secondLedger.recordSuccess("feed-2", new Date(2026, 6, 21, 9, 0, 0)),
+    ]);
+
+    expect(await firstLedger.getStates()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sourceId: "feed-1", status: "success" }),
+        expect.objectContaining({ sourceId: "feed-2", status: "success" }),
+      ]),
+    );
+  });
+
+  it.each([
+    "{",
+    JSON.stringify({ schemaVersion: 2, sources: {} }),
+    JSON.stringify({ schemaVersion: 1, sources: [] }),
+  ])("self-heals invalid persisted ledger state: %s", async (invalidContent) => {
+    const { adapter, ledger } = createLedger();
+    adapter.directories.add(".rss-dashboard-data");
+    adapter.directories.add(".rss-dashboard-data/state");
+    adapter.files.set(
+      ".rss-dashboard-data/state/source-refresh.json",
+      invalidContent,
+    );
+
+    await ledger.recordSuccess("feed-1", new Date(2026, 6, 21, 9, 0, 0));
+
+    const persisted = JSON.parse(
+      adapter.files.get(".rss-dashboard-data/state/source-refresh.json") ?? "",
+    ) as { schemaVersion: number; sources: Record<string, unknown> };
+    expect(Array.isArray(persisted.sources)).toBe(false);
+    expect(persisted).toMatchObject({
+      schemaVersion: 1,
+      sources: { "feed-1": { sourceId: "feed-1", status: "success" } },
+    });
   });
 });

@@ -78,6 +78,20 @@ function flushPromises(): Promise<void> {
   });
 }
 
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 // Create mock App using stubs
 function createMockApp(): MockApp {
   return App.createMock();
@@ -461,6 +475,17 @@ describe("onload() initialization", () => {
     expect(plugin.registerInterval).not.toHaveBeenCalled();
   });
 
+  it("reuses one source refresh ledger for the configured data root", () => {
+    plugin.settings = { ...DEFAULT_SETTINGS };
+    const pluginWithLedger = plugin as unknown as {
+      getSourceRefreshLedger: () => unknown;
+    };
+
+    expect(pluginWithLedger.getSourceRefreshLedger()).toBe(
+      pluginWithLedger.getSourceRefreshLedger(),
+    );
+  });
+
   it("does not schedule startup or interval refresh in off mode", async () => {
     vi.useFakeTimers();
     const intervalSpy = vi.spyOn(window, "setInterval");
@@ -551,6 +576,101 @@ describe("onload() initialization", () => {
     await vi.advanceTimersByTimeAsync(15_000);
 
     expect(refreshSpy).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("does not schedule a daily refresh after unload while the ledger read is pending", async () => {
+    vi.useFakeTimers();
+    const deferredExists = createDeferred<boolean>();
+    const adapter = plugin.app.vault.adapter;
+    const originalExists = adapter.exists;
+    adapter.exists = vi.fn((path: string) =>
+      path === ".rss-dashboard-data/state/source-refresh.json"
+        ? deferredExists.promise
+        : originalExists(path),
+    );
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 15,
+      feeds: [{ ...sampleFeed, feedId: "feed-1" }],
+    });
+    const refreshSpy = vi
+      .spyOn(plugin, "refreshFeeds")
+      .mockResolvedValue(undefined);
+
+    await plugin.onload();
+    await flushPromises();
+    plugin.onunload();
+    deferredExists.resolve(false);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(refreshSpy).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("does not run a delayed daily refresh after a manual refresh cancels a pending ledger read", async () => {
+    vi.useFakeTimers();
+    const deferredExists = createDeferred<boolean>();
+    const adapter = plugin.app.vault.adapter;
+    const originalExists = adapter.exists;
+    adapter.exists = vi.fn((path: string) =>
+      path === ".rss-dashboard-data/state/source-refresh.json"
+        ? deferredExists.promise
+        : originalExists(path),
+    );
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 15,
+      feeds: [{ ...sampleFeed, feedId: "feed-1" }],
+    });
+    const refreshSpy = vi
+      .spyOn(plugin, "refreshFeeds")
+      .mockResolvedValue(undefined);
+
+    await plugin.onload();
+    await flushPromises();
+    const manualRefreshCommand = (
+      plugin.addCommand as ReturnType<typeof vi.fn>
+    ).mock.calls.find(([command]) => command.id === "refresh-feeds")?.[0] as {
+      callback: () => void;
+    };
+    manualRefreshCommand.callback();
+    deferredExists.resolve(false);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("catches rejected ledger reads without scheduling a refresh", async () => {
+    vi.useFakeTimers();
+    const adapter = plugin.app.vault.adapter;
+    const originalExists = adapter.exists;
+    adapter.exists = vi.fn((path: string) =>
+      path === ".rss-dashboard-data/state/source-refresh.json"
+        ? Promise.reject(new Error("ledger access failed?token=secret"))
+        : originalExists(path),
+    );
+    const warningSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 0,
+      feeds: [{ ...sampleFeed, feedId: "feed-1" }],
+    });
+    const refreshSpy = vi
+      .spyOn(plugin, "refreshFeeds")
+      .mockResolvedValue(undefined);
+
+    await plugin.onload();
+    await flushPromises();
+    await flushPromises();
+
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(warningSpy).toHaveBeenCalledWith(
+      "[RSS Dashboard] Automatic refresh scheduling skipped due to ledger access failure.",
+    );
     vi.useRealTimers();
   });
 
