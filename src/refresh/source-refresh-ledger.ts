@@ -248,7 +248,7 @@ function sanitizeErrorMessage(message: string): string {
     (rawUrl) => redactUrlQuery(rawUrl),
   );
   const withoutAnyUrlQueries = withoutAbsoluteUrlQueries.replace(
-    /\/(?!\/)[^\s?#;,)]+(?:\/[^\s?#;,)]+)*\?[^\s#;,)]+/g,
+    /[^\s#;,)]+\?[^\s#;,)]+/g,
     (rawUrl) => redactUrlQuery(rawUrl),
   );
   const sensitiveHeaderNames =

@@ -109,12 +109,15 @@ describe("SourceRefreshLedger", () => {
       "digest-nonce-secret",
       "api-key-secret",
       "relative-query-secret",
+      "parent-relative-secret",
+      "bare-relative-secret",
     ];
     const message = [
+      "Request /feed?session=relative-query-secret&lang=zh failed",
+      "Retry ../feed?session=parent-relative-secret then feed?session=bare-relative-secret",
       "Cookie: session=cookie-session-secret; refresh=cookie-refresh-secret",
       "Authorization: Digest realm=digest-realm-secret, nonce=digest-nonce-secret, response=hash",
       "X-API-Key: api-key-secret",
-      "Request /feed?session=relative-query-secret&lang=zh failed",
     ].join("; ");
 
     await ledger.recordError("feed-1", new Date(2026, 6, 21, 9, 0, 0), {
