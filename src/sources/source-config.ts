@@ -315,8 +315,10 @@ export function inferXSourceKind(
     return value.kind;
   }
   if (typeof value !== "string") return undefined;
-  const match = /^tikhub:\/\/(x-account|x-topic)(?=\/|[?#]|$)/.exec(value);
-  return match?.[1] as "x-account" | "x-topic" | undefined;
+  const candidate = value.toLowerCase();
+  if (candidate.startsWith("tikhub://x-account")) return "x-account";
+  if (candidate.startsWith("tikhub://x-topic")) return "x-topic";
+  return undefined;
 }
 
 export function isSyntheticUrlForKind(
@@ -324,6 +326,7 @@ export function isSyntheticUrlForKind(
   kind: "x-account" | "x-topic",
 ): boolean {
   if (typeof url !== "string") return false;
+  if (!url.startsWith(`tikhub://${kind}/`)) return false;
   const inferred = inferXSourceKind(url);
   if (inferred !== kind) return false;
   const identifier = url.slice(`tikhub://${kind}/`.length);

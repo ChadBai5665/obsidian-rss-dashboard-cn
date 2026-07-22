@@ -284,6 +284,44 @@ describe("settings-loader", () => {
       );
     });
 
+    it.each([
+      ["tikhub://x-account%2Fopenai", "x-account"],
+      ["tikhub://x-account\\openai", "x-account"],
+      ["tikhub://x-account-openai", "x-account"],
+      ["tikhub://x-topic.evil/rss", "x-topic"],
+      ["TikHub://X-ACCOUNT/openai", "x-account"],
+      ["TIKHUB://X-TOPIC/topic-1", "x-topic"],
+    ])(
+      "quarantines a malformed or case-variant X prefix: %s",
+      async (url, sourceKind) => {
+        const { loadAndNormalizeSettings } =
+          await import("../../../src/utils/settings-loader");
+        const result = loadAndNormalizeSettings({
+          feeds: [createFeed({ url } as unknown as Feed)],
+        });
+
+        expect(result.feeds[0]).toMatchObject({
+          sourceKind,
+          excludeFromRefresh: true,
+          lastFetchError: "Invalid X source configuration",
+          url: `tikhub://${sourceKind}/unconfigured-1`,
+        });
+      },
+    );
+
+    it("does not misclassify unrelated tikhub schemes as X sources", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const result = loadAndNormalizeSettings({
+        feeds: [createFeed({ url: "tikhub://unrelated-x-account/openai" })],
+      });
+
+      expect(result.feeds[0]).toMatchObject({
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+      });
+    });
+
     it("deduplicates loaded X sources by canonical account handle or topic id", async () => {
       const { loadAndNormalizeSettings } =
         await import("../../../src/utils/settings-loader");
