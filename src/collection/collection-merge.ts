@@ -1,4 +1,5 @@
 import type { CollectedItem } from "./collected-item";
+import { mergeXPostSourceMetadata } from "./source-metadata";
 
 export function mergeCollectedItems(
   previous: CollectedItem,
@@ -13,6 +14,10 @@ export function mergeCollectedItems(
     excerpt: preferNonEmpty(incoming.excerpt, previous.excerpt),
     contentPath: preferNonEmpty(incoming.contentPath, previous.contentPath),
     metrics: mergeMetrics(previous.metrics, incoming.metrics),
+    sourceMetadata: mergeXPostSourceMetadata(
+      previous.sourceMetadata,
+      incoming.sourceMetadata,
+    ),
     read: incoming.read,
     starred: previous.starred || incoming.starred,
     saved: previous.saved || incoming.saved,

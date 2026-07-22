@@ -17,7 +17,6 @@ export function parseTikHubTimeline(payload: unknown): TikHubTimelineParseResult
   const warnings: string[] = [];
   const posts: XPost[] = [];
   let candidateCount = 0;
-  const seenIds = new Set<string>();
   const instructionArrays = findNamedArrays(payload, "instructions");
 
   for (const instructions of instructionArrays) {
@@ -44,8 +43,6 @@ export function parseTikHubTimeline(payload: unknown): TikHubTimelineParseResult
             warnings.push("Skipped a malformed X post.");
             continue;
           }
-          if (seenIds.has(post.id)) continue;
-          seenIds.add(post.id);
           posts.push(post);
         }
       }

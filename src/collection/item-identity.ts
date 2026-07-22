@@ -71,6 +71,17 @@ export function createSourceLocator(sourceId: string): string {
   return createHash("sha256").update(sourceId.trim()).digest("hex");
 }
 
+/** X IDs are globally stable across account renames and topic rediscovery. */
+export function createXPostCollectedItemId(guid: string): string {
+  const normalizedGuid = guid.trim();
+  if (!/^\d{1,30}$/u.test(normalizedGuid)) {
+    throw new Error("Cannot identify an X post without a valid post ID.");
+  }
+  return createHash("sha256")
+    .update(JSON.stringify(["x-post", normalizedGuid]))
+    .digest("hex");
+}
+
 export function resolveFeedSourceId(
   feed: Pick<Feed, "feedId" | "url">,
 ): string {

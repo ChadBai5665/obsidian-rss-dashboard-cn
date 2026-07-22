@@ -764,6 +764,16 @@ describe("CollectionRepository", () => {
       { ...createItem(), sourceType: "email" },
       { ...createItem(), author: 42 },
       { ...createItem(), metrics: { likes: "many" } },
+      {
+        ...createItem(),
+        sourceType: "x-account",
+        contentBasis: "x-post",
+        sourceMetadata: {
+          kind: "x-post",
+          inReplyToId: "../../escape",
+          externalUrls: [],
+        },
+      },
     ];
     const raw = `${invalidRecords.map((item) => JSON.stringify(item)).join("\n")}\n`;
     await adapter.write(dailyPath, raw);

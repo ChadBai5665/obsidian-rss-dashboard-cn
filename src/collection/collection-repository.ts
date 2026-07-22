@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { normalizePath, type DataAdapter, type Vault } from "obsidian";
 import type { CollectedItem } from "./collected-item";
 import { mergeCollectedItems } from "./collection-merge";
+import { normalizeXPostSourceMetadata } from "./source-metadata";
 
 interface ItemIndexEntry {
   earliestDate: string;
@@ -955,7 +956,21 @@ function isCollectedItem(value: unknown): value is CollectedItem {
     optionalString(value.excerpt) &&
     optionalString(value.contentPath) &&
     optionalString(value.savedNotePath) &&
-    validMetrics(value.metrics)
+    validMetrics(value.metrics) &&
+    validSourceMetadata(value.sourceMetadata, value.sourceType, value.contentBasis)
+  );
+}
+
+function validSourceMetadata(
+  value: unknown,
+  sourceType: unknown,
+  contentBasis: unknown,
+): boolean {
+  if (value === undefined) return true;
+  return (
+    (sourceType === "x-account" || sourceType === "x-topic") &&
+    contentBasis === "x-post" &&
+    normalizeXPostSourceMetadata(value) !== undefined
   );
 }
 

@@ -10,6 +10,7 @@ import { parseTikHubTimeline } from "./tikhub-parser";
 import type { TikHubResult } from "./tikhub-types";
 import { mapXAccountPostsToFeed } from "./x-feed-mapper";
 import type { XPost } from "./x-post";
+import { validateParsedXTimeline } from "./x-timeline-validator";
 
 export interface XAccountTikHubClient {
   fetchUserPosts(input: TikHubUserRequest): Promise<TikHubResult<unknown>>;
@@ -83,7 +84,7 @@ export class XAccountAdapter implements SourceAdapter<XAccountSourceConfig> {
           signal: context.signal,
         }),
       )).data;
-      parsed = this.parseTimeline(accountPayload);
+      parsed = validateParsedXTimeline(this.parseTimeline(accountPayload));
       posts = parsed.posts;
       warnings = [...parsed.warnings];
 
@@ -97,12 +98,15 @@ export class XAccountAdapter implements SourceAdapter<XAccountSourceConfig> {
           }),
         )).data;
         providerRequestCount += 1;
-        parsed = this.parseTimeline(replyPayload);
-        posts = mergePostsById(posts, parsed.posts);
+        parsed = validateParsedXTimeline(this.parseTimeline(replyPayload));
+        posts.push(...parsed.posts);
         warnings.push(...parsed.warnings);
       }
 
-      posts = posts.filter((post) => shouldIncludePost(config, post));
+      posts = mergePostsById(
+        posts.filter((post) => belongsToAccount(config, post)),
+        [],
+      ).filter((post) => passesAccountSwitches(config, post));
       const mapped = mapXAccountPostsToFeed(config, posts, context.now);
       return {
         feed: mapped.feed,
@@ -150,11 +154,17 @@ export class XAccountAdapter implements SourceAdapter<XAccountSourceConfig> {
   }
 }
 
-function shouldIncludePost(
+function belongsToAccount(
   config: XAccountSourceConfig,
   post: XPost,
 ): boolean {
-  if (post.authorHandle.toLowerCase() !== config.handle) return false;
+  return post.authorHandle.toLowerCase() === config.handle;
+}
+
+function passesAccountSwitches(
+  config: XAccountSourceConfig,
+  post: XPost,
+): boolean {
   if (post.inReplyToId && !config.includeReplies) return false;
   if (post.repostOfId && !config.includeReposts) return false;
   return true;

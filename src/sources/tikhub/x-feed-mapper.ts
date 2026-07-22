@@ -1,5 +1,10 @@
-import type { ContentBasis, SourceType } from "../../collection/collected-item";
+import type {
+  ContentBasis,
+  SourceType,
+  XPostSourceMetadata,
+} from "../../collection/collected-item";
 import type { Feed, FeedItem } from "../../types/types";
+import { createXPostCollectedItemId } from "../../collection/item-identity";
 import {
   sourceConfigUrl,
   type XAccountSourceConfig,
@@ -13,8 +18,7 @@ export interface XAccountFeedItem extends FeedItem {
   /** Exact provider-neutral post text; render as text, never as markup. */
   plainText: string;
   metrics: XPost["metrics"];
-  externalUrls: string[];
-  quoteOfId?: string;
+  sourceMetadata: XPostSourceMetadata;
 }
 
 export interface XAccountFeed extends Feed {
@@ -67,13 +71,14 @@ function mapPost(
   feedTitle: string,
   feedUrl: string,
 ): XAccountFeedItem {
-  const plainText = post.text;
+  const plainText = sanitizePlainText(post.text);
   const safeMarkup = escapeHtml(plainText);
   const canonicalUrl = `https://x.com/${config.handle}/status/${post.id}`;
   const title = truncateCodePoints(plainTextTitle(plainText), 120) ||
     `@${config.handle} · ${post.id}`;
 
   return {
+    rssDashboardId: createXPostCollectedItemId(post.id),
     title,
     link: canonicalUrl,
     description: safeMarkup,
@@ -90,16 +95,61 @@ function mapPost(
     sourceType: "x-account",
     sourceBucket: config.folder,
     metrics: normalizeMetrics(post.metrics),
-    externalUrls: [...post.externalUrls],
-    ...(post.quoteOfId ? { quoteOfId: post.quoteOfId } : {}),
+    sourceMetadata: {
+      kind: "x-post",
+      ...(post.conversationId ? { conversationId: post.conversationId } : {}),
+      ...(post.inReplyToId ? { inReplyToId: post.inReplyToId } : {}),
+      ...(post.repostOfId ? { repostOfId: post.repostOfId } : {}),
+      ...(post.quoteOfId ? { quoteOfId: post.quoteOfId } : {}),
+      externalUrls: [...post.externalUrls],
+    },
   };
 }
 
 function plainTextTitle(text: string): string {
   return text
-    .replace(/<[^>]*>/gu, "")
     .replace(/\s+/gu, " ")
     .trim();
+}
+
+function sanitizePlainText(text: string): string {
+  let result = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const first = text.charCodeAt(index);
+    let codePoint: number;
+    if (first >= 0xd800 && first <= 0xdbff) {
+      const second = text.charCodeAt(index + 1);
+      if (second < 0xdc00 || second > 0xdfff) {
+        result += "�";
+        continue;
+      }
+      codePoint = (first - 0xd800) * 0x400 + (second - 0xdc00) + 0x10000;
+      index += 1;
+    } else if (first >= 0xdc00 && first <= 0xdfff) {
+      result += "�";
+      continue;
+    } else {
+      codePoint = first;
+    }
+    if (!isFormatControl(codePoint)) result += String.fromCodePoint(codePoint);
+  }
+  return result;
+}
+
+function isFormatControl(codePoint: number): boolean {
+  return (
+    codePoint === 0x00ad ||
+    codePoint === 0x061c ||
+    codePoint === 0x180e ||
+    (codePoint >= 0x200b && codePoint <= 0x200f) ||
+    (codePoint >= 0x202a && codePoint <= 0x202e) ||
+    (codePoint >= 0x2060 && codePoint <= 0x206f) ||
+    codePoint === 0xfeff ||
+    (codePoint >= 0xfff9 && codePoint <= 0xfffb) ||
+    (codePoint >= 0x1d173 && codePoint <= 0x1d17a) ||
+    codePoint === 0xe0001 ||
+    (codePoint >= 0xe0020 && codePoint <= 0xe007f)
+  );
 }
 
 function escapeHtml(text: string): string {

@@ -19,6 +19,15 @@ export type ContentBasis =
 
 export type CollectionStatus = "collected" | "partial" | "parse-error";
 
+export interface XPostSourceMetadata {
+  kind: "x-post";
+  conversationId?: string;
+  inReplyToId?: string;
+  repostOfId?: string;
+  quoteOfId?: string;
+  externalUrls: string[];
+}
+
 export interface CollectedItem {
   schemaVersion: 1;
   id: string;
@@ -41,6 +50,7 @@ export interface CollectedItem {
   contentPath?: string;
   contentBasis: ContentBasis;
   metrics?: Record<string, number>;
+  sourceMetadata?: XPostSourceMetadata;
   read: boolean;
   starred: boolean;
   saved: boolean;

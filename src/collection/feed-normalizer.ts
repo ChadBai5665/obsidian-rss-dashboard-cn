@@ -1,9 +1,11 @@
 import { createHash } from "crypto";
 import type { Feed, FeedItem } from "../types/types";
 import type { CollectedItem, SourceType } from "./collected-item";
+import { normalizeXPostSourceMetadata } from "./source-metadata";
 import {
   bindFeedItemSourceIdentity,
   canonicalizeUrl,
+  createXPostCollectedItemId,
   resolveFeedItemStableId,
   resolveFeedSourceId,
 } from "./item-identity";
@@ -23,6 +25,7 @@ type FeedWithOptionalSourceType = Feed & { sourceType?: unknown };
 type FeedItemWithCollectionMetadata = FeedItem & {
   metrics?: unknown;
   plainText?: unknown;
+  sourceMetadata?: unknown;
 };
 
 export function normalizeFeedItem(
@@ -38,8 +41,14 @@ export function normalizeFeedItem(
   const publishedAt = nonEmpty(item.pubDate);
   const guid = nonEmpty(item.guid);
   const url = canonicalizeUrl(item.link);
+  const sourceMetadata = resolveSourceMetadata(item);
 
-  const id = resolveFeedItemStableId(item);
+  const id = sourceType === "x-account" || sourceType === "x-topic"
+    ? createXPostCollectedItemId(item.guid)
+    : resolveFeedItemStableId(item);
+  if (sourceType === "x-account" || sourceType === "x-topic") {
+    item.rssDashboardId = id;
+  }
 
   return {
     schemaVersion: 1,
@@ -61,6 +70,7 @@ export function normalizeFeedItem(
     excerpt: normalizeFeedItemExcerpt(item),
     contentBasis: resolveContentBasis(sourceType),
     metrics: normalizeFeedItemMetrics(item),
+    ...(sourceMetadata ? { sourceMetadata } : {}),
     read: item.read ?? false,
     starred: item.starred ?? false,
     saved: item.saved ?? false,
@@ -111,9 +121,18 @@ export function createFeedItemMaterialFingerprint(item: FeedItem): string {
               left.localeCompare(right),
             )
           : undefined,
+        sourceMetadata: resolveSourceMetadata(item),
       }),
     )
     .digest("hex");
+}
+
+function resolveSourceMetadata(item: FeedItem): CollectedItem["sourceMetadata"] {
+  const raw = (item as FeedItemWithCollectionMetadata).sourceMetadata;
+  if (raw === undefined) return undefined;
+  const normalized = normalizeXPostSourceMetadata(raw);
+  if (!normalized) throw new Error("Invalid X post source metadata.");
+  return normalized;
 }
 
 function resolveSourceType(feed: Feed, item: FeedItem): SourceType {

@@ -72,4 +72,39 @@ describe("mergeCollectedItems", () => {
 
     expect(merged.firstSeenAt).toBe("2026-07-20T10:00:00.000Z");
   });
+
+  it("preserves and merges additive X relationship metadata", () => {
+    const merged = mergeCollectedItems(
+      createItem({
+        sourceType: "x-account",
+        contentBasis: "x-post",
+        sourceMetadata: {
+          kind: "x-post",
+          conversationId: "10",
+          quoteOfId: "11",
+          externalUrls: ["https://example.com/old"],
+        },
+      }),
+      createItem({
+        sourceType: "x-account",
+        contentBasis: "x-post",
+        sourceMetadata: {
+          kind: "x-post",
+          inReplyToId: "12",
+          externalUrls: ["https://example.com/new"],
+        },
+      }),
+    );
+
+    expect(merged.sourceMetadata).toEqual({
+      kind: "x-post",
+      conversationId: "10",
+      inReplyToId: "12",
+      quoteOfId: "11",
+      externalUrls: [
+        "https://example.com/old",
+        "https://example.com/new",
+      ],
+    });
+  });
 });

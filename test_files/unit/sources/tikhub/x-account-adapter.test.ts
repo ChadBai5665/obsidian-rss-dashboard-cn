@@ -39,17 +39,26 @@ const account = (overrides: Partial<XAccountSourceConfig> = {}): XAccountSourceC
   ...overrides,
 });
 
-const post = (overrides: Partial<XPost> = {}): XPost => ({
-  id: "100",
-  authorHandle: "openai",
-  authorName: "OpenAI",
-  text: "Original post",
-  createdAt: "2026-07-22T07:00:00.000Z",
-  url: "https://x.com/openai/status/100",
-  externalUrls: [],
-  metrics: { likes: 1 },
-  ...overrides,
-});
+const post = (overrides: Partial<XPost> = {}): XPost => {
+  const value = {
+    id: "100",
+    authorHandle: "openai",
+    authorName: "OpenAI",
+    text: "Original post",
+    createdAt: "2026-07-22T07:00:00.000Z",
+    url: "https://x.com/openai/status/100",
+    externalUrls: [],
+    metrics: { likes: 1 },
+    ...overrides,
+  } as XPost;
+  if (!Object.prototype.hasOwnProperty.call(overrides, "url")) {
+    value.url = `https://x.com/${value.authorHandle}/status/${value.id}`;
+  }
+  for (const key of Object.keys(value) as Array<keyof XPost>) {
+    if (value[key] === undefined) delete value[key];
+  }
+  return value;
+};
 
 function payload(posts: XPost[]) {
   return { posts };
@@ -285,8 +294,107 @@ describe("XAccountAdapter requests and filtering", () => {
     expect(fetchUserPosts).toHaveBeenCalledOnce();
     expect(output.items.map((item) => item.guid)).toEqual(["100", "103"]);
     expect(output.items.find((item) => item.guid === "103")).toMatchObject({
-      quoteOfId: "91",
+      sourceMetadata: { quoteOfId: "91" },
     });
+  });
+
+  it("filters by the watched account before merging duplicate post IDs", async () => {
+    const test = harness({
+      accountPosts: [
+        post({ id: "999", authorHandle: "other", text: "Other account" }),
+        post({ id: "999", text: "Target account" }),
+      ],
+    });
+
+    const output = await test.adapter.refresh(account(), { now: NOW });
+
+    expect(output.items).toHaveLength(1);
+    expect(output.items[0]).toMatchObject({
+      guid: "999",
+      plainText: "Target account",
+    });
+  });
+
+  it("merges target-account duplicates before reply and repost filtering", async () => {
+    const test = harness({
+      accountPosts: [
+        post({ id: "701", text: "Reply relation", inReplyToId: "700" }),
+        post({ id: "701", text: "Incomplete duplicate", inReplyToId: undefined }),
+        post({ id: "801", text: "Repost relation", repostOfId: "800" }),
+        post({ id: "801", text: "Incomplete duplicate", repostOfId: undefined }),
+        post(),
+      ],
+    });
+
+    const output = await test.adapter.refresh(account(), { now: NOW });
+
+    expect(output.items.map((item) => item.guid)).toEqual(["100"]);
+  });
+
+  it("rejects inherited or sparse parser containers as typed failures", async () => {
+    const inherited = Object.create({
+      posts: [post()],
+      warnings: [],
+      candidateCount: 1,
+    }) as ReturnType<typeof import("../../../../src/sources/tikhub/tikhub-parser").parseTikHubTimeline>;
+    const sparsePosts: XPost[] = [];
+    sparsePosts.length = 1;
+    const outputs = [
+      inherited,
+      { posts: sparsePosts, warnings: [], candidateCount: 0 },
+    ];
+
+    for (const parsed of outputs) {
+      const adapter = new XAccountAdapter({
+        client: {
+          fetchUserPosts: vi.fn(async () => ({ data: {} })),
+          fetchUserReplies: vi.fn(async () => ({ data: {} })),
+        },
+        secretStore: { get: vi.fn(async () => API_KEY) },
+        connectionId: CONNECTION_ID,
+        parseTimeline: () => parsed,
+      });
+      await expect(adapter.refresh(account(), { now: NOW })).rejects.toMatchObject({
+        code: "invalid-x-timeline",
+      });
+    }
+  });
+
+  it("never executes XPost accessors or reads inherited post data", async () => {
+    let getterReads = 0;
+    const getterPost = { ...post({ id: "501" }) } as XPost;
+    Object.defineProperty(getterPost, "text", {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        return "Accessor text";
+      },
+    });
+    const inheritedPost = Object.create(
+      post({ id: "../../escape" }),
+    ) as XPost;
+    const adapter = new XAccountAdapter({
+      client: {
+        fetchUserPosts: vi.fn(async () => ({ data: {} })),
+        fetchUserReplies: vi.fn(async () => ({ data: {} })),
+      },
+      secretStore: { get: vi.fn(async () => API_KEY) },
+      connectionId: CONNECTION_ID,
+      parseTimeline: () => ({
+        posts: [getterPost, inheritedPost, post()],
+        warnings: [],
+        candidateCount: 3,
+      }),
+    });
+
+    const output = await adapter.refresh(account(), { now: NOW });
+
+    expect(getterReads).toBe(0);
+    expect(output.items.map((item) => item.guid)).toEqual(["100"]);
+    expect(output.warnings).toEqual([
+      "Skipped an invalid parsed X post.",
+      "Skipped an invalid parsed X post.",
+    ]);
   });
 });
 
@@ -299,7 +407,7 @@ describe("X account feed mapping", () => {
     const item = mapped.items[0];
 
     expect(Array.from(item.title)).toHaveLength(120);
-    expect(item.title).not.toContain("<img");
+    expect(item.title).toContain("<img");
     expect(item.description).toContain("&lt;img");
     expect(item.description).not.toContain("<img");
     const rendered = new DOMParser().parseFromString(item.description, "text/html");
@@ -315,6 +423,10 @@ describe("X account feed mapping", () => {
       sourceType: "x-account",
       sourceBucket: "X/关注账号",
       metrics: { likes: 3, views: 40 },
+      sourceMetadata: {
+        kind: "x-post",
+        externalUrls: [],
+      },
     });
     expect(mapped.feed).toMatchObject({
       feedId: "account-openai",
@@ -323,6 +435,48 @@ describe("X account feed mapping", () => {
       folder: "X/关注账号",
       url: "tikhub://x-account/openai",
     });
+  });
+
+  it("keeps legal angle brackets while neutralizing format controls and surrogates", () => {
+    const mapped = mapXAccountPostsToFeed(account(), [
+      post({
+        id: "201",
+        text: "Line one\n  2 < 3 and 5 > 4\t\u202Ebad\u200B \uD800 end",
+      }),
+    ], NOW);
+    const item = mapped.items[0];
+
+    expect(item.title).toBe("Line one 2 < 3 and 5 > 4 bad � end");
+    expect(item.title).not.toContain("\u202E");
+    expect(item.title).not.toContain("\u200B");
+    expect(item.plainText).toBe("Line one\n  2 < 3 and 5 > 4\tbad � end");
+    expect(item.description).toContain("2 &lt; 3 and 5 &gt; 4");
+  });
+
+  it("carries all X relationships and links into durable source metadata", () => {
+    const mapped = mapXAccountPostsToFeed(account(), [
+      post({
+        id: "202",
+        conversationId: "190",
+        inReplyToId: "191",
+        repostOfId: "192",
+        quoteOfId: "193",
+        externalUrls: ["https://example.com/report"],
+      }),
+    ], NOW);
+    const item = mapped.items[0];
+    const collected = normalizeFeedItem(mapped.feed, item, NOW);
+
+    expect(item.sourceMetadata).toEqual({
+      kind: "x-post",
+      conversationId: "190",
+      inReplyToId: "191",
+      repostOfId: "192",
+      quoteOfId: "193",
+      externalUrls: ["https://example.com/report"],
+    });
+    expect(collected.sourceMetadata).toEqual(item.sourceMetadata);
+    expect(collected.sourceMetadata).not.toBe(item.sourceMetadata);
   });
 
   it("sorts by created time descending and then by post ID descending", () => {
@@ -336,13 +490,25 @@ describe("X account feed mapping", () => {
     expect(mapped.items.map((item) => item.guid)).toEqual(["10", "9", "8", "7"]);
   });
 
-  it("keeps identity stable while metrics merge into the same collected record", () => {
-    const first = mapXAccountPostsToFeed(account(), [
+  it("keeps X identity stable across handle/source changes while metrics merge", () => {
+    const first = mapXAccountPostsToFeed(account({
+      id: "account-oldhandle",
+      handle: "oldhandle",
+    }), [
       post({ metrics: { likes: 1 } }),
     ], NOW);
-    const second = mapXAccountPostsToFeed(account(), [
-      post({ metrics: { likes: 7, replies: 2 } }),
+    const second = mapXAccountPostsToFeed(account({
+      id: "account-newhandle",
+      handle: "newhandle",
+    }), [
+      post({
+        authorHandle: "newhandle",
+        url: "https://x.com/newhandle/status/100",
+        metrics: { likes: 7, replies: 2 },
+      }),
     ], new Date("2026-07-22T09:00:00.000Z"));
+    expect(first.items[0].rssDashboardId).toMatch(/^[a-f0-9]{64}$/u);
+    expect(first.items[0].rssDashboardId).toBe(second.items[0].rssDashboardId);
     const firstCollected = normalizeFeedItem(first.feed, first.items[0], NOW);
     const secondCollected = normalizeFeedItem(
       second.feed,

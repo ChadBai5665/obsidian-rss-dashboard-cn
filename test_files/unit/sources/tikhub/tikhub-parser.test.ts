@@ -208,4 +208,39 @@ describe("parseTikHubTimeline", () => {
     expect(() => parseTikHubTimeline(payload)).not.toThrow();
     expect(descriptorReads).toBeLessThanOrEqual(20);
   });
+
+  it("preserves duplicate IDs so account semantics can filter before merging", () => {
+    const tweet = (screenName: string, text: string) => ({
+      content: {
+        itemContent: {
+          tweet_results: {
+            result: {
+              rest_id: "999",
+              core: {
+                user_results: {
+                  result: { legacy: { screen_name: screenName } },
+                },
+              },
+              legacy: { full_text: text },
+            },
+          },
+        },
+      },
+    });
+    const payload = {
+      data: {
+        instructions: [{
+          entries: [
+            tweet("other_account", "Other account duplicate"),
+            tweet("fixture_ai", "Target account duplicate"),
+          ],
+        }],
+      },
+    };
+
+    expect(parseTikHubTimeline(payload).posts).toMatchObject([
+      { id: "999", authorHandle: "other_account" },
+      { id: "999", authorHandle: "fixture_ai" },
+    ]);
+  });
 });
