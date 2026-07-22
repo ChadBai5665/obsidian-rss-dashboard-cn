@@ -1,9 +1,23 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename as fsRename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { captureTikHubFixtures } from "../../../scripts/capture-tikhub-fixtures.mjs";
+import {
+  captureTikHubFixtures,
+  cleanupInactiveTikHubFixtureSets,
+  readActiveTikHubFixtureSet,
+  writeTikHubFixtureSet,
+} from "../../../scripts/capture-tikhub-fixtures.mjs";
 import { sanitizeTikHubFixture } from "../../../scripts/sanitize-tikhub-fixture.mjs";
 
 const temporaryDirectories: string[] = [];
@@ -32,9 +46,19 @@ describe("sanitizeTikHubFixture", () => {
       support: { ticket: "private keywords" },
       support_url: "https://support.invalid/private_handle",
       api_key: "api-secret",
+      ApiKey: "api-secret-camel",
+      access_token: "access-secret",
+      bearerCredential: "bearer-secret",
+      auth: "auth-secret",
+      password: "password-secret",
+      ClientSecret: "client-secret",
+      PRIVATE_HANDLE: "personal value",
+      "private+keywords": "personal key",
       data: {
         screen_name: "private_handle",
         query: "private keywords",
+        query_url:
+          "https://example.invalid/?q=private+keywords&encoded=private%20keywords&handle=PRIVATE_HANDLE",
         created_at: "Tue Jul 21 12:34:56 +0000 2026",
         instructions: [
           {
@@ -57,7 +81,7 @@ describe("sanitizeTikHubFixture", () => {
     const serialized = JSON.stringify(sanitized);
 
     expect(serialized).not.toMatch(
-      /request-secret|cache\.invalid|support|api-secret|cursor-secret|private_handle|private keywords/i,
+      /request-secret|cache\.invalid|support|api-secret|access-secret|bearer-secret|auth-secret|password-secret|client-secret|cursor-secret|private_handle|private(?:\+|%20| )keywords/i,
     );
     expect(sanitized).toMatchObject({
       data: {
@@ -68,6 +92,35 @@ describe("sanitizeTikHubFixture", () => {
     });
     expect(serialized).toContain("tweet-safe");
     expect(serialized).not.toContain("cursor-bottom-secret");
+  });
+
+  it("fails closed on accessors, custom prototypes, cycles, and oversized arrays", () => {
+    const accessor = {};
+    Object.defineProperty(accessor, "value", {
+      enumerable: true,
+      get() {
+        throw new Error("private accessor value");
+      },
+    });
+    const customPrototype = Object.create({ inherited: "private prototype value" });
+    customPrototype.safe = true;
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    const oversized: unknown[] = [];
+    oversized.length = 100_001;
+
+    expect(() => sanitizeTikHubFixture(accessor)).toThrow(
+      "TikHub fixture contains an unsafe object shape.",
+    );
+    expect(() => sanitizeTikHubFixture(customPrototype)).toThrow(
+      "TikHub fixture contains an unsafe object shape.",
+    );
+    expect(() => sanitizeTikHubFixture(cycle)).toThrow(
+      "TikHub fixture exceeds safe traversal limits.",
+    );
+    expect(() => sanitizeTikHubFixture(oversized)).toThrow(
+      "TikHub fixture exceeds safe traversal limits.",
+    );
   });
 });
 
@@ -113,10 +166,8 @@ describe("captureTikHubFixtures", () => {
         url: String(input),
         authorization: new Headers(init?.headers).get("Authorization") ?? undefined,
       });
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
+      return new Response(
+        JSON.stringify({
           code: 200,
           request_id: "provider-request-id",
           data: {
@@ -126,13 +177,15 @@ describe("captureTikHubFixtures", () => {
             instructions: [],
           },
         }),
-      };
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
     });
 
     const result = await captureTikHubFixtures({
       apiKey: "api-secret",
       handle: "private_handle",
       query: "private keywords",
+      cwd: root,
       destinationDir,
       fetchImpl,
       isDestinationDirty: async () => false,
@@ -154,17 +207,14 @@ describe("captureTikHubFixtures", () => {
     expect(calls.every(({ authorization }) => authorization === "Bearer api-secret")).toBe(
       true,
     );
-    expect(await readdir(destinationDir)).toEqual([
+    expect(await readdir(destinationDir)).toEqual(["captures", "current.json"]);
+    const active = await readActiveTikHubFixtureSet(destinationDir);
+    expect(active?.files).toEqual([
       "account-posts.json",
       "search-latest.json",
       "search-top.json",
     ]);
-
-    const written = await Promise.all(
-      ["account-posts.json", "search-latest.json", "search-top.json"].map(
-        async (name) => await readFile(join(destinationDir, name), "utf8"),
-      ),
-    );
+    const written = active?.fixtures.map((fixture: unknown) => JSON.stringify(fixture)) ?? [];
     const observableOutput = `${logs.join("\n")}\n${written.join("\n")}`;
     expect(observableOutput).not.toMatch(
       /api-secret|private_handle|private keywords|provider-request-id|Bearer|cache_url/,
@@ -177,6 +227,37 @@ describe("captureTikHubFixtures", () => {
     ]);
   });
 
+  it("never invokes transport-supplied response accessors", async () => {
+    const root = await temporaryDirectory();
+    let getterCalls = 0;
+    const response = {};
+    for (const key of ["ok", "status", "json"]) {
+      Object.defineProperty(response, key, {
+        get() {
+          getterCalls += 1;
+          throw new Error("api-secret private_handle private keywords");
+        },
+      });
+    }
+
+    const error = await captureTikHubFixtures({
+      apiKey: "api-secret",
+      handle: "private_handle",
+      query: "private keywords",
+      cwd: root,
+      destinationDir: join(root, "fixtures", "tikhub"),
+      fetchImpl: async () => response,
+      isDestinationDirty: async () => false,
+      log: () => undefined,
+    }).catch((caught: unknown) => caught);
+
+    expect(getterCalls).toBe(0);
+    expect(String(error)).toBe(
+      "Error: TikHub fixture request 1 failed with status unknown.",
+    );
+    expect(String(error)).not.toMatch(/api-secret|private_handle|private keywords/);
+  });
+
   it("aborts before any request when the destination is dirty", async () => {
     const root = await temporaryDirectory();
     const fetchImpl = vi.fn();
@@ -186,6 +267,7 @@ describe("captureTikHubFixtures", () => {
         apiKey: "api-secret",
         handle: "private_handle",
         query: "private keywords",
+        cwd: root,
         destinationDir: join(root, "fixtures", "tikhub"),
         fetchImpl,
         isDestinationDirty: async () => true,
@@ -230,6 +312,55 @@ describe("captureTikHubFixtures", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("rejects a symlinked destination segment before checking git or sending a request", async () => {
+    const root = await temporaryDirectory();
+    const outside = join(root, "outside");
+    const linked = join(root, "linked");
+    await mkdir(outside);
+    await symlink(outside, linked, "dir");
+    const fetchImpl = vi.fn();
+    const isDestinationDirty = vi.fn(async () => false);
+
+    await expect(
+      captureTikHubFixtures({
+        apiKey: "api-secret",
+        handle: "fixture_ai",
+        query: "fixture topic",
+        cwd: root,
+        destinationDir: join(linked, "tikhub"),
+        fetchImpl,
+        isDestinationDirty,
+        log: () => undefined,
+      }),
+    ).rejects.toThrow("TikHub fixture destination path is unsafe.");
+    expect(isDestinationDirty).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("rejects a symlinked repository root before sending a request", async () => {
+    const root = await temporaryDirectory();
+    const realRoot = join(root, "real-repository");
+    const linkedRoot = join(root, "linked-repository");
+    await mkdir(realRoot);
+    await symlink(realRoot, linkedRoot, "dir");
+    const fetchImpl = vi.fn();
+    const isDestinationDirty = vi.fn(async () => false);
+
+    await expect(
+      captureTikHubFixtures({
+        apiKey: "api-secret",
+        handle: "fixture_ai",
+        query: "fixture topic",
+        cwd: linkedRoot,
+        destinationDir: join(linkedRoot, "fixtures", "tikhub"),
+        fetchImpl,
+        isDestinationDirty,
+        log: () => undefined,
+      }),
+    ).rejects.toThrow("TikHub fixture repository path is unsafe.");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("leaves no partial files and emits no input or key when a request fails", async () => {
     const root = await temporaryDirectory();
     const destinationDir = join(root, "fixtures", "tikhub");
@@ -244,6 +375,7 @@ describe("captureTikHubFixtures", () => {
       apiKey: "api-secret",
       handle: "private_handle",
       query: "private keywords",
+      cwd: root,
       destinationDir,
       fetchImpl,
       isDestinationDirty: async () => false,
@@ -253,5 +385,83 @@ describe("captureTikHubFixtures", () => {
     expect(String(error)).toBe("Error: TikHub fixture request 3 failed with status 500.");
     expect(String(error)).not.toMatch(/api-secret|private_handle|private keywords|https?:/);
     await expect(readdir(destinationDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("TikHub fixture copy-on-write activation", () => {
+  it("refuses a non-canonical credential-bearing set before creating files", async () => {
+    const root = await temporaryDirectory();
+    const destinationDir = join(root, "live");
+
+    await expect(
+      writeTikHubFixtureSet(destinationDir, [
+        { bearerCredential: "private token" },
+        {},
+        {},
+      ]),
+    ).rejects.toThrow("TikHub fixture sanitization verification failed.");
+    await expect(readdir(destinationDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("preserves the old active set when manifest activation and cleanup both fail", async () => {
+    const root = await temporaryDirectory();
+    const destinationDir = join(root, "live");
+    const oldCaptureDir = join(destinationDir, "captures", "old-capture");
+    const fixtureNames = [
+      "account-posts.json",
+      "search-latest.json",
+      "search-top.json",
+    ];
+    await mkdir(oldCaptureDir, { recursive: true });
+    for (const name of fixtureNames) {
+      await writeFile(join(oldCaptureDir, name), '{"version":"old"}\n', "utf8");
+    }
+    await writeFile(
+      join(destinationDir, "current.json"),
+      `${JSON.stringify({ version: 1, captureId: "old-capture", files: fixtureNames })}\n`,
+      "utf8",
+    );
+
+    let cleanupFailureInjected = false;
+    const fsOps = {
+      rename: async (from: string, to: string) => {
+        if (to === join(destinationDir, "current.json")) {
+          throw new Error("injected manifest rename failure");
+        }
+        await fsRename(from, to);
+      },
+      rm: async (path: string, options: { recursive?: boolean; force?: boolean }) => {
+        if (
+          !cleanupFailureInjected &&
+          path === join(destinationDir, "captures", "new-capture")
+        ) {
+          cleanupFailureInjected = true;
+          throw new Error("injected cleanup failure");
+        }
+        await rm(path, options);
+      },
+    };
+
+    await expect(
+      writeTikHubFixtureSet(
+        destinationDir,
+        fixtureNames.map(() => ({ version: "new" })),
+        { captureId: "new-capture", fsOps },
+      ),
+    ).rejects.toThrow("TikHub fixture activation failed.");
+
+    const active = await readActiveTikHubFixtureSet(destinationDir);
+    expect(active?.fixtures).toEqual(fixtureNames.map(() => ({ version: "old" })));
+    expect(await readdir(join(destinationDir, "captures", "new-capture"))).toEqual(
+      fixtureNames,
+    );
+    for (const name of fixtureNames) {
+      await expect(readFile(join(destinationDir, name), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+
+    await cleanupInactiveTikHubFixtureSets(destinationDir);
+    expect(await readdir(join(destinationDir, "captures"))).toEqual(["old-capture"]);
   });
 });

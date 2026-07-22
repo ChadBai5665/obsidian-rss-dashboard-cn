@@ -1,30 +1,34 @@
-const REMOVED_KEYS = new Set([
-  "apikey",
-  "accesstoken",
-  "authorization",
-  "bearertoken",
-  "cacheurl",
-  "cursor",
-  "requestid",
-  "support",
-  "supportmetadata",
-]);
-
 const ISO_FIXTURE_TIME = "2024-01-01T00:00:00.000Z";
 const TWITTER_FIXTURE_TIME = "Mon Jan 01 00:00:00 +0000 2024";
+const MAX_DEPTH = 64;
+const MAX_NODES = 100_000;
+const MAX_ARRAY_ENTRIES = 100_000;
+const MAX_OBJECT_PROPERTIES = 20_000;
+const SENSITIVE_TOKENS = new Set([
+  "auth",
+  "authentication",
+  "authorization",
+  "bearer",
+  "credential",
+  "credentials",
+  "passwd",
+  "password",
+  "pwd",
+  "secret",
+  "token",
+]);
 
 /**
- * Clone a TikHub response while removing provider metadata and personal capture inputs.
- * The input is never mutated and accessor properties are never invoked.
+ * Clone a JSON-shaped TikHub response while removing provider metadata,
+ * credentials, and personal capture inputs. Unsafe shapes fail closed.
  */
 export function sanitizeTikHubFixture(value, aliases = {}) {
-  const replacements = [
-    [aliases.handle, "fixture_account"],
-    [aliases.query, "fixture_topic"],
-  ].filter(([input]) => typeof input === "string" && input.length > 0);
+  const replacements = buildReplacements(aliases);
   const seen = new WeakSet();
+  const state = { nodes: 0 };
 
-  function sanitize(current, key = "") {
+  function sanitize(current, key = "", depth = 0) {
+    if (depth > MAX_DEPTH) traversalLimit();
     if (typeof current === "string") {
       if (isVolatileTimestampKey(key)) return fixtureTimestamp(key);
       return replaceAliases(current, replacements);
@@ -37,53 +41,140 @@ export function sanitizeTikHubFixture(value, aliases = {}) {
       return current;
     }
     if (typeof current !== "object") return undefined;
-    if (seen.has(current)) throw new Error("TikHub fixture contains a cycle.");
+
+    state.nodes += 1;
+    if (state.nodes > MAX_NODES || seen.has(current)) traversalLimit();
     seen.add(current);
 
     if (Array.isArray(current)) {
+      requirePrototype(current, Array.prototype);
+      if (current.length > MAX_ARRAY_ENTRIES) traversalLimit();
       const sanitized = [];
       for (let index = 0; index < current.length; index += 1) {
-        const descriptor = Object.getOwnPropertyDescriptor(current, String(index));
-        if (!descriptor || !("value" in descriptor)) continue;
+        const descriptor = safeDescriptor(current, String(index));
+        if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+          unsafeShape();
+        }
         if (isCursorObject(descriptor.value)) continue;
-        const item = sanitize(descriptor.value);
+        const item = sanitize(descriptor.value, "", depth + 1);
         if (item !== undefined) sanitized.push(item);
       }
-      seen.delete(current);
       return sanitized;
     }
 
+    requirePrototype(current, Object.prototype, null);
+    const properties = safeOwnPropertyNames(current);
+    if (properties.length > MAX_OBJECT_PROPERTIES) traversalLimit();
     const sanitized = Object.create(null);
-    for (const property of Object.getOwnPropertyNames(current)) {
-      if (isRemovedKey(property) || isUnsafeProperty(property)) continue;
-      const descriptor = Object.getOwnPropertyDescriptor(current, property);
-      if (!descriptor || !("value" in descriptor)) continue;
-      const child = sanitize(descriptor.value, property);
-      if (child !== undefined) sanitized[property] = child;
+    for (const property of properties) {
+      const descriptor = safeDescriptor(current, property);
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+        unsafeShape();
+      }
+      const sanitizedProperty = replaceAliases(property, replacements);
+      if (
+        isUnsafeProperty(sanitizedProperty) ||
+        isProviderMetadataKey(sanitizedProperty) ||
+        isSensitiveCredentialKey(sanitizedProperty)
+      ) {
+        continue;
+      }
+      if (Object.prototype.hasOwnProperty.call(sanitized, sanitizedProperty)) {
+        unsafeShape();
+      }
+      const child = sanitize(descriptor.value, sanitizedProperty, depth + 1);
+      if (child !== undefined) sanitized[sanitizedProperty] = child;
     }
-    seen.delete(current);
     return sanitized;
   }
 
   return sanitize(value);
 }
 
-function isRemovedKey(key) {
-  const normalized = key.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+/** Ensures the write candidate is already canonical and contains no private input. */
+export function assertTikHubFixtureSanitized(value, aliases = {}) {
+  const replacements = buildReplacements(aliases);
+  const canonical = sanitizeTikHubFixture(value, aliases);
+  const serialized = safeSerialize(value);
+  const canonicalSerialized = safeSerialize(canonical);
+  const privatePatterns = replacements.map(({ pattern }) => pattern);
+  const apiKey = typeof aliases.apiKey === "string" ? aliases.apiKey : "";
+
+  if (
+    serialized !== canonicalSerialized ||
+    privatePatterns.some((pattern) => pattern.test(serialized)) ||
+    (apiKey.length > 0 && serialized.includes(apiKey)) ||
+    /\bBearer\b/i.test(serialized) ||
+    /TIKHUB_API_KEY/i.test(serialized)
+  ) {
+    throw new Error("TikHub fixture sanitization verification failed.");
+  }
+}
+
+export function isSensitiveCredentialKey(key) {
+  const tokens = keyTokens(key);
+  const compact = tokens.join("");
   return (
-    REMOVED_KEYS.has(normalized) ||
-    normalized.includes("cursor") ||
-    normalized.endsWith("requestid") ||
-    normalized.endsWith("cacheurl") ||
-    normalized.startsWith("support") ||
-    normalized.endsWith("apikey") ||
-    normalized.endsWith("accesstoken") ||
-    normalized.endsWith("bearertoken")
+    tokens.some((token) => SENSITIVE_TOKENS.has(token)) ||
+    compact.includes("apikey") ||
+    compact.includes("accesskey") ||
+    compact.includes("privatekey") ||
+    compact.includes("secretkey")
   );
 }
 
-function isUnsafeProperty(key) {
-  return key === "__proto__" || key === "constructor" || key === "prototype";
+function isProviderMetadataKey(key) {
+  const tokens = keyTokens(key);
+  const compact = tokens.join("");
+  return (
+    tokens.includes("cursor") ||
+    tokens.includes("support") ||
+    compact.endsWith("requestid") ||
+    compact.endsWith("cacheurl")
+  );
+}
+
+function keyTokens(key) {
+  return key
+    .normalize("NFKC")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+function buildReplacements(aliases) {
+  const replacements = [];
+  for (const [input, alias] of [
+    [aliases.handle, "fixture_account"],
+    [aliases.query, "fixture_topic"],
+  ]) {
+    if (typeof input !== "string" || input.length === 0) continue;
+    const plusEncoded = new URLSearchParams({ value: input })
+      .toString()
+      .slice("value=".length);
+    const variants = new Set([input, encodeURIComponent(input), plusEncoded]);
+    for (const variant of [...variants].sort((left, right) => right.length - left.length)) {
+      replacements.push({
+        pattern: new RegExp(escapeRegExp(variant), "gi"),
+        replacement: variant === input ? alias : encodeURIComponent(alias),
+      });
+    }
+  }
+  return replacements;
+}
+
+function replaceAliases(value, replacements) {
+  let result = value;
+  for (const { pattern, replacement } of replacements) {
+    pattern.lastIndex = 0;
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isVolatileTimestampKey(key) {
@@ -91,6 +182,7 @@ function isVolatileTimestampKey(key) {
   return (
     normalized === "createdat" ||
     normalized === "updatedat" ||
+    normalized === "generatedat" ||
     normalized === "timestamp" ||
     normalized === "requesttime" ||
     normalized === "responsetime"
@@ -103,29 +195,18 @@ function fixtureTimestamp(key) {
     : ISO_FIXTURE_TIME;
 }
 
-function replaceAliases(value, replacements) {
-  let result = value;
-  for (const [input, alias] of replacements) {
-    result = result.replace(new RegExp(escapeRegExp(input), "gi"), alias);
-    result = result.replace(
-      new RegExp(escapeRegExp(encodeURIComponent(input)), "gi"),
-      encodeURIComponent(alias),
-    );
-  }
-  return result;
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function isUnsafeProperty(key) {
+  return key === "__proto__" || key === "constructor" || key === "prototype";
 }
 
 function isCursorObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const entryId = ownString(value, "entryId");
-  const type = ownString(value, "type");
-  const content = ownObject(value, "content");
-  const entryType = ownString(content, "entryType");
-  const cursorType = ownString(content, "cursorType");
+  requirePrototype(value, Object.prototype, null);
+  const entryId = safeOwnString(value, "entryId");
+  const type = safeOwnString(value, "type");
+  const content = safeOwnObject(value, "content");
+  const entryType = safeOwnString(content, "entryType");
+  const cursorType = safeOwnString(content, "cursorType");
   return (
     entryId?.toLowerCase().startsWith("cursor-") === true ||
     type?.toLowerCase().includes("cursor") === true ||
@@ -134,22 +215,66 @@ function isCursorObject(value) {
   );
 }
 
-function ownObject(value, key) {
-  const property = ownValue(value, key);
+function safeOwnObject(value, key) {
+  const property = safeOwnValue(value, key);
   return property && typeof property === "object" && !Array.isArray(property)
     ? property
     : undefined;
 }
 
-function ownString(value, key) {
-  const property = ownValue(value, key);
+function safeOwnString(value, key) {
+  const property = safeOwnValue(value, key);
   return typeof property === "string" ? property : undefined;
 }
 
-function ownValue(value, key) {
+function safeOwnValue(value, key) {
   if (!value || (typeof value !== "object" && typeof value !== "function")) {
     return undefined;
   }
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  const descriptor = safeDescriptor(value, key);
+  if (!descriptor) return undefined;
+  if (!("value" in descriptor)) unsafeShape();
+  return descriptor.value;
+}
+
+function safeDescriptor(value, key) {
+  try {
+    return Object.getOwnPropertyDescriptor(value, key);
+  } catch {
+    unsafeShape();
+  }
+}
+
+function safeOwnPropertyNames(value) {
+  try {
+    return Object.getOwnPropertyNames(value);
+  } catch {
+    unsafeShape();
+  }
+}
+
+function requirePrototype(value, ...allowed) {
+  let prototype;
+  try {
+    prototype = Object.getPrototypeOf(value);
+  } catch {
+    unsafeShape();
+  }
+  if (!allowed.includes(prototype)) unsafeShape();
+}
+
+function safeSerialize(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    throw new Error("TikHub fixture sanitization verification failed.");
+  }
+}
+
+function unsafeShape() {
+  throw new Error("TikHub fixture contains an unsafe object shape.");
+}
+
+function traversalLimit() {
+  throw new Error("TikHub fixture exceeds safe traversal limits.");
 }

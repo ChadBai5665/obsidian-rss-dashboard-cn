@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import accountFixture from "../../../fixtures/tikhub/account-posts.json";
-import latestFixture from "../../../fixtures/tikhub/search-latest.json";
-import topFixture from "../../../fixtures/tikhub/search-top.json";
+import accountFixture from "../../../fixtures/tikhub/synthetic/account-edge-cases.json";
+import latestFixture from "../../../fixtures/tikhub/synthetic/search-latest-edge.json";
+import topFixture from "../../../fixtures/tikhub/synthetic/search-top-edge.json";
 import { parseTikHubTimeline } from "../../../../src/sources/tikhub/tikhub-parser";
 
 describe("parseTikHubTimeline", () => {
@@ -125,5 +125,85 @@ describe("parseTikHubTimeline", () => {
       posts: [],
       warnings: ["Skipped a malformed X post."],
     });
+  });
+
+  it("preserves multiline post text while rejecting other control characters", () => {
+    const payload = {
+      data: {
+        instructions: [
+          {
+            entries: [
+              {
+                entryId: "tweet-multiline",
+                content: {
+                  itemContent: {
+                    tweet_results: {
+                      result: {
+                        rest_id: "400",
+                        core: {
+                          user_results: {
+                            result: { legacy: { screen_name: "fixture_ai" } },
+                          },
+                        },
+                        legacy: {
+                          full_text: "Line one\nLine two\tvalue\r\nEnd",
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                entryId: "tweet-disallowed-control",
+                content: {
+                  itemContent: {
+                    tweet_results: {
+                      result: {
+                        rest_id: "401",
+                        core: {
+                          user_results: {
+                            result: { legacy: { screen_name: "fixture_ai" } },
+                          },
+                        },
+                        legacy: { full_text: "Unsafe\u0001text" },
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    expect(parseTikHubTimeline(payload)).toEqual({
+      posts: [
+        expect.objectContaining({
+          id: "400",
+          text: "Line one\nLine two\tvalue\r\nEnd",
+        }),
+      ],
+      warnings: ["Skipped a malformed X post."],
+    });
+  });
+
+  it("does not scan millions of holes in an oversized sparse entry array", () => {
+    const target: unknown[] = [];
+    target.length = 5_000_000;
+    let descriptorReads = 0;
+    const entries = new Proxy(target, {
+      getOwnPropertyDescriptor(array, property) {
+        if (typeof property === "string" && /^\d+$/.test(property)) {
+          descriptorReads += 1;
+          if (descriptorReads > 20) throw new Error("scanned sparse holes");
+        }
+        return Reflect.getOwnPropertyDescriptor(array, property);
+      },
+    });
+    const payload = { data: { instructions: [{ entries }] } };
+
+    expect(() => parseTikHubTimeline(payload)).not.toThrow();
+    expect(descriptorReads).toBeLessThanOrEqual(20);
   });
 });

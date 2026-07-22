@@ -7,6 +7,8 @@ export interface TikHubTimelineParseResult {
 
 const MAX_WALK_DEPTH = 32;
 const MAX_WALK_NODES = 25_000;
+const MAX_ARRAY_ENTRIES = 100_000;
+const MAX_OBJECT_PROPERTIES = 10_000;
 const X_HANDLE = /^[A-Za-z0-9_]{1,15}$/;
 
 /** Converts untrusted TikHub GraphQL timeline data into provider-neutral records. */
@@ -186,7 +188,9 @@ function walkOwnData(
 
     const record = value as Record<string, unknown>;
     if (!visit(record)) continue;
-    for (const property of Object.getOwnPropertyNames(record)) {
+    const properties = ownEnumerableKeys(record);
+    if (properties.length > MAX_OBJECT_PROPERTIES) continue;
+    for (const property of properties) {
       const child = ownValue(record, property);
       if (child !== undefined) {
         stack.push({ value: child, depth: current.depth + 1 });
@@ -313,13 +317,26 @@ function ownArray(value: unknown): unknown[] | undefined {
 }
 
 function ownArrayValues(value: unknown[]): unknown[] {
+  if (value.length > MAX_ARRAY_ENTRIES) return [];
   const values: unknown[] = [];
-  for (let index = 0; index < value.length; index += 1) {
-    if (!Object.prototype.hasOwnProperty.call(value, index)) continue;
-    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+  const keys = ownEnumerableKeys(value);
+  if (keys.length > MAX_ARRAY_ENTRIES) return [];
+  for (const key of keys) {
+    if (!/^(?:0|[1-9]\d*)$/.test(key)) continue;
+    const index = Number(key);
+    if (!Number.isSafeInteger(index) || index < 0 || index >= value.length) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (descriptor && "value" in descriptor) values.push(descriptor.value);
   }
   return values;
+}
+
+function ownEnumerableKeys(value: object): string[] {
+  try {
+    return Object.keys(value);
+  } catch {
+    return [];
+  }
 }
 
 function requiredString(value: unknown): string | undefined {
@@ -333,6 +350,7 @@ function requiredString(value: unknown): string | undefined {
 function hasControlCharacter(value: string): boolean {
   for (const character of value) {
     const code = character.codePointAt(0) ?? 0;
+    if (code === 9 || code === 10 || code === 13) continue;
     if (code <= 31 || code === 127) return true;
   }
   return false;
