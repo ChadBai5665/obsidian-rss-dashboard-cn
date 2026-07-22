@@ -142,6 +142,58 @@ describe("AiContentSelector", () => {
   });
 
   it.each([
+    ["inline emphasis", "can<strong>not</strong>", "cannot"],
+    ["inline punctuation", "This is <em>important</em>.", "This is important."],
+    ["inline Chinese", "知<strong>识</strong>库", "知识库"],
+    ["inline comment", "前<!--隐藏注释-->后", "前后"],
+    ["block paragraphs", "<p>第一段</p><p>第二段</p>", "第一段 第二段"],
+  ])("preserves readable %s spacing", async (_case, excerpt, expected) => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+
+    const result = await selector.select({
+      item: item({ excerpt }),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+
+    expect(result.content).toBe(expected);
+  });
+
+  it("bounds entity candidate inspection independently of the next semicolon", async () => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+    const hostile = `${"&".repeat(1_000_000)};`;
+    const originalIndexOf = String.prototype.indexOf;
+    let semicolonSearches = 0;
+    const indexOfSpy = vi.spyOn(String.prototype, "indexOf").mockImplementation(
+      function (this: string, searchString: string, position?: number): number {
+        if (searchString === ";") {
+          semicolonSearches += 1;
+          if (semicolonSearches > 20) {
+            throw new Error("Entity scan exceeded its fixed candidate window");
+          }
+        }
+        return Reflect.apply(originalIndexOf, this, [searchString, position]);
+      },
+    );
+
+    try {
+      const result = await selector.select({
+        item: item({ excerpt: hostile }),
+        maxInputCharacters: 200,
+        fetchFullText: false,
+      });
+
+      expect(result.content.startsWith("&")).toBe(true);
+      expect(result.content.endsWith("&;")).toBe(true);
+      expect(result.characterCount).toBe(200);
+      expect(result.truncated).toBe(true);
+      expect(semicolonSearches).toBe(0);
+    } finally {
+      indexOfSpy.mockRestore();
+    }
+  });
+
+  it.each([
     "<script/>SECRET",
     "<style/>HIDDEN",
   ])("does not treat a raw-text opening slash as self-closing: %s", async (excerpt) => {
@@ -170,7 +222,7 @@ describe("AiContentSelector", () => {
         fetchFullText: false,
       });
 
-      expect(result.content).toBe("可见 安全尾部");
+      expect(result.content).toBe("可见安全尾部");
       expect(result.content).not.toContain("SECRET");
       expect(result.content).not.toContain("LEAK");
     },
@@ -186,7 +238,7 @@ describe("AiContentSelector", () => {
         fetchFullText: false,
       });
 
-      expect(result.content).toBe("可见 应保留");
+      expect(result.content).toBe("可见应保留");
     },
   );
 
@@ -198,7 +250,7 @@ describe("AiContentSelector", () => {
       maxInputCharacters: 1_000,
       fetchFullText: false,
     });
-    expect(mixedCase.content).toBe("可见 安全");
+    expect(mixedCase.content).toBe("可见安全");
 
     const incomplete = await selector.select({
       item: item({ excerpt: "可见<script>SECRET</script" }),
@@ -218,7 +270,7 @@ describe("AiContentSelector", () => {
       fetchFullText: false,
     });
 
-    expect(result.content).toBe("可见 安全尾部");
+    expect(result.content).toBe("可见安全尾部");
   });
 
   it("labels X text as x-post and never fetches the X page", async () => {
@@ -462,8 +514,8 @@ describe("AiContentSelector", () => {
     });
 
     expect(result).toMatchObject({
-      content: "前文 尾文",
-      characterCount: 5,
+      content: "前文尾文",
+      characterCount: 4,
       truncated: false,
     });
     expect(result.content).not.toContain(AI_CONTENT_OMISSION_MARKER);

@@ -14,6 +14,7 @@ import {
 } from "./content-size";
 
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/u;
+const BASIC_HTML_ENTITY_TOKEN = /^(?:#x[0-9a-f]{1,6}|#[0-9]{1,7}|amp|lt|gt|quot|apos|nbsp)$/iu;
 const MAX_TITLE_CHARACTERS = 20_000;
 const MAX_SOURCE_NAME_CHARACTERS = 20_000;
 const MAX_SOURCE_URL_CHARACTERS = 8_192;
@@ -25,6 +26,41 @@ const FETCHABLE_SOURCE_TYPES = new Set<SourceType>([
   "website",
 ]);
 const X_SOURCE_TYPES = new Set<SourceType>(["x-account", "x-topic"]);
+const BLOCK_SPACING_TAGS = new Set([
+  "address",
+  "article",
+  "aside",
+  "blockquote",
+  "dd",
+  "div",
+  "dl",
+  "dt",
+  "figcaption",
+  "figure",
+  "footer",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "li",
+  "main",
+  "nav",
+  "ol",
+  "p",
+  "pre",
+  "section",
+  "table",
+  "tbody",
+  "td",
+  "tfoot",
+  "th",
+  "thead",
+  "tr",
+  "ul",
+]);
 const SOURCE_TYPES = new Set<SourceType>([
   ...FETCHABLE_SOURCE_TYPES,
   "youtube",
@@ -275,7 +311,6 @@ function scanVisibleHtml(input: string): VisibleHtmlScan {
         tag.rawTextNameBoundaryValid
       ) {
         blockedTag = undefined;
-        collector.separate();
       }
       index = tag?.end ?? opening + 1;
       continue;
@@ -291,7 +326,6 @@ function scanVisibleHtml(input: string): VisibleHtmlScan {
     if (input.startsWith("<!--", opening)) {
       const closing = input.indexOf("-->", opening + 4);
       if (closing === -1) break;
-      collector.separate();
       index = closing + 3;
       continue;
     }
@@ -306,7 +340,7 @@ function scanVisibleHtml(input: string): VisibleHtmlScan {
       collector.appendTextRange(input, opening, input.length);
       break;
     }
-    collector.separate();
+    if (shouldSeparateAfterTag(tag)) collector.separate();
     if (
       !tag.closing &&
       tag.rawTextNameBoundaryValid &&
@@ -318,6 +352,14 @@ function scanVisibleHtml(input: string): VisibleHtmlScan {
   }
 
   return collector.finish();
+}
+
+function shouldSeparateAfterTag(tag: ParsedHtmlTag): boolean {
+  return (
+    tag.name === "br" ||
+    tag.name === "hr" ||
+    (tag.closing && BLOCK_SPACING_TAGS.has(tag.name))
+  );
 }
 
 function parseHtmlTag(input: string, start: number): ParsedHtmlTag | undefined {
@@ -556,12 +598,17 @@ function readBasicHtmlEntity(
   start: number,
   end: number,
 ): DecodedHtmlEntity | undefined {
-  const semicolon = source.indexOf(";", start + 1);
-  if (semicolon === -1 || semicolon >= end || semicolon - start > 9) {
-    return undefined;
+  let semicolon = -1;
+  const candidateEnd = Math.min(end, start + 10);
+  for (let cursor = start + 1; cursor < candidateEnd; cursor += 1) {
+    if (source.charCodeAt(cursor) === 59) {
+      semicolon = cursor;
+      break;
+    }
   }
+  if (semicolon === -1) return undefined;
   const token = source.slice(start + 1, semicolon);
-  if (!/^(?:#x[0-9a-f]{1,6}|#[0-9]{1,7}|amp|lt|gt|quot|apos|nbsp)$/iu.test(token)) {
+  if (!BASIC_HTML_ENTITY_TOKEN.test(token)) {
     return undefined;
   }
   const match = source.slice(start, semicolon + 1);
