@@ -420,6 +420,106 @@ export const en = {
   "settings.tab.tikhub": "TikHub",
   "settings.tab.ai": "AI models",
 
+  "settings.ai.heading": "Optional AI connections",
+  "settings.ai.description":
+    "AI is optional and runs only when you explicitly request an operation. Collection continues without an AI connection.",
+  "settings.ai.generalGuidance":
+    "Model IDs must match your account and region. Relay compatibility is not guaranteed, and current model availability is determined by each provider.",
+  "settings.ai.claudeGuidance":
+    "Claude requires an Anthropic API key or a compatible relay. A Claude Code login is not imported automatically.",
+  "settings.ai.connections": "Connections",
+  "settings.ai.connectionsDesc":
+    "Only connection metadata, order, and the default choice are stored in plugin settings. API keys stay in external desktop secret storage.",
+  "settings.ai.addConnection": "Add connection",
+  "settings.ai.empty": "No AI connections configured.",
+  "settings.ai.addTitle": "Add AI connection",
+  "settings.ai.editTitle": "Edit AI connection",
+  "settings.ai.provider": "Provider or compatible API",
+  "settings.ai.providerDesc":
+    "Choose a provider preset or a compatible relay protocol.",
+  "settings.ai.provider.kimi": "Kimi",
+  "settings.ai.provider.deepseek": "DeepSeek",
+  "settings.ai.provider.qwen": "Qwen",
+  "settings.ai.provider.glm": "Zhipu GLM",
+  "settings.ai.provider.openai": "OpenAI",
+  "settings.ai.provider.claude": "Claude",
+  "settings.ai.provider.openaiCompatible": "OpenAI-compatible relay",
+  "settings.ai.provider.anthropicCompatible": "Anthropic-compatible relay",
+  "settings.ai.connectionName": "Connection name",
+  "settings.ai.connectionNameDesc": "A local label used only to identify this connection.",
+  "settings.ai.protocol": "API protocol",
+  "settings.ai.protocolOpenAi": "OpenAI Chat Completions",
+  "settings.ai.protocolAnthropic": "Anthropic Messages",
+  "settings.ai.baseUrl": "Base URL",
+  "settings.ai.baseUrlDesc":
+    "Provider presets use their documented compatible endpoint. Relay connections accept a safe HTTPS URL or exact localhost HTTP URL.",
+  "settings.ai.model": "Model ID",
+  "settings.ai.modelDesc":
+    "Required. Enter the exact model ID enabled for your account and region; presets do not guess one.",
+  "settings.ai.apiKey": "API key",
+  "settings.ai.apiKeyDesc":
+    "Optional while creating. A supplied key is written only to external desktop secret storage.",
+  "settings.ai.apiKeyEditDesc":
+    "Leave blank to keep the stored key unchanged. The existing key is never read or displayed here.",
+  "settings.ai.apiKeyPlaceholder": "Paste a new key",
+  "settings.ai.enabled": "Enable connection",
+  "settings.ai.enabledDesc":
+    "Disabled connections remain saved but cannot be used for AI operations or connection tests.",
+  "settings.ai.qwenGuidance":
+    "Qwen workspace or region URLs may differ. If your account requires another URL, use an OpenAI-compatible relay connection. The model ID must match the current account and region.",
+  "settings.ai.relayGuidance":
+    "Relay compatibility is not guaranteed. Confirm its protocol and enter the exact model ID available to your account.",
+  "settings.ai.modelAccountGuidance":
+    "The model ID must match the current account and region. This preset does not promise current model availability.",
+  "settings.ai.nameRequired": "Enter a valid connection name.",
+  "settings.ai.modelRequired": "Enter a model ID.",
+  "settings.ai.invalidBaseUrl": "Enter a safe API base URL.",
+  "settings.ai.invalidConnectionId": "A secure UUID connection ID could not be created.",
+  "settings.ai.invalidConnection": "The connection metadata is invalid.",
+  "settings.ai.invalidKey": "Enter a valid non-empty API key without surrounding spaces.",
+  "settings.ai.metadataSaveFailed": "Could not save the connection settings.",
+  "settings.ai.keySaveAfterMetadataFailed":
+    "The connection was saved, but the key could not be stored securely. Paste it again to retry.",
+  "settings.ai.defaultBadge": "Default",
+  "settings.ai.setDefault": "Set as default",
+  "settings.ai.moveUp": "Move up",
+  "settings.ai.moveDown": "Move down",
+  "settings.ai.keyConfigured": "Key configured",
+  "settings.ai.keyNotConfigured": "Key not configured",
+  "settings.ai.keyStatusUnavailable": "Key status unavailable",
+  "settings.ai.deleteKey": "Delete key",
+  "settings.ai.keyDeleted": "Key deleted. The connection metadata remains.",
+  "settings.ai.keyDeleteFailed": "Could not securely delete the key.",
+  "settings.ai.deleteConnection": "Delete connection",
+  "settings.ai.connectionDeleteRetained":
+    "Deletion was not completed, so the connection was retained.",
+  "settings.ai.connectionDeleteKeyRestoreFailed":
+    "The connection was retained, but its key must be configured again.",
+  "settings.ai.testConnection": "Test connection",
+  "settings.ai.cancelTest": "Cancel test",
+  "settings.ai.connectionSucceeded": "Connection succeeded.",
+  "settings.ai.connectionMissingKey": "No API key is configured.",
+  "settings.ai.connectionInvalidKey": "The API key is invalid or expired.",
+  "settings.ai.connectionInsufficientBalance": "The provider account balance is insufficient.",
+  "settings.ai.connectionRateLimited": "The provider rate limit was reached. Try again later.",
+  "settings.ai.connectionTimeout": "The connection test timed out.",
+  "settings.ai.connectionAborted": "The test was cancelled.",
+  "settings.ai.connectionNetworkFailed": "The network connection failed.",
+  "settings.ai.connectionDisabled": "This connection is disabled.",
+  "settings.ai.connectionInvalid": "This connection configuration is invalid.",
+  "settings.ai.connectionInvalidRequest":
+    "The provider rejected the model or test request.",
+  "settings.ai.connectionFailed": "The connection test failed.",
+  "settings.ai.confirmTestTitle": "Confirm a potentially billable test",
+  "settings.ai.confirmTestDesc":
+    "Testing {name} sends exactly one minimal request asking it to reply OK. The provider or relay may charge for it. Continue?",
+  "settings.ai.confirmDeleteKeyTitle": "Delete API key",
+  "settings.ai.confirmDeleteKeyDesc":
+    "Delete the external key for {name}? The connection metadata will remain.",
+  "settings.ai.confirmDeleteConnectionTitle": "Delete AI connection",
+  "settings.ai.confirmDeleteConnectionDesc":
+    "Delete {name} and its external key? This is separate from deleting only the key.",
+
   "settings.sources.heading": "X account subscriptions",
   "settings.sources.accountSubscriptions": "X account subscriptions",
   "settings.sources.accountSubscriptionsDesc":

@@ -27,6 +27,7 @@ export const SETTINGS_TAB_IDS = [
   "sources",
   "topic-discovery",
   "tikhub",
+  "ai",
   "storage",
   "display",
   "sidebar",

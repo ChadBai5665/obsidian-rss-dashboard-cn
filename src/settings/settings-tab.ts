@@ -33,6 +33,7 @@ import { renderGeneralSettingsTab } from "./tabs/general-settings-tab";
 import { renderSourcesSettingsTab } from "./tabs/sources-settings-tab";
 import { renderTopicDiscoverySettingsTab } from "./tabs/topic-discovery-settings-tab";
 import { renderTikHubSettingsTab } from "./tabs/tikhub-settings-tab";
+import { renderAiSettingsTab } from "./tabs/ai-settings-tab";
 import { renderStorageSettingsTab } from "./tabs/storage-settings-tab";
 import { renderDisplaySettingsTab } from "./tabs/display-settings-tab";
 import { renderSidebarSettingsTab } from "./tabs/sidebar-settings-tab";
@@ -180,6 +181,10 @@ export class RssDashboardSettingTab extends PluginSettingTab {
         break;
       case "tikhub":
         renderTikHubSettingsTab(tabContent, this.plugin);
+        this.pendingSection = null;
+        break;
+      case "ai":
+        renderAiSettingsTab(tabContent, this.plugin);
         this.pendingSection = null;
         break;
       case "storage":

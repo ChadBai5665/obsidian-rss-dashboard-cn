@@ -15,6 +15,9 @@ vi.mock("../../../src/settings/tabs/topic-discovery-settings-tab", () => ({
 vi.mock("../../../src/settings/tabs/tikhub-settings-tab", () => ({
   renderTikHubSettingsTab: vi.fn(),
 }));
+vi.mock("../../../src/settings/tabs/ai-settings-tab", () => ({
+  renderAiSettingsTab: vi.fn(),
+}));
 vi.mock("../../../src/settings/tabs/storage-settings-tab", () => ({
   renderStorageSettingsTab: vi.fn(),
 }));
@@ -73,7 +76,7 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
     const tabButtons = Array.from(
       tab.containerEl.querySelectorAll(".rss-dashboard-settings-tab-btn"),
     );
-    expect(tabButtons).toHaveLength(14);
+    expect(tabButtons).toHaveLength(15);
     expect(tabButtons[0].textContent).toBe("常规");
     expect(tab.containerEl.querySelector(".rss-dashboard-settings-tab-bar")?.getAttribute("role"))
       .toBe("tablist");
@@ -142,6 +145,10 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
 
     tab.activateTab("rules");
     expect(vi.mocked(rules.renderRulesSettingsTab)).toHaveBeenCalledTimes(1);
+
+    const ai = await import("../../../src/settings/tabs/ai-settings-tab");
+    tab.activateTab("ai");
+    expect(vi.mocked(ai.renderAiSettingsTab)).toHaveBeenCalledTimes(1);
 
     const display = await import("../../../src/settings/tabs/display-settings-tab");
     tab.activateTab("display", "Reader");
