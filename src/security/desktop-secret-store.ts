@@ -15,12 +15,13 @@ import {
   SecretStoreCorruptError,
   SecretStoreSecurityError,
   type SecretFileV1,
+  type SecretRecordV1,
   type SecretStatusProjection,
   projectSecretStatus,
 } from "./secret-types";
 import { resolveDesktopSecretPath } from "./secret-path";
 import {
-  isCanonicalConnectionId,
+  normalizeConnectionId,
   requireConnectionId,
 } from "./connection-id";
 
@@ -414,21 +415,61 @@ function parseSecretFile(raw: string): SecretFileV1 {
   } catch {
     throw new SecretStoreCorruptError();
   }
-  if (!isSecretFileV1(parsed)) throw new SecretStoreCorruptError();
-  return parsed;
+  return normalizeSecretFile(parsed);
 }
 
-function isSecretFileV1(value: unknown): value is SecretFileV1 {
-  if (!isPlainRecord(value) || !hasExactOwnKeys(value, ["schemaVersion", "secrets"]) || value.schemaVersion !== 1 || !isPlainRecord(value.secrets)) return false;
-  return Object.entries(value.secrets).every(([connectionId, secret]) =>
-    isCanonicalConnectionId(connectionId) &&
-    isPlainRecord(secret) &&
-    hasExactOwnKeys(secret, ["apiKey", "updatedAt"]) &&
-    typeof secret.apiKey === "string" &&
-    secret.apiKey.length > 0 &&
-    typeof secret.updatedAt === "string" &&
-    Number.isFinite(Date.parse(secret.updatedAt)),
-  );
+function normalizeSecretFile(value: unknown): SecretFileV1 {
+  const root = isPlainRecord(value) ? value : undefined;
+  if (!root || !hasExactOwnDataKeys(root, ["schemaVersion", "secrets"])) {
+    throw new SecretStoreCorruptError();
+  }
+  const schemaVersion = ownData(root, "schemaVersion");
+  const secretValue = ownData(root, "secrets");
+  const legacySecrets = isPlainRecord(secretValue) ? secretValue : undefined;
+  if (schemaVersion !== 1 || !legacySecrets) {
+    throw new SecretStoreCorruptError();
+  }
+
+  const secrets: Record<string, SecretRecordV1> = {};
+  let keys: PropertyKey[];
+  try {
+    keys = Reflect.ownKeys(legacySecrets);
+  } catch {
+    throw new SecretStoreCorruptError();
+  }
+  for (const legacyId of keys) {
+    if (typeof legacyId !== "string") throw new SecretStoreCorruptError();
+    const canonicalId = normalizeConnectionId(legacyId);
+    const candidate = readSecretRecord(ownData(legacySecrets, legacyId));
+    if (!canonicalId || !candidate) throw new SecretStoreCorruptError();
+
+    const existing = secrets[canonicalId];
+    if (existing) {
+      if (
+        existing.apiKey !== candidate.apiKey ||
+        existing.updatedAt !== candidate.updatedAt
+      ) throw new SecretStoreCorruptError();
+      continue;
+    }
+    secrets[canonicalId] = candidate;
+  }
+  return { schemaVersion: 1, secrets };
+}
+
+function readSecretRecord(value: unknown): SecretRecordV1 | undefined {
+  const record = isPlainRecord(value) ? value : undefined;
+  if (!record || !hasExactOwnDataKeys(record, ["apiKey", "updatedAt"])) {
+    return undefined;
+  }
+  const apiKey = ownData(record, "apiKey");
+  const updatedAt = ownData(record, "updatedAt");
+  if (
+    typeof apiKey !== "string" ||
+    apiKey.length === 0 ||
+    typeof updatedAt !== "string" ||
+    !Number.isFinite(Date.parse(updatedAt))
+  ) return undefined;
+  return { apiKey, updatedAt };
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -439,9 +480,29 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function hasExactOwnKeys(value: Record<string, unknown>, expected: string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+function hasExactOwnDataKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  try {
+    const keys = Reflect.ownKeys(value);
+    return keys.length === expected.length && keys.every((key) => {
+      if (typeof key !== "string" || !expected.includes(key)) return false;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return Boolean(descriptor && "value" in descriptor);
+    });
+  } catch {
+    return false;
+  }
+}
+
+function ownData(value: Record<string, unknown>, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

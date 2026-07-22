@@ -16,11 +16,14 @@ import process from "node:process";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DesktopSecretStore,
+  SecretStoreCorruptError,
   SecretStoreSecurityError,
   type DesktopSecretFileSystem,
 } from "../../../src/security/desktop-secret-store";
 
 const CONNECTION_ID = "d4eb3f58-b672-4f73-b9f3-9cd2f0e57a8d";
+const CONNECTION_ID_UPPER = CONNECTION_ID.toUpperCase();
+const CONNECTION_B = "41ecf4d4-7301-4f0d-a333-dafb184a4013";
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
@@ -72,6 +75,152 @@ async function createPath(): Promise<{ root: string; parent: string; secretPath:
 }
 
 describe("DesktopSecretStore real filesystem ownership", () => {
+  it("reads a legacy uppercase UUID through lower- and uppercase callers", async () => {
+    const { secretPath } = await createPath();
+    await writeFile(secretPath, JSON.stringify({
+      schemaVersion: 1,
+      secrets: {
+        [CONNECTION_ID_UPPER]: {
+          apiKey: "legacy-uppercase-secret",
+          updatedAt: "2026-07-23T00:00:00.000Z",
+        },
+      },
+    }), { mode: 0o600 });
+    const store = new DesktopSecretStore({ secretPath, platform: "linux" });
+
+    await expect(store.get(CONNECTION_ID)).resolves.toBe("legacy-uppercase-secret");
+    await expect(store.get(CONNECTION_ID_UPPER)).resolves.toBe("legacy-uppercase-secret");
+    expect((await lstat(secretPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("atomically migrates legacy uppercase keys to lowercase on set and delete", async () => {
+    const { secretPath } = await createPath();
+    await writeFile(secretPath, JSON.stringify({
+      schemaVersion: 1,
+      secrets: {
+        [CONNECTION_ID_UPPER]: {
+          apiKey: "legacy-a",
+          updatedAt: "2026-07-23T00:00:00.000Z",
+        },
+        [CONNECTION_B.toUpperCase()]: {
+          apiKey: "legacy-b",
+          updatedAt: "2026-07-23T00:00:00.000Z",
+        },
+      },
+    }), { mode: 0o600 });
+    const store = new DesktopSecretStore({
+      secretPath,
+      platform: "linux",
+      randomSuffix: () => "legacy-case-migration",
+      now: () => new Date("2026-07-23T01:00:00.000Z"),
+    });
+
+    await store.set(CONNECTION_ID_UPPER, "replacement-a");
+    const afterSet = JSON.parse(await readFile(secretPath, "utf8")) as {
+      secrets: Record<string, { apiKey: string }>;
+    };
+    expect(Object.keys(afterSet.secrets).sort()).toEqual([
+      CONNECTION_B,
+      CONNECTION_ID,
+    ].sort());
+    expect(afterSet.secrets[CONNECTION_ID]?.apiKey).toBe("replacement-a");
+    expect((await lstat(secretPath)).mode & 0o777).toBe(0o600);
+
+    await store.delete(CONNECTION_ID_UPPER);
+    const afterDelete = JSON.parse(await readFile(secretPath, "utf8")) as {
+      secrets: Record<string, { apiKey: string }>;
+    };
+    expect(afterDelete.secrets).toEqual({
+      [CONNECTION_B]: {
+        apiKey: "legacy-b",
+        updatedAt: "2026-07-23T00:00:00.000Z",
+      },
+    });
+
+    const directDeletePath = await createPath();
+    await writeFile(directDeletePath.secretPath, JSON.stringify({
+      schemaVersion: 1,
+      secrets: {
+        [CONNECTION_ID_UPPER]: {
+          apiKey: "delete-me",
+          updatedAt: "2026-07-23T00:00:00.000Z",
+        },
+        [CONNECTION_B.toUpperCase()]: {
+          apiKey: "keep-me",
+          updatedAt: "2026-07-23T00:00:00.000Z",
+        },
+      },
+    }), { mode: 0o600 });
+    const directDeleteStore = new DesktopSecretStore({
+      secretPath: directDeletePath.secretPath,
+      platform: "linux",
+      randomSuffix: () => "legacy-direct-delete",
+    });
+    await directDeleteStore.delete(CONNECTION_ID_UPPER);
+    const directDelete = JSON.parse(
+      await readFile(directDeletePath.secretPath, "utf8"),
+    ) as { secrets: Record<string, unknown> };
+    expect(Object.keys(directDelete.secrets)).toEqual([CONNECTION_B]);
+  });
+
+  it("collapses identical case-folded duplicate records and rejects conflicting ones", async () => {
+    const identical = {
+      apiKey: "same-secret",
+      updatedAt: "2026-07-23T00:00:00.000Z",
+    };
+    const safePath = await createPath();
+    await writeFile(safePath.secretPath, JSON.stringify({
+      schemaVersion: 1,
+      secrets: {
+        [CONNECTION_ID]: identical,
+        [CONNECTION_ID_UPPER]: identical,
+      },
+    }), { mode: 0o600 });
+    const safeStore = new DesktopSecretStore({
+      secretPath: safePath.secretPath,
+      platform: "linux",
+      randomSuffix: () => "duplicate-collapse",
+    });
+    await expect(safeStore.get(CONNECTION_ID_UPPER)).resolves.toBe("same-secret");
+    await safeStore.set(CONNECTION_ID, "replacement-secret");
+    const collapsed = JSON.parse(await readFile(safePath.secretPath, "utf8")) as {
+      secrets: Record<string, unknown>;
+    };
+    expect(Object.keys(collapsed.secrets)).toEqual([CONNECTION_ID]);
+
+    for (const conflictingRecord of [
+      {
+        apiKey: "different-secret",
+        updatedAt: "2026-07-23T00:00:00.000Z",
+      },
+      {
+        apiKey: "same-secret",
+        updatedAt: "2026-07-23T00:00:01.000Z",
+      },
+    ]) {
+      const conflictPath = await createPath();
+      const conflictingRaw = JSON.stringify({
+        schemaVersion: 1,
+        secrets: {
+          [CONNECTION_ID]: identical,
+          [CONNECTION_ID_UPPER]: conflictingRecord,
+        },
+      });
+      await writeFile(conflictPath.secretPath, conflictingRaw, { mode: 0o600 });
+      const conflictStore = new DesktopSecretStore({
+        secretPath: conflictPath.secretPath,
+        platform: "linux",
+      });
+      await expect(conflictStore.get(CONNECTION_ID)).rejects.toBeInstanceOf(
+        SecretStoreCorruptError,
+      );
+      await expect(
+        conflictStore.set(CONNECTION_ID, "must-not-overwrite-conflict"),
+      ).rejects.toBeInstanceOf(SecretStoreCorruptError);
+      expect(await readFile(conflictPath.secretPath, "utf8")).toBe(conflictingRaw);
+    }
+  });
+
   it("creates and repairs real Unix secret permissions on every write", async () => {
     const { parent, secretPath } = await createPath();
     await chmod(parent, 0o777);

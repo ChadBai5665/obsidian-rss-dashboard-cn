@@ -73,6 +73,14 @@ describe("AI provider presets", () => {
     expect(getAiProviderPreset("kimi")?.baseUrl).toBe(
       "https://api.moonshot.cn/v1",
     );
+    expect(
+      createAiConnection({
+        id: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        name: "Uppercase legacy input",
+        providerKind: "openai",
+        model: "user-selected",
+      }).id,
+    ).toBe("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
   });
 
   it("requires a user-supplied endpoint for compatible relays", () => {
