@@ -90,6 +90,29 @@ import {
 import type { CollectedItem } from "./src/collection/collected-item";
 import { createTranslator, type Translator } from "./src/i18n";
 import { isLocalizedView } from "./src/views/localized-view";
+import { DesktopSecretStore } from "./src/security/desktop-secret-store";
+import { SourceRegistry } from "./src/sources/source-registry";
+import {
+  normalizeSourceConfig,
+  type FeedSourceConfig,
+  type XAccountSourceConfig,
+  type XTopicSourceConfig,
+} from "./src/sources/source-config";
+import type {
+  SourceAdapter,
+  SourceRefreshOutput,
+} from "./src/sources/source-adapter";
+import { TikHubRequestLedger } from "./src/sources/tikhub/request-ledger";
+import { TikHubRequestBudget } from "./src/sources/tikhub/request-budget";
+import { TikHubClient } from "./src/sources/tikhub/tikhub-client";
+import {
+  XAccountAdapter,
+  XAccountRefreshError,
+} from "./src/sources/tikhub/x-account-adapter";
+import {
+  XTopicAdapter,
+  XTopicRefreshError,
+} from "./src/sources/tikhub/x-topic-adapter";
 
 export interface FeedRefreshResult {
   feed: Feed;
@@ -132,7 +155,11 @@ type FeedRefreshFailureCode =
   | "refresh-failed"
   | "timed-out"
   | "collection-failed"
-  | "state-failed";
+  | "state-failed"
+  | "tikhub-disabled"
+  | "missing-key"
+  | "invalid-key"
+  | "invalid-source-config";
 
 type CollectionFlagState = Pick<
   CollectedItem,
@@ -419,9 +446,15 @@ class FeedRefreshPipelineError extends Error {
 
 class RefreshAttemptToken {
   private active = true;
+  private readonly controller = new AbortController();
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
 
   cancel(): void {
     this.active = false;
+    this.controller.abort();
   }
 
   assertActive(): void {
@@ -465,9 +498,18 @@ function toFeedRefreshPipelineError(error: unknown): FeedRefreshPipelineError {
   if (error instanceof FeedRefreshPipelineError) {
     return error;
   }
+  if (error instanceof XAccountRefreshError || error instanceof XTopicRefreshError) {
+    return new FeedRefreshPipelineError(error.code, error.message);
+  }
   return isTimeoutFeedError(error)
     ? new FeedRefreshPipelineError("timed-out", "Source refresh timed out.")
     : new FeedRefreshPipelineError("refresh-failed", "Source refresh failed.");
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -647,6 +689,9 @@ export default class RssDashboardPlugin extends Plugin {
   private collectionService:
     | { dataRoot: string; dailyIndexFolder: string; service: CollectionService }
     | null = null;
+  private sourceRegistry:
+    | { signature: string; registry: SourceRegistry }
+    | null = null;
   private progressSaveDebounce: number | null = null;
   private suppressWatcherUntil = 0;
   // Status changes touch both the feed store and the collection store. A single
@@ -782,6 +827,131 @@ export default class RssDashboardPlugin extends Plugin {
         this.ensureFolderExists(folder, opts),
       addStatusBarItem: () => this.addStatusBarItem(),
       getLocale: () => this.settings.locale,
+    });
+    // Register every source kind during startup/settings reinitialization. The
+    // first refresh consumes this registry; later runs receive a fresh budget.
+    this.sourceRegistry = {
+      signature: this.sourceRegistrySignature(),
+      registry: this.createSourceRegistryForRun(),
+    };
+  }
+
+  private createSourceRegistryForRun(): SourceRegistry {
+    const translate = createTranslator(this.settings.locale ?? "zh-CN");
+    const registry = new SourceRegistry({ translate });
+    const feedAdapter: SourceAdapter<FeedSourceConfig> = {
+      kind: "feed",
+      refresh: async (_config, context): Promise<SourceRefreshOutput> => {
+        const parserInput = context.feed;
+        if (!parserInput) {
+          throw new FeedRefreshPipelineError(
+            "invalid-source-config",
+            translate("source.invalidConfiguration"),
+          );
+        }
+        let updatedFeed: Feed;
+        if (typeof this.feedParser.refreshFeed === "function") {
+          updatedFeed = await this.feedParser.refreshFeed(parserInput);
+        } else {
+          const updatedFeeds = await this.feedParser.refreshAllFeeds([parserInput]);
+          updatedFeed = updatedFeeds[0] ?? parserInput;
+        }
+        updatedFeed.sourceKind = "feed";
+        updatedFeed.sourceConfig = { kind: "feed" };
+        return {
+          feed: updatedFeed,
+          items: updatedFeed.items,
+          providerRequestCount: 0,
+          warnings: [],
+        };
+      },
+    };
+    registry.register(feedAdapter);
+
+    if (!this.settings.tikhub.enabled) {
+      this.registerUnavailableXAdapters(
+        registry,
+        "tikhub-disabled",
+        translate("source.tikhubDisabled"),
+      );
+      return registry;
+    }
+
+    try {
+      const connectionId = this.settings.tikhub.connectionId.toLowerCase();
+      const requestLedger = new TikHubRequestLedger(
+        this.app.vault,
+        this.settings.collection.dataFolder,
+        {
+          storageIdentity: `vault:${isUuid(connectionId) ? connectionId : "unconfigured"}`,
+        },
+      );
+      const budget = new TikHubRequestBudget({
+        ledger: requestLedger,
+        maxRequestsPerRun: this.settings.tikhub.maxRequestsPerRun,
+        maxRequestsPerDay: this.settings.tikhub.maxRequestsPerDay,
+      });
+      const client = new TikHubClient({
+        baseUrl: this.settings.tikhub.baseUrl,
+        timeoutMs: this.settings.tikhub.timeoutMs,
+        budget,
+      });
+      const secretStore = new DesktopSecretStore();
+      registry.register(new XAccountAdapter({
+        client,
+        secretStore,
+        connectionId,
+        translate,
+      }));
+      registry.register(new XTopicAdapter({
+        client,
+        secretStore,
+        connectionId,
+        translate,
+      }));
+    } catch {
+      this.registerUnavailableXAdapters(
+        registry,
+        "invalid-source-config",
+        translate("source.invalidConfiguration"),
+      );
+    }
+    return registry;
+  }
+
+  private takeSourceRegistryForRun(): SourceRegistry {
+    const signature = this.sourceRegistrySignature();
+    const registry = this.sourceRegistry?.signature === signature
+      ? this.sourceRegistry.registry
+      : this.createSourceRegistryForRun();
+    this.sourceRegistry = null;
+    return registry;
+  }
+
+  private sourceRegistrySignature(): string {
+    return JSON.stringify({
+      locale: this.settings.locale,
+      dataFolder: this.settings.collection.dataFolder,
+      tikhub: this.settings.tikhub,
+    });
+  }
+
+  private registerUnavailableXAdapters(
+    registry: SourceRegistry,
+    code: Extract<FeedRefreshFailureCode, "tikhub-disabled" | "invalid-source-config">,
+    message: string,
+  ): void {
+    registry.register<XAccountSourceConfig>({
+      kind: "x-account",
+      refresh: async () => {
+        throw new FeedRefreshPipelineError(code, message);
+      },
+    });
+    registry.register<XTopicSourceConfig>({
+      kind: "x-topic",
+      refresh: async () => {
+        throw new FeedRefreshPipelineError(code, message);
+      },
     });
   }
 
@@ -1832,12 +2002,21 @@ export default class RssDashboardPlugin extends Plugin {
       }
 
       this.notify("plugin.refreshing", { source: feedNoticeText });
+      const sourceRegistry = this.takeSourceRegistryForRun();
       if (feedsToRefresh.length === 1) {
-        await this.refreshSingleFeed(feedsToRefresh[0], feedNoticeText);
+        await this.refreshSingleFeed(
+          feedsToRefresh[0],
+          feedNoticeText,
+          sourceRegistry,
+        );
         return;
       }
 
-      await this.refreshFeedBatch(feedsToRefresh, feedNoticeText);
+      await this.refreshFeedBatch(
+        feedsToRefresh,
+        feedNoticeText,
+        sourceRegistry,
+      );
     } catch {
       console.error("[RSS dashboard] Refresh request failed.");
       this.notify("plugin.refreshFailed");
@@ -1937,7 +2116,11 @@ export default class RssDashboardPlugin extends Plugin {
       }
 
       this.notify("plugin.refreshing", { source: feed.title });
-      await this.refreshSingleFeed(feed, feed.title);
+      await this.refreshSingleFeed(
+        feed,
+        feed.title,
+        this.takeSourceRegistryForRun(),
+      );
     } catch {
       console.error("[RSS dashboard] Refresh request failed.");
       this.notify("plugin.refreshFailed");
@@ -3861,8 +4044,9 @@ export default class RssDashboardPlugin extends Plugin {
   private async refreshSingleFeed(
     feed: Feed,
     feedNoticeText: string,
+    sourceRegistry: SourceRegistry,
   ): Promise<void> {
-    const result = await this.refreshFeedPipeline(feed);
+    const result = await this.refreshFeedPipeline(feed, sourceRegistry);
     this.mergeRefreshedFeed(result.feed);
 
     await this.validateSavedArticles({ suppressCollectionBroadcast: true });
@@ -3875,6 +4059,7 @@ export default class RssDashboardPlugin extends Plugin {
   private async refreshFeedBatch(
     feedsToRefresh: Feed[],
     feedNoticeText: string,
+    sourceRegistry: SourceRegistry,
   ): Promise<void> {
     if (this.isMultiFeedRefreshRunning) {
       this.notify("plugin.multiRefresh");
@@ -3935,6 +4120,7 @@ export default class RssDashboardPlugin extends Plugin {
           currentFeed,
           refreshSummary,
           refreshView,
+          sourceRegistry,
         ).finally(() => {
           globalFetchSemaphore.release();
         });
@@ -4006,6 +4192,7 @@ export default class RssDashboardPlugin extends Plugin {
     currentFeed: Feed,
     refreshSummary: { failed: number; timedOut: number },
     refreshView: () => Promise<void>,
+    sourceRegistry: SourceRegistry,
   ): Promise<void> {
     this.activeRefreshState.set(currentFeed.url, {
       status: "processing",
@@ -4013,7 +4200,7 @@ export default class RssDashboardPlugin extends Plugin {
     });
 
     try {
-      const result = await this.refreshFeedPipeline(currentFeed);
+      const result = await this.refreshFeedPipeline(currentFeed, sourceRegistry);
       this.mergeRefreshedFeed(result.feed);
     } catch (error) {
       const isTimedOut =
@@ -4040,7 +4227,10 @@ export default class RssDashboardPlugin extends Plugin {
     });
   }
 
-  private async refreshFeedPipeline(feed: Feed): Promise<FeedRefreshResult> {
+  private async refreshFeedPipeline(
+    feed: Feed,
+    sourceRegistry: SourceRegistry,
+  ): Promise<FeedRefreshResult> {
     this.feedStorageRepository.ensureFeedIds(this.settings);
     if (!feed.feedId) {
       feed.feedId = this.settings.feeds.find(
@@ -4063,7 +4253,7 @@ export default class RssDashboardPlugin extends Plugin {
     const attempt = new RefreshAttemptToken();
     let result: FeedRefreshResult;
     try {
-      result = await this.refreshFeedWithTimeout(feed, attempt);
+      result = await this.refreshFeedWithTimeout(feed, attempt, sourceRegistry);
       attempt.assertActive();
     } catch (error) {
       const failure = toFeedRefreshPipelineError(error);
@@ -4138,11 +4328,12 @@ export default class RssDashboardPlugin extends Plugin {
   private async refreshFeedWithTimeout(
     feed: Feed,
     attempt: RefreshAttemptToken,
+    sourceRegistry: SourceRegistry,
   ): Promise<FeedRefreshResult> {
     let timeoutId: number | null = null;
     try {
       return await Promise.race([
-        this.refreshFeedDirect(feed, attempt),
+        this.refreshFeedDirect(feed, attempt, sourceRegistry),
         new Promise<FeedRefreshResult>((_, reject) => {
           timeoutId = window.setTimeout(() => {
             attempt.cancel();
@@ -4165,19 +4356,36 @@ export default class RssDashboardPlugin extends Plugin {
   private async refreshFeedDirect(
     feed: Feed,
     attempt: RefreshAttemptToken,
+    sourceRegistry: SourceRegistry,
   ): Promise<FeedRefreshResult> {
     const parserInput = cloneRefreshData(feed);
     parserInput.lastFetchError = undefined;
     const previousItems = cloneRefreshData(feed.items);
     bindFeedItemsToSourceIdentity(parserInput);
     bindFeedItemsToSourceIdentity({ ...parserInput, items: previousItems });
-    let updatedFeed: Feed;
-    if (typeof this.feedParser.refreshFeed === "function") {
-      updatedFeed = await this.feedParser.refreshFeed(parserInput);
-    } else {
-      const updatedFeeds = await this.feedParser.refreshAllFeeds([parserInput]);
-      updatedFeed = updatedFeeds[0] ?? parserInput;
+    const config = normalizeSourceConfig(feed.sourceConfig) ??
+      (feed.sourceKind === undefined || feed.sourceKind === "feed"
+        ? ({ kind: "feed" } as const)
+        : undefined);
+    if (!config || (feed.sourceKind !== undefined && feed.sourceKind !== config.kind)) {
+      throw new FeedRefreshPipelineError(
+        "invalid-source-config",
+        this.t("source.invalidConfiguration"),
+      );
     }
+    if (config.kind !== "feed" && !this.settings.tikhub.enabled) {
+      throw new FeedRefreshPipelineError(
+        "tikhub-disabled",
+        this.t("source.tikhubDisabled"),
+      );
+    }
+    const fetchedAt = new Date();
+    const output = await sourceRegistry.refresh(config, {
+      now: fetchedAt,
+      signal: attempt.signal,
+      ...(config.kind === "feed" ? { feed: parserInput } : {}),
+    });
+    const updatedFeed = output.feed;
     updatedFeed.feedId ??= parserInput.feedId;
     bindFeedItemsToSourceIdentity(updatedFeed);
     attempt.assertActive();
@@ -4196,7 +4404,7 @@ export default class RssDashboardPlugin extends Plugin {
       feed: updatedFeed,
       previousItems,
       refreshedItems: updatedFeed.items,
-      fetchedAt: new Date(),
+      fetchedAt,
     };
   }
 

@@ -9,6 +9,7 @@ import { CollectionRepository } from "../../../src/collection/collection-reposit
 import { RssDashboardView } from "../../../src/views/dashboard-view";
 import { ReaderView } from "../../../src/views/reader-view";
 import type { CollectedItem } from "../../../src/collection/collected-item";
+import type { SourceRegistry } from "../../../src/sources/source-registry";
 
 let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
@@ -86,7 +87,11 @@ interface TestPlugin {
   getCollectionService: ReturnType<typeof vi.fn>;
   refreshFailedSources: () => Promise<void>;
   refreshSelectedFeed: (feed: Feed) => Promise<void>;
+  manualRefreshAllSources: () => Promise<void>;
+  manualRefreshSourceById: (sourceId: string) => Promise<void>;
+  refreshOnOpenIfNeeded: () => Promise<void>;
   saveSettings: (options?: { forceAllShards?: boolean; forceMetadata?: boolean }) => Promise<void>;
+  createSourceRegistryForRun: () => SourceRegistry;
 }
 
 function createPluginWithSettings(feeds: Feed[]): TestPlugin {
@@ -146,6 +151,242 @@ beforeEach(() => {
 });
 
 describe("refreshFeeds() pipeline behavior", () => {
+  it("routes RSS and X through one refresh run without sending X synthetic URLs to the RSS parser", async () => {
+    const rss = createFeed({
+      feedId: "rss-source",
+      sourceKind: "feed",
+      sourceConfig: { kind: "feed" },
+    });
+    const accountConfig = {
+      kind: "x-account" as const,
+      id: "x-account-openai",
+      handle: "openai",
+      includeReplies: false,
+      includeReposts: false,
+      folder: "X",
+      topics: ["AI"],
+    };
+    const topicConfig = {
+      kind: "x-topic" as const,
+      id: "ai-apps",
+      name: "AI applications",
+      includeKeywords: ["AI application"],
+      excludeKeywords: [],
+      priorityAccounts: ["openai"],
+      windowDays: 7 as const,
+      folder: "Topics",
+    };
+    const account = createFeed({
+      feedId: accountConfig.id,
+      sourceKind: "x-account",
+      sourceConfig: accountConfig,
+      url: "tikhub://x-account/openai",
+      title: "@openai",
+    });
+    const topic = createFeed({
+      feedId: topicConfig.id,
+      sourceKind: "x-topic",
+      sourceConfig: topicConfig,
+      url: "tikhub://x-topic/ai-apps",
+      title: topicConfig.name,
+    });
+    const plugin = createPluginWithSettings([rss, account, topic]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    const refresh = vi.fn(async (
+      config: { kind: "feed" } | typeof accountConfig | typeof topicConfig,
+      context: { feed?: Feed },
+    ) => {
+      if (config.kind === "feed") {
+        const updated = await plugin.feedParser.refreshFeed(context.feed);
+        return {
+          feed: { ...updated, sourceKind: "feed", sourceConfig: { kind: "feed" as const } },
+          items: updated.items,
+          providerRequestCount: 0,
+          warnings: [],
+        };
+      }
+      const source = config.kind === "x-account" ? account : topic;
+      const observed = createItem({
+        guid: config.kind === "x-account" ? "100" : "200",
+        link: `https://x.com/openai/status/${config.kind === "x-account" ? "100" : "200"}`,
+        feedUrl: source.url,
+      });
+      return {
+        feed: { ...source, items: [observed], lastUpdated: 2 },
+        items: [observed],
+        providerRequestCount: config.kind === "x-account" ? 1 : 3,
+        warnings: [],
+      };
+    });
+    const registry = { refresh } as unknown as SourceRegistry;
+    plugin.createSourceRegistryForRun = vi.fn(() => registry);
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+    plugin.feedParser.refreshFeed.mockResolvedValue({
+      ...rss,
+      lastUpdated: 2,
+    });
+
+    await plugin.manualRefreshAllSources();
+
+    expect(plugin.createSourceRegistryForRun).toHaveBeenCalledTimes(1);
+    expect(plugin.feedParser.refreshFeed).toHaveBeenCalledTimes(1);
+    expect(plugin.feedParser.refreshFeed).toHaveBeenCalledWith(
+      expect.objectContaining({ feedId: "rss-source" }),
+    );
+    expect(refresh.mock.calls.map(([config]) => config.kind)).toEqual([
+      "feed",
+      "x-account",
+      "x-topic",
+    ]);
+    expect(collectFeedRefresh).toHaveBeenCalledTimes(3);
+  });
+
+  it("records an actionable error for disabled X sources while RSS still refreshes", async () => {
+    const rss = createFeed({ feedId: "rss-source" });
+    const account = createFeed({
+      feedId: "x-account-openai",
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "x-account-openai",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      url: "tikhub://x-account/openai",
+    });
+    const plugin = createPluginWithSettings([rss, account]);
+    plugin.settings.tikhub = { ...plugin.settings.tikhub, enabled: false };
+    plugin.settings.collection = { ...plugin.settings.collection, enabled: false };
+    const ledger = {
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+    };
+    plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+    plugin.feedParser.refreshFeed.mockResolvedValue({
+      ...rss,
+      lastUpdated: 2,
+    });
+
+    await plugin.refreshFeeds();
+
+    expect(plugin.feedParser.refreshFeed).toHaveBeenCalledTimes(1);
+    expect(plugin.settings.feeds.find((feed) => feed.feedId === "rss-source")?.lastUpdated).toBe(2);
+    expect(ledger.recordError).toHaveBeenCalledWith(
+      "x-account-openai",
+      expect.any(Date),
+      expect.objectContaining({
+        code: "tikhub-disabled",
+        message: expect.stringContaining("TikHub"),
+      }),
+    );
+    expect(ledger.recordSuccess).toHaveBeenCalledWith(
+      "rss-source",
+      expect.any(Date),
+    );
+  });
+
+  it("includes enabled account and topic sources in the due daily-on-open set", async () => {
+    const account = createFeed({
+      feedId: "x-account-openai",
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "x-account-openai",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      url: "tikhub://x-account/openai",
+    });
+    const topic = createFeed({
+      feedId: "ai-apps",
+      sourceKind: "x-topic",
+      sourceConfig: {
+        kind: "x-topic",
+        id: "ai-apps",
+        name: "AI applications",
+        includeKeywords: ["AI"],
+        excludeKeywords: [],
+        priorityAccounts: [],
+        windowDays: 7,
+        folder: "Topics",
+      },
+      url: "tikhub://x-topic/ai-apps",
+    });
+    const plugin = createPluginWithSettings([account, topic]);
+    plugin.settings.refreshMode = "daily-on-open";
+    plugin.settings.startupRefreshDelaySeconds = 0;
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getDueSourceIds: vi.fn().mockResolvedValue([
+        "x-account-openai",
+        "ai-apps",
+      ]),
+    }));
+    plugin.refreshFeeds = vi.fn().mockResolvedValue(undefined);
+
+    await plugin.refreshOnOpenIfNeeded();
+    await flushMicrotasks();
+
+    expect(plugin.refreshFeeds).toHaveBeenCalledWith([account, topic]);
+  });
+
+  it("contains a missing TikHub key to the X source while RSS completes", async () => {
+    const rss = createFeed({ feedId: "rss-source" });
+    const account = createFeed({
+      feedId: "x-account-openai",
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "x-account-openai",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      url: "tikhub://x-account/openai",
+    });
+    const plugin = createPluginWithSettings([rss, account]);
+    plugin.settings.collection = { ...plugin.settings.collection, enabled: false };
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "",
+    };
+    const ledger = {
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+    };
+    plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+    plugin.feedParser.refreshFeed.mockResolvedValue({
+      ...rss,
+      lastUpdated: 2,
+    });
+
+    await plugin.manualRefreshAllSources();
+
+    expect(plugin.feedParser.refreshFeed).toHaveBeenCalledTimes(1);
+    expect(ledger.recordSuccess).toHaveBeenCalledWith("rss-source", expect.any(Date));
+    expect(ledger.recordError).toHaveBeenCalledWith(
+      "x-account-openai",
+      expect.any(Date),
+      expect.objectContaining({ code: "missing-key" }),
+    );
+  });
   it("restores vault metadata and its plugin pointer with feed files", async () => {
     const source = createFeed({ feedId: "source-transaction" });
     const plugin = createPluginWithSettings([source]);

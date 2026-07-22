@@ -67,9 +67,14 @@ export class CollectionService {
     }));
     const hasSuccessfulBootstrap =
       await this.dependencies.repository.hasItemsForSource(sourceId);
-    const collected = hasSuccessfulBootstrap
-      ? this.collectChanges(input, normalizedItems)
-      : normalizedItems.map(({ collected }) => collected);
+    // Topic discovery is an observation snapshot, not a change feed. Passing
+    // every in-window result lets the repository mark cross-day repeats as
+    // rediscovered while its same-day merge still prevents duplicates.
+    const collected = input.feed.sourceKind === "x-topic"
+      ? normalizedItems.map(({ collected }) => collected)
+      : hasSuccessfulBootstrap
+        ? this.collectChanges(input, normalizedItems)
+        : normalizedItems.map(({ collected }) => collected);
     const localDate = toLocalCalendarDate(input.fetchedAt);
 
     const storedDailyItems = await this.dependencies.repository.upsertDaily(

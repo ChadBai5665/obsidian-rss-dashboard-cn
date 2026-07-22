@@ -266,6 +266,87 @@ describe("Dashboard collection sections", () => {
     ]);
   });
 
+  it("composes account, topic, observation, date, starred, saved, and read filters", async () => {
+    const matching = item({
+      id: "match",
+      sourceType: "x-topic",
+      sourceId: "ai-apps",
+      sourceName: "AI applications",
+      author: "OpenAI",
+      url: "https://x.com/openai/status/200",
+      fetchedAt: "2026-07-22T08:00:00.000Z",
+      topics: ["AI applications", "x:latest"],
+      starred: true,
+      saved: true,
+      read: false,
+      sourceMetadata: {
+        kind: "x-post",
+        externalUrls: [],
+        observationTags: ["latest"],
+      },
+    });
+    const { view } = await makeView({
+      items: [
+        matching,
+        item({
+          id: "other-account",
+          sourceType: "x-topic",
+          sourceId: "ai-apps",
+          author: "Anthropic",
+          url: "https://x.com/anthropicai/status/201",
+          topics: ["AI applications", "x:latest"],
+          starred: true,
+          saved: true,
+          sourceMetadata: {
+            kind: "x-post",
+            externalUrls: [],
+            observationTags: ["latest"],
+          },
+        }),
+        item({
+          id: "other-category",
+          sourceType: "x-topic",
+          sourceId: "ai-apps",
+          author: "OpenAI",
+          url: "https://x.com/openai/status/202",
+          topics: ["AI applications", "x:platform-top"],
+          starred: true,
+          saved: true,
+          sourceMetadata: {
+            kind: "x-post",
+            externalUrls: [],
+            observationTags: ["platform-top"],
+          },
+        }),
+      ],
+    });
+    await view.loadCollectionItems();
+    const root = document.body.createDiv();
+    view.renderCollectionSections(root);
+
+    root.querySelector<HTMLButtonElement>('[data-collection-account="openai"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-collection-topic="AI applications"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-collection-observation="latest"]')?.click();
+    const date = root.querySelector<HTMLInputElement>(".rss-dashboard-collection-date-filter");
+    expect(date?.value).toBe("2026-07-22");
+    for (const [selector, value] of [
+      [".rss-dashboard-collection-starred-filter", "yes"],
+      [".rss-dashboard-collection-saved-filter", "yes"],
+      [".rss-dashboard-collection-read-filter", "unread"],
+    ] as const) {
+      const control = root.querySelector<HTMLSelectElement>(selector);
+      expect(control).not.toBeNull();
+      if (control) {
+        control.value = value;
+        control.dispatchEvent(new Event("change"));
+      }
+    }
+
+    expect(view.getCollectionSectionItems().map((entry) => entry.id)).toEqual([
+      "match",
+    ]);
+  });
+
   it("updates collection search results without destroying the active input or its cursor", async () => {
     const { view } = await makeView({
       items: [

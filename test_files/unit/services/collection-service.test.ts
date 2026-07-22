@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { App } from "obsidian";
 import { CollectionService } from "../../../src/services/collection-service";
 import type { CollectedItem } from "../../../src/collection/collected-item";
+import { CollectionRepository } from "../../../src/collection/collection-repository";
+import { DailyIndexService } from "../../../src/collection/daily-index-service";
 import type { Feed, FeedItem } from "../../../src/types/types";
 
 function item(overrides: Partial<FeedItem> = {}): FeedItem {
@@ -95,7 +98,15 @@ function harness(options: { bootstrapped?: boolean; stored?: boolean } = {}) {
   };
   const normalize = vi.fn((sourceFeed: Feed, sourceItem: FeedItem, now: Date) => {
     events.push("normalize");
-    return collected(sourceItem, now);
+    return {
+      ...collected(sourceItem, now),
+      sourceId: sourceFeed.feedId ?? sourceFeed.url,
+      sourceName: sourceFeed.title,
+      sourceBucket: sourceFeed.folder,
+      ...(sourceFeed.sourceKind === "x-topic"
+        ? { sourceType: "x-topic" as const, contentBasis: "x-post" as const }
+        : {}),
+    };
   });
   const service = new CollectionService({
     repository,
@@ -108,6 +119,117 @@ function harness(options: { bootstrapped?: boolean; stored?: boolean } = {}) {
 }
 
 describe("CollectionService", () => {
+  it("observes every in-window topic result so a later daily upsert can mark it rediscovered", async () => {
+    const unchanged = item({
+      guid: "200",
+      link: "https://x.com/openai/status/200",
+      feedUrl: "tikhub://x-topic/ai-apps",
+    });
+    const topicFeed: Feed = {
+      ...feed([unchanged]),
+      feedId: "ai-apps",
+      sourceKind: "x-topic",
+      sourceConfig: {
+        kind: "x-topic",
+        id: "ai-apps",
+        name: "AI applications",
+        includeKeywords: ["AI"],
+        excludeKeywords: [],
+        priorityAccounts: [],
+        windowDays: 7,
+        folder: "Topics",
+      },
+      url: "tikhub://x-topic/ai-apps",
+    };
+    const test = harness({ stored: true });
+
+    const result = await test.service.collectFeedRefresh({
+      feed: topicFeed,
+      previousItems: [unchanged],
+      refreshedItems: [unchanged],
+      fetchedAt: new Date(2026, 6, 22, 10, 0, 0),
+    });
+
+    expect(result).toHaveLength(1);
+    expect(test.repository.upsertDaily).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: "200", sourceId: "ai-apps" })],
+      "2026-07-22",
+    );
+    expect(test.events.slice(-3)).toEqual(["jsonl", "markdown", "success"]);
+  });
+
+  it("marks an unchanged topic post rediscovered when it is observed on a later local date", async () => {
+    const app = new App();
+    const repository = new CollectionRepository(
+      app.vault,
+      ".task8-topic-rediscovery",
+      () => new Date(2026, 6, 22, 10, 0, 0),
+    );
+    const ledger = { recordSuccess: vi.fn().mockResolvedValue(undefined) };
+    const service = new CollectionService({
+      repository,
+      dailyIndex: new DailyIndexService(
+        app.vault,
+        "Task8 Topic Rediscovery",
+      ),
+      ledger,
+    });
+    const observed = item({
+      guid: "200",
+      link: "https://x.com/openai/status/200",
+      feedUrl: "tikhub://x-topic/ai-apps",
+    }) as FeedItem & {
+      plainText: string;
+      sourceMetadata: CollectedItem["sourceMetadata"];
+    };
+    observed.plainText = "Same provider observation";
+    observed.sourceMetadata = {
+      kind: "x-post",
+      externalUrls: [],
+      observationTags: ["latest"],
+    };
+    const topicFeed = {
+      ...feed([observed]),
+      feedId: "ai-apps",
+      sourceKind: "x-topic" as const,
+      sourceType: "x-topic" as const,
+      sourceConfig: {
+        kind: "x-topic" as const,
+        id: "ai-apps",
+        name: "AI applications",
+        includeKeywords: ["AI"],
+        excludeKeywords: [],
+        priorityAccounts: [],
+        windowDays: 7 as const,
+        folder: "Topics",
+      },
+      url: "tikhub://x-topic/ai-apps",
+    };
+
+    await service.collectFeedRefresh({
+      feed: topicFeed,
+      previousItems: [],
+      refreshedItems: [observed],
+      fetchedAt: new Date(2026, 6, 21, 10, 0, 0),
+    });
+    await service.collectFeedRefresh({
+      feed: topicFeed,
+      previousItems: [observed],
+      refreshedItems: [observed],
+      fetchedAt: new Date(2026, 6, 22, 10, 0, 0),
+    });
+
+    const secondDay = await repository.listByDate("2026-07-22");
+    expect(secondDay).toHaveLength(1);
+    expect(secondDay[0]).toMatchObject({
+      guid: "200",
+      observationType: "rediscovered",
+      topics: expect.arrayContaining(["x:latest"]),
+    });
+    expect(secondDay[0].id).toMatch(/^[a-f0-9]{64}$/u);
+    expect(ledger.recordSuccess).toHaveBeenCalledTimes(2);
+  });
+
   it("bootstraps every refreshed item and durably orders JSONL, Markdown, then success", async () => {
     const first = item();
     const second = item({ guid: "article-2", link: "https://example.com/2" });

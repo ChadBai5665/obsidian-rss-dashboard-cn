@@ -4,6 +4,8 @@ import type { SourceConfig } from "./source-config";
 export interface SourceRefreshContext {
   now: Date;
   signal?: AbortSignal;
+  /** Present for the legacy feed adapter; X adapters use only typed config. */
+  feed?: Feed;
 }
 
 export interface LinkedPageGroupData {

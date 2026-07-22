@@ -54,6 +54,7 @@ import type { CollectedItem, ContentBasis } from "../collection/collected-item";
 import { getContentBasisLabel } from "../collection/content-basis-display";
 import { toLocalCalendarDate } from "../refresh/local-calendar-day";
 import { createTranslator } from "../i18n";
+import { renderTopicDiscoverySection } from "./topic-discovery-section";
 
 export const RSS_DASHBOARD_VIEW_TYPE = "rss-dashboard-view";
 
@@ -147,7 +148,14 @@ export class RssDashboardView extends ItemView {
   private collectionQueryText = "";
   private collectionSourceTypes = new Set<CollectedItem["sourceType"]>();
   private collectionTopics = new Set<string>();
+  private collectionAccounts = new Set<string>();
+  private collectionObservationTags = new Set<
+    "latest" | "platform-top" | "priority-account"
+  >();
   private collectionRead: boolean | undefined;
+  private collectionStarred: boolean | undefined;
+  private collectionSaved: boolean | undefined;
+  private collectionDate = toLocalCalendarDate(new Date());
   private collectionCollapsed = false;
   private collectionLoading = false;
   private collectionLoadError = false;
@@ -1132,7 +1140,7 @@ export class RssDashboardView extends ItemView {
 
     try {
       const items = await this.plugin.getCollectedItemsForDate(
-        toLocalCalendarDate(new Date()),
+        this.collectionDate,
       );
       if (
         this.collectionViewDisposed ||
@@ -1143,6 +1151,12 @@ export class RssDashboardView extends ItemView {
       this.collectionItems = items;
       const availableTypes = new Set(items.map((item) => item.sourceType));
       const availableTopics = new Set(items.flatMap((item) => item.topics));
+      const availableAccounts = new Set(
+        items.map(collectionAccountHandle).filter((value): value is string => Boolean(value)),
+      );
+      const availableObservations = new Set(
+        items.flatMap(collectionObservationTags),
+      );
       this.collectionSourceTypes = new Set(
         [...this.collectionSourceTypes].filter((type) =>
           availableTypes.has(type),
@@ -1151,6 +1165,16 @@ export class RssDashboardView extends ItemView {
       this.collectionTopics = new Set(
         [...this.collectionTopics].filter((topic) =>
           availableTopics.has(topic),
+        ),
+      );
+      this.collectionAccounts = new Set(
+        [...this.collectionAccounts].filter((account) =>
+          availableAccounts.has(account),
+        ),
+      );
+      this.collectionObservationTags = new Set(
+        [...this.collectionObservationTags].filter((tag) =>
+          availableObservations.has(tag),
         ),
       );
     } catch {
@@ -1190,7 +1214,26 @@ export class RssDashboardView extends ItemView {
       sourceTypes: [...this.collectionSourceTypes],
       topics: [...this.collectionTopics],
       read: this.collectionRead,
+      starred: this.collectionStarred,
+      saved: this.collectionSaved,
     };
+
+    input.items = input.items.filter((item) => {
+      const account = collectionAccountHandle(item);
+      if (
+        this.collectionAccounts.size > 0 &&
+        (!account || !this.collectionAccounts.has(account))
+      ) return false;
+      if (this.collectionObservationTags.size > 0) {
+        const tags = collectionObservationTags(item);
+        if (!tags.some((tag) => this.collectionObservationTags.has(tag))) {
+          return false;
+        }
+      }
+      // Date selection happens at repository load time; do not reinterpret a
+      // fetched timestamp here because a local-day snapshot is authoritative.
+      return true;
+    });
 
     if (this.collectionSection === "subscriptions") {
       const currentSourceIds = new Set(
@@ -1204,6 +1247,8 @@ export class RssDashboardView extends ItemView {
       // recommendation. Keep the raw values out of translated UI copy.
       input.items = input.items.filter(
         (item) =>
+          (item.sourceType === "x-topic" &&
+            collectionObservationTags(item).length > 0) ||
           item.sourceBucket === "topic-latest" ||
           item.sourceBucket === "topic-top",
       );
@@ -1303,6 +1348,20 @@ export class RssDashboardView extends ItemView {
     const filterControls = section.createDiv({
       cls: "rss-dashboard-collection-filter-controls",
     });
+    const date = filterControls.createEl("input", {
+      cls: "rss-dashboard-collection-date-filter",
+      attr: {
+        type: "date",
+        value: this.collectionDate,
+        "aria-label": this.t("navigation.todayCollection"),
+      },
+    });
+    date.value = this.collectionDate;
+    date.addEventListener("change", () => {
+      if (!/^\d{4}-\d{2}-\d{2}$/u.test(date.value)) return;
+      this.collectionDate = date.value;
+      void this.loadCollectionItems();
+    });
     const sourceTypes = [
       ...new Set(this.collectionItems.map((item) => item.sourceType)),
     ].sort();
@@ -1330,8 +1389,40 @@ export class RssDashboardView extends ItemView {
       });
     }
 
+    const accounts = [
+      ...new Set(
+        this.collectionItems
+          .map(collectionAccountHandle)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ].sort();
+    for (const account of accounts) {
+      const accountButton = filterControls.createEl("button", {
+        text: `@${account}`,
+        cls: "rss-dashboard-collection-account-filter",
+        attr: {
+          type: "button",
+          "data-collection-account": account,
+          "aria-pressed": String(this.collectionAccounts.has(account)),
+        },
+      });
+      accountButton.toggleClass("is-active", this.collectionAccounts.has(account));
+      accountButton.addEventListener("click", () => {
+        if (this.collectionAccounts.has(account)) {
+          this.collectionAccounts.delete(account);
+        } else {
+          this.collectionAccounts.add(account);
+        }
+        this.render();
+      });
+    }
+
     const topics = [
-      ...new Set(this.collectionItems.flatMap((item) => item.topics)),
+      ...new Set(
+        this.collectionItems
+          .flatMap((item) => item.topics)
+          .filter((topic) => !topic.startsWith("x:")),
+      ),
     ].sort();
     for (const topic of topics) {
       const topicButton = filterControls.createEl("button", {
@@ -1349,6 +1440,41 @@ export class RssDashboardView extends ItemView {
           this.collectionTopics.delete(topic);
         } else {
           this.collectionTopics.add(topic);
+        }
+        this.render();
+      });
+    }
+
+    const observations = [
+      ...new Set(this.collectionItems.flatMap(collectionObservationTags)),
+    ].sort();
+    for (const observation of observations) {
+      const observationButton = filterControls.createEl("button", {
+        text: this.t(
+          observation === "latest"
+            ? "dashboard.topicLatest"
+            : observation === "platform-top"
+              ? "dashboard.topicPlatformTop"
+              : "dashboard.topicPriorityAccount",
+        ),
+        cls: "rss-dashboard-collection-observation-filter",
+        attr: {
+          type: "button",
+          "data-collection-observation": observation,
+          "aria-pressed": String(
+            this.collectionObservationTags.has(observation),
+          ),
+        },
+      });
+      observationButton.toggleClass(
+        "is-active",
+        this.collectionObservationTags.has(observation),
+      );
+      observationButton.addEventListener("click", () => {
+        if (this.collectionObservationTags.has(observation)) {
+          this.collectionObservationTags.delete(observation);
+        } else {
+          this.collectionObservationTags.add(observation);
         }
         this.render();
       });
@@ -1376,6 +1502,24 @@ export class RssDashboardView extends ItemView {
         read.value === "all" ? undefined : read.value === "read";
       this.render();
     });
+    this.renderCollectionBooleanFilter(
+      filterControls,
+      "rss-dashboard-collection-starred-filter",
+      this.collectionStarred,
+      (value) => {
+        this.collectionStarred = value;
+      },
+      this.t("navigation.starred"),
+    );
+    this.renderCollectionBooleanFilter(
+      filterControls,
+      "rss-dashboard-collection-saved-filter",
+      this.collectionSaved,
+      (value) => {
+        this.collectionSaved = value;
+      },
+      this.t("navigation.saved"),
+    );
 
     const results = section.createDiv({
       cls: "rss-dashboard-collection-results",
@@ -1415,6 +1559,15 @@ export class RssDashboardView extends ItemView {
       return;
     }
 
+    if (this.collectionSection === "topic-discovery") {
+      renderTopicDiscoverySection(
+        list,
+        items,
+        this.settings.locale ?? "zh-CN",
+      );
+      return;
+    }
+
     for (const item of items) {
       const row = list.createDiv({ cls: "rss-dashboard-collection-row" });
       row.createSpan({
@@ -1443,6 +1596,31 @@ export class RssDashboardView extends ItemView {
         );
       });
     }
+  }
+
+  private renderCollectionBooleanFilter(
+    container: HTMLElement,
+    className: string,
+    current: boolean | undefined,
+    update: (value: boolean | undefined) => void,
+    label: string,
+  ): void {
+    const select = container.createEl("select", {
+      cls: className,
+      attr: { "aria-label": label },
+    });
+    for (const option of [
+      { value: "all", label: this.t("common.all") },
+      { value: "yes", label },
+      { value: "no", label: this.t("dashboard.filterNo", { label }) },
+    ]) {
+      select.createEl("option", { value: option.value, text: option.label });
+    }
+    select.value = current === undefined ? "all" : current ? "yes" : "no";
+    select.addEventListener("change", () => {
+      update(select.value === "all" ? undefined : select.value === "yes");
+      this.render();
+    });
   }
 
   private runCollectionRefreshAction(action: () => Promise<void>): void {
@@ -5118,5 +5296,105 @@ export class RssDashboardView extends ItemView {
     if (this.currentFolder === "starred")
       return this.settings.starredArticlesPageSize;
     return this.settings.allArticlesPageSize;
+  }
+}
+
+type CollectionObservationTag =
+  | "latest"
+  | "platform-top"
+  | "priority-account";
+const COLLECTION_OBSERVATION_TAGS = new Set<CollectionObservationTag>([
+  "latest",
+  "platform-top",
+  "priority-account",
+]);
+
+function collectionAccountHandle(item: CollectedItem): string | undefined {
+  const urlValue = ownDataValue(item as unknown as Record<string, unknown>, "url");
+  if (typeof urlValue !== "string") return undefined;
+  try {
+    const url = new URL(urlValue);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== "https:" || (host !== "x.com" && host !== "www.x.com")) {
+      return undefined;
+    }
+    const segments = url.pathname.split("/").filter(Boolean);
+    if (segments.length !== 3 || segments[1] !== "status") return undefined;
+    const handle = segments[0].toLowerCase();
+    return /^[a-z0-9_]{1,15}$/u.test(handle) ? handle : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function collectionObservationTags(
+  item: CollectedItem,
+): CollectionObservationTag[] {
+  const metadata = ownDataValue(
+    item as unknown as Record<string, unknown>,
+    "sourceMetadata",
+  );
+  if (!isPlainRecord(metadata)) return [];
+  const value = ownDataValue(metadata, "observationTags");
+  return snapshotDenseObservationTags(value) ?? [];
+}
+
+function snapshotDenseObservationTags(
+  value: unknown,
+): CollectionObservationTag[] | undefined {
+  try {
+    if (!Array.isArray(value) || Reflect.getPrototypeOf(value) !== Array.prototype) {
+      return undefined;
+    }
+    const lengthValue: unknown = Object.getOwnPropertyDescriptor(
+      value,
+      "length",
+    )?.value;
+    if (
+      typeof lengthValue !== "number" ||
+      !Number.isSafeInteger(lengthValue) ||
+      lengthValue < 0 ||
+      lengthValue > 3
+    ) return undefined;
+    const length = lengthValue;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== length + 1 || !keys.includes("length")) return undefined;
+    const result: CollectionObservationTag[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (
+        !descriptor ||
+        !("value" in descriptor) ||
+        !COLLECTION_OBSERVATION_TAGS.has(descriptor.value as CollectionObservationTag)
+      ) return undefined;
+      result.push(descriptor.value as CollectionObservationTag);
+    }
+    return result;
+  } catch {
+    return undefined;
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return false;
+    }
+    const prototype = Reflect.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  } catch {
+    return false;
+  }
+}
+
+function ownDataValue(
+  value: Record<string, unknown>,
+  key: string,
+): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
   }
 }
