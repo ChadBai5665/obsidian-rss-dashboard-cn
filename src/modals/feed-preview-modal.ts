@@ -16,6 +16,7 @@ export class FeedPreviewModal extends Modal {
     private feed: FeedMetadata;
     private articles: PreviewArticle[] = [];
     private error: string | null = null;
+    private loadGeneration = 0;
 
     private corsProxyEnabled: boolean;
 
@@ -36,10 +37,6 @@ export class FeedPreviewModal extends Modal {
         contentEl.empty();
         
         this.renderHeader(contentEl);
-        contentEl.createDiv({
-            cls: "feed-preview-loading",
-            text: createTranslator(this.locale)("common.loading"),
-        });
         void this.loadFeedPreview();
     }
 
@@ -91,18 +88,42 @@ export class FeedPreviewModal extends Modal {
     }
 
     private async loadFeedPreview(): Promise<void> {
+        const generation = ++this.loadGeneration;
+        this.renderLoading();
+
         try {
             this.error = null;
 
             const xmlString = await fetchFeedXml(this.feed.url, this.corsProxyEnabled);
-            this.articles = this.parseFeedXml(xmlString);
+            const articles = this.parseFeedXml(xmlString);
+            if (generation !== this.loadGeneration) return;
+
+            this.articles = articles;
             
             this.renderContent();
         } catch (error) {
             console.error("[RSS Dashboard] Failed to load feed preview:", error);
+            if (generation !== this.loadGeneration) return;
+
             this.error = createTranslator(this.locale)("modal.preview.error");
             this.renderError();
         }
+    }
+
+    private clearPreviewState(): void {
+        this.contentEl
+            .querySelectorAll(
+                ".feed-preview-loading, .feed-preview-error, .feed-preview-empty, .feed-preview-content",
+            )
+            .forEach((element) => element.remove());
+    }
+
+    private renderLoading(): void {
+        this.clearPreviewState();
+        this.contentEl.createDiv({
+            cls: "feed-preview-loading",
+            text: createTranslator(this.locale)("common.loading"),
+        });
     }
 
     private parseFeedXml(xmlString: string): PreviewArticle[] {
@@ -229,7 +250,7 @@ export class FeedPreviewModal extends Modal {
     }
 
     private renderError(): void {
-        this.contentEl.querySelector(".feed-preview-loading")?.remove();
+        this.clearPreviewState();
         const t = createTranslator(this.locale);
         const container = this.contentEl;
         const errorEl = container.createDiv({ cls: "feed-preview-error" });
@@ -242,7 +263,7 @@ export class FeedPreviewModal extends Modal {
     }
 
     private renderContent(): void {
-        this.contentEl.querySelector(".feed-preview-loading")?.remove();
+        this.clearPreviewState();
         const t = createTranslator(this.locale);
         const container = this.contentEl;
         
@@ -352,6 +373,7 @@ export class FeedPreviewModal extends Modal {
     }
 
     onClose() {
+        this.loadGeneration++;
         this.contentEl.empty();
     }
 } 

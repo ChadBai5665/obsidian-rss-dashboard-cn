@@ -13,6 +13,23 @@ function flushPromises(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+const oneArticleFeed = `<?xml version="1.0"?>
+  <rss><channel><item><title>Ok</title><link>x</link></item></channel></rss>`;
+
 const baseFeed = {
   id: "test-feed",
   title: "Example Feed",
@@ -169,41 +186,193 @@ describe("FeedPreviewModal", () => {
     ).toBeFalsy();
   });
 
-  it("renders an error and retries fetching on button click", async () => {
+  it("replaces a Chinese error with loading and then successful content on retry", async () => {
     const { FeedPreviewModal } =
       await import("../../../src/modals/feed-preview-modal");
 
+    const firstRequest = createDeferred<string>();
+    const retryRequest = createDeferred<string>();
     fetchFeedXmlMock
-      .mockRejectedValueOnce(new Error("boom"))
-      .mockResolvedValueOnce(
-        `<?xml version="1.0"?><rss><channel><item><title>Ok</title><link>x</link></item></channel></rss>`,
-      );
+      .mockReturnValueOnce(firstRequest.promise)
+      .mockReturnValueOnce(retryRequest.promise);
 
     const app = obsidian.App.createMock();
     const modal = new FeedPreviewModal(
       app as unknown as obsidian.App,
       baseFeed as unknown as FeedMetadata,
       true,
-      "en",
     );
     modal.open();
 
+    firstRequest.reject(new Error("boom"));
     await flushPromises();
 
-    expect(modal.contentEl.textContent).toContain(
-      "Could not load the feed preview",
-    );
+    expect(modal.contentEl.textContent).toContain("无法加载订阅源预览");
     expect(modal.contentEl.textContent).not.toContain("boom");
 
     const retryBtn = modal.contentEl.querySelector(
       "button.mod-cta",
     ) as HTMLButtonElement;
-    expect(retryBtn?.textContent).toBe("Retry");
+    expect(retryBtn?.textContent).toBe("重试");
 
     retryBtn.click();
+
+    expect(modal.contentEl.querySelectorAll(".feed-preview-loading")).toHaveLength(
+      1,
+    );
+    expect(modal.contentEl.querySelectorAll(".feed-preview-error")).toHaveLength(
+      0,
+    );
+    expect(modal.contentEl.querySelectorAll(".feed-preview-empty")).toHaveLength(
+      0,
+    );
+    expect(modal.contentEl.querySelectorAll(".feed-preview-content")).toHaveLength(
+      0,
+    );
+
+    retryRequest.resolve(oneArticleFeed);
     await flushPromises();
 
     expect(fetchFeedXmlMock).toHaveBeenCalledTimes(2);
+    expect(modal.contentEl.querySelectorAll(".feed-preview-loading")).toHaveLength(
+      0,
+    );
+    expect(modal.contentEl.querySelectorAll(".feed-preview-error")).toHaveLength(
+      0,
+    );
+    expect(modal.contentEl.querySelectorAll(".feed-preview-content")).toHaveLength(
+      1,
+    );
+    expect(modal.contentEl.textContent).toContain("最新 1 篇文章");
+  });
+
+  it("keeps exactly one English error after a failed retry", async () => {
+    const { FeedPreviewModal } =
+      await import("../../../src/modals/feed-preview-modal");
+
+    const retryRequest = createDeferred<string>();
+    fetchFeedXmlMock
+      .mockRejectedValueOnce(new Error("first raw error"))
+      .mockReturnValueOnce(retryRequest.promise);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const modal = new FeedPreviewModal(
+      obsidian.App.createMock() as unknown as obsidian.App,
+      baseFeed as unknown as FeedMetadata,
+      true,
+      "en",
+    );
+    modal.open();
+    await flushPromises();
+
+    const retryBtn = modal.contentEl.querySelector(
+      "button.mod-cta",
+    ) as HTMLButtonElement;
+    retryBtn.click();
+
+    expect(modal.contentEl.querySelectorAll(".feed-preview-loading")).toHaveLength(
+      1,
+    );
+    expect(modal.contentEl.querySelectorAll(".feed-preview-error")).toHaveLength(
+      0,
+    );
+
+    retryRequest.reject(new Error("second raw error"));
+    await flushPromises();
+
+    expect(modal.contentEl.querySelectorAll(".feed-preview-loading")).toHaveLength(
+      0,
+    );
+    expect(modal.contentEl.querySelectorAll(".feed-preview-error")).toHaveLength(
+      1,
+    );
+    expect(modal.contentEl.textContent).toContain(
+      "Could not load the feed preview",
+    );
+    expect(modal.contentEl.textContent).not.toContain("first raw error");
+    expect(modal.contentEl.textContent).not.toContain("second raw error");
+  });
+
+  it("replaces an empty state with loading before a later successful load", async () => {
+    const { FeedPreviewModal } =
+      await import("../../../src/modals/feed-preview-modal");
+
+    const reloadRequest = createDeferred<string>();
+    fetchFeedXmlMock
+      .mockResolvedValueOnce("<rss><channel></channel></rss>")
+      .mockReturnValueOnce(reloadRequest.promise);
+
+    const modal = new FeedPreviewModal(
+      obsidian.App.createMock() as unknown as obsidian.App,
+      baseFeed as unknown as FeedMetadata,
+      true,
+      "en",
+    );
+    modal.open();
+    await flushPromises();
+
+    expect(modal.contentEl.querySelectorAll(".feed-preview-empty")).toHaveLength(
+      1,
+    );
+
+    const reload = (
+      modal as unknown as { loadFeedPreview: () => Promise<void> }
+    ).loadFeedPreview();
+
+    expect(modal.contentEl.querySelectorAll(".feed-preview-empty")).toHaveLength(
+      0,
+    );
+    expect(modal.contentEl.querySelectorAll(".feed-preview-loading")).toHaveLength(
+      1,
+    );
+
+    reloadRequest.resolve(oneArticleFeed);
+    await reload;
+
+    expect(modal.contentEl.querySelectorAll(".feed-preview-loading")).toHaveLength(
+      0,
+    );
+    expect(modal.contentEl.querySelectorAll(".feed-preview-content")).toHaveLength(
+      1,
+    );
+  });
+
+  it("ignores an older request that completes after a newer request", async () => {
+    const { FeedPreviewModal } =
+      await import("../../../src/modals/feed-preview-modal");
+
+    const olderRequest = createDeferred<string>();
+    const newerRequest = createDeferred<string>();
+    fetchFeedXmlMock
+      .mockReturnValueOnce(olderRequest.promise)
+      .mockReturnValueOnce(newerRequest.promise);
+
+    const modal = new FeedPreviewModal(
+      obsidian.App.createMock() as unknown as obsidian.App,
+      baseFeed as unknown as FeedMetadata,
+      true,
+      "en",
+    );
+    modal.open();
+    const newerLoad = (
+      modal as unknown as { loadFeedPreview: () => Promise<void> }
+    ).loadFeedPreview();
+
+    newerRequest.resolve(oneArticleFeed);
+    await newerLoad;
+    olderRequest.resolve("<rss><channel></channel></rss>");
+    await flushPromises();
+
+    expect(modal.contentEl.querySelectorAll(".feed-preview-loading")).toHaveLength(
+      0,
+    );
+    expect(modal.contentEl.querySelectorAll(".feed-preview-empty")).toHaveLength(
+      0,
+    );
+    expect(modal.contentEl.querySelectorAll(".feed-preview-content")).toHaveLength(
+      1,
+    );
+    expect(modal.contentEl.textContent).toContain("Latest 1 articles");
   });
 
   it("shows an empty state when no articles are found", async () => {
