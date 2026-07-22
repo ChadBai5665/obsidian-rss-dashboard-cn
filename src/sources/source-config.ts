@@ -159,7 +159,16 @@ export function normalizeXAccountSourceConfig(
   }
   const handle = normalizeXHandle(value.handle);
   const id = normalizedId(value.id);
-  if (value.kind !== "x-account" || !handle || !id) return undefined;
+  if (
+    value.kind !== "x-account" ||
+    !handle ||
+    !id ||
+    typeof value.includeReplies !== "boolean" ||
+    typeof value.includeReposts !== "boolean" ||
+    typeof value.folder !== "string"
+  ) {
+    return undefined;
+  }
   const topics = normalizedStringList(value.topics);
   if (!topics) return undefined;
   const displayName = hasOwn(value, "displayName")
@@ -170,8 +179,8 @@ export function normalizeXAccountSourceConfig(
     id,
     handle,
     ...(displayName ? { displayName } : {}),
-    includeReplies: value.includeReplies === true,
-    includeReposts: value.includeReposts === true,
+    includeReplies: value.includeReplies,
+    includeReposts: value.includeReposts,
     folder: normalizedText(value.folder) ?? "",
     topics,
   };
@@ -201,6 +210,7 @@ export function normalizeXTopicSourceConfig(
     value.kind !== "x-topic" ||
     !id ||
     !name ||
+    typeof value.folder !== "string" ||
     !WINDOW_DAYS.has(value.windowDays as XTopicSourceConfig["windowDays"])
   ) {
     return undefined;
@@ -305,10 +315,7 @@ export function inferXSourceKind(
     return value.kind;
   }
   if (typeof value !== "string") return undefined;
-  const match =
-    /^tikhub:\/\/(x-account|x-topic)\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/.exec(
-      value,
-    );
+  const match = /^tikhub:\/\/(x-account|x-topic)(?=\/|[?#]|$)/.exec(value);
   return match?.[1] as "x-account" | "x-topic" | undefined;
 }
 

@@ -170,4 +170,28 @@ describe("SourceRegistry", () => {
       code: "invalid-source-output",
     });
   });
+
+  it("rejects inherited output fields and incomplete FeedItems", async () => {
+    const inheritedFeed = Object.create(feed) as Feed;
+    Object.assign(inheritedFeed, {
+      sourceKind: "x-account",
+      sourceConfig: { ...account },
+      url: "tikhub://x-account/openai",
+    });
+    const inheritedOutput = Object.create({
+      feed: inheritedFeed,
+      items: [{}],
+      providerRequestCount: 0,
+      warnings: [],
+    });
+    const registry = new SourceRegistry();
+    registry.register({
+      kind: "x-account",
+      refresh: vi.fn().mockResolvedValue(inheritedOutput),
+    });
+
+    await expect(registry.refresh(account, { now: new Date() })).rejects.toMatchObject({
+      code: "invalid-source-output",
+    });
+  });
 });

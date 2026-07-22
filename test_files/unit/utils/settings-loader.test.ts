@@ -263,6 +263,27 @@ describe("settings-loader", () => {
       });
     });
 
+    it.each([
+      "tikhub://x-account/openai?cursor=paid",
+      "tikhub://x-topic/topic-1/extra-path",
+      "tikhub://x-topic/invalid/id",
+    ])("quarantines any malformed X synthetic prefix: %s", async (url) => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const result = loadAndNormalizeSettings({
+        feeds: [createFeed({ url } as unknown as Feed)],
+      });
+
+      expect(result.feeds[0]).toMatchObject({
+        sourceKind: url.includes("x-account") ? "x-account" : "x-topic",
+        excludeFromRefresh: true,
+        lastFetchError: "Invalid X source configuration",
+      });
+      expect(result.feeds[0].url).toMatch(
+        /^tikhub:\/\/x-(account|topic)\/unconfigured-1$/,
+      );
+    });
+
     it("deduplicates loaded X sources by canonical account handle or topic id", async () => {
       const { loadAndNormalizeSettings } =
         await import("../../../src/utils/settings-loader");

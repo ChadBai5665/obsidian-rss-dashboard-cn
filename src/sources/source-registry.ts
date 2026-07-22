@@ -54,6 +54,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+const MISSING = Symbol("missing-own-property");
+
+function ownDataValue(
+  value: Record<string, unknown>,
+  key: string,
+): unknown {
+  if (!hasOwn(value, key)) return MISSING;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && "value" in descriptor ? descriptor.value : MISSING;
+}
+
 function isDenseOwnArray(
   value: unknown,
   predicate: (entry: unknown) => boolean,
@@ -77,26 +88,62 @@ function sourceSignature(config: SourceConfig): string {
   return JSON.stringify(config);
 }
 
+const FEED_ITEM_REQUIRED_FIELDS = [
+  "title",
+  "link",
+  "description",
+  "pubDate",
+  "guid",
+  "feedTitle",
+  "feedUrl",
+  "coverImage",
+] as const;
+
+function isFeedItem(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return FEED_ITEM_REQUIRED_FIELDS.every(
+    (field) => typeof ownDataValue(value, field) === "string",
+  );
+}
+
+function isFeed(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const lastUpdated = ownDataValue(value, "lastUpdated");
+  return (
+    typeof ownDataValue(value, "title") === "string" &&
+    typeof ownDataValue(value, "url") === "string" &&
+    typeof ownDataValue(value, "folder") === "string" &&
+    typeof lastUpdated === "number" &&
+    Number.isFinite(lastUpdated) &&
+    ownDataValue(value, "sourceKind") !== MISSING &&
+    ownDataValue(value, "sourceConfig") !== MISSING &&
+    isDenseOwnArray(ownDataValue(value, "items"), isFeedItem)
+  );
+}
+
 function assertValidRefreshOutput(
   output: unknown,
   config: SourceConfig,
 ): SourceRefreshOutput {
-  if (!isRecord(output) || !isRecord(output.feed)) {
+  if (!isRecord(output)) {
     throw new InvalidSourceOutputError();
   }
-  const feed = output.feed;
-  const outputConfig = normalizeSourceConfig(feed.sourceConfig);
-  const providerRequestCount = output.providerRequestCount;
+  const feed = ownDataValue(output, "feed");
+  const items = ownDataValue(output, "items");
+  const providerRequestCount = ownDataValue(output, "providerRequestCount");
+  const warnings = ownDataValue(output, "warnings");
+  if (!isFeed(feed)) throw new InvalidSourceOutputError();
+  const outputConfig = normalizeSourceConfig(ownDataValue(feed, "sourceConfig"));
   if (
-    !isDenseOwnArray(output.items, isRecord) ||
+    !isDenseOwnArray(items, isFeedItem) ||
     typeof providerRequestCount !== "number" ||
     !Number.isSafeInteger(providerRequestCount) ||
     providerRequestCount < 0 ||
     !isDenseOwnArray(
-      output.warnings,
+      warnings,
       (warning) => typeof warning === "string",
     ) ||
-    feed.sourceKind !== config.kind ||
+    ownDataValue(feed, "sourceKind") !== config.kind ||
     !outputConfig ||
     sourceSignature(outputConfig) !== sourceSignature(config)
   ) {
@@ -105,18 +152,19 @@ function assertValidRefreshOutput(
 
   const expectedUrl = sourceConfigUrl(config);
   if (
-    (expectedUrl !== undefined && feed.url !== expectedUrl) ||
+    (expectedUrl !== undefined && ownDataValue(feed, "url") !== expectedUrl) ||
     (config.kind === "feed" &&
-      (typeof feed.url !== "string" || !feed.url.trim()))
+      (typeof ownDataValue(feed, "url") !== "string" ||
+        !(ownDataValue(feed, "url") as string).trim()))
   ) {
     throw new InvalidSourceOutputError();
   }
 
   return {
     feed: feed as unknown as SourceRefreshOutput["feed"],
-    items: [...(output.items as SourceRefreshOutput["items"])],
+    items: [...(items as SourceRefreshOutput["items"])],
     providerRequestCount,
-    warnings: [...(output.warnings as SourceRefreshOutput["warnings"])],
+    warnings: [...(warnings as SourceRefreshOutput["warnings"])],
   };
 }
 

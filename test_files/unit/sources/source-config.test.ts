@@ -215,6 +215,36 @@ describe("X source configuration", () => {
     expect(sourceConfigUrl({ kind: "feed" })).toBeUndefined();
   });
 
+  it("rejects required X fields with the wrong type instead of coercing them", () => {
+    const validAccount = {
+      kind: "x-account",
+      id: "account-1",
+      handle: "openai",
+      includeReplies: false,
+      includeReposts: false,
+      folder: "X",
+      topics: [],
+    };
+    expect(
+      normalizeXAccountSourceConfig({ ...validAccount, includeReplies: "false" }),
+    ).toBeUndefined();
+    expect(
+      normalizeXAccountSourceConfig({ ...validAccount, folder: 42 }),
+    ).toBeUndefined();
+    expect(
+      normalizeXTopicSourceConfig({
+        kind: "x-topic",
+        id: "topic-1",
+        name: "AI",
+        includeKeywords: [],
+        excludeKeywords: [],
+        priorityAccounts: [],
+        windowDays: 7,
+        folder: null,
+      }),
+    ).toBeUndefined();
+  });
+
   it("creates a topic with a stable generated identifier and URL", () => {
     const topic = createXTopicSourceConfig({
       name: "AI 应用",
