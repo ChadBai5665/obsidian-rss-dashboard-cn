@@ -26,6 +26,8 @@ export interface XPostSourceMetadata {
   repostOfId?: string;
   quoteOfId?: string;
   externalUrls: string[];
+  /** Provider observation categories, not plugin quality judgments. */
+  observationTags?: Array<"latest" | "platform-top" | "priority-account">;
 }
 
 export interface CollectedItem {

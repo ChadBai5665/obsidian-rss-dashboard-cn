@@ -8,6 +8,7 @@ const ALLOWED_KEYS = new Set([
   "repostOfId",
   "quoteOfId",
   "externalUrls",
+  "observationTags",
 ]);
 const RELATION_KEYS = [
   "conversationId",
@@ -35,6 +36,11 @@ export function normalizeXPostSourceMetadata(
     kind: "x-post",
     externalUrls,
   };
+  if (Object.prototype.hasOwnProperty.call(record, "observationTags")) {
+    const observationTags = safeObservationTags(ownData(record, "observationTags"));
+    if (!observationTags) return undefined;
+    result.observationTags = observationTags;
+  }
   for (const key of RELATION_KEYS) {
     if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
     const relation = ownData(record, key);
@@ -68,6 +74,15 @@ export function mergeXPostSourceMetadata(
       ? { quoteOfId: incoming.quoteOfId ?? previous.quoteOfId }
       : {}),
     externalUrls: [...new Set([...previous.externalUrls, ...incoming.externalUrls])],
+    ...((previous.observationTags?.length ?? 0) > 0 ||
+    (incoming.observationTags?.length ?? 0) > 0
+      ? {
+          observationTags: orderedObservationTags([
+            ...(previous.observationTags ?? []),
+            ...(incoming.observationTags ?? []),
+          ]),
+        }
+      : {}),
   };
 }
 
@@ -75,7 +90,42 @@ function cloneMetadata(value: XPostSourceMetadata): XPostSourceMetadata {
   return {
     ...value,
     externalUrls: [...value.externalUrls],
+    ...(value.observationTags
+      ? { observationTags: [...value.observationTags] }
+      : {}),
   };
+}
+
+const OBSERVATION_TAGS = [
+  "latest",
+  "platform-top",
+  "priority-account",
+] as const;
+
+function safeObservationTags(
+  value: unknown,
+): XPostSourceMetadata["observationTags"] | undefined {
+  if (!Array.isArray(value) || value.length > OBSERVATION_TAGS.length) {
+    return undefined;
+  }
+  const entries: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string") {
+      return undefined;
+    }
+    entries.push(descriptor.value);
+  }
+  if (new Set(entries).size !== entries.length) return undefined;
+  const ordered = orderedObservationTags(entries);
+  return ordered.length === entries.length ? ordered : undefined;
+}
+
+function orderedObservationTags(
+  values: readonly string[],
+): NonNullable<XPostSourceMetadata["observationTags"]> {
+  const present = new Set(values);
+  return OBSERVATION_TAGS.filter((tag) => present.has(tag));
 }
 
 function safeExternalUrls(value: unknown): string[] | undefined {

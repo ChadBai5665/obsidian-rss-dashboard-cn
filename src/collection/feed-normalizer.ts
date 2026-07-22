@@ -66,7 +66,7 @@ export function normalizeFeedItem(
     url: nonEmpty(url),
     guid,
     observationType: "new",
-    topics: uniqueTopicNames(item),
+    topics: uniqueTopicNames(item, sourceMetadata),
     excerpt: normalizeFeedItemExcerpt(item),
     contentBasis: resolveContentBasis(sourceType),
     metrics: normalizeFeedItemMetrics(item),
@@ -176,7 +176,10 @@ function isYouTubeUrl(value: string | undefined): boolean {
   }
 }
 
-function uniqueTopicNames(item: FeedItem): string[] {
+function uniqueTopicNames(
+  item: FeedItem,
+  sourceMetadata?: CollectedItem["sourceMetadata"],
+): string[] {
   const topics = new Set<string>();
 
   for (const tag of item.tags ?? []) {
@@ -184,6 +187,10 @@ function uniqueTopicNames(item: FeedItem): string[] {
     if (topic) {
       topics.add(topic);
     }
+  }
+
+  for (const observationTag of sourceMetadata?.observationTags ?? []) {
+    topics.add(`x:${observationTag}`);
   }
 
   return Array.from(topics);

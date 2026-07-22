@@ -10,7 +10,10 @@ import {
   normalizeTikHubBaseUrl,
   safeTikHubRequestId,
 } from "./tikhub-types";
-import type { TikHubRequestBudgetLike } from "./request-budget";
+import type {
+  TikHubBudgetReservation,
+  TikHubRequestBudgetLike,
+} from "./request-budget";
 
 export interface TikHubTransportRequest {
   url: string;
@@ -39,6 +42,8 @@ interface CommonRequestInput {
   apiKey: string;
   cursor?: string;
   signal?: AbortSignal;
+  /** A caller-owned whole-batch reservation; the caller releases its tail. */
+  reservation?: TikHubBudgetReservation;
 }
 
 export interface TikHubUserRequest extends CommonRequestInput {
@@ -128,9 +133,16 @@ export class TikHubClient {
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
     if (input.cursor?.trim()) url.searchParams.set("cursor", input.cursor.trim());
 
-    const reservation = await this.budget.reserve(1);
+    const ownsReservation = input.reservation === undefined;
+    const reservation = input.reservation ?? await this.budget.reserve(1);
     try {
       if (input.signal?.aborted) throw abortedError();
+      if (reservation.remaining <= 0) {
+        throw new TikHubClientError(
+          "provider-rejected",
+          "TikHub request reservation is exhausted.",
+        );
+      }
 
       let pendingRequest: Promise<TikHubTransportResponse>;
       try {
@@ -203,7 +215,7 @@ export class TikHubClient {
         ? { data: envelope.data as T, requestId }
         : { data: envelope.data as T };
     } finally {
-      await reservation.releaseUnused();
+      if (ownsReservation) await reservation.releaseUnused();
     }
   }
 }

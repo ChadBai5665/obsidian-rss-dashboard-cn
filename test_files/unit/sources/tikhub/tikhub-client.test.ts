@@ -149,6 +149,40 @@ describe("TikHubClient exact request contract", () => {
     );
   });
 
+  it("uses a caller-owned batch reservation without reserving or releasing it twice", async () => {
+    const test = createHarness();
+    let remaining = 2;
+    const markAttempted = vi.fn(() => {
+      remaining -= 1;
+    });
+    const releaseUnused = vi.fn(async () => remaining);
+    const reservation: TikHubBudgetReservation = {
+      total: 2,
+      get remaining() {
+        return remaining;
+      },
+      markAttempted,
+      releaseUnused,
+    };
+
+    await test.client.fetchSearchTimeline({
+      apiKey: API_KEY,
+      query: "AI",
+      searchType: "Latest",
+      reservation,
+    });
+    await test.client.fetchSearchTimeline({
+      apiKey: API_KEY,
+      query: "AI",
+      searchType: "Top",
+      reservation,
+    });
+
+    expect(test.reserve).not.toHaveBeenCalled();
+    expect(markAttempted).toHaveBeenCalledTimes(2);
+    expect(releaseUnused).not.toHaveBeenCalled();
+  });
+
   it("sanitizes a hostile transport error whose status accessor throws secret data", async () => {
     const test = createHarness();
     const secretError = new Error(

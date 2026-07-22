@@ -8,8 +8,10 @@ import { createXPostCollectedItemId } from "../../collection/item-identity";
 import {
   sourceConfigUrl,
   type XAccountSourceConfig,
+  type XTopicSourceConfig,
 } from "../source-config";
 import type { XPost } from "./x-post";
+import type { XObservationTag } from "./x-search-query";
 
 export interface XAccountFeedItem extends FeedItem {
   contentBasis: Extract<ContentBasis, "x-post">;
@@ -31,6 +33,32 @@ export interface XAccountFeed extends Feed {
 export interface XAccountFeedMapping {
   feed: XAccountFeed;
   items: XAccountFeedItem[];
+}
+
+export interface ObservedXPost {
+  post: XPost;
+  observationTags: XObservationTag[];
+}
+
+export interface XTopicFeedItem extends FeedItem {
+  contentBasis: Extract<ContentBasis, "x-post">;
+  sourceType: Extract<SourceType, "x-topic">;
+  sourceBucket: string;
+  plainText: string;
+  metrics: XPost["metrics"];
+  sourceMetadata: XPostSourceMetadata;
+}
+
+export interface XTopicFeed extends Feed {
+  sourceType: Extract<SourceType, "x-topic">;
+  sourceKind: "x-topic";
+  sourceConfig: XTopicSourceConfig;
+  items: XTopicFeedItem[];
+}
+
+export interface XTopicFeedMapping {
+  feed: XTopicFeed;
+  items: XTopicFeedItem[];
 }
 
 /** Maps already-filtered X posts into the neutral feed pipeline. */
@@ -60,6 +88,41 @@ export function mapXAccountPostsToFeed(
     items,
     lastUpdated: now.getTime(),
     author: feedTitle,
+    mediaType: "article",
+  };
+  return { feed, items };
+}
+
+/** Maps observed topic posts without adding a score or recommendation. */
+export function mapXTopicPostsToFeed(
+  config: XTopicSourceConfig,
+  observedPosts: readonly ObservedXPost[],
+  now: Date,
+): XTopicFeedMapping {
+  const feedUrl = sourceConfigUrl(config);
+  if (!feedUrl) throw new Error("Invalid X topic source configuration");
+  const items = [...observedPosts]
+    .sort((left, right) => compareXPosts(left.post, right.post))
+    .map(({ post, observationTags }) =>
+      mapTopicPost(config, post, observationTags, feedUrl),
+    );
+  const sourceConfig: XTopicSourceConfig = {
+    ...config,
+    includeKeywords: [...config.includeKeywords],
+    excludeKeywords: [...config.excludeKeywords],
+    priorityAccounts: [...config.priorityAccounts],
+  };
+  const feed: XTopicFeed = {
+    feedId: config.id,
+    sourceKind: "x-topic",
+    sourceConfig,
+    sourceType: "x-topic",
+    title: config.name,
+    url: feedUrl,
+    folder: config.folder,
+    items,
+    lastUpdated: now.getTime(),
+    author: config.name,
     mediaType: "article",
   };
   return { feed, items };
@@ -102,6 +165,48 @@ function mapPost(
       ...(post.repostOfId ? { repostOfId: post.repostOfId } : {}),
       ...(post.quoteOfId ? { quoteOfId: post.quoteOfId } : {}),
       externalUrls: [...post.externalUrls],
+    },
+  };
+}
+
+function mapTopicPost(
+  config: XTopicSourceConfig,
+  post: XPost,
+  observationTags: XObservationTag[],
+  feedUrl: string,
+): XTopicFeedItem {
+  const plainText = repairUnpairedSurrogates(post.text);
+  const safeMarkup = escapeHtml(plainText);
+  const canonicalUrl = `https://x.com/${post.authorHandle}/status/${post.id}`;
+  const title = truncateCodePoints(sanitizeTitle(plainText), 120) ||
+    `@${post.authorHandle} · ${post.id}`;
+
+  return {
+    rssDashboardId: createXPostCollectedItemId(post.id),
+    title,
+    link: canonicalUrl,
+    description: safeMarkup,
+    content: safeMarkup,
+    plainText,
+    pubDate: post.createdAt ?? "",
+    guid: post.id,
+    feedTitle: config.name,
+    feedUrl,
+    coverImage: "",
+    author: post.authorName ?? `@${post.authorHandle}`,
+    tags: [{ name: config.name, color: "" }],
+    contentBasis: "x-post",
+    sourceType: "x-topic",
+    sourceBucket: config.folder,
+    metrics: normalizeMetrics(post.metrics),
+    sourceMetadata: {
+      kind: "x-post",
+      ...(post.conversationId ? { conversationId: post.conversationId } : {}),
+      ...(post.inReplyToId ? { inReplyToId: post.inReplyToId } : {}),
+      ...(post.repostOfId ? { repostOfId: post.repostOfId } : {}),
+      ...(post.quoteOfId ? { quoteOfId: post.quoteOfId } : {}),
+      externalUrls: [...post.externalUrls],
+      observationTags: [...observationTags],
     },
   };
 }
