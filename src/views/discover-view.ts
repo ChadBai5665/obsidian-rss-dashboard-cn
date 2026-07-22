@@ -1273,17 +1273,13 @@ export class DiscoverView extends ItemView {
     sortDropdown.addClass("rss-discover-sort-dropdown");
     const selectedSort = options?.selectedValue ?? this.currentSort;
 
+    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     const sortOptions: Record<string, string> = {
-      "title-asc": "File name (a to z)",
-      "title-desc": "File name (z to a)",
-      "type-asc": "Type (a to z)",
-      "type-desc": "Type (z to a)",
-      "created-desc": "Created time (new to old)",
-      "created-asc": "Created time (old to new)",
-      "tags-desc": "Tags number (most to least)",
-      "tags-asc": "Tags number (least to most)",
-      "category-asc": "Category (a to z)",
-      "tag-name-asc": "First tag (a to z)",
+      "title-asc": t("discover.sort.titleAsc"), "title-desc": t("discover.sort.titleDesc"),
+      "type-asc": t("discover.sort.typeAsc"), "type-desc": t("discover.sort.typeDesc"),
+      "created-desc": t("discover.sort.newest"), "created-asc": t("discover.sort.oldest"),
+      "tags-desc": t("discover.sort.tagsDesc"), "tags-asc": t("discover.sort.tagsAsc"),
+      "category-asc": t("discover.sort.category"), "tag-name-asc": t("discover.sort.firstTag"),
     };
 
     for (const [value, text] of Object.entries(sortOptions)) {
@@ -1621,7 +1617,7 @@ export class DiscoverView extends ItemView {
       });
       setIcon(spinner, "loader-2");
       addAllButton.createSpan({
-        text: `Adding ${this.bulkAddCompletedCount}/${this.bulkAddTotalCount}...`,
+        text: createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.adding", { completed: this.bulkAddCompletedCount, total: this.bulkAddTotalCount }),
       });
     } else {
       addAllButton.setText(createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.addAll"));
@@ -1676,11 +1672,11 @@ export class DiscoverView extends ItemView {
 
       this.refreshViewAfterFollowStateChange();
       new Notice(
-        `Added ${result.addedCount} feeds. Articles will be fetched in the background. Skipped ${skippedAlreadyFollowed + result.skippedCount} already-followed feeds.`,
+        createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.bulkAdded", { added: result.addedCount, skipped: skippedAlreadyFollowed + result.skippedCount }),
       );
-    } catch (error) {
+    } catch (_error) {
       new Notice(
-        `Failed to add feeds: ${error instanceof Error ? error.message : "Unknown error"}`,
+        createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.bulkFailed"),
       );
     } finally {
       this.isAddingAllFeeds = false;
@@ -1713,13 +1709,13 @@ export class DiscoverView extends ItemView {
       if (!added) {
         return;
       }
-      new Notice(`Feed "${feed.title}" added to "${folderName}"`);
+      new Notice(createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.added", { feed: feed.title, folder: folderName }));
 
       // Re-filter when follow status filters are active, then refresh.
       this.refreshViewAfterFollowStateChange(feed.url);
-    } catch (error) {
+    } catch (_error) {
       new Notice(
-        `Failed to add feed: ${error instanceof Error ? error.message : "Unknown error"}`,
+        createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.addFailed"),
       );
     }
   }
@@ -1762,11 +1758,11 @@ export class DiscoverView extends ItemView {
           dashboardView.refresh();
         }
 
-        new Notice(`Feed "${feedTitle}" removed`);
+        new Notice(createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.removed", { feed: feedTitle }));
       }
-    } catch (error) {
+    } catch (_error) {
       new Notice(
-        `Failed to remove feed: ${error instanceof Error ? error.message : "Unknown error"}`,
+        createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.removeFailed"),
       );
     }
   }
@@ -2105,10 +2101,10 @@ export class DiscoverView extends ItemView {
       );
       const label =
         size === 0
-          ? "All"
+          ? createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.pageAll")
           : isStandardOption
             ? String(size)
-            : `Current (${size})`;
+            : createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.pageCurrent", { size });
       const opt = pageSizeDropdown.createEl("option", {
         text: label,
         value: String(size),
@@ -2127,7 +2123,7 @@ export class DiscoverView extends ItemView {
     });
     paginationContainer.createEl("span", {
       cls: "rss-dashboard-pagination-results",
-      text: `Results: ${startIdx} - ${endIdx} of ${totalFeeds}`,
+      text: createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.resultsRange", { start: startIdx, end: endIdx, total: totalFeeds }),
     });
   }
 

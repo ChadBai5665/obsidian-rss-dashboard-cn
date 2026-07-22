@@ -451,6 +451,25 @@ describe("onload() initialization", () => {
     ).toBeGreaterThanOrEqual(7);
   });
 
+  it("rerenders every open localized view without changing command registrations", async () => {
+    const renders = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+    const leavesByType = new Map<string, Array<{ view: { render: ReturnType<typeof vi.fn> } }>>([
+      ["rss-dashboard-view", [{ view: { render: renders[0] } }]],
+      ["rss-discover-view", [{ view: { render: renders[1] } }]],
+      ["rss-reader-view", [{ view: { render: renders[2] } }]],
+      ["rss-smallweb-view", [{ view: { render: renders[3] } }]],
+    ]);
+    plugin.app.workspace.getLeavesOfType = vi.fn((type: string) =>
+      leavesByType.get(type) ?? [],
+    );
+    const commandSpy = plugin.addCommand as ReturnType<typeof vi.fn>;
+
+    plugin.refreshLocalizedViews();
+
+    for (const render of renders) expect(render).toHaveBeenCalledTimes(1);
+    expect(commandSpy).not.toHaveBeenCalled();
+  });
+
   it("registers Chinese command names by default", async () => {
     await plugin.onload();
 

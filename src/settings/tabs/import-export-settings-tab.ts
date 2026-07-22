@@ -232,7 +232,7 @@ export function renderImportExportSettingsTab(
     .addButton((button) =>
       button
         .setIcon("upload")
-        .setButtonText("Import OPML")
+        .setButtonText(t("command.importOpml"))
         .onClick(() => {
           new ImportOpmlModal(plugin.app, plugin).open();
         }),
@@ -240,7 +240,7 @@ export function renderImportExportSettingsTab(
     .addButton((button) =>
       button
         .setIcon("download")
-        .setButtonText("Export OPML")
+        .setButtonText(t("command.exportOpml"))
         .onClick(() => plugin.exportOpml()),
     )
     .addButton((button) =>
@@ -261,7 +261,7 @@ export function renderImportExportSettingsTab(
 
   new Setting(backupSection)
     .setName(t("settings.import.backupData"))
-    .setDesc("Saves a copy to data.json.backup in the plugin folder.")
+    .setDesc(t("settings.import.backupDataDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.autoBackup.backupDataJson)
@@ -273,7 +273,7 @@ export function renderImportExportSettingsTab(
 
   new Setting(backupSection)
     .setName(t("settings.import.backupFeeds"))
-    .setDesc("Saves a copy to feeds.opml.backup in the plugin folder.")
+    .setDesc(t("settings.import.backupFeedsDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.autoBackup.backupOpml)
@@ -285,7 +285,7 @@ export function renderImportExportSettingsTab(
 
   new Setting(backupSection)
     .setName(t("settings.import.backupPreferences"))
-    .setDesc("Saves a copy to userdata.json.backup in the plugin folder.")
+    .setDesc(t("settings.import.backupPreferencesDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.autoBackup.backupUserdata)

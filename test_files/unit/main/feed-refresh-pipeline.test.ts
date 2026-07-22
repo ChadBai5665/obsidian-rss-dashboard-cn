@@ -791,7 +791,7 @@ describe("refreshFeeds() pipeline behavior", () => {
     const notices = getNoticeMessages(consoleLogSpy);
     expect(notices[0]).toBe("Refreshing Feed A...");
     expect(notices).toContain(
-      "Source refresh failed. Check the source status for details.",
+      "来源刷新失败，请查看来源状态了解详情。",
     );
   });
 

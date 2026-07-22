@@ -266,8 +266,8 @@ export function renderHighlightsSettingsTab(
         )
         .addButton((button) =>
           button
-            .setButtonText(word.wholeWord ? "Whole" : "Partial")
-            .setTooltip("Toggle whole-word matching")
+            .setButtonText(word.wholeWord ? t("settings.highlight.wholeButton") : t("settings.highlight.partialButton"))
+            .setTooltip(t("settings.highlight.toggleWhole"))
             .onClick(async () => {
               const h = ensureHighlights(plugin);
               h.words[index].wholeWord = !word.wholeWord;
@@ -279,7 +279,7 @@ export function renderHighlightsSettingsTab(
         .addButton((button) => {
           button
             .setButtonText("Case")
-            .setTooltip("Toggle case sensitivity");
+            .setTooltip(t("settings.highlight.toggleCase"));
           if (word.caseSensitive) button.setCta();
           return button.onClick(async () => {
             const h = ensureHighlights(plugin);
@@ -292,13 +292,13 @@ export function renderHighlightsSettingsTab(
         .addExtraButton((button) =>
           button
             .setIcon("pencil")
-            .setTooltip(`Edit "${word.text}"`)
+            .setTooltip(t("settings.highlight.edit", { word: word.text }))
             .onClick(openEditModal),
         )
         .addExtraButton((button) =>
           button
             .setIcon("trash")
-            .setTooltip(`Delete "${word.text}"`)
+            .setTooltip(t("settings.highlight.delete", { word: word.text }))
             .onClick(async () => {
               const confirmModal = new ConfirmDeleteModal(plugin.app, word.text, plugin.settings.locale);
               confirmModal.open();
@@ -308,7 +308,7 @@ export function renderHighlightsSettingsTab(
               h.words.splice(index, 1);
               await plugin.saveSettings();
               new Notice(
-                `Deleted highlight word "${word.text}". Refresh the dashboard to apply highlight changes.`,
+                t("settings.highlight.deleted", { word: word.text }),
               );
               onRefresh();
               await refreshHighlightStatusBarOnly();
@@ -316,7 +316,7 @@ export function renderHighlightsSettingsTab(
         );
 
       wordSetting.nameEl.addClass("rss-dashboard-highlight-word-name-click");
-      wordSetting.nameEl.setAttr("title", `Edit "${word.text}"`);
+      wordSetting.nameEl.setAttr("title", t("settings.highlight.edit", { word: word.text }));
       wordSetting.nameEl.addEventListener("click", openEditModal);
     });
   }

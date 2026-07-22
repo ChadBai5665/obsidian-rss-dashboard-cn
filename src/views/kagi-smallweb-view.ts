@@ -362,7 +362,7 @@ export class KagiSmallwebView extends ItemView {
       });
 
       apiLink.createSpan({
-        text: ` Last Kagi update: ${utcTime} / ${estTime} EST`,
+        text: ` ${this.t("smallweb.lastKagi", { utc: utcTime, est: estTime })}`,
       });
     }
 
@@ -378,7 +378,7 @@ export class KagiSmallwebView extends ItemView {
       });
       setIcon(timestamp, "clock");
       timestamp.appendText(
-        ` Last local update: ${this.getSmallwebRelativeTime(this.smallwebCache.fetchedAt)}`,
+        ` ${this.t("smallweb.lastLocal", { time: this.getSmallwebRelativeTime(this.smallwebCache.fetchedAt) })}`,
       );
     }
 
@@ -686,12 +686,10 @@ export class KagiSmallwebView extends ItemView {
     const diffHours = Math.floor(diffMins / 60);
     const diffDays = Math.floor(diffHours / 24);
 
-    if (diffMins < 1) return "Just now";
-    if (diffMins < 60)
-      return `${diffMins} minute${diffMins > 1 ? "s" : ""} ago`;
-    if (diffHours < 24)
-      return `${diffHours} hour${diffHours > 1 ? "s" : ""} ago`;
-    return `${diffDays} day${diffDays > 1 ? "s" : ""} ago`;
+    if (diffMins < 1) return this.t("smallweb.justNow");
+    if (diffMins < 60) return this.t("smallweb.minutesAgo", { count: diffMins });
+    if (diffHours < 24) return this.t("smallweb.hoursAgo", { count: diffHours });
+    return this.t("smallweb.daysAgo", { count: diffDays });
   }
 
   private async handleSmallwebSubscribe(entry: SmallwebEntry): Promise<void> {
@@ -700,7 +698,7 @@ export class KagiSmallwebView extends ItemView {
       const feedUrl = await this.discoverRssFeed(entry.blogUrl);
 
       if (!feedUrl) {
-        new Notice(`Could not find RSS feed for "${entry.blogName}"`);
+        new Notice(this.t("smallweb.noRss", { blog: entry.blogName }));
         return;
       }
 
@@ -711,15 +709,15 @@ export class KagiSmallwebView extends ItemView {
       );
 
       if (success) {
-        new Notice(`Following "${entry.blogName}"`);
+        new Notice(this.t("smallweb.following", { blog: entry.blogName }));
         // Force re-render to update all cards with the new following state
         this.render();
       } else {
-        new Notice(`Failed to follow "${entry.blogName}"`);
+        new Notice(this.t("smallweb.followFailed"));
       }
     } catch (err) {
       console.error("[Kagi Smallweb] Error subscribing:", err);
-      new Notice("Failed to follow blog");
+      new Notice(this.t("smallweb.followFailed"));
     }
   }
 
@@ -735,7 +733,7 @@ export class KagiSmallwebView extends ItemView {
       const feedUrl = await this.discoverRssFeed(entry.blogUrl);
 
       if (!feedUrl) {
-        new Notice(`Could not find RSS feed for "${entry.blogName}"`);
+        new Notice(this.t("smallweb.noRss", { blog: entry.blogName }));
         return;
       }
 
@@ -755,15 +753,15 @@ export class KagiSmallwebView extends ItemView {
       );
 
       if (success) {
-        new Notice(`Following "${entry.blogName}" in "${folderName}"`);
+        new Notice(this.t("smallweb.followingIn", { blog: entry.blogName, folder: folderName }));
         // Force re-render to update all cards with the new following state
         this.render();
       } else {
-        new Notice(`Failed to follow "${entry.blogName}"`);
+        new Notice(this.t("smallweb.followFailed"));
       }
     } catch (err) {
       console.error("[Kagi Smallweb] Error subscribing:", err);
-      new Notice("Failed to follow blog");
+      new Notice(this.t("smallweb.followFailed"));
     }
   }
 
@@ -852,14 +850,14 @@ export class KagiSmallwebView extends ItemView {
       if (feedIndex >= 0) {
         this.plugin.settings.feeds.splice(feedIndex, 1);
         await this.plugin.saveSettings();
-        new Notice(`Unfollowed "${entry.blogName}"`);
+        new Notice(this.t("smallweb.unfollowed", { blog: entry.blogName }));
 
         // Force re-render to update all cards
         this.render();
       }
     } catch (err) {
       console.error("[Kagi Smallweb] Error unfollowing:", err);
-      new Notice("Failed to unfollow");
+      new Notice(this.t("smallweb.unfollowFailed"));
     }
   }
 

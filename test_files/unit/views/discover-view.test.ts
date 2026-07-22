@@ -527,7 +527,7 @@ describe("DiscoverView (P1-3)", () => {
     if (!processingButton) throw new Error("processingButton not found");
     expect((processingButton as HTMLButtonElement).disabled).toBe(true);
     expect((processingButton as HTMLElement).textContent).toContain(
-      "Adding 0/4...",
+      "正在添加 0/4",
     );
 
     resolveImport?.({
@@ -575,7 +575,7 @@ describe("DiscoverView (P1-3)", () => {
 
     expect(console.debug).toHaveBeenCalledWith(
       "[Stub Notice]",
-      "Added 2 feeds. Articles will be fetched in the background. Skipped 1 already-followed feeds.",
+      "已添加 2 个订阅源，文章将在后台获取。已跳过 1 个已订阅来源。",
     );
   });
 });

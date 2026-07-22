@@ -135,7 +135,7 @@ describe("PodcastPlayer", () => {
       const details = container.querySelector(".podcast-episode-details");
       expect(details).not.toBeNull();
       expect(details?.querySelector("summary")?.textContent).toContain(
-        "Episode details",
+        "节目详情",
       );
     });
 
@@ -223,21 +223,21 @@ describe("PodcastPlayer", () => {
       const grid = container.querySelector(".podcast-episode-meta-grid");
       expect(grid).not.toBeNull();
       const text = grid?.textContent || "";
-      expect(text).toContain("Published");
-      expect(text).toContain("Duration");
+      expect(text).toContain("发布时间");
+      expect(text).toContain("时长");
       expect(text).toContain("1:23");
-      expect(text).toContain("Explicit");
-      expect(text).toContain("Yes");
-      expect(text).toContain("Season");
+      expect(text).toContain("露骨内容");
+      expect(text).toContain("是");
+      expect(text).toContain("季");
       expect(text).toContain("2");
-      expect(text).toContain("Episode");
+      expect(text).toContain("集");
       expect(text).toContain("7");
-      expect(text).toContain("Type");
+      expect(text).toContain("类型");
       expect(text).toContain("full");
-      expect(text).toContain("Category");
+      expect(text).toContain("分类");
       expect(text).toContain("Tech");
-      expect(text).toContain("Link");
-      expect(text).toContain("Size");
+      expect(text).toContain("链接");
+      expect(text).toContain("大小");
 
       const link = container.querySelector<HTMLAnchorElement>(
         ".podcast-episode-meta-value a",

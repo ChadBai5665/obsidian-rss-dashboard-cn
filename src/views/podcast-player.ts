@@ -207,7 +207,7 @@ export class PodcastPlayer {
       const overflowTitle = remainingTags.map((t) => t.name).join("\n");
       tagsStrip.createDiv({
         cls: "podcast-tag podcast-tag-more",
-        text: `+${remainingCount} more`,
+        text: this.t("podcast.more", { count: remainingCount }),
         attr: { title: overflowTitle, "aria-label": overflowTitle },
       });
     }
@@ -327,7 +327,7 @@ export class PodcastPlayer {
     const rewindBtn = transportSection.createDiv({
       cls: "rss-rewind clickable-icon",
       attr: {
-        title: "Rewind 30s",
+        title: this.t("media.rewind"),
         role: "button",
         tabindex: "0",
         "aria-label": this.t("media.rewind"),
@@ -360,7 +360,7 @@ export class PodcastPlayer {
     this.playButton = transportSection.createDiv({
       cls: "rss-play-pause clickable-icon",
       attr: {
-        title: "Play/Pause",
+        title: this.t("media.playPause"),
         role: "button",
         tabindex: "0",
         "aria-label": this.t("media.playPause"),
@@ -383,7 +383,7 @@ export class PodcastPlayer {
     }
 
     if (!this.hasAudioForCurrentItem) {
-      const errorText = "Audio url not found. Cannot play this podcast.";
+      const errorText = this.t("podcast.audioMissing");
       podcastContainer.createDiv({
         cls: "podcast-player-error",
         text: errorText,
@@ -393,7 +393,7 @@ export class PodcastPlayer {
     const forwardBtn = transportSection.createDiv({
       cls: "rss-forward clickable-icon",
       attr: {
-        title: "Forward 30s",
+        title: this.t("media.forward"),
         role: "button",
         tabindex: "0",
         "aria-label": this.t("media.forward"),
@@ -426,7 +426,7 @@ export class PodcastPlayer {
     this.repeatButton = transportSection.createDiv({
       cls: "rss-repeat-btn clickable-icon",
       attr: {
-        title: "Repeat",
+        title: this.t("media.repeat"),
         role: "button",
         tabindex: "0",
         "aria-label": this.t("media.repeat"),
@@ -470,7 +470,7 @@ export class PodcastPlayer {
     this.sleepTimerButton = toolsSection.createDiv({
       cls: "rss-sleep-timer-btn clickable-icon",
       attr: {
-        title: "Sleep Timer",
+        title: this.t("media.sleep"),
         role: "button",
         tabindex: "0",
         "aria-label": this.t("media.sleep"),
@@ -486,7 +486,7 @@ export class PodcastPlayer {
     const volumeBtn = this.volumeContainer.createDiv({
       cls: "rss-volume clickable-icon",
       attr: {
-        title: "Volume",
+        title: this.t("media.volume"),
         role: "button",
         tabindex: "0",
         "aria-label": this.t("media.volume"),
@@ -588,7 +588,7 @@ export class PodcastPlayer {
     // Quick Restart Button
     this.sleepTimerRestartBtn = this.sleepTimerDisplayEl.createDiv({
       cls: "rss-sleep-timer-restart-btn",
-      attr: { title: "Restart sleep timer" },
+      attr: { title: this.t("podcast.restartSleep") },
     });
     setIcon(this.sleepTimerRestartBtn, "rotate-ccw");
     this.sleepTimerRestartBtn.onclick = (e) => {
@@ -723,7 +723,7 @@ export class PodcastPlayer {
 
       const autoplayLabel = sortControls.createEl("label", {
         cls: "playlist-autoplay-container",
-        attr: { title: "Continuously play all episodes in the playlist" }
+        attr: { title: this.t("podcast.continuous") }
       });
 
       const autoplayCheckbox = autoplayLabel.createEl("input", {
@@ -893,41 +893,41 @@ export class PodcastPlayer {
     if (item.pubDate) {
       const d = new Date(item.pubDate);
       entries.push({
-        label: "Published",
+        label: this.t("podcast.published"),
         value: Number.isNaN(d.getTime()) ? item.pubDate : d.toLocaleString(),
       });
     }
 
     const duration = (item.duration || item.itunes?.duration || "").trim();
-    if (duration) entries.push({ label: "Duration", value: duration });
+    if (duration) entries.push({ label: this.t("podcast.duration"), value: duration });
 
     const author = (item.author || "").trim();
-    if (author) entries.push({ label: "Author", value: author });
+    if (author) entries.push({ label: this.t("podcast.author"), value: author });
 
     if (typeof item.explicit === "boolean") {
-      entries.push({ label: "Explicit", value: item.explicit ? "Yes" : "No" });
+      entries.push({ label: this.t("podcast.explicit"), value: item.explicit ? this.t("podcast.yes") : this.t("podcast.no") });
     }
 
     if (typeof item.season === "number")
-      entries.push({ label: "Season", value: String(item.season) });
+      entries.push({ label: this.t("podcast.season"), value: String(item.season) });
     if (typeof item.episode === "number")
-      entries.push({ label: "Episode", value: String(item.episode) });
+      entries.push({ label: this.t("podcast.episode"), value: String(item.episode) });
 
     const episodeType = (item.episodeType || "").trim();
-    if (episodeType) entries.push({ label: "Type", value: episodeType });
+    if (episodeType) entries.push({ label: this.t("podcast.type"), value: episodeType });
 
     const category = (item.category || "").trim();
-    if (category) entries.push({ label: "Category", value: category });
+    if (category) entries.push({ label: this.t("podcast.category"), value: category });
 
     const link = (item.link || "").trim();
     if (link)
-      entries.push({ label: "Link", value: "Open episode", href: link });
+      entries.push({ label: this.t("podcast.link"), value: this.t("podcast.openEpisode"), href: link });
 
     const enclosureLen = (item.enclosure?.length || "").trim();
     if (enclosureLen) {
       const n = Number(enclosureLen);
       const formatted = Number.isFinite(n) ? this.formatBytes(n) : "";
-      entries.push({ label: "Size", value: formatted || enclosureLen });
+      entries.push({ label: this.t("podcast.size"), value: formatted || enclosureLen });
     }
 
     const hasNotes = Boolean(notesHtml && notesHtml.trim());
@@ -939,7 +939,7 @@ export class PodcastPlayer {
     });
     details.setAttribute("data-podcast-theme", this.theme);
 
-    details.createEl("summary", { text: "Episode details" });
+    details.createEl("summary", { text: this.t("podcast.details") });
     const body = details.createDiv({ cls: "podcast-episode-details-body" });
 
     if (hasMeta) {
@@ -967,7 +967,7 @@ export class PodcastPlayer {
       const notes = body.createDiv({ cls: "podcast-episode-notes" });
       notes.createDiv({
         cls: "podcast-episode-notes-title",
-        text: "Show notes",
+        text: this.t("podcast.showNotes"),
       });
       const notesBody = notes.createDiv({ cls: "podcast-episode-notes-body" });
       sanitizeAndAppendHtml(notesBody, notesHtml);
@@ -1034,7 +1034,7 @@ export class PodcastPlayer {
       const overflowTitle = remainingTags.map((t) => t.name).join("\n");
       tagsWrap.createDiv({
         cls: "playlist-ep-tag playlist-ep-tag-more",
-        text: `+${remainingCount}`,
+        text: this.t("podcast.more", { count: remainingCount }),
         attr: { title: overflowTitle, "aria-label": overflowTitle },
       });
     }
@@ -1069,7 +1069,7 @@ export class PodcastPlayer {
 
       const autoplayLabel = sortControls.createEl("label", {
         cls: "playlist-autoplay-container",
-        attr: { title: "Continuously play all episodes in the playlist" }
+        attr: { title: this.t("podcast.continuous") }
       });
 
       const autoplayCheckbox = autoplayLabel.createEl("input", {
@@ -1313,7 +1313,7 @@ export class PodcastPlayer {
     const menu = new Menu();
 
     const options = [
-      { label: "Off", action: () => this.clearSleepTimer() },
+      { label: this.t("podcast.off"), action: () => this.clearSleepTimer() },
       { label: "5 minutes", minutes: 5 },
       { label: "10 minutes", minutes: 10 },
       { label: "15 minutes", minutes: 15 },
@@ -1322,7 +1322,7 @@ export class PodcastPlayer {
       { label: "60 minutes", minutes: 60 },
       { label: "90 minutes", minutes: 90 },
       { label: "120 minutes", minutes: 120 },
-      { label: "End of episode", action: () => this.setSleepTimer("end") },
+      { label: this.t("podcast.end"), action: () => this.setSleepTimer("end") },
     ];
 
     options.forEach((opt) => {
@@ -1335,12 +1335,12 @@ export class PodcastPlayer {
 
         // Active state check
         if (
-          opt.label === "Off" &&
+          opt.label === this.t("podcast.off") &&
           !this.sleepTimerEndTime &&
           !this.stopAtEndOfEpisode
         ) {
           item.setChecked(true);
-        } else if (opt.label === "End of episode" && this.stopAtEndOfEpisode) {
+        } else if (opt.label === this.t("podcast.end") && this.stopAtEndOfEpisode) {
           item.setChecked(true);
         }
       });
@@ -1411,7 +1411,7 @@ export class PodcastPlayer {
       return;
 
     if (this.stopAtEndOfEpisode) {
-      this.sleepTimerTextEl.textContent = "End of ep";
+      this.sleepTimerTextEl.textContent = this.t("podcast.endShort");
       this.sleepTimerDisplayEl.addClass("is-visible");
       this.sleepTimerDisplayEl.removeClass("is-expired");
       this.sleepTimerRestartBtn.addClass("hidden");
@@ -1421,7 +1421,7 @@ export class PodcastPlayer {
         Math.floor((this.sleepTimerEndTime - Date.now()) / 1000),
       );
       if (remainingSecs === 0) {
-        this.sleepTimerTextEl.textContent = "Times up!";
+        this.sleepTimerTextEl.textContent = this.t("podcast.timesUp");
         this.sleepTimerDisplayEl.addClass("is-expired");
         this.sleepTimerDisplayEl.addClass("is-visible");
         this.sleepTimerRestartBtn.removeClass("hidden");

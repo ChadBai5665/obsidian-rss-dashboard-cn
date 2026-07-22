@@ -37,6 +37,7 @@ export interface GeneralSettingsPlugin {
   importPortableDataBundleFromFile(file: File): Promise<void>;
   exportPortableDataBundle(): Promise<void>;
   applyFeedLimitsToAllFeeds(): Promise<void>;
+  refreshLocalizedViews?(): void;
   refreshFeeds(): Promise<void>;
 }
 
@@ -71,6 +72,7 @@ export function renderGeneralSettingsTab(
         .onChange(async (value) => {
           plugin.settings.locale = value === "en" ? "en" : "zh-CN";
           await plugin.saveSettings();
+          plugin.refreshLocalizedViews?.();
           plugin.settingTab?.display();
           new Notice(createTranslator(plugin.settings.locale)("notice.commandNamesReload"));
         }),

@@ -658,6 +658,10 @@ export default class RssDashboardPlugin extends Plugin {
   /** Commands are registered once by Obsidian, so this translator is frozen at load. */
   private commandTranslator: Translator = createTranslator("zh-CN");
 
+  private t(key: Parameters<Translator>[0], params?: Parameters<Translator>[1]): string {
+    return createTranslator(this.settings?.locale ?? "zh-CN")(key, params);
+  }
+
   constructor(app: App, manifest: ConstructorParameters<typeof Plugin>[1]) {
     super(app, manifest);
     this.feedStorageRepository = new FeedStorageRepository(app, {
@@ -1037,6 +1041,26 @@ export default class RssDashboardPlugin extends Plugin {
     void this.reconcileSavedArticlesOnStartup();
   }
 
+  /**
+   * Rebuilds only the UI chrome of every currently open plugin view after a
+   * locale switch. Each view keeps its own selected item, filters, pagination,
+   * and playback state; command labels remain fixed until Obsidian reloads.
+   */
+  public refreshLocalizedViews(): void {
+    const viewTypes = [
+      RSS_DASHBOARD_VIEW_TYPE,
+      RSS_DISCOVER_VIEW_TYPE,
+      RSS_READER_VIEW_TYPE,
+      RSS_SMALLWEB_VIEW_TYPE,
+    ] as const;
+    for (const viewType of viewTypes) {
+      for (const leaf of this.app.workspace.getLeavesOfType(viewType)) {
+        const render = (leaf.view as unknown as { render?: () => void }).render;
+        render?.call(leaf.view);
+      }
+    }
+  }
+
   public async getActiveDashboardView(): Promise<RssDashboardView | null> {
     const leaves = this.app.workspace.getLeavesOfType(RSS_DASHBOARD_VIEW_TYPE);
     for (const leaf of leaves) {
@@ -1151,7 +1175,7 @@ export default class RssDashboardPlugin extends Plugin {
       this.settingTab.display();
     }
 
-    new Notice("Restored plugin to factory defaults.");
+    new Notice(this.t("plugin.factoryReset"));
   }
 
   /**
@@ -1285,7 +1309,7 @@ export default class RssDashboardPlugin extends Plugin {
         (leaf) => new KagiSmallwebView(leaf, this),
       );
 
-      this.addRibbonIcon("compass", "RSS dashboard", () => {
+      this.addRibbonIcon("compass", this.commandTranslator("command.openDashboard"), () => {
         void this.activateView();
       });
 
@@ -1399,7 +1423,7 @@ export default class RssDashboardPlugin extends Plugin {
           String(err),
         );
       }
-      new Notice("Error initializing RSS dashboard plugin.");
+      new Notice(this.t("plugin.initializationFailed"));
     }
   }
 
@@ -1581,7 +1605,7 @@ export default class RssDashboardPlugin extends Plugin {
         void workspace.revealLeaf(leaf);
       }
     } catch {
-      new Notice("Error opening RSS dashboard view");
+      new Notice(this.t("plugin.openDashboardFailed"));
     }
   }
 
@@ -1606,7 +1630,7 @@ export default class RssDashboardPlugin extends Plugin {
         void workspace.revealLeaf(leaf);
       }
     } catch {
-      new Notice("Error opening RSS discover view");
+      new Notice(this.t("plugin.openDiscoverFailed"));
     }
   }
 
@@ -1631,7 +1655,7 @@ export default class RssDashboardPlugin extends Plugin {
         void workspace.revealLeaf(leaf);
       }
     } catch {
-      new Notice("Error opening kagi smallweb");
+      new Notice(this.t("plugin.openSmallwebFailed"));
     }
   }
 
@@ -1803,7 +1827,7 @@ export default class RssDashboardPlugin extends Plugin {
       await this.refreshFeedBatch(feedsToRefresh, feedNoticeText);
     } catch {
       console.error("[RSS dashboard] Refresh request failed.");
-      new Notice("Source refresh failed. Check the source status for details.");
+      new Notice(this.t("plugin.refreshFailed"));
     }
   }
 
@@ -1900,11 +1924,11 @@ export default class RssDashboardPlugin extends Plugin {
         return;
       }
 
-      new Notice(`Refreshing ${feed.title}...`);
+      new Notice(this.t("plugin.refreshing", { source: feed.title }));
       await this.refreshSingleFeed(feed, feed.title);
     } catch {
       console.error("[RSS dashboard] Refresh request failed.");
-      new Notice("Source refresh failed. Check the source status for details.");
+      new Notice(this.t("plugin.refreshFailed"));
     }
   }
 
@@ -3063,7 +3087,7 @@ export default class RssDashboardPlugin extends Plugin {
           void view.refresh();
         }
         if (showNotice) {
-          new Notice(`Feed "${title}" added`);
+      new Notice(this.t("plugin.feedAdded", { feed: title }));
         }
         return true;
       } catch (error) {
@@ -3164,7 +3188,7 @@ export default class RssDashboardPlugin extends Plugin {
     const view = await this.getActiveDashboardView();
     if (view) {
       void view.refresh();
-      new Notice(`Feed "${newTitle}" updated`);
+      new Notice(this.t("plugin.feedUpdated", { feed: newTitle }));
     }
   }
 
@@ -3846,7 +3870,7 @@ export default class RssDashboardPlugin extends Plugin {
     feedNoticeText: string,
   ): Promise<void> {
     if (this.isMultiFeedRefreshRunning) {
-      new Notice("A multi-feed refresh is already in progress.");
+      new Notice(this.t("plugin.multiRefresh"));
       return;
     }
 

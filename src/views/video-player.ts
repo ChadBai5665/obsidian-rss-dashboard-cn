@@ -148,7 +148,7 @@ export class VideoPlayer {
     const tosLink = linksContainer.createEl("a", {
       cls: "rss-video-tos-link",
       href: "https://www.youtube.com/t/terms",
-      text: "YouTube terms of service",
+      text: this.t("settings.media.youtubeTos"),
     });
     tosLink.target = "_blank";
     tosLink.rel = "noopener noreferrer";

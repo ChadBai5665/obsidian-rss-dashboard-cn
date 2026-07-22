@@ -194,7 +194,7 @@ export function renderArticleSavingSettingsTab(
         .addButton((button) =>
           button
             .setButtonText(t("settings.article.load"))
-            .setTooltip("Load this template into the editor")
+            .setTooltip(t("settings.article.load"))
             .onClick(async () => {
               templateInput.value = template.template;
               plugin.settings.articleSaving.defaultTemplate = template.template;
@@ -205,7 +205,7 @@ export function renderArticleSavingSettingsTab(
         .addButton((button) =>
           button
             .setButtonText(t("settings.article.update"))
-            .setTooltip("Update this template with current editor content")
+            .setTooltip(t("settings.article.update"))
             .onClick(async () => {
               plugin.settings.articleSaving.savedTemplates![index].template =
                 plugin.settings.articleSaving.defaultTemplate;
@@ -216,7 +216,7 @@ export function renderArticleSavingSettingsTab(
         .addButton((button) =>
           button
             .setIcon("trash")
-            .setTooltip("Delete this template")
+            .setTooltip(t("common.delete"))
             .onClick(async () => {
               plugin.settings.articleSaving.savedTemplates!.splice(index, 1);
               await plugin.saveSettings();
