@@ -20,7 +20,10 @@ const SOURCE_TYPES = new Set<SourceType>([
 ]);
 
 type FeedWithOptionalSourceType = Feed & { sourceType?: unknown };
-type FeedItemWithMetrics = FeedItem & { metrics?: unknown };
+type FeedItemWithCollectionMetadata = FeedItem & {
+  metrics?: unknown;
+  plainText?: unknown;
+};
 
 export function normalizeFeedItem(
   feed: Feed,
@@ -56,7 +59,7 @@ export function normalizeFeedItem(
     observationType: "new",
     topics: uniqueTopicNames(item),
     excerpt: normalizeFeedItemExcerpt(item),
-    contentBasis: sourceType === "youtube" ? "title-description" : "feed",
+    contentBasis: resolveContentBasis(sourceType),
     metrics: normalizeFeedItemMetrics(item),
     read: item.read ?? false,
     starred: item.starred ?? false,
@@ -69,13 +72,15 @@ export function normalizeFeedItem(
 export function normalizeFeedItemExcerpt(
   item: FeedItem,
 ): string | undefined {
+  const plainText = (item as FeedItemWithCollectionMetadata).plainText;
+  if (typeof plainText === "string" && plainText.trim()) return plainText.trim();
   return nonEmpty(item.summary) ?? nonEmpty(item.description);
 }
 
 export function normalizeFeedItemMetrics(
   item: FeedItem,
 ): Record<string, number> | undefined {
-  const value = (item as FeedItemWithMetrics).metrics;
+  const value = (item as FeedItemWithCollectionMetadata).metrics;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
@@ -85,6 +90,11 @@ export function normalizeFeedItemMetrics(
       typeof entry[1] === "number" && Number.isFinite(entry[1]),
   );
   return metrics.length > 0 ? Object.fromEntries(metrics) : undefined;
+}
+
+function resolveContentBasis(sourceType: SourceType): CollectedItem["contentBasis"] {
+  if (sourceType === "x-account" || sourceType === "x-topic") return "x-post";
+  return sourceType === "youtube" ? "title-description" : "feed";
 }
 
 export function createFeedItemMaterialFingerprint(item: FeedItem): string {

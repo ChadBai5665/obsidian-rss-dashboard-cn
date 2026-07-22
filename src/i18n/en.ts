@@ -25,6 +25,8 @@ export const en = {
   "common.noItems": "No items",
   "common.error": "Something went wrong. Please try again.",
   "source.unsupported": "Unsupported source: {kind}",
+  "source.tikhubKeyMissing": "No valid API key is configured. Configure one in TikHub settings and try again.",
+  "source.tikhubKeyInvalid": "The TikHub API key is invalid. Replace it in TikHub settings and try again.",
 
   "command.refreshAll": "Refresh all subscriptions",
   "command.refreshCurrent": "Refresh current subscription",

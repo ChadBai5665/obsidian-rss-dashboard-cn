@@ -23,6 +23,8 @@ export const zhCN = {
   "common.noItems": "暂无内容",
   "common.error": "发生错误，请稍后重试。",
   "source.unsupported": "不支持的来源：{kind}",
+  "source.tikhubKeyMissing": "尚未配置有效的 API 密钥。请在 TikHub 设置中配置后重试。",
+  "source.tikhubKeyInvalid": "TikHub API 密钥无效。请在 TikHub 设置中重新配置后重试。",
 
   "command.refreshAll": "刷新全部订阅",
   "command.refreshCurrent": "刷新当前订阅",
