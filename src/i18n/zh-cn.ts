@@ -474,7 +474,7 @@ export const zhCN = {
   "settings.ai.invalidKey": "请输入非空、且首尾没有空格的有效 API 密钥。",
   "settings.ai.metadataSaveFailed": "无法保存连接设置。",
   "settings.ai.keySaveAfterMetadataFailed":
-    "连接已保存，但无法安全保存密钥；请重新粘贴后再试。",
+    "连接已保存，但无法确认密钥保存状态；请查看连接列表，必要时重新配置。",
   "settings.ai.defaultBadge": "默认",
   "settings.ai.setDefault": "设为默认",
   "settings.ai.moveUp": "上移",
@@ -488,7 +488,7 @@ export const zhCN = {
   "settings.ai.deleteConnection": "删除连接",
   "settings.ai.connectionDeleteRetained": "删除未完成，连接已保留。",
   "settings.ai.connectionDeleteKeyRestoreFailed":
-    "连接已保留，但密钥需要重新配置。",
+    "连接已保留，但无法确认密钥状态，请重新配置。",
   "settings.ai.testConnection": "测试连接",
   "settings.ai.cancelTest": "取消测试",
   "settings.ai.connectionSucceeded": "连接成功。",
@@ -497,7 +497,9 @@ export const zhCN = {
   "settings.ai.connectionInsufficientBalance": "账户余额不足。",
   "settings.ai.connectionRateLimited": "请求频率已达上限，请稍后再试。",
   "settings.ai.connectionTimeout": "连接测试超时。",
-  "settings.ai.connectionAborted": "测试已取消。",
+  "settings.ai.connectionCancelledBeforeSend": "测试已取消，尚未发送请求。",
+  "settings.ai.connectionWaitCancelled":
+    "已停止等待，已发送请求仍可能计费；后台请求结束前不能再次测试。",
   "settings.ai.connectionNetworkFailed": "网络连接失败。",
   "settings.ai.connectionDisabled": "连接已停用。",
   "settings.ai.connectionInvalid": "连接配置无效。",

@@ -11,6 +11,16 @@ function flushPromises(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function setting(modal: AiConnectionModal, name: string): HTMLElement {
   const result = Array.from(
     modal.contentEl.querySelectorAll<HTMLElement>(".setting-item"),
@@ -42,6 +52,9 @@ function harness(
     existing?: ReturnType<typeof createAiConnection>;
     onSave?: ReturnType<typeof vi.fn>;
     secretSet?: ReturnType<typeof vi.fn>;
+    onPersisted?: ReturnType<typeof vi.fn>;
+    runTransaction?: <T>(operation: () => Promise<T>) => Promise<T>;
+    createConnectionId?: () => string;
   } = {},
 ) {
   const secretStore = {
@@ -50,15 +63,18 @@ function harness(
     delete: vi.fn(async () => {}),
   };
   const onSave = options.onSave ?? vi.fn(async () => {});
+  const onPersisted = options.onPersisted ?? vi.fn();
   const modal = new AiConnectionModal(new obsidian.App(), {
     locale: "zh-CN",
     existing: options.existing,
     secretStore,
-    createConnectionId: () => CONNECTION_ID,
+    createConnectionId: options.createConnectionId ?? (() => CONNECTION_ID),
     onSave,
+    onPersisted,
+    ...(options.runTransaction ? { runTransaction: options.runTransaction } : {}),
   });
   modal.open();
-  return { modal, onSave, secretStore };
+  return { modal, onSave, onPersisted, secretStore };
 }
 
 beforeEach(() => {
@@ -171,6 +187,101 @@ describe("AiConnectionModal", () => {
     expect(JSON.stringify(save.mock.calls[0][0])).not.toContain(API_KEY);
   });
 
+  it("waits for a deferred key write before announcing the final persisted state", async () => {
+    const keyWrite = deferred<void>();
+    const transaction = vi.fn(async <T>(operation: () => Promise<T>) =>
+      await operation());
+    const test = harness({
+      secretSet: vi.fn(() => keyWrite.promise),
+      runTransaction: transaction,
+    });
+    setInput(test.modal, "连接名称", "延迟密钥");
+    setInput(test.modal, "模型 ID", "account-model");
+    setInput(test.modal, "API 密钥", API_KEY);
+    button(test.modal, "保存").click();
+    await flushPromises();
+
+    expect(test.onSave).toHaveBeenCalledTimes(1);
+    expect(test.secretStore.set).toHaveBeenCalledTimes(1);
+    expect(test.onPersisted).not.toHaveBeenCalled();
+    expect(test.modal.containerEl.isConnected).toBe(true);
+
+    keyWrite.resolve();
+    await flushPromises();
+    expect(test.onPersisted).toHaveBeenCalledWith(
+      expect.objectContaining({ id: CONNECTION_ID }),
+      "key-saved",
+    );
+    expect(test.modal.containerEl.isConnected).toBe(false);
+    expect(transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers the close callback until an in-flight key write has settled", async () => {
+    const keyWrite = deferred<void>();
+    const onClose = vi.fn();
+    const onPersisted = vi.fn();
+    const secretStore = {
+      set: vi.fn(() => keyWrite.promise),
+    };
+    const modal = new AiConnectionModal(new obsidian.App(), {
+      locale: "zh-CN",
+      secretStore,
+      createConnectionId: () => CONNECTION_ID,
+      onSave: vi.fn(async () => {}),
+      onPersisted,
+      onClose,
+    });
+    modal.open();
+    setInput(modal, "连接名称", "关闭竞态");
+    setInput(modal, "模型 ID", "account-model");
+    setInput(modal, "API 密钥", API_KEY);
+    button(modal, "保存").click();
+    await flushPromises();
+
+    modal.close();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onPersisted).not.toHaveBeenCalled();
+    keyWrite.resolve();
+    await flushPromises();
+
+    expect(onPersisted).toHaveBeenCalledWith(
+      expect.objectContaining({ id: CONNECTION_ID }),
+      "key-saved",
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses the same generated UUID when a failed key write is retried in the same modal", async () => {
+    const secondId = "7355ea63-b509-4da9-a2cf-3db29665f9e1";
+    const ids = [CONNECTION_ID, secondId];
+    const createConnectionId = vi.fn(() => ids.shift()!);
+    const secretSet = vi.fn()
+      .mockRejectedValueOnce(new Error(API_KEY))
+      .mockResolvedValueOnce(undefined);
+    const test = harness({ createConnectionId, secretSet });
+    setInput(test.modal, "连接名称", "重试密钥");
+    setInput(test.modal, "模型 ID", "account-model");
+    setInput(test.modal, "API 密钥", API_KEY);
+    button(test.modal, "保存").click();
+    await flushPromises();
+    expect(test.modal.containerEl.isConnected).toBe(true);
+
+    setInput(test.modal, "API 密钥", API_KEY);
+    button(test.modal, "保存").click();
+    await flushPromises();
+
+    expect(createConnectionId).toHaveBeenCalledTimes(1);
+    expect(test.onSave.mock.calls.map(([connection]) => connection.id)).toEqual([
+      CONNECTION_ID,
+      CONNECTION_ID,
+    ]);
+    expect(test.onPersisted.mock.calls.map(([, status]) => status)).toEqual([
+      "key-failed",
+      "key-saved",
+    ]);
+    expect(test.modal.containerEl.isConnected).toBe(false);
+  });
+
   it("edits metadata with an empty key field without reading, revealing, or replacing the stored key", async () => {
     const existing = createAiConnection({
       id: CONNECTION_ID,
@@ -243,7 +354,13 @@ describe("AiConnectionModal", () => {
     button(secretFailure.modal, "保存").click();
     await flushPromises();
     expect(secretFailure.onSave).toHaveBeenCalledTimes(1);
-    expect(secretFailure.modal.contentEl.textContent).toContain("连接已保存，但无法安全保存密钥");
+    expect(secretFailure.onPersisted).toHaveBeenCalledWith(
+      expect.objectContaining({ id: CONNECTION_ID }),
+      "key-failed",
+    );
+    expect(secretFailure.modal.contentEl.textContent).toContain(
+      "连接已保存，但无法确认密钥保存状态",
+    );
     expect(secretFailure.modal.contentEl.textContent).not.toContain(API_KEY);
     expect(secretFailure.modal.containerEl.isConnected).toBe(true);
   });

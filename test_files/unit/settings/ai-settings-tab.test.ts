@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as obsidian from "obsidian";
 import { ProviderError } from "../../../src/ai/providers/provider-error";
+import { createTextGenerationProvider } from "../../../src/ai/providers/provider-factory";
 import { createAiConnection } from "../../../src/ai/provider-presets";
 import {
   getAiConnectionMessage,
@@ -36,10 +37,44 @@ function row(container: HTMLElement, connectionName: string): HTMLElement {
   return result;
 }
 
+function connectionNames(container: HTMLElement): string[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      ".rss-dashboard-ai-connection .setting-item-name",
+    ),
+  ).map((element) => element.textContent ?? "");
+}
+
+interface CapturedEditorOptions {
+  existing?: unknown;
+  onSave(connection: ReturnType<typeof createAiConnection>): Promise<void>;
+  onPersisted?: (
+    connection: ReturnType<typeof createAiConnection>,
+    status: "unchanged" | "key-saved" | "key-failed",
+  ) => void;
+  onClose?: () => void;
+  runTransaction?: <T>(operation: () => Promise<T>) => Promise<T>;
+}
+
+async function persistEditor(
+  editor: CapturedEditorOptions,
+  connection: ReturnType<typeof createAiConnection>,
+): Promise<void> {
+  if (editor.runTransaction) {
+    await editor.runTransaction(() => editor.onSave(connection));
+    return;
+  }
+  await editor.onSave(connection);
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function harness(options: {
@@ -50,6 +85,9 @@ function harness(options: {
   providerFactory?: ReturnType<typeof vi.fn>;
   firstEnabled?: boolean;
   getStatus?: () => Promise<{ hasSecret: boolean }>;
+  secretGet?: ReturnType<typeof vi.fn>;
+  secretSet?: ReturnType<typeof vi.fn>;
+  secretDelete?: ReturnType<typeof vi.fn>;
 } = {}) {
   const settings: RssDashboardSettings = structuredClone(DEFAULT_SETTINGS);
   settings.locale = "zh-CN";
@@ -76,9 +114,9 @@ function harness(options: {
   };
   const secretStore = {
     getStatus: vi.fn(options.getStatus ?? (async () => ({ hasSecret: true }))),
-    get: vi.fn(async () => API_KEY),
-    set: vi.fn(async () => {}),
-    delete: vi.fn(async () => {}),
+    get: options.secretGet ?? vi.fn(async () => API_KEY),
+    set: options.secretSet ?? vi.fn(async () => {}),
+    delete: options.secretDelete ?? vi.fn(async () => {}),
   };
   const generate = vi.fn(async () => ({ text: "OK" }));
   const providerFactory = options.providerFactory ?? vi.fn(async () => ({ generate }));
@@ -153,11 +191,8 @@ describe("renderAiSettingsTab", () => {
     button(test.containerEl, "添加连接").click();
     button(row(test.containerEl, "Kimi 工作"), "编辑").click();
     expect(test.openedEditors).toHaveLength(2);
-    const add = test.openedEditors[0] as {
-      existing?: unknown;
-      onSave(connection: ReturnType<typeof createAiConnection>): Promise<void>;
-    };
-    const edit = test.openedEditors[1] as typeof add;
+    const add = test.openedEditors[0] as CapturedEditorOptions;
+    const edit = test.openedEditors[1] as CapturedEditorOptions;
     expect(add.existing).toBeUndefined();
     expect(edit.existing).toEqual(test.plugin.settings.ai.connections[0]);
 
@@ -168,22 +203,20 @@ describe("renderAiSettingsTab", () => {
       baseUrl: "https://relay.example.com/v1",
       model: "relay-model",
     });
-    await add.onSave(added);
+    await persistEditor(add, added);
     expect(test.plugin.settings.ai.connections.at(-1)).toEqual(added);
     expect(test.plugin.saveSettings).toHaveBeenCalledTimes(1);
 
     test.plugin.saveSettings.mockRejectedValueOnce(new Error("save failed"));
     const changed = { ...test.plugin.settings.ai.connections[0], name: "不会留下" };
-    await expect(edit.onSave(changed)).rejects.toThrow();
+    await expect(persistEditor(edit, changed)).rejects.toThrow();
     expect(test.plugin.settings.ai.connections[0].name).toBe("Kimi 工作");
   });
 
   it("rejects an add collision instead of silently overwriting an existing UUID", async () => {
     const test = harness();
     button(test.containerEl, "添加连接").click();
-    const add = test.openedEditors[0] as {
-      onSave(connection: ReturnType<typeof createAiConnection>): Promise<void>;
-    };
+    const add = test.openedEditors[0] as CapturedEditorOptions;
     const collision = createAiConnection({
       id: FIRST_ID.toUpperCase(),
       name: "碰撞连接",
@@ -191,9 +224,187 @@ describe("renderAiSettingsTab", () => {
       model: "account-model",
     });
 
-    await expect(add.onSave(collision)).rejects.toThrow();
+    await expect(persistEditor(add, collision)).rejects.toThrow();
     expect(test.plugin.settings.ai.connections[0].name).toBe("Kimi 工作");
     expect(test.plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("refreshes only after the modal reports the final key state", async () => {
+    const test = harness();
+    let refreshes = 0;
+    test.containerEl.addEventListener("rss-settings-refresh", () => {
+      refreshes += 1;
+    });
+    button(test.containerEl, "添加连接").click();
+    const add = test.openedEditors[0] as CapturedEditorOptions;
+    const added = createAiConnection({
+      id: "84794c18-dd50-4128-8498-01ed2a508006",
+      name: "延迟状态",
+      providerKind: "deepseek",
+      model: "account-model",
+    });
+
+    await persistEditor(add, added);
+    expect(refreshes).toBe(0);
+    add.onPersisted?.(added, "key-saved");
+    expect(refreshes).toBe(1);
+  });
+
+  it("keeps the renderer alive after key failure so a same-modal retry can refresh to configured", async () => {
+    let hasSecret = false;
+    const test = harness({
+      getStatus: async () => ({ hasSecret }),
+    });
+    let refreshes = 0;
+    test.containerEl.addEventListener("rss-settings-refresh", () => {
+      refreshes += 1;
+      test.containerEl.dispatchEvent(new CustomEvent("rss-settings-dispose"));
+      test.containerEl.empty();
+      renderAiSettingsTab(test.containerEl, test.plugin, {
+        secretStore: test.secretStore,
+        providerFactory: test.providerFactory,
+        confirmPaidRequest: test.confirmPaidRequest,
+        confirmDeleteKey: test.confirmDeleteKey,
+        confirmDeleteConnection: test.confirmDeleteConnection,
+      });
+    });
+    button(test.containerEl, "添加连接").click();
+    const add = test.openedEditors[0] as CapturedEditorOptions;
+    const added = createAiConnection({
+      id: "a4f4e412-dd79-4c17-9435-ac7e6f083758",
+      name: "重试连接",
+      providerKind: "kimi",
+      model: "account-model",
+    });
+
+    await persistEditor(add, added);
+    add.onPersisted?.(added, "key-failed");
+    expect(refreshes).toBe(0);
+
+    await persistEditor(add, added);
+    hasSecret = true;
+    add.onPersisted?.(added, "key-saved");
+    await flushPromises();
+    expect(refreshes).toBe(1);
+    expect(row(test.containerEl, "重试连接").textContent).toContain("已配置密钥");
+  });
+
+  it("refreshes saved metadata when a key-failed modal is closed without retrying", async () => {
+    const test = harness();
+    let refreshes = 0;
+    test.containerEl.addEventListener("rss-settings-refresh", () => {
+      refreshes += 1;
+    });
+    button(test.containerEl, "添加连接").click();
+    const add = test.openedEditors[0] as CapturedEditorOptions;
+    const added = createAiConnection({
+      id: "e3218f4a-d916-4e6c-8a5e-b51179ca6d35",
+      name: "无密钥连接",
+      providerKind: "deepseek",
+      model: "account-model",
+    });
+    await persistEditor(add, added);
+    add.onPersisted?.(added, "key-failed");
+    expect(refreshes).toBe(0);
+    add.onClose?.();
+    expect(refreshes).toBe(1);
+  });
+
+  it("serializes mutations across renderer lifetimes so an old rejection cannot erase a newer save", async () => {
+    const firstSave = deferred<void>();
+    const persisted: RssDashboardSettings["ai"][] = [];
+    const saveSettings = vi.fn()
+      .mockImplementationOnce(() => firstSave.promise)
+      .mockImplementationOnce(async function (this: void) {
+        persisted.push(structuredClone(test.plugin.settings.ai));
+      });
+    const test = harness({ saveSettings });
+    button(row(test.containerEl, "Claude 研究"), "上移").click();
+    await flushPromises();
+    expect(saveSettings).toHaveBeenCalledTimes(1);
+
+    test.containerEl.dispatchEvent(new CustomEvent("rss-settings-dispose"));
+    test.containerEl.remove();
+    const openedEditors: unknown[] = [];
+    const secondContainer = document.body.createDiv();
+    renderAiSettingsTab(secondContainer, test.plugin, {
+      secretStore: test.secretStore,
+      providerFactory: test.providerFactory,
+      confirmPaidRequest: test.confirmPaidRequest,
+      confirmDeleteKey: test.confirmDeleteKey,
+      confirmDeleteConnection: test.confirmDeleteConnection,
+      createEditor: (options) => ({
+        open: () => { openedEditors.push(options); },
+        close: () => {},
+      }),
+    });
+    button(secondContainer, "添加连接").click();
+    const add = openedEditors[0] as CapturedEditorOptions;
+    const third = createAiConnection({
+      id: "9f27215d-d56b-4253-9e27-ac59bbfbb1d7",
+      name: "稍后成功",
+      providerKind: "glm",
+      model: "account-model",
+    });
+    const addPromise = persistEditor(add, third);
+    await flushPromises();
+
+    firstSave.reject(new Error("old renderer save failed"));
+    await flushPromises();
+    await addPromise;
+
+    expect(saveSettings).toHaveBeenCalledTimes(2);
+    expect(test.plugin.settings.ai.connections.map(({ id }) => id)).toEqual([
+      FIRST_ID,
+      SECOND_ID,
+      third.id,
+    ]);
+    expect(persisted.at(-1)?.connections.map(({ id }) => id)).toEqual([
+      FIRST_ID,
+      SECOND_ID,
+      third.id,
+    ]);
+  });
+
+  it("refreshes the current renderer after an old renderer rolls back", async () => {
+    const firstSave = deferred<void>();
+    const test = harness({ saveSettings: vi.fn(() => firstSave.promise) });
+    button(row(test.containerEl, "Claude 研究"), "上移").click();
+    await flushPromises();
+
+    test.containerEl.dispatchEvent(new CustomEvent("rss-settings-dispose"));
+    test.containerEl.remove();
+    const currentContainer = document.body.createDiv();
+    const dependencies = {
+      secretStore: test.secretStore,
+      providerFactory: test.providerFactory,
+      confirmPaidRequest: test.confirmPaidRequest,
+      confirmDeleteKey: test.confirmDeleteKey,
+      confirmDeleteConnection: test.confirmDeleteConnection,
+    };
+    currentContainer.addEventListener("rss-settings-refresh", () => {
+      currentContainer.dispatchEvent(new CustomEvent("rss-settings-dispose"));
+      currentContainer.empty();
+      renderAiSettingsTab(currentContainer, test.plugin, dependencies);
+    });
+    renderAiSettingsTab(currentContainer, test.plugin, dependencies);
+    expect(connectionNames(currentContainer)).toEqual([
+      "Claude 研究",
+      "Kimi 工作",
+    ]);
+
+    firstSave.reject(new Error("old renderer save failed"));
+    await flushPromises();
+    await flushPromises();
+
+    expect(test.plugin.settings.ai.connections.map(({ id }) => id)).toEqual([
+      FIRST_ID,
+      SECOND_ID,
+    ]);
+    expect(connectionNames(currentContainer)).toEqual([
+      "Kimi 工作",
+      "Claude 研究",
+    ]);
   });
 
   it("keeps delete-key and delete-connection as separate confirmed actions", async () => {
@@ -239,8 +450,17 @@ describe("renderAiSettingsTab", () => {
     expect(metadataFailure.plugin.saveSettings).toHaveBeenCalledTimes(1);
 
     document.body.empty();
-    const keyFailure = harness();
-    keyFailure.secretStore.delete.mockRejectedValueOnce(new Error("secret failed"));
+    let storedKey: string | undefined = API_KEY;
+    const keyFailure = harness({
+      secretGet: vi.fn(async () => storedKey),
+      secretDelete: vi.fn(async () => {
+        storedKey = undefined;
+        throw new Error("delete failed after rename");
+      }),
+      secretSet: vi.fn(async (_id: string, key: string) => {
+        storedKey = key;
+      }),
+    });
     button(row(keyFailure.containerEl, "Kimi 工作"), "删除连接").click();
     await flushPromises();
     await flushPromises();
@@ -248,7 +468,30 @@ describe("renderAiSettingsTab", () => {
       .toContain(FIRST_ID);
     expect(keyFailure.plugin.settings.ai.defaultConnectionId).toBe(FIRST_ID);
     expect(keyFailure.plugin.saveSettings).not.toHaveBeenCalled();
+    expect(keyFailure.secretStore.set).toHaveBeenCalledWith(FIRST_ID, API_KEY);
+    expect(storedKey).toBe(API_KEY);
     expect(keyFailure.containerEl.textContent).toContain("删除未完成，连接已保留");
+  });
+
+  it("reports uncertain key state when a delete clears then rejects and restoration also fails", async () => {
+    let storedKey: string | undefined = API_KEY;
+    const test = harness({
+      secretGet: vi.fn(async () => storedKey),
+      secretDelete: vi.fn(async () => {
+        storedKey = undefined;
+        throw new Error(API_KEY);
+      }),
+      secretSet: vi.fn(async () => { throw new Error(API_KEY); }),
+    });
+    button(row(test.containerEl, "Kimi 工作"), "删除连接").click();
+    await flushPromises();
+    await flushPromises();
+
+    expect(test.plugin.settings.ai.connections.map(({ id }) => id)).toContain(FIRST_ID);
+    expect(test.plugin.saveSettings).not.toHaveBeenCalled();
+    expect(storedKey).toBeUndefined();
+    expect(test.containerEl.textContent).toContain("无法确认密钥状态，请重新配置");
+    expect(test.containerEl.textContent).not.toContain(API_KEY);
   });
 
   it("retains recoverable metadata when key compensation also fails", async () => {
@@ -261,7 +504,7 @@ describe("renderAiSettingsTab", () => {
     await flushPromises();
 
     expect(test.plugin.settings.ai.connections.map(({ id }) => id)).toContain(FIRST_ID);
-    expect(test.containerEl.textContent).toContain("连接已保留，但密钥需要重新配置");
+    expect(test.containerEl.textContent).toContain("无法确认密钥状态，请重新配置");
     expect(test.containerEl.textContent).not.toContain(API_KEY);
   });
 
@@ -314,20 +557,50 @@ describe("renderAiSettingsTab", () => {
     expect(disabled.containerEl.textContent).toContain("连接已停用");
 
     document.body.empty();
-    const pending = deferred<{ text: string }>();
-    const generate = vi.fn((_request: unknown) => pending.promise);
-    const providerFactory = vi.fn(async () => ({ generate }));
+    const underlying = deferred<{
+      status: number;
+      json: { choices: Array<{ message: { content: string } }> };
+    }>();
+    const transport = vi.fn(() => underlying.promise);
+    const providerFactory = vi.fn(async (
+      connection: ReturnType<typeof createAiConnection>,
+      secretStore: { get(connectionId: string): Promise<string | undefined> },
+    ) => await createTextGenerationProvider(connection, secretStore, { transport }));
     const test = harness({ providerFactory });
-    button(row(test.containerEl, "Claude 研究"), "测试连接").click();
+    button(row(test.containerEl, "Kimi 工作"), "测试连接").click();
     await flushPromises();
-    expect(generate).toHaveBeenCalledTimes(1);
-    const request = generate.mock.calls[0][0] as { signal: AbortSignal };
-    expect(request.signal.aborted).toBe(false);
-    button(row(test.containerEl, "Claude 研究"), "取消测试").click();
-    expect(request.signal.aborted).toBe(true);
-    pending.resolve({ text: "late" });
+    expect(transport).toHaveBeenCalledTimes(1);
+    button(row(test.containerEl, "Kimi 工作"), "取消测试").click();
     await flushPromises();
-    expect(test.containerEl.textContent).toContain("测试已取消");
+    expect(test.containerEl.textContent).toContain("停止等待，已发送请求仍可能计费");
+    expect(button(row(test.containerEl, "Kimi 工作"), "测试连接").disabled)
+      .toBe(true);
+    expect(button(row(test.containerEl, "Claude 研究"), "测试连接").disabled)
+      .toBe(true);
+
+    test.containerEl.dispatchEvent(new CustomEvent("rss-settings-dispose"));
+    test.containerEl.remove();
+    const currentContainer = document.body.createDiv();
+    renderAiSettingsTab(currentContainer, test.plugin, {
+      secretStore: test.secretStore,
+      providerFactory,
+      confirmPaidRequest: test.confirmPaidRequest,
+      confirmDeleteKey: test.confirmDeleteKey,
+      confirmDeleteConnection: test.confirmDeleteConnection,
+    });
+    expect(button(row(currentContainer, "Kimi 工作"), "测试连接").disabled)
+      .toBe(true);
+    expect(button(row(currentContainer, "Claude 研究"), "测试连接").disabled)
+      .toBe(true);
+
+    underlying.resolve({
+      status: 200,
+      json: { choices: [{ message: { content: "OK" } }] },
+    });
+    await flushPromises();
+    await flushPromises();
+    expect(button(row(currentContainer, "Kimi 工作"), "测试连接").disabled)
+      .toBe(false);
   });
 
   it("maps provider failures to distinct static localized messages", () => {
@@ -338,7 +611,7 @@ describe("renderAiSettingsTab", () => {
       ["insufficient-balance", "账户余额不足。"],
       ["rate-limited", "请求频率已达上限，请稍后再试。"],
       ["timeout", "连接测试超时。"],
-      ["aborted", "测试已取消。"],
+      ["aborted", "已停止等待，已发送请求仍可能计费；后台请求结束前不能再次测试。"],
       ["network-failure", "网络连接失败。"],
     ] as const;
     for (const [code, message] of cases) {

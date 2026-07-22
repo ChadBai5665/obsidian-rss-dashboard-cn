@@ -4,6 +4,7 @@ import { normalizeAiConnection } from "../../ai/connection-validation";
 import { ProviderError } from "../../ai/providers/provider-error";
 import { createTextGenerationProvider } from "../../ai/providers/provider-factory";
 import type { TextGenerationProvider } from "../../ai/providers/text-generation-provider";
+import { waitForTrustedAbortWork } from "../../ai/trusted-abort";
 import { DesktopSecretStore } from "../../security/desktop-secret-store";
 import {
   AiConnectionModal,
@@ -20,6 +21,13 @@ import type { RssDashboardSettings } from "../../types/types";
 const TEST_USER_PROMPT = "回复 OK";
 const TEST_OUTPUT_TOKENS = 8;
 const RENDER_EPOCHS = new WeakMap<HTMLElement, number>();
+const AI_OPERATION_QUEUES = new WeakMap<object, Promise<void>>();
+const AI_RENDER_SUBSCRIBERS = new WeakMap<object, Set<() => void>>();
+const AI_ACTIVE_TESTS = new WeakMap<object, ActiveAiTest>();
+const AI_TEST_GATE_SUBSCRIBERS = new WeakMap<
+  object,
+  Set<(busy: boolean) => void>
+>();
 
 export interface AiSettingsPlugin {
   app: App;
@@ -37,6 +45,13 @@ export interface AiSettingsSecretStore {
 export interface AiEditorHandle {
   open(): void;
   close(): void;
+}
+
+interface ActiveAiTest {
+  connectionId: string;
+  controller: AbortController;
+  cancelled: boolean;
+  requestStarted: boolean;
 }
 
 export interface AiSettingsDependencies {
@@ -77,13 +92,18 @@ export function renderAiSettingsTab(
 
   let disposed = false;
   let mutationInFlight = false;
-  let activeTest:
-    | { connectionId: string; controller: AbortController; cancelled: boolean }
-    | undefined;
   const actionGates = new Set<string>();
   const mutableButtons = new Set<HTMLButtonElement>();
   const testButtons = new Set<HTMLButtonElement>();
   const isCurrent = (): boolean => !disposed && isRenderCurrent();
+  const refreshRenderer = (): void => {
+    if (isCurrent()) {
+      containerEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+    }
+  };
+  const renderSubscribers = AI_RENDER_SUBSCRIBERS.get(plugin) ?? new Set();
+  renderSubscribers.add(refreshRenderer);
+  AI_RENDER_SUBSCRIBERS.set(plugin, renderSubscribers);
   const setMutationBusy = (busy: boolean): void => {
     mutationInFlight = busy;
     for (const button of mutableButtons) {
@@ -98,8 +118,9 @@ export function renderAiSettingsTab(
   };
   const registerTestButton = (button: HTMLButtonElement): void => {
     testButtons.add(button);
-    button.disabled = activeTest !== undefined;
-    button.setAttribute("aria-disabled", String(activeTest !== undefined));
+    const busy = AI_ACTIVE_TESTS.has(plugin);
+    button.disabled = busy;
+    button.setAttribute("aria-disabled", String(busy));
   };
   const setTestBusy = (busy: boolean): void => {
     for (const button of testButtons) {
@@ -107,6 +128,12 @@ export function renderAiSettingsTab(
       button.setAttribute("aria-disabled", String(busy));
     }
   };
+  const testGateSubscriber = (busy: boolean): void => {
+    if (isCurrent()) setTestBusy(busy);
+  };
+  const testGateSubscribers = AI_TEST_GATE_SUBSCRIBERS.get(plugin) ?? new Set();
+  testGateSubscribers.add(testGateSubscriber);
+  AI_TEST_GATE_SUBSCRIBERS.set(plugin, testGateSubscribers);
 
   new Setting(containerEl)
     .setName(t("settings.ai.heading"))
@@ -123,18 +150,23 @@ export function renderAiSettingsTab(
 
   const openEditor = (existing?: AiConnection): void => {
     if (!isCurrent()) return;
+    let ownedConnectionId = existing?.id;
+    let metadataPersisted = false;
+    let refreshSent = false;
     const editor = createEditor({
       locale,
       ...(existing ? { existing } : {}),
       secretStore,
+      runTransaction: (operation) =>
+        runSerializedAiOperation(plugin, operation),
       onSave: async (connection) => {
         const normalized = normalizeAiConnection(connection);
         if (!normalized) throw new Error("Invalid AI connection metadata.");
-        await mutateAiSettings(plugin, () => {
+        await mutateAiSettingsUnlocked(plugin, () => {
           const connections = [...plugin.settings.ai.connections];
           const index = connections.findIndex(({ id }) => id === normalized.id);
-          if (existing) {
-            if (normalized.id !== existing.id || index < 0) {
+          if (ownedConnectionId) {
+            if (normalized.id !== ownedConnectionId || index < 0) {
               throw new Error("The edited AI connection identity is invalid.");
             }
             connections[index] = normalized;
@@ -149,8 +181,19 @@ export function renderAiSettingsTab(
               plugin.settings.ai.defaultConnectionId ?? normalized.id,
           };
         });
-        if (isCurrent()) {
-          containerEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+        ownedConnectionId = normalized.id;
+        metadataPersisted = true;
+      },
+      onPersisted: (_connection, status) => {
+        if (status !== "key-failed") {
+          refreshSent = true;
+          notifyAiSettingsRenderers(plugin);
+        }
+      },
+      onClose: () => {
+        if (metadataPersisted && !refreshSent) {
+          refreshSent = true;
+          notifyAiSettingsRenderers(plugin);
         }
       },
     });
@@ -194,16 +237,27 @@ export function renderAiSettingsTab(
       setTestBusy,
       setMutationBusy,
       actionGates,
-      getActiveTest: () => activeTest,
-      setActiveTest: (value) => { activeTest = value; },
+      getActiveTest: () => AI_ACTIVE_TESTS.get(plugin),
+      setActiveTest: (value) => setActiveAiTest(plugin, value),
     });
   });
 
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
-    activeTest?.controller.abort();
-    activeTest = undefined;
+    const activeTest = AI_ACTIVE_TESTS.get(plugin);
+    if (activeTest && !activeTest.cancelled) {
+      activeTest.cancelled = true;
+      activeTest.controller.abort();
+    }
+    renderSubscribers.delete(refreshRenderer);
+    if (renderSubscribers.size === 0) {
+      AI_RENDER_SUBSCRIBERS.delete(plugin);
+    }
+    testGateSubscribers.delete(testGateSubscriber);
+    if (testGateSubscribers.size === 0) {
+      AI_TEST_GATE_SUBSCRIBERS.delete(plugin);
+    }
     containerEl.removeEventListener("rss-settings-dispose", dispose);
   };
   containerEl.addEventListener("rss-settings-dispose", dispose);
@@ -230,14 +284,8 @@ interface RenderConnectionInput {
   setTestBusy(busy: boolean): void;
   setMutationBusy(busy: boolean): void;
   actionGates: Set<string>;
-  getActiveTest():
-    | { connectionId: string; controller: AbortController; cancelled: boolean }
-    | undefined;
-  setActiveTest(
-    value:
-      | { connectionId: string; controller: AbortController; cancelled: boolean }
-      | undefined,
-  ): void;
+  getActiveTest(): ActiveAiTest | undefined;
+  setActiveTest(value: ActiveAiTest | undefined): void;
 }
 
 function renderConnection(input: RenderConnectionInput): void {
@@ -359,6 +407,7 @@ function renderConnection(input: RenderConnectionInput): void {
           connectionId: normalized.id,
           controller,
           cancelled: false,
+          requestStarted: false,
         };
         input.setActiveTest(operation);
         input.setTestBusy(true);
@@ -371,6 +420,7 @@ function renderConnection(input: RenderConnectionInput): void {
             if (!confirmed || !input.isCurrent() || operation.cancelled) return;
             const provider = await input.providerFactory(normalized, secretStore);
             if (!input.isCurrent() || operation.cancelled) return;
+            operation.requestStarted = true;
             await provider.generate({
               system: "",
               user: TEST_USER_PROMPT,
@@ -383,10 +433,13 @@ function renderConnection(input: RenderConnectionInput): void {
           } catch (error) {
             if (input.isCurrent()) {
               testStatusEl.setText(operation.cancelled
-                ? t("settings.ai.connectionAborted")
+                ? t(operation.requestStarted
+                  ? "settings.ai.connectionWaitCancelled"
+                  : "settings.ai.connectionCancelledBeforeSend")
                 : getAiConnectionMessage(error, t));
             }
           } finally {
+            await waitForTrustedAbortWork(controller.signal);
             if (input.getActiveTest() === operation) {
               input.setActiveTest(undefined);
               if (input.isCurrent()) {
@@ -412,7 +465,9 @@ function renderConnection(input: RenderConnectionInput): void {
         }
         active.cancelled = true;
         active.controller.abort();
-        testStatusEl.setText(t("settings.ai.connectionAborted"));
+        testStatusEl.setText(t(active.requestStarted
+          ? "settings.ai.connectionWaitCancelled"
+          : "settings.ai.connectionCancelledBeforeSend"));
       });
   });
 
@@ -444,11 +499,7 @@ function runMetadataMutation(
   if (!input.isCurrent()) return;
   input.setMutationBusy(true);
   void mutateAiSettings(input.plugin, next).then(
-    () => {
-      if (input.isCurrent()) {
-        input.containerEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
-      }
-    },
+    () => {},
     () => {
       if (input.isCurrent()) statusEl.setText(input.t("settings.ai.metadataSaveFailed"));
     },
@@ -471,12 +522,16 @@ function runDeleteKey(
     try {
       const confirmed = await input.confirmDeleteKey(input.connection);
       if (!confirmed || !input.isCurrent()) return;
-      await input.secretStore.delete(input.connection.id);
+      await runSerializedAiOperation(
+        input.plugin,
+        () => input.secretStore.delete(input.connection.id),
+      );
       if (input.isCurrent()) {
         invalidateKeyStatus();
         keyStatusEl.setText(input.t("settings.ai.keyNotConfigured"));
         actionStatusEl.setText(input.t("settings.ai.keyDeleted"));
       }
+      notifyAiSettingsRenderers(input.plugin);
     } catch {
       if (input.isCurrent()) {
         actionStatusEl.setText(input.t("settings.ai.keyDeleteFailed"));
@@ -497,61 +552,90 @@ function runDeleteConnection(
   input.actionGates.add(gate);
   input.setMutationBusy(true);
   void (async () => {
-    let keyBackup: string | undefined;
     try {
       const confirmed = await input.confirmDeleteConnection(input.connection);
       if (!confirmed || !input.isCurrent()) return;
-      keyBackup = await input.secretStore.get(input.connection.id);
-      await input.secretStore.delete(input.connection.id);
-      try {
-        await mutateAiSettings(input.plugin, () => {
-          const connections = input.plugin.settings.ai.connections.filter(
-            ({ id }) => id !== input.connection.id,
-          );
-          return {
-            connections,
-            ...(input.plugin.settings.ai.defaultConnectionId === input.connection.id
-              ? connections[0]
-                ? { defaultConnectionId: connections[0].id }
-                : {}
-              : input.plugin.settings.ai.defaultConnectionId
-                ? { defaultConnectionId: input.plugin.settings.ai.defaultConnectionId }
-                : {}),
-          };
-        });
-      } catch {
-        let keyRestored = keyBackup === undefined;
+      const result = await runSerializedAiOperation(input.plugin, async () => {
+        let keyBackup: string | undefined;
         try {
-          if (keyBackup !== undefined) {
-            await input.secretStore.set(input.connection.id, keyBackup);
-            keyRestored = true;
+          keyBackup = await input.secretStore.get(input.connection.id);
+          try {
+            await input.secretStore.delete(input.connection.id);
+          } catch {
+            return await restoreDeletedConnectionKey(input, keyBackup);
           }
-        } catch {
-          keyRestored = false;
+          try {
+            await mutateAiSettingsUnlocked(input.plugin, () => {
+              const connections = input.plugin.settings.ai.connections.filter(
+                ({ id }) => id !== input.connection.id,
+              );
+              return {
+                connections,
+                ...(input.plugin.settings.ai.defaultConnectionId === input.connection.id
+                  ? connections[0]
+                    ? { defaultConnectionId: connections[0].id }
+                    : {}
+                  : input.plugin.settings.ai.defaultConnectionId
+                    ? { defaultConnectionId: input.plugin.settings.ai.defaultConnectionId }
+                    : {}),
+              };
+            });
+          } catch {
+            return await restoreDeletedConnectionKey(input, keyBackup);
+          }
+          return "deleted" as const;
+        } finally {
+          keyBackup = undefined;
         }
-        if (input.isCurrent()) {
-          statusEl.setText(input.t(keyRestored
-            ? "settings.ai.connectionDeleteRetained"
-            : "settings.ai.connectionDeleteKeyRestoreFailed"));
-        }
+      });
+      notifyAiSettingsRenderers(input.plugin);
+      if (!input.isCurrent()) return;
+      if (result === "deleted") {
         return;
-      }
-      if (input.isCurrent()) {
-        input.containerEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+      } else {
+        statusEl.setText(input.t(result === "retained"
+          ? "settings.ai.connectionDeleteRetained"
+          : "settings.ai.connectionDeleteKeyRestoreFailed"));
       }
     } catch {
       if (input.isCurrent()) {
         statusEl.setText(input.t("settings.ai.connectionDeleteRetained"));
       }
     } finally {
-      keyBackup = undefined;
       input.actionGates.delete(gate);
       if (input.isCurrent()) input.setMutationBusy(false);
     }
   })();
 }
 
+async function restoreDeletedConnectionKey(
+  input: RenderConnectionInput,
+  keyBackup: string | undefined,
+): Promise<"retained" | "key-uncertain"> {
+  if (keyBackup === undefined) return "retained";
+  try {
+    await input.secretStore.set(input.connection.id, keyBackup);
+    return "retained";
+  } catch {
+    return "key-uncertain";
+  }
+}
+
 async function mutateAiSettings(
+  plugin: AiSettingsPlugin,
+  next: () => RssDashboardSettings["ai"],
+): Promise<void> {
+  try {
+    await runSerializedAiOperation(
+      plugin,
+      () => mutateAiSettingsUnlocked(plugin, next),
+    );
+  } finally {
+    notifyAiSettingsRenderers(plugin);
+  }
+}
+
+async function mutateAiSettingsUnlocked(
   plugin: AiSettingsPlugin,
   next: () => RssDashboardSettings["ai"],
 ): Promise<void> {
@@ -564,6 +648,43 @@ async function mutateAiSettings(
     plugin.settings.ai = original;
     throw error;
   }
+}
+
+async function runSerializedAiOperation<T>(
+  plugin: AiSettingsPlugin,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = AI_OPERATION_QUEUES.get(plugin) ?? Promise.resolve();
+  const queued = previous.then(operation);
+  const tail = queued.then(
+    () => undefined,
+    () => undefined,
+  );
+  AI_OPERATION_QUEUES.set(plugin, tail);
+  try {
+    return await queued;
+  } finally {
+    if (AI_OPERATION_QUEUES.get(plugin) === tail) {
+      AI_OPERATION_QUEUES.delete(plugin);
+    }
+  }
+}
+
+function notifyAiSettingsRenderers(plugin: AiSettingsPlugin): void {
+  const subscribers = AI_RENDER_SUBSCRIBERS.get(plugin);
+  if (!subscribers) return;
+  for (const subscriber of [...subscribers]) subscriber();
+}
+
+function setActiveAiTest(
+  plugin: AiSettingsPlugin,
+  activeTest: ActiveAiTest | undefined,
+): void {
+  if (activeTest) AI_ACTIVE_TESTS.set(plugin, activeTest);
+  else AI_ACTIVE_TESTS.delete(plugin);
+  const subscribers = AI_TEST_GATE_SUBSCRIBERS.get(plugin);
+  if (!subscribers) return;
+  for (const subscriber of [...subscribers]) subscriber(activeTest !== undefined);
 }
 
 function moveConnection(
@@ -590,7 +711,7 @@ export function getAiConnectionMessage(
     "insufficient-balance": "settings.ai.connectionInsufficientBalance",
     "rate-limited": "settings.ai.connectionRateLimited",
     timeout: "settings.ai.connectionTimeout",
-    aborted: "settings.ai.connectionAborted",
+    aborted: "settings.ai.connectionWaitCancelled",
     "network-failure": "settings.ai.connectionNetworkFailed",
     "connection-disabled": "settings.ai.connectionDisabled",
     "invalid-connection": "settings.ai.connectionInvalid",

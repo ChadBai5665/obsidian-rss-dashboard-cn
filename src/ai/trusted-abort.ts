@@ -15,6 +15,7 @@ const REMOVE_EVENT_LISTENER: unknown = Object.getOwnPropertyDescriptor(
   ABORT_SIGNAL_EVENT_TARGET,
   "removeEventListener",
 )?.value;
+const TRUSTED_ABORT_WORK = new WeakMap<AbortSignal, Promise<void>>();
 
 export interface TrustedAbortRaceOptions {
   signal?: AbortSignal;
@@ -40,6 +41,17 @@ export function readTrustedAbortState(value: unknown): boolean | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Waits for non-cancellable work started with this signal to actually settle.
+ * The public request may reject on abort before Obsidian's requestUrl finishes.
+ */
+export async function waitForTrustedAbortWork(
+  signal: AbortSignal,
+): Promise<void> {
+  if (readTrustedAbortState(signal) === undefined) return;
+  await TRUSTED_ABORT_WORK.get(signal);
 }
 
 /**
@@ -140,10 +152,31 @@ export function raceWithTrustedAbort<T>(
       rejectWith(normalizeFailure(error, options.mapFailure));
       return;
     }
+    if (signal) trackTrustedAbortWork(signal, normalized);
     normalized.then(
       (value) => finish(() => resolve(value as T)),
       (error: unknown) => rejectWith(normalizeFailure(error, options.mapFailure)),
     );
+  });
+}
+
+function trackTrustedAbortWork(
+  signal: AbortSignal,
+  pending: Promise<unknown>,
+): void {
+  const settled = pending.then(
+    () => undefined,
+    () => undefined,
+  );
+  const previous = TRUSTED_ABORT_WORK.get(signal);
+  const combined = previous
+    ? Promise.all([previous, settled]).then(() => undefined)
+    : settled;
+  TRUSTED_ABORT_WORK.set(signal, combined);
+  void combined.then(() => {
+    if (TRUSTED_ABORT_WORK.get(signal) === combined) {
+      TRUSTED_ABORT_WORK.delete(signal);
+    }
   });
 }
 

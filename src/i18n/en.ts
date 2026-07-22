@@ -479,7 +479,7 @@ export const en = {
   "settings.ai.invalidKey": "Enter a valid non-empty API key without surrounding spaces.",
   "settings.ai.metadataSaveFailed": "Could not save the connection settings.",
   "settings.ai.keySaveAfterMetadataFailed":
-    "The connection was saved, but the key could not be stored securely. Paste it again to retry.",
+    "The connection was saved, but the key storage state could not be confirmed. Check the connection list and configure it again if needed.",
   "settings.ai.defaultBadge": "Default",
   "settings.ai.setDefault": "Set as default",
   "settings.ai.moveUp": "Move up",
@@ -494,7 +494,7 @@ export const en = {
   "settings.ai.connectionDeleteRetained":
     "Deletion was not completed, so the connection was retained.",
   "settings.ai.connectionDeleteKeyRestoreFailed":
-    "The connection was retained, but its key must be configured again.",
+    "The connection was retained, but the key state could not be confirmed. Configure the key again.",
   "settings.ai.testConnection": "Test connection",
   "settings.ai.cancelTest": "Cancel test",
   "settings.ai.connectionSucceeded": "Connection succeeded.",
@@ -503,7 +503,10 @@ export const en = {
   "settings.ai.connectionInsufficientBalance": "The provider account balance is insufficient.",
   "settings.ai.connectionRateLimited": "The provider rate limit was reached. Try again later.",
   "settings.ai.connectionTimeout": "The connection test timed out.",
-  "settings.ai.connectionAborted": "The test was cancelled.",
+  "settings.ai.connectionCancelledBeforeSend":
+    "The test was cancelled before a request was sent.",
+  "settings.ai.connectionWaitCancelled":
+    "Stopped waiting. A request already sent may still incur charges; another test stays blocked until it settles.",
   "settings.ai.connectionNetworkFailed": "The network connection failed.",
   "settings.ai.connectionDisabled": "This connection is disabled.",
   "settings.ai.connectionInvalid": "This connection configuration is invalid.",

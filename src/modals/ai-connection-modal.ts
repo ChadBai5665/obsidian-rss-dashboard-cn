@@ -40,17 +40,30 @@ export interface AiConnectionModalSecretStore {
   set(connectionId: string, apiKey: string): Promise<void>;
 }
 
+export type AiKeyPersistenceStatus =
+  | "unchanged"
+  | "key-saved"
+  | "key-failed";
+
 export interface AiConnectionModalOptions {
   locale?: Locale;
   existing?: AiConnection;
   secretStore: Pick<DesktopSecretStore, "set"> | AiConnectionModalSecretStore;
   createConnectionId?: () => string;
   onSave(connection: AiConnection): Promise<void> | void;
+  runTransaction?<T>(operation: () => Promise<T>): Promise<T>;
+  onPersisted?(
+    connection: AiConnection,
+    status: AiKeyPersistenceStatus,
+  ): void;
   onClose?(): void;
 }
 
 export class AiConnectionModal extends Modal {
   private lifecycleEpoch = 0;
+  private persistenceInFlight = false;
+  private closeNotificationPending = false;
+  private closeNotified = false;
 
   constructor(
     app: App,
@@ -61,6 +74,9 @@ export class AiConnectionModal extends Modal {
 
   onOpen(): void {
     const lifecycleToken = ++this.lifecycleEpoch;
+    this.persistenceInFlight = false;
+    this.closeNotificationPending = false;
+    this.closeNotified = false;
     const t = createTranslator(this.options.locale ?? "zh-CN");
     const existing = this.options.existing
       ? normalizeAiConnection(this.options.existing)
@@ -78,6 +94,7 @@ export class AiConnectionModal extends Modal {
     let baseUrl = existing?.baseUrl ?? getAiProviderPreset(providerKind)?.baseUrl ?? "";
     let enabled = existing?.enabled ?? true;
     let pendingKey = "";
+    let generatedConnectionId: string | undefined;
     let inFlight = false;
 
     const providerGuidanceEl = contentEl.createEl("p", {
@@ -215,8 +232,11 @@ export class AiConnectionModal extends Modal {
               model,
               baseUrl,
               enabled,
-              createConnectionId:
-                this.options.createConnectionId ?? defaultConnectionId,
+              createConnectionId: () => {
+                generatedConnectionId ??=
+                  (this.options.createConnectionId ?? defaultConnectionId)();
+                return generatedConnectionId;
+              },
             });
             if (!connection.ok) {
               errorEl.setText(t(connection.error));
@@ -228,32 +248,55 @@ export class AiConnectionModal extends Modal {
             }
 
             inFlight = true;
+            this.persistenceInFlight = true;
             setBusy(true);
             void (async () => {
               let keyForWrite: string | undefined = submittedKey || undefined;
+              let metadataSaved = false;
+              const runTransaction = async <T>(
+                operation: () => Promise<T>,
+              ): Promise<T> => this.options.runTransaction
+                ? await this.options.runTransaction(operation)
+                : await operation();
               try {
                 errorEl.setText("");
-                await this.options.onSave(connection.connection);
-                if (keyForWrite !== undefined) {
-                  try {
-                    await this.options.secretStore.set(
-                      connection.connection.id,
-                      keyForWrite,
-                    );
-                  } catch {
-                    if (isCurrent()) {
-                      errorEl.setText(t("settings.ai.keySaveAfterMetadataFailed"));
+                const keyStatus = await runTransaction(async () => {
+                  await this.options.onSave(connection.connection);
+                  metadataSaved = true;
+                  if (keyForWrite !== undefined) {
+                    try {
+                      await this.options.secretStore.set(
+                        connection.connection.id,
+                        keyForWrite,
+                      );
+                      return "key-saved" as const;
+                    } catch {
+                      return "key-failed" as const;
                     }
-                    return;
                   }
+                  return "unchanged" as const;
+                });
+                if (keyStatus === "key-failed" && isCurrent()) {
+                  errorEl.setText(t("settings.ai.keySaveAfterMetadataFailed"));
                 }
-                if (isCurrent()) this.close();
+                try {
+                  this.options.onPersisted?.(connection.connection, keyStatus);
+                } catch {
+                  // Persistence succeeded; a stale UI refresh cannot undo it.
+                }
+                if (keyStatus !== "key-failed" && isCurrent()) this.close();
               } catch {
                 if (isCurrent()) {
-                  errorEl.setText(t("settings.ai.metadataSaveFailed"));
+                  errorEl.setText(t(metadataSaved
+                    ? "settings.ai.keySaveAfterMetadataFailed"
+                    : "settings.ai.metadataSaveFailed"));
                 }
               } finally {
                 keyForWrite = undefined;
+                this.persistenceInFlight = false;
+                if (this.closeNotificationPending) {
+                  this.notifyClosed();
+                }
                 if (isCurrent()) {
                   inFlight = false;
                   setBusy(false);
@@ -266,11 +309,19 @@ export class AiConnectionModal extends Modal {
 
   onClose(): void {
     this.lifecycleEpoch += 1;
-    try {
-      this.contentEl.empty();
-    } finally {
-      this.options.onClose?.();
+    this.contentEl.empty();
+    if (this.persistenceInFlight) {
+      this.closeNotificationPending = true;
+    } else {
+      this.notifyClosed();
     }
+  }
+
+  private notifyClosed(): void {
+    if (this.closeNotified) return;
+    this.closeNotified = true;
+    this.closeNotificationPending = false;
+    this.options.onClose?.();
   }
 }
 
