@@ -71,10 +71,10 @@ function mapPost(
   feedTitle: string,
   feedUrl: string,
 ): XAccountFeedItem {
-  const plainText = sanitizePlainText(post.text);
+  const plainText = repairUnpairedSurrogates(post.text);
   const safeMarkup = escapeHtml(plainText);
   const canonicalUrl = `https://x.com/${config.handle}/status/${post.id}`;
-  const title = truncateCodePoints(plainTextTitle(plainText), 120) ||
+  const title = truncateCodePoints(sanitizeTitle(plainText), 120) ||
     `@${config.handle} · ${post.id}`;
 
   return {
@@ -106,13 +106,7 @@ function mapPost(
   };
 }
 
-function plainTextTitle(text: string): string {
-  return text
-    .replace(/\s+/gu, " ")
-    .trim();
-}
-
-function sanitizePlainText(text: string): string {
+function repairUnpairedSurrogates(text: string): string {
   let result = "";
   for (let index = 0; index < text.length; index += 1) {
     const first = text.charCodeAt(index);
@@ -131,17 +125,30 @@ function sanitizePlainText(text: string): string {
     } else {
       codePoint = first;
     }
-    if (!isFormatControl(codePoint)) result += String.fromCodePoint(codePoint);
+    result += String.fromCodePoint(codePoint);
   }
   return result;
 }
 
-function isFormatControl(codePoint: number): boolean {
+function sanitizeTitle(text: string): string {
+  let result = "";
+  for (const character of text) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint !== undefined && !isDangerousTitleFormatControl(codePoint)) {
+      result += character;
+    }
+  }
+  return result.replace(/\s+/gu, " ").trim();
+}
+
+function isDangerousTitleFormatControl(codePoint: number): boolean {
   return (
     codePoint === 0x00ad ||
     codePoint === 0x061c ||
     codePoint === 0x180e ||
-    (codePoint >= 0x200b && codePoint <= 0x200f) ||
+    codePoint === 0x200b ||
+    codePoint === 0x200e ||
+    codePoint === 0x200f ||
     (codePoint >= 0x202a && codePoint <= 0x202e) ||
     (codePoint >= 0x2060 && codePoint <= 0x206f) ||
     codePoint === 0xfeff ||

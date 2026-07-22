@@ -449,8 +449,28 @@ describe("X account feed mapping", () => {
     expect(item.title).toBe("Line one 2 < 3 and 5 > 4 bad � end");
     expect(item.title).not.toContain("\u202E");
     expect(item.title).not.toContain("\u200B");
-    expect(item.plainText).toBe("Line one\n  2 < 3 and 5 > 4\tbad � end");
+    expect(item.plainText).toBe(
+      "Line one\n  2 < 3 and 5 > 4\t\u202Ebad\u200B � end",
+    );
+    expect(item.description).toContain("\u202Ebad\u200B � end");
     expect(item.description).toContain("2 &lt; 3 and 5 &gt; 4");
+  });
+
+  it("preserves legal Unicode joiners and body whitespace independently from title cleanup", () => {
+    const exactText = "Family 👨‍👩‍👧‍👦; Persian می‌خواهم\nNext\tline";
+    const mapped = mapXAccountPostsToFeed(account(), [
+      post({ id: "203", text: exactText }),
+    ], NOW);
+    const item = mapped.items[0];
+
+    expect(item.plainText).toBe(exactText);
+    expect(item.description).toBe(exactText);
+    expect(item.content).toBe(exactText);
+    expect(item.description).toContain("👨‍👩‍👧‍👦");
+    expect(item.description).toContain("می‌خواهم");
+    expect(item.title).toBe(
+      "Family 👨‍👩‍👧‍👦; Persian می‌خواهم Next line",
+    );
   });
 
   it("carries all X relationships and links into durable source metadata", () => {
