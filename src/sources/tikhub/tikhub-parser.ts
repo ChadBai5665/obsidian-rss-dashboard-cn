@@ -3,6 +3,7 @@ import type { XPost } from "./x-post";
 export interface TikHubTimelineParseResult {
   posts: XPost[];
   warnings: string[];
+  candidateCount: number;
 }
 
 const MAX_WALK_DEPTH = 32;
@@ -15,6 +16,7 @@ const X_HANDLE = /^[A-Za-z0-9_]{1,15}$/;
 export function parseTikHubTimeline(payload: unknown): TikHubTimelineParseResult {
   const warnings: string[] = [];
   const posts: XPost[] = [];
+  let candidateCount = 0;
   const seenIds = new Set<string>();
   const instructionArrays = findNamedArrays(payload, "instructions");
 
@@ -26,6 +28,7 @@ export function parseTikHubTimeline(payload: unknown): TikHubTimelineParseResult
       for (const entry of ownArrayValues(entries)) {
         if (isCursorEntry(entry)) continue;
         const candidates = findTweetResults(entry);
+        candidateCount += candidates.length;
         if (candidates.length === 0) {
           warnings.push("Skipped an unknown X timeline entry.");
           continue;
@@ -49,7 +52,7 @@ export function parseTikHubTimeline(payload: unknown): TikHubTimelineParseResult
     }
   }
 
-  return { posts, warnings };
+  return { posts, warnings, candidateCount };
 }
 
 function parseTweetResult(candidate: unknown): XPost | undefined {

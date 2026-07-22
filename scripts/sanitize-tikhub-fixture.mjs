@@ -29,18 +29,28 @@ export function sanitizeTikHubFixture(value, aliases = {}) {
 
   function sanitize(current, key = "", depth = 0) {
     if (depth > MAX_DEPTH) traversalLimit();
+    if (
+      isVolatileTimestampKey(key) &&
+      (typeof current === "string" ||
+        typeof current === "number" ||
+        typeof current === "bigint")
+    ) {
+      return fixtureTimestamp(key);
+    }
     if (typeof current === "string") {
-      if (isVolatileTimestampKey(key)) return fixtureTimestamp(key);
-      return replaceAliases(current, replacements);
+      if (isSensitiveFixtureText(current)) return "[redacted]";
+      const replaced = replaceAliases(current, replacements);
+      return isSensitiveFixtureText(replaced) ? "[redacted]" : replaced;
     }
     if (
       current === null ||
       typeof current === "number" ||
       typeof current === "boolean"
     ) {
+      if (typeof current === "number" && !Number.isFinite(current)) unsafeShape();
       return current;
     }
-    if (typeof current !== "object") return undefined;
+    if (typeof current !== "object") unsafeShape();
 
     state.nodes += 1;
     if (state.nodes > MAX_NODES || seen.has(current)) traversalLimit();
@@ -70,6 +80,13 @@ export function sanitizeTikHubFixture(value, aliases = {}) {
       const descriptor = safeDescriptor(current, property);
       if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
         unsafeShape();
+      }
+      if (
+        isUnsafeProperty(property) ||
+        isProviderMetadataKey(property) ||
+        isSensitiveCredentialKey(property)
+      ) {
+        continue;
       }
       const sanitizedProperty = replaceAliases(property, replacements);
       if (
@@ -113,13 +130,28 @@ export function assertTikHubFixtureSanitized(value, aliases = {}) {
 
 export function isSensitiveCredentialKey(key) {
   const tokens = keyTokens(key);
-  const compact = tokens.join("");
   return (
     tokens.some((token) => SENSITIVE_TOKENS.has(token)) ||
-    compact.includes("apikey") ||
-    compact.includes("accesskey") ||
-    compact.includes("privatekey") ||
-    compact.includes("secretkey")
+    tokens.some((token) =>
+      ["apikey", "accesskey", "privatekey", "secretkey"].includes(token),
+    ) ||
+    hasTokenPair(tokens, "api", "key") ||
+    hasTokenPair(tokens, "access", "key") ||
+    hasTokenPair(tokens, "private", "key") ||
+    hasTokenPair(tokens, "secret", "key")
+  );
+}
+
+function hasTokenPair(tokens, first, second) {
+  return tokens.some((token, index) => token === first && tokens[index + 1] === second);
+}
+
+function isSensitiveFixtureText(value) {
+  return (
+    isProviderMetadataKey(value) ||
+    isSensitiveCredentialKey(value) ||
+    /\bBearer\b/i.test(value) ||
+    /TIKHUB_API_KEY/i.test(value)
   );
 }
 

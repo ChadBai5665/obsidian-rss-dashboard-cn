@@ -22,10 +22,18 @@ describe.skipIf(!hasLiveCapture)("sanitized live TikHub response shapes", () => 
     const live = await readActiveTikHubFixtureSet(liveDirectory);
     expect(live?.fixtures).toHaveLength(3);
 
-    for (const fixture of live?.fixtures ?? []) {
+    for (const [index, fixture] of (live?.fixtures ?? []).entries()) {
       const result = parseTikHubTimeline(fixture);
+      const fileName = live?.files[index];
+      const candidateCount = fileName
+        ? live?.statistics?.[fileName]?.candidateCount
+        : undefined;
       expect(Array.isArray(result.posts)).toBe(true);
       expect(Array.isArray(result.warnings)).toBe(true);
+      expect(candidateCount).toBeGreaterThan(0);
+      expect(result.candidateCount).toBe(candidateCount);
+      expect(result.posts.length).toBeGreaterThan(0);
+      expect(result.posts.length).toBeLessThanOrEqual(result.candidateCount);
       for (const post of result.posts) {
         expect(post.id).toMatch(/^\d+$/);
         expect(post.authorHandle).toMatch(/^[A-Za-z0-9_]{1,15}$/);

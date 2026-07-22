@@ -25,6 +25,9 @@ const FIXTURE_NAMES = [
   "search-latest.json",
   "search-top.json",
 ];
+const MAX_SHAPE_NODES = 100_000;
+const MAX_SHAPE_DEPTH = 32;
+const MAX_SHAPE_ARRAY_ENTRIES = 100_000;
 const HELP = `Capture sanitized TikHub response fixtures.
 
 This command makes exactly 3 potentially billable requests:
@@ -172,6 +175,127 @@ function trustedPrototypeMethod(prototype, key) {
   return undefined;
 }
 
+function fixtureStatistics(fixtures) {
+  return Object.fromEntries(
+    FIXTURE_NAMES.map((name, index) => [
+      name,
+      { candidateCount: countTikHubTweetCandidates(fixtures[index]) },
+    ]),
+  );
+}
+
+/** Independently counts GraphQL tweet-result candidates without parsing X posts. */
+export function countTikHubTweetCandidates(payload) {
+  let count = 0;
+  const instructionArrays = findShapeNamedArrays(payload, "instructions");
+  for (const instructions of instructionArrays) {
+    for (const instruction of shapeArrayValues(instructions)) {
+      const entries = ownValue(instruction, "entries");
+      if (!Array.isArray(entries)) continue;
+      for (const entry of shapeArrayValues(entries)) {
+        if (isShapeCursorEntry(entry)) continue;
+        count += countEntryTweetCandidates(entry);
+      }
+    }
+  }
+  return count;
+}
+
+function countEntryTweetCandidates(entry) {
+  let count = 0;
+  walkShape(entry, (record) => {
+    for (const key of ["tweet_results", "tweetResult"]) {
+      const container = ownValue(record, key);
+      if (!container || typeof container !== "object" || Array.isArray(container)) {
+        continue;
+      }
+      if (ownValue(container, "result") !== undefined) count += 1;
+      return false;
+    }
+    return true;
+  });
+  return count;
+}
+
+function findShapeNamedArrays(payload, key) {
+  const arrays = [];
+  walkShape(payload, (record) => {
+    const candidate = ownValue(record, key);
+    if (Array.isArray(candidate)) arrays.push(candidate);
+    return true;
+  });
+  return arrays;
+}
+
+function walkShape(root, visit) {
+  const seen = new WeakSet();
+  const stack = [{ value: root, depth: 0 }];
+  let nodes = 0;
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || current.depth > MAX_SHAPE_DEPTH) shapeLimit();
+    const value = current.value;
+    if (!value || typeof value !== "object") continue;
+    if (seen.has(value)) shapeLimit();
+    seen.add(value);
+    nodes += 1;
+    if (nodes > MAX_SHAPE_NODES) shapeLimit();
+
+    if (Array.isArray(value)) {
+      for (const child of shapeArrayValues(value)) {
+        stack.push({ value: child, depth: current.depth + 1 });
+      }
+      continue;
+    }
+    if (!visit(value)) continue;
+    const keys = shapeKeys(value);
+    for (const key of keys) {
+      const child = ownValue(value, key);
+      if (child !== undefined) {
+        stack.push({ value: child, depth: current.depth + 1 });
+      }
+    }
+  }
+}
+
+function shapeArrayValues(value) {
+  if (value.length > MAX_SHAPE_ARRAY_ENTRIES) shapeLimit();
+  const keys = shapeKeys(value);
+  if (keys.length > MAX_SHAPE_ARRAY_ENTRIES) shapeLimit();
+  const result = [];
+  for (const key of keys) {
+    if (!/^(?:0|[1-9]\d*)$/.test(key)) continue;
+    const index = Number(key);
+    if (!Number.isSafeInteger(index) || index < 0 || index >= value.length) continue;
+    const child = ownValue(value, key);
+    if (child !== undefined) result.push(child);
+  }
+  return result;
+}
+
+function shapeKeys(value) {
+  try {
+    return Object.keys(value);
+  } catch {
+    shapeLimit();
+  }
+}
+
+function isShapeCursorEntry(entry) {
+  const entryId = ownValue(entry, "entryId");
+  if (typeof entryId === "string" && entryId.toLowerCase().startsWith("cursor-")) {
+    return true;
+  }
+  const content = ownValue(entry, "content");
+  const entryType = ownValue(content, "entryType");
+  const cursorType = ownValue(content, "cursorType");
+  return entryType === "TimelineTimelineCursor" || typeof cursorType === "string";
+}
+
+function shapeLimit() {
+  throw new Error("TikHub fixture response shape is unsafe.");
+}
+
 function ownValue(value, key) {
   try {
     const descriptor =
@@ -249,6 +373,14 @@ export async function writeTikHubFixtureSet(
     throw new Error("TikHub fixture activation failed.");
   }
   for (const fixture of fixtures) assertTikHubFixtureSanitized(fixture);
+  const statistics = fixtureStatistics(fixtures);
+  if (
+    Object.values(statistics).some(
+      ({ candidateCount }) => !Number.isSafeInteger(candidateCount) || candidateCount <= 0,
+    )
+  ) {
+    throw new Error("TikHub fixture response contained no tweet candidates.");
+  }
 
   const captureId = options.captureId ?? randomUUID();
   if (!/^[A-Za-z0-9-]{1,128}$/.test(captureId)) {
@@ -280,9 +412,10 @@ export async function writeTikHubFixtureSet(
     await fsOps.rename(stagingDir, finalDir);
     stagedAsFinal = true;
     await writeExclusiveJson(manifestTemp, {
-      version: 1,
-      captureId,
+      version: 2,
+      activeVersion: captureId,
       files: FIXTURE_NAMES,
+      statistics,
     });
     await fsOps.rename(manifestTemp, manifestPath);
   } catch {
@@ -294,7 +427,7 @@ export async function writeTikHubFixtureSet(
   await cleanupInactiveTikHubFixtureSets(destinationDir, { fsOps }).catch(
     () => undefined,
   );
-  return { captureId, files: [...FIXTURE_NAMES] };
+  return { captureId, files: [...FIXTURE_NAMES], statistics };
 }
 
 export async function readActiveTikHubFixtureSet(destinationDir) {
@@ -310,13 +443,14 @@ export async function readActiveTikHubFixtureSet(destinationDir) {
     } catch {
       throw new Error("TikHub fixture manifest is invalid.");
     }
-    const captureId = validManifestCaptureId(manifest);
-    if (!captureId) throw new Error("TikHub fixture manifest is invalid.");
-    const captureDir = join(destinationDir, "captures", captureId);
+    const manifestData = validManifestData(manifest);
+    if (!manifestData) throw new Error("TikHub fixture manifest is invalid.");
+    const captureDir = join(destinationDir, "captures", manifestData.activeVersion);
     await requireSafeDirectory(captureDir);
     return {
-      captureId,
+      captureRef: manifestData.activeVersion,
       files: [...FIXTURE_NAMES],
+      statistics: manifestData.statistics,
       fixtures: await readFixtureFiles(captureDir),
     };
   }
@@ -332,10 +466,12 @@ export async function readActiveTikHubFixtureSet(destinationDir) {
   ) {
     throw new Error("TikHub fixture set is incomplete.");
   }
+  const fixtures = await readFixtureFiles(destinationDir);
   return {
-    captureId: "legacy",
+    captureRef: "legacy",
     files: [...FIXTURE_NAMES],
-    fixtures: await readFixtureFiles(destinationDir),
+    statistics: fixtureStatistics(fixtures),
+    fixtures,
   };
 }
 
@@ -376,34 +512,66 @@ async function readManifestCaptureId(destinationDir) {
     throw new Error("TikHub fixture manifest is unsafe.");
   }
   try {
-    const captureId = validManifestCaptureId(
+    const manifestData = validManifestData(
       JSON.parse(await readFile(manifestPath, "utf8")),
     );
-    if (!captureId) throw new Error("invalid manifest");
-    return captureId;
+    if (!manifestData) throw new Error("invalid manifest");
+    return manifestData.activeVersion;
   } catch {
     throw new Error("TikHub fixture manifest is invalid.");
   }
 }
 
-function validManifestCaptureId(manifest) {
+function validManifestData(manifest) {
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
     return undefined;
   }
   const version = ownValue(manifest, "version");
-  const captureId = ownValue(manifest, "captureId");
+  const activeVersion = ownValue(manifest, "activeVersion");
   const files = ownValue(manifest, "files");
+  const statistics = ownValue(manifest, "statistics");
+  const manifestKeys = Object.keys(manifest);
   if (
-    version !== 1 ||
-    typeof captureId !== "string" ||
-    !/^[A-Za-z0-9-]{1,128}$/.test(captureId) ||
+    version !== 2 ||
+    manifestKeys.length !== 4 ||
+    !["activeVersion", "files", "statistics", "version"].every((key) =>
+      manifestKeys.includes(key),
+    ) ||
+    typeof activeVersion !== "string" ||
+    !/^[A-Za-z0-9-]{1,128}$/.test(activeVersion) ||
     !Array.isArray(files) ||
     files.length !== FIXTURE_NAMES.length ||
-    !FIXTURE_NAMES.every((name, index) => files[index] === name)
+    !FIXTURE_NAMES.every((name, index) => files[index] === name) ||
+    !statistics ||
+    typeof statistics !== "object" ||
+    Array.isArray(statistics)
   ) {
     return undefined;
   }
-  return captureId;
+  const statisticKeys = Object.keys(statistics);
+  if (
+    statisticKeys.length !== FIXTURE_NAMES.length ||
+    !FIXTURE_NAMES.every((name) => statisticKeys.includes(name))
+  ) {
+    return undefined;
+  }
+  const normalizedStatistics = {};
+  for (const name of FIXTURE_NAMES) {
+    const entry = ownValue(statistics, name);
+    const candidateCount = ownValue(entry, "candidateCount");
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      Array.isArray(entry) ||
+      Object.keys(entry).length !== 1 ||
+      !Number.isSafeInteger(candidateCount) ||
+      candidateCount <= 0
+    ) {
+      return undefined;
+    }
+    normalizedStatistics[name] = { candidateCount };
+  }
+  return { activeVersion, statistics: normalizedStatistics };
 }
 
 async function readFixtureFiles(directory) {

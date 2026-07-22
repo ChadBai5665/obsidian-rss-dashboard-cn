@@ -124,6 +124,7 @@ describe("parseTikHubTimeline", () => {
     expect(parseTikHubTimeline(payload)).toEqual({
       posts: [],
       warnings: ["Skipped a malformed X post."],
+      candidateCount: 1,
     });
   });
 
@@ -185,6 +186,7 @@ describe("parseTikHubTimeline", () => {
         }),
       ],
       warnings: ["Skipped a malformed X post."],
+      candidateCount: 2,
     });
   });
 
