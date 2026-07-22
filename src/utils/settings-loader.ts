@@ -28,6 +28,35 @@ const DEFAULT_FEED_KEYWORD_RULES = {
   rules: [],
 };
 
+const TOP_LEVEL_TIKHUB_SECRET_ALIASES = [
+  "tikhubApiKey",
+  "tikHubApiKey",
+  "tikhub_api_key",
+  "TIKHUB_API_KEY",
+  "tikhubToken",
+  "tikHubToken",
+  "tikhub_token",
+  "TIKHUB_TOKEN",
+  "tikhubAccessToken",
+  "tikHubAccessToken",
+  "tikhubBearerToken",
+  "tikHubBearerToken",
+] as const;
+const TOP_LEVEL_TIKHUB_SECRET_ALIAS_SET = new Set<string>(
+  TOP_LEVEL_TIKHUB_SECRET_ALIASES,
+);
+
+const TIKHUB_SCOPED_SECRET_ALIASES = new Set<string>([
+  ...TOP_LEVEL_TIKHUB_SECRET_ALIASES,
+  "apiKey",
+  "api_key",
+  "token",
+  "accessToken",
+  "access_token",
+  "bearerToken",
+  "bearer_token",
+]);
+
 const PAGE_SIZE_FIELDS: Array<
   | "allArticlesPageSize"
   | "unreadArticlesPageSize"
@@ -80,7 +109,10 @@ export function buildFactoryResetSettings(): RssDashboardSettings {
 export function loadAndNormalizeSettings(
   rawData?: Partial<RssDashboardSettings> | null,
 ): RssDashboardSettings {
-  const settings = Object.assign({}, DEFAULT_SETTINGS, rawData ?? {});
+  const settings = copyOwnTopLevelSettings(rawData);
+  removeTopLevelTikHubSecretAliases(
+    settings as unknown as Record<string, unknown>,
+  );
 
   if (settings.locale !== "zh-CN" && settings.locale !== "en") {
     settings.locale = DEFAULT_SETTINGS.locale;
@@ -258,34 +290,106 @@ export function loadAndNormalizeSettings(
   return settings;
 }
 
+function copyOwnTopLevelSettings(
+  rawData: Partial<RssDashboardSettings> | null | undefined,
+): RssDashboardSettings {
+  const settings = { ...DEFAULT_SETTINGS } as unknown as Record<string, unknown>;
+  if (!isRecord(rawData)) return settings as unknown as RssDashboardSettings;
+
+  let keys: string[];
+  try {
+    keys = Object.getOwnPropertyNames(rawData);
+  } catch {
+    return settings as unknown as RssDashboardSettings;
+  }
+  for (const key of keys) {
+    if (
+      key === "__proto__" ||
+      key === "prototype" ||
+      key === "constructor" ||
+      TOP_LEVEL_TIKHUB_SECRET_ALIAS_SET.has(key)
+    ) {
+      continue;
+    }
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(rawData, key);
+    } catch {
+      continue;
+    }
+    if (!descriptor || !("value" in descriptor)) continue;
+    Object.defineProperty(settings, key, {
+      configurable: true,
+      enumerable: true,
+      value: descriptor.value,
+      writable: true,
+    });
+  }
+  return settings as unknown as RssDashboardSettings;
+}
+
 function normalizeTikHubSettings(value: unknown): RssDashboardSettings["tikhub"] {
-  if (!isRecord(value)) return { ...DEFAULT_SETTINGS.tikhub };
-  const baseUrl = normalizeTikHubBaseUrl(value.baseUrl);
+  const sanitized = copyOwnTikHubSettingsWithoutSecrets(value);
+  if (!sanitized) return { ...DEFAULT_SETTINGS.tikhub };
+  const baseUrl = normalizeTikHubBaseUrl(sanitized.baseUrl);
   if (!baseUrl) return { ...DEFAULT_SETTINGS.tikhub };
 
   const connectionId =
-    typeof value.connectionId === "string" ? value.connectionId.trim() : "";
+    typeof sanitized.connectionId === "string"
+      ? sanitized.connectionId.trim()
+      : "";
   if (connectionId && !UUID_PATTERN.test(connectionId)) {
     return { ...DEFAULT_SETTINGS.tikhub };
   }
 
   return {
-    enabled: value.enabled === true,
+    enabled: sanitized.enabled === true,
     connectionId,
     baseUrl,
     timeoutMs: positiveIntegerOrDefault(
-      value.timeoutMs,
+      sanitized.timeoutMs,
       DEFAULT_SETTINGS.tikhub.timeoutMs,
     ),
     maxRequestsPerRun: positiveIntegerOrDefault(
-      value.maxRequestsPerRun,
+      sanitized.maxRequestsPerRun,
       DEFAULT_SETTINGS.tikhub.maxRequestsPerRun,
     ),
     maxRequestsPerDay: positiveIntegerOrDefault(
-      value.maxRequestsPerDay,
+      sanitized.maxRequestsPerDay,
       DEFAULT_SETTINGS.tikhub.maxRequestsPerDay,
     ),
   };
+}
+
+function removeTopLevelTikHubSecretAliases(
+  settings: Record<string, unknown>,
+): void {
+  for (const alias of TOP_LEVEL_TIKHUB_SECRET_ALIASES) {
+    if (Object.prototype.hasOwnProperty.call(settings, alias)) {
+      delete settings[alias];
+    }
+  }
+}
+
+function copyOwnTikHubSettingsWithoutSecrets(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const sanitized = Object.create(null) as Record<string, unknown>;
+  try {
+    for (const key of Object.getOwnPropertyNames(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor && "value" in descriptor) {
+        sanitized[key] = descriptor.value;
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  for (const alias of TIKHUB_SCOPED_SECRET_ALIASES) {
+    delete sanitized[alias];
+  }
+  return sanitized;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -297,7 +401,11 @@ function positiveIntegerOrDefault(value: unknown, fallback: number): number {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  try {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  } catch {
+    return false;
+  }
 }
 
 export function migrateSettings(settings: RssDashboardSettings): boolean {

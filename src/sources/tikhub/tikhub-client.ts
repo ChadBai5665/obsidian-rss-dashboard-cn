@@ -119,8 +119,8 @@ export class TikHubClient {
     query: Record<string, string>,
     input: CommonRequestInput,
   ): Promise<TikHubResult<T>> {
-    const apiKey = input.apiKey;
-    if (!apiKey.trim()) {
+    const apiKey = input.apiKey.trim();
+    if (!apiKey) {
       throw new TikHubClientError("missing-key", "TikHub API key is not configured.");
     }
 
@@ -155,35 +155,38 @@ export class TikHubClient {
         throw errorForTransportFailure(error);
       }
 
-      const headerRequestId = requestIdFromHeaders(response.headers);
-      if (response.status < 200 || response.status >= 300) {
-        throw errorForStatus(response.status, headerRequestId);
+      const extractedResponse = extractTransportResponse(response, apiKey);
+      if (extractedResponse.status < 200 || extractedResponse.status >= 300) {
+        throw errorForStatus(
+          extractedResponse.status,
+          extractedResponse.headerRequestId,
+        );
       }
 
       let envelope: unknown;
       try {
-        envelope = JSON.parse(response.text);
+        envelope = JSON.parse(extractedResponse.text);
       } catch {
         throw new TikHubClientError(
           "malformed-response",
           "TikHub returned malformed JSON.",
-          response.status,
-          headerRequestId,
+          extractedResponse.status,
+          extractedResponse.headerRequestId,
         );
       }
       if (!isEnvelope(envelope)) {
         throw new TikHubClientError(
           "malformed-response",
           "TikHub returned an invalid response envelope.",
-          response.status,
-          headerRequestId,
+          extractedResponse.status,
+          extractedResponse.headerRequestId,
         );
       }
 
       const requestId =
-        safeTikHubRequestId(envelope.request_id) ??
-        safeTikHubRequestId(envelope.requestId) ??
-        headerRequestId;
+        safeTikHubRequestId(envelope.request_id, apiKey) ??
+        safeTikHubRequestId(envelope.requestId, apiKey) ??
+        extractedResponse.headerRequestId;
       if (envelope.code !== 200) {
         throw errorForProviderCode(envelope.code, requestId);
       }
@@ -191,7 +194,7 @@ export class TikHubClient {
         throw new TikHubClientError(
           "malformed-response",
           "TikHub response data is missing.",
-          response.status,
+          extractedResponse.status,
           requestId,
         );
       }
@@ -249,7 +252,14 @@ function raceRequest<T>(
       onAbort();
       return;
     }
-    request.then(
+    let normalizedRequest: Promise<T>;
+    try {
+      normalizedRequest = Promise.resolve(request);
+    } catch (error) {
+      finish(() => reject(asTransportError(error)));
+      return;
+    }
+    normalizedRequest.then(
       (value) => finish(() => resolve(value)),
       (error: unknown) => finish(() => reject(asTransportError(error))),
     );
@@ -330,14 +340,63 @@ function errorForStatus(status: number, requestId?: string): TikHubClientError {
   );
 }
 
-function requestIdFromHeaders(
-  headers: Record<string, string> | undefined,
-): string | undefined {
-  if (!headers) return undefined;
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === "x-request-id") return safeTikHubRequestId(value);
+function extractTransportResponse(
+  response: unknown,
+  apiKey: string,
+): TikHubTransportResponse & { headerRequestId?: string } {
+  try {
+    const status = ownDataProperty(response, "status");
+    const text = ownDataProperty(response, "text");
+    const headers = ownDataProperty(response, "headers", true);
+    if (
+      typeof status !== "number" ||
+      !Number.isInteger(status) ||
+      status < 100 ||
+      status > 599 ||
+      typeof text !== "string"
+    ) {
+      throw new Error("invalid transport response");
+    }
+
+    let headerRequestId: string | undefined;
+    if (headers !== undefined) {
+      if (!isObjectRecord(headers)) throw new Error("invalid transport headers");
+      for (const key of Object.getOwnPropertyNames(headers)) {
+        if (key.toLowerCase() !== "x-request-id") continue;
+        const value = ownDataProperty(headers, key);
+        headerRequestId = safeTikHubRequestId(value, apiKey);
+        break;
+      }
+    }
+
+    return headerRequestId
+      ? { status, text, headers: {}, headerRequestId }
+      : { status, text, headers: {} };
+  } catch {
+    throw new TikHubClientError(
+      "malformed-response",
+      "TikHub returned an invalid transport response.",
+    );
   }
-  return undefined;
+}
+
+function ownDataProperty(
+  value: unknown,
+  key: string,
+  optional = false,
+): unknown {
+  if (!isObjectRecord(value)) throw new Error("invalid object");
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor) {
+    if (optional) return undefined;
+    throw new Error("missing property");
+  }
+  if (!("value" in descriptor)) throw new Error("accessor property rejected");
+  return descriptor.value;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isEnvelope(value: unknown): value is TikHubEnvelope {

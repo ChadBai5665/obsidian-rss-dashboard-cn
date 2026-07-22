@@ -33,25 +33,35 @@ export class TikHubRequestLedgerError extends Error {
 }
 
 export interface TikHubRequestLedgerOptions {
+  /** Stable, non-secret identity for the physical vault/storage target. */
+  storageIdentity: string;
   now?: () => Date;
   randomSuffix?: () => string;
 }
 
-const mutationQueues = new WeakMap<object, Map<string, Promise<void>>>();
+/**
+ * Process-global serialization covers multiple adapter wrappers in one Node/Electron
+ * process. Separate processes must not share this ledger until an inter-process
+ * lock or equivalent fail-safe is added.
+ */
+const mutationQueues = new Map<string, Promise<void>>();
 
 export class TikHubRequestLedger implements TikHubRequestLedgerLike {
   private readonly dataRoot: string;
+  private readonly lockKey: string;
   private readonly now: () => Date;
   private readonly randomSuffix: () => string;
 
   constructor(
     private readonly vault: Vault,
     dataRoot: string,
-    options: TikHubRequestLedgerOptions = {},
+    options: TikHubRequestLedgerOptions,
   ) {
     const trimmedRoot = dataRoot.trim();
     assertSafeDataRoot(trimmedRoot);
+    assertSafeStorageIdentity(options.storageIdentity);
     this.dataRoot = normalizePath(trimmedRoot);
+    this.lockKey = `${options.storageIdentity}:${this.ledgerPath}`;
     this.now = options.now ?? (() => new Date());
     this.randomSuffix = options.randomSuffix ?? defaultRandomSuffix;
   }
@@ -219,18 +229,16 @@ export class TikHubRequestLedger implements TikHubRequestLedgerLike {
   }
 
   private async withLock<T>(operation: () => Promise<T>): Promise<T> {
-    const keyOwner = this.vault.adapter as object;
-    const queues = mutationQueues.get(keyOwner) ?? new Map<string, Promise<void>>();
-    mutationQueues.set(keyOwner, queues);
-    const previous = queues.get(this.ledgerPath) ?? Promise.resolve();
+    const previous = mutationQueues.get(this.lockKey) ?? Promise.resolve();
     const running = previous.catch(() => undefined).then(operation);
     const settled = running.then(() => undefined, () => undefined);
-    queues.set(this.ledgerPath, settled);
+    mutationQueues.set(this.lockKey, settled);
     try {
       return await running;
     } finally {
-      if (queues.get(this.ledgerPath) === settled) queues.delete(this.ledgerPath);
-      if (queues.size === 0) mutationQueues.delete(keyOwner);
+      if (mutationQueues.get(this.lockKey) === settled) {
+        mutationQueues.delete(this.lockKey);
+      }
     }
   }
 }
@@ -318,6 +326,15 @@ function assertSafeDataRoot(folder: string): void {
     folder.split("/").some((segment) => !segment || segment === "." || segment === "..")
   ) {
     throw new Error("Invalid TikHub request ledger data folder.");
+  }
+}
+
+function assertSafeStorageIdentity(value: unknown): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    !/^[a-z][a-z0-9-]{1,31}:[a-z0-9][a-z0-9._-]{0,94}$/.test(value)
+  ) {
+    throw new Error("Invalid TikHub request ledger storage identity.");
   }
 }
 

@@ -27,8 +27,13 @@ export type TikHubClientErrorCode =
 
 const SAFE_REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
-export function safeTikHubRequestId(value: unknown): string | undefined {
-  return typeof value === "string" && SAFE_REQUEST_ID.test(value)
+export function safeTikHubRequestId(
+  value: unknown,
+  currentApiKey: string,
+): string | undefined {
+  return typeof value === "string" &&
+    SAFE_REQUEST_ID.test(value) &&
+    !value.includes(currentApiKey)
     ? value
     : undefined;
 }

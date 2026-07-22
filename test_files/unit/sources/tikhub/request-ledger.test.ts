@@ -9,10 +9,25 @@ const DATA_FOLDER = ".rss-dashboard-data";
 const STATE_FOLDER = `${DATA_FOLDER}/state`;
 const LEDGER_PATH = `${STATE_FOLDER}/tikhub-requests.json`;
 
+interface InMemoryStorage {
+  files: Map<string, string>;
+  directories: Set<string>;
+}
+
 class InMemoryAdapter {
-  readonly files = new Map<string, string>();
-  readonly directories = new Set<string>();
+  readonly files: Map<string, string>;
+  readonly directories: Set<string>;
   readonly operations: string[] = [];
+
+  constructor(
+    storage: InMemoryStorage = {
+      files: new Map<string, string>(),
+      directories: new Set<string>(),
+    },
+  ) {
+    this.files = storage.files;
+    this.directories = storage.directories;
+  }
 
   async exists(path: string): Promise<boolean> {
     return this.files.has(path) || this.directories.has(path);
@@ -70,18 +85,43 @@ class InMemoryAdapter {
   }
 }
 
-function createLedger(adapter = new InMemoryAdapter(), now = new Date(2026, 6, 22, 9, 0, 0)) {
+function createLedger(
+  adapter = new InMemoryAdapter(),
+  now = new Date(2026, 6, 22, 9, 0, 0),
+  storageIdentity = "vault:test-storage",
+  randomSuffix = "fixed",
+) {
   const vault = { adapter } as unknown as Vault;
   return {
     adapter,
     ledger: new TikHubRequestLedger(vault, DATA_FOLDER, {
       now: () => now,
-      randomSuffix: () => "fixed",
+      randomSuffix: () => randomSuffix,
+      storageIdentity,
     }),
   };
 }
 
 describe("TikHubRequestLedger", () => {
+  it.each([
+    "",
+    " vault:shared",
+    "vault/shared",
+    "vault:shared?query",
+    "vault:shared#fragment",
+    "x".repeat(129),
+  ])("rejects an unsafe storage lock identity: %s", (storageIdentity) => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+
+    expect(
+      () =>
+        new TikHubRequestLedger(vault, DATA_FOLDER, {
+          storageIdentity,
+        }),
+    ).toThrow("storage identity");
+  });
+
   it("persists only the local date and aggregate count", async () => {
     const test = createLedger();
 
@@ -176,6 +216,42 @@ describe("TikHubRequestLedger", () => {
     expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
     expect(JSON.parse(adapter.files.get(LEDGER_PATH) ?? "null")).toEqual({
+      localDate: "2026-07-22",
+      count: 7,
+    });
+  });
+
+  it("serializes concurrent reservations across adapters for one storage target", async () => {
+    const storage: InMemoryStorage = {
+      files: new Map<string, string>(),
+      directories: new Set<string>(),
+    };
+    const firstAdapter = new InMemoryAdapter(storage);
+    const secondAdapter = new InMemoryAdapter(storage);
+    const first = createLedger(
+      firstAdapter,
+      new Date(2026, 6, 22, 9, 0, 0),
+      "vault:shared-storage",
+      "first",
+    ).ledger;
+    const second = createLedger(
+      secondAdapter,
+      new Date(2026, 6, 22, 9, 0, 0),
+      "vault:shared-storage",
+      "second",
+    ).ledger;
+
+    const outcomes = await Promise.allSettled([
+      first.reserve(7, 10),
+      second.reserve(7, 10),
+    ]);
+
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const rejected = outcomes.find(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+    );
+    expect(rejected?.reason).toMatchObject({ code: "daily-limit" });
+    expect(JSON.parse(storage.files.get(LEDGER_PATH) ?? "null")).toEqual({
       localDate: "2026-07-22",
       count: 7,
     });
