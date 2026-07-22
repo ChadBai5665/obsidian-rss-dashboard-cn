@@ -80,6 +80,7 @@ export class RssDashboardSettingTab extends PluginSettingTab {
 
     // ── Tab bar ──────────────────────────────────────────────────────────────
     const tabBar = containerEl.createDiv("rss-dashboard-settings-tab-bar");
+    tabBar.setAttribute("role", "tablist");
     const t = createTranslator(this.plugin.settings.locale);
     SETTINGS_TAB_IDS.forEach((tab) => {
       const tabBtn = tabBar.createEl("button", {
@@ -88,6 +89,9 @@ export class RssDashboardSettingTab extends PluginSettingTab {
           "rss-dashboard-settings-tab-btn" +
           (this.currentTab === tab ? " active" : ""),
       });
+      tabBtn.setAttribute("role", "tab");
+      tabBtn.setAttribute("aria-selected", String(this.currentTab === tab));
+      tabBtn.setAttribute("tabindex", this.currentTab === tab ? "0" : "-1");
       tabBtn.onclick = () => {
         this.currentTab = tab;
         this.display();

@@ -16,6 +16,8 @@ export interface XAccountSourceModalOptions {
 }
 
 export class XAccountSourceModal extends Modal {
+  private lifecycleEpoch = 0;
+
   constructor(
     app: App,
     private readonly options: XAccountSourceModalOptions,
@@ -24,6 +26,7 @@ export class XAccountSourceModal extends Modal {
   }
 
   onOpen(): void {
+    const lifecycleToken = ++this.lifecycleEpoch;
     const t = createTranslator(this.options.locale ?? "zh-CN");
     const { contentEl } = this;
     contentEl.empty();
@@ -102,57 +105,88 @@ export class XAccountSourceModal extends Modal {
     const errorEl = contentEl.createEl("p", {
       cls: "rss-dashboard-validation-error",
     });
+    errorEl.setAttribute("role", "alert");
+    errorEl.setAttribute("aria-live", "polite");
+
+    let inFlight = false;
+    let cancelButtonEl: HTMLButtonElement | undefined;
+    let saveButtonEl: HTMLButtonElement | undefined;
+    const isCurrent = (): boolean =>
+      this.lifecycleEpoch === lifecycleToken && contentEl.isConnected;
+    const setBusy = (busy: boolean): void => {
+      for (const buttonEl of [cancelButtonEl, saveButtonEl]) {
+        if (!buttonEl) continue;
+        buttonEl.disabled = busy;
+        buttonEl.setAttribute("aria-disabled", String(busy));
+      }
+    };
 
     new Setting(contentEl)
-      .addButton((button) => button
-        .setButtonText(t("common.cancel"))
-        .onClick(() => this.close()))
-      .addButton((button) => button
-        .setButtonText(t("common.save"))
-        .setCta()
-        .onClick(() => {
-          void (async () => {
-            errorEl.setText("");
-            const normalizedHandle = normalizeXHandle(handle);
-            if (!normalizedHandle) {
-              errorEl.setText(t("modal.xAccount.invalidHandle"));
-              return;
-            }
-            const duplicate = this.options.existingAccounts.some((account) =>
-              account.id !== this.options.existing?.id &&
-              account.handle === normalizedHandle,
-            );
-            if (duplicate) {
-              errorEl.setText(t("modal.xAccount.duplicate"));
-              return;
-            }
-
-            let config: XAccountSourceConfig;
+      .addButton((button) => {
+        cancelButtonEl = button.buttonEl;
+        button
+          .setButtonText(t("common.cancel"))
+          .onClick(() => {
+            if (!inFlight) this.close();
+          });
+      })
+      .addButton((button) => {
+        saveButtonEl = button.buttonEl;
+        button
+          .setButtonText(t("common.save"))
+          .setCta()
+          .onClick(() => {
+            if (inFlight || !isCurrent()) return;
+            inFlight = true;
+            setBusy(true);
+            void (async () => {
             try {
-              config = createXAccountSourceConfig({
-                id: this.options.existing?.id,
-                handle: normalizedHandle,
-                displayName,
-                includeReplies,
-                includeReposts,
-                folder,
-                topics: splitList(topics),
-              });
-            } catch {
-              errorEl.setText(t("modal.xAccount.invalidHandle"));
-              return;
-            }
-            try {
+              errorEl.setText("");
+              const normalizedHandle = normalizeXHandle(handle);
+              if (!normalizedHandle) {
+                errorEl.setText(t("modal.xAccount.invalidHandle"));
+                return;
+              }
+              const duplicate = this.options.existingAccounts.some((account) =>
+                account.id !== this.options.existing?.id &&
+                account.handle === normalizedHandle,
+              );
+              if (duplicate) {
+                errorEl.setText(t("modal.xAccount.duplicate"));
+                return;
+              }
+              let config: XAccountSourceConfig;
+              try {
+                config = createXAccountSourceConfig({
+                  id: this.options.existing?.id,
+                  handle: normalizedHandle,
+                  displayName,
+                  includeReplies,
+                  includeReposts,
+                  folder,
+                  topics: splitList(topics),
+                });
+              } catch {
+                errorEl.setText(t("modal.xAccount.invalidHandle"));
+                return;
+              }
               await this.options.onSave(config);
-              this.close();
+              if (isCurrent()) this.close();
             } catch {
-              errorEl.setText(t("modal.xAccount.saveFailed"));
+              if (isCurrent()) errorEl.setText(t("modal.xAccount.saveFailed"));
+            } finally {
+              if (isCurrent()) {
+                inFlight = false;
+                setBusy(false);
+              }
             }
-          })();
-        }));
+            })();
+          });
+      });
   }
 
   onClose(): void {
+    this.lifecycleEpoch += 1;
     this.contentEl.empty();
   }
 }

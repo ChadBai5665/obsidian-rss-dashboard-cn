@@ -14,6 +14,12 @@ import type { RssDashboardSettings } from "../../types/types";
 const MAINLAND_BASE_URL = "https://api.tikhub.dev";
 const OVERSEAS_BASE_URL = "https://api.tikhub.io";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const RENDER_EPOCHS = new WeakMap<HTMLElement, number>();
+
+interface RegisteredControl {
+  element: HTMLElement;
+  setDisabled(disabled: boolean): void;
+}
 
 interface TikHubSecretStoreLike {
   getStatus(connectionId: string): Promise<{ hasSecret: boolean }>;
@@ -65,22 +71,88 @@ export function renderTikHubSettingsTab(
   const confirmDeleteSecret = dependencies.confirmDeleteSecret ?? (() =>
     confirmTikHubAction(plugin.app, locale, "delete"));
   const createConnectionId = dependencies.createConnectionId ?? defaultConnectionId;
+  const renderEpoch = (RENDER_EPOCHS.get(containerEl) ?? 0) + 1;
+  RENDER_EPOCHS.set(containerEl, renderEpoch);
+
+  let operationSequence = 0;
+  let activeOperation: number | undefined;
+  let statusEpoch = 0;
   let hasSecret = false;
+  const controls: RegisteredControl[] = [];
+  const isRenderCurrent = (): boolean =>
+    RENDER_EPOCHS.get(containerEl) === renderEpoch && containerEl.isConnected;
+  const setBusy = (busy: boolean): void => {
+    for (const control of controls) {
+      control.setDisabled(busy);
+      control.element.setAttribute("aria-disabled", String(busy));
+    }
+  };
+  const registerControl = <T extends HTMLElement>(
+    element: T,
+    setDisabled?: (disabled: boolean) => void,
+  ): T => {
+    const registered: RegisteredControl = {
+      element,
+      setDisabled: setDisabled ?? ((disabled) => {
+        (element as unknown as { disabled: boolean }).disabled = disabled;
+      }),
+    };
+    controls.push(registered);
+    registered.setDisabled(activeOperation !== undefined);
+    element.setAttribute("aria-disabled", String(activeOperation !== undefined));
+    return element;
+  };
+  const beginOperation = (invalidateSecretStatus = false): number | undefined => {
+    if (activeOperation !== undefined) return undefined;
+    if (invalidateSecretStatus) statusEpoch += 1;
+    const operation = ++operationSequence;
+    activeOperation = operation;
+    setBusy(true);
+    return operation;
+  };
+  const isOperationCurrent = (operation: number): boolean =>
+    activeOperation === operation && isRenderCurrent();
+  const finishOperation = (operation: number): void => {
+    if (activeOperation !== operation) return;
+    activeOperation = undefined;
+    if (isRenderCurrent()) setBusy(false);
+  };
 
   new Setting(containerEl)
     .setName(t("settings.tikhub.heading"))
     .setDesc(t("settings.tikhub.description"))
     .setHeading();
 
-  new Setting(containerEl)
+  const enabledSetting = new Setting(containerEl)
     .setName(t("settings.tikhub.enabled"))
-    .setDesc(t("settings.tikhub.enabledDesc"))
-    .addToggle((toggle) => toggle
+    .setDesc(t("settings.tikhub.enabledDesc"));
+  enabledSetting.addToggle((toggle) => {
+    registerControl(toggle.toggleEl, (disabled) => {
+      const setDisabled = (toggle as unknown as {
+        setDisabled?: (value: boolean) => void;
+      }).setDisabled;
+      if (setDisabled) setDisabled.call(toggle, disabled);
+      else (toggle.toggleEl as unknown as { disabled: boolean }).disabled = disabled;
+    });
+    toggle
       .setValue(plugin.settings.tikhub.enabled)
-      .onChange(async (value) => {
+      .onChange((value) => {
+        const operation = beginOperation();
+        if (operation === undefined) return;
+        const original = plugin.settings.tikhub.enabled;
         plugin.settings.tikhub.enabled = value;
-        await plugin.saveSettings();
-      }));
+        void (async () => {
+          try {
+            await plugin.saveSettings();
+          } catch {
+            plugin.settings.tikhub.enabled = original;
+            if (isOperationCurrent(operation)) toggle.setValue(original);
+          } finally {
+            finishOperation(operation);
+          }
+        })();
+      });
+  });
 
   let customBaseUrl = isPresetBaseUrl(plugin.settings.tikhub.baseUrl)
     ? ""
@@ -88,100 +160,221 @@ export function renderTikHubSettingsTab(
   const customErrorEl = containerEl.createEl("p", {
     cls: "rss-dashboard-validation-error",
   });
-  new Setting(containerEl)
+  customErrorEl.setAttribute("role", "alert");
+  customErrorEl.setAttribute("aria-live", "polite");
+  const baseUrlSetting = new Setting(containerEl)
     .setName(t("settings.tikhub.baseUrl"))
-    .setDesc(t("settings.tikhub.baseUrlDesc"))
-    .addDropdown((dropdown) => dropdown
+    .setDesc(t("settings.tikhub.baseUrlDesc"));
+  baseUrlSetting.addDropdown((dropdown) => {
+    registerControl(dropdown.selectEl);
+    dropdown
       .addOption(MAINLAND_BASE_URL, t("settings.tikhub.presetMainland"))
       .addOption(OVERSEAS_BASE_URL, t("settings.tikhub.presetOverseas"))
       .addOption("custom", t("settings.tikhub.presetCustom"))
       .setValue(isPresetBaseUrl(plugin.settings.tikhub.baseUrl)
         ? plugin.settings.tikhub.baseUrl
         : "custom")
-      .onChange(async (value) => {
+      .onChange((value) => {
         if (value === "custom") return;
+        const operation = beginOperation();
+        if (operation === undefined) return;
+        const original = plugin.settings.tikhub.baseUrl;
         plugin.settings.tikhub.baseUrl = value;
         customErrorEl.setText("");
-        await plugin.saveSettings();
-      }));
+        void (async () => {
+          try {
+            await plugin.saveSettings();
+          } catch {
+            plugin.settings.tikhub.baseUrl = original;
+            if (isOperationCurrent(operation)) {
+              dropdown.setValue(isPresetBaseUrl(original) ? original : "custom");
+            }
+          } finally {
+            finishOperation(operation);
+          }
+        })();
+      });
+  });
 
-  new Setting(containerEl)
+  let customBaseUrlInput: HTMLInputElement | undefined;
+  const customBaseSetting = new Setting(containerEl)
     .setName(t("settings.tikhub.customBaseUrl"))
-    .setDesc(t("settings.tikhub.customBaseUrlDesc"))
-    .addText((text) => text
-      .setPlaceholder("https://gateway.example.com")
-      .setValue(customBaseUrl)
-      .onChange((value) => { customBaseUrl = value; }))
+    .setDesc(t("settings.tikhub.customBaseUrlDesc"));
+  customBaseSetting
+    .addText((text) => {
+      customBaseUrlInput = registerControl(text.inputEl);
+      text
+        .setPlaceholder("https://gateway.example.com")
+        .setValue(customBaseUrl)
+        .onChange((value) => { customBaseUrl = value; });
+    })
     .addButton((button) => button
       .setButtonText(t("settings.tikhub.applyBaseUrl"))
       .onClick(() => {
+        const normalized = normalizeTikHubBaseUrl(customBaseUrl);
+        if (!normalized) {
+          customErrorEl.setText(t("settings.tikhub.invalidBaseUrl"));
+          return;
+        }
+        const operation = beginOperation();
+        if (operation === undefined) return;
+        const original = plugin.settings.tikhub.baseUrl;
+        const originalCustomBaseUrl = customBaseUrl;
+        plugin.settings.tikhub.baseUrl = normalized;
+        customBaseUrl = normalized;
+        if (customBaseUrlInput) customBaseUrlInput.value = normalized;
+        customErrorEl.setText("");
         void (async () => {
-          const normalized = normalizeTikHubBaseUrl(customBaseUrl);
-          if (!normalized) {
-            customErrorEl.setText(t("settings.tikhub.invalidBaseUrl"));
-            return;
+          try {
+            await plugin.saveSettings();
+          } catch {
+            plugin.settings.tikhub.baseUrl = original;
+            customBaseUrl = originalCustomBaseUrl;
+            if (isOperationCurrent(operation) && customBaseUrlInput) {
+              customBaseUrlInput.value = originalCustomBaseUrl;
+            }
+          } finally {
+            finishOperation(operation);
           }
-          plugin.settings.tikhub.baseUrl = normalized;
-          customBaseUrl = normalized;
-          customErrorEl.setText("");
-          await plugin.saveSettings();
         })();
       }));
+  registerControl(customBaseSetting.controlEl.querySelector<HTMLButtonElement>("button")!);
 
-  renderPositiveIntegerSetting(
-    containerEl,
-    t("settings.tikhub.maxRequestsPerRun"),
-    plugin.settings.tikhub.maxRequestsPerRun,
-    async (value) => {
-      plugin.settings.tikhub.maxRequestsPerRun = value;
-      await plugin.saveSettings();
-    },
-  );
-  renderPositiveIntegerSetting(
-    containerEl,
-    t("settings.tikhub.maxRequestsPerDay"),
-    plugin.settings.tikhub.maxRequestsPerDay,
-    async (value) => {
-      plugin.settings.tikhub.maxRequestsPerDay = value;
-      await plugin.saveSettings();
-    },
-  );
-  containerEl.createEl("p", {
-    text: t("settings.tikhub.requestCaps", {
-      run: plugin.settings.tikhub.maxRequestsPerRun,
-      day: plugin.settings.tikhub.maxRequestsPerDay,
-    }),
+  let currentRunCap = plugin.settings.tikhub.maxRequestsPerRun;
+  let currentDayCap = plugin.settings.tikhub.maxRequestsPerDay;
+  let lastValidRunCap = currentRunCap;
+  let lastValidDayCap = currentDayCap;
+  let connectionTestSetting: Setting | undefined;
+  const capsEl = containerEl.createEl("p", {
     cls: "rss-dashboard-request-caps",
   });
+  const renderCapDisplays = (): void => {
+    capsEl.setText(t("settings.tikhub.requestCaps", {
+      run: currentRunCap,
+      day: currentDayCap,
+    }));
+    connectionTestSetting?.setDesc([
+      t("settings.tikhub.testConnectionDesc"),
+      t("settings.tikhub.estimatedTestRequests"),
+      t("settings.tikhub.requestCaps", {
+        run: currentRunCap,
+        day: currentDayCap,
+      }),
+    ].join(" "));
+  };
+  const renderCapInput = (
+    label: string,
+    kind: "run" | "day",
+  ): void => {
+    new Setting(containerEl).setName(label).addText((text) => {
+      const input = registerControl(text.inputEl);
+      input.type = "number";
+      input.min = "1";
+      text.setValue(String(kind === "run" ? currentRunCap : currentDayCap));
+      input.addEventListener("change", () => {
+        const lastValid = kind === "run" ? lastValidRunCap : lastValidDayCap;
+        const parsed = Number(input.value);
+        if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+          input.value = String(lastValid);
+          return;
+        }
+        const operation = beginOperation();
+        if (operation === undefined) {
+          input.value = String(lastValid);
+          return;
+        }
+        const original = lastValid;
+        if (kind === "run") {
+          lastValidRunCap = parsed;
+          currentRunCap = parsed;
+          plugin.settings.tikhub.maxRequestsPerRun = parsed;
+        } else {
+          lastValidDayCap = parsed;
+          currentDayCap = parsed;
+          plugin.settings.tikhub.maxRequestsPerDay = parsed;
+        }
+        renderCapDisplays();
+        void (async () => {
+          try {
+            await plugin.saveSettings();
+          } catch {
+            if (kind === "run") {
+              lastValidRunCap = original;
+              currentRunCap = original;
+              plugin.settings.tikhub.maxRequestsPerRun = original;
+            } else {
+              lastValidDayCap = original;
+              currentDayCap = original;
+              plugin.settings.tikhub.maxRequestsPerDay = original;
+            }
+            if (isOperationCurrent(operation)) input.value = String(original);
+            renderCapDisplays();
+          } finally {
+            finishOperation(operation);
+          }
+        })();
+      });
+    });
+  };
+  renderCapInput(t("settings.tikhub.maxRequestsPerRun"), "run");
+  renderCapInput(t("settings.tikhub.maxRequestsPerDay"), "day");
+  renderCapDisplays();
 
   const statusEl = containerEl.createEl("p", {
     cls: "rss-dashboard-secret-status",
   });
+  statusEl.setAttribute("role", "status");
+  statusEl.setAttribute("aria-live", "polite");
+  statusEl.setAttribute("aria-atomic", "true");
   const updateStatus = (): void => {
     statusEl.setText(t(hasSecret
       ? "settings.tikhub.keyConfigured"
       : "settings.tikhub.keyNotConfigured"));
   };
-  updateStatus();
-  if (UUID_PATTERN.test(plugin.settings.tikhub.connectionId)) {
-    void secretStore.getStatus(plugin.settings.tikhub.connectionId)
+  const refreshSecretStatus = (): void => {
+    const connectionId = plugin.settings.tikhub.connectionId;
+    const refreshEpoch = ++statusEpoch;
+    if (!UUID_PATTERN.test(connectionId)) {
+      hasSecret = false;
+      updateStatus();
+      return;
+    }
+    let statusPromise: Promise<{ hasSecret: boolean }>;
+    try {
+      statusPromise = secretStore.getStatus(connectionId);
+    } catch {
+      if (refreshEpoch === statusEpoch && isRenderCurrent()) {
+        hasSecret = false;
+        updateStatus();
+      }
+      return;
+    }
+    void statusPromise
       .then((status) => {
+        if (refreshEpoch !== statusEpoch || !isRenderCurrent()) return;
         hasSecret = status.hasSecret;
         updateStatus();
       })
       .catch(() => {
+        if (refreshEpoch !== statusEpoch || !isRenderCurrent()) return;
         hasSecret = false;
         updateStatus();
       });
-  }
+  };
+  updateStatus();
 
   const secretErrorEl = containerEl.createEl("p", {
     cls: "rss-dashboard-validation-error",
   });
-  new Setting(containerEl)
+  secretErrorEl.setAttribute("role", "status");
+  secretErrorEl.setAttribute("aria-live", "polite");
+  let secretInputEl: HTMLInputElement | undefined;
+  const secretSetting = new Setting(containerEl)
     .setName(t("settings.tikhub.apiKey"))
-    .setDesc(t("settings.tikhub.apiKeyDesc"))
+    .setDesc(t("settings.tikhub.apiKeyDesc"));
+  secretSetting
     .addText((text) => {
+      secretInputEl = registerControl(text.inputEl);
       text.inputEl.type = "password";
       text.inputEl.autocomplete = "new-password";
       text.inputEl.value = "";
@@ -191,33 +384,50 @@ export function renderTikHubSettingsTab(
       .setButtonText(t("settings.tikhub.saveKey"))
       .setCta()
       .onClick(() => {
+        let apiKey: string | undefined = secretInputEl?.value ?? "";
+        if (secretInputEl) secretInputEl.value = "";
+        const operation = beginOperation(true);
+        if (operation === undefined) {
+          apiKey = undefined;
+          return;
+        }
+        let refreshAfter = false;
         void (async () => {
-          const settingEl = button.buttonEl.closest(".setting-item");
-          const inputEl = settingEl?.querySelector<HTMLInputElement>("input");
-          if (!inputEl) return;
-          const apiKey = inputEl.value;
-          inputEl.value = "";
-          secretErrorEl.setText("");
-          if (!apiKey.trim()) {
-            secretErrorEl.setText(t("settings.tikhub.keyRequired"));
-            return;
-          }
           try {
-            let connectionId = plugin.settings.tikhub.connectionId;
-            if (!UUID_PATTERN.test(connectionId)) {
-              connectionId = createConnectionId();
-              if (!UUID_PATTERN.test(connectionId)) throw new Error("invalid connection id");
-              plugin.settings.tikhub.connectionId = connectionId;
-              await plugin.saveSettings();
+            secretErrorEl.setText("");
+            if (!apiKey?.trim()) {
+              secretErrorEl.setText(t("settings.tikhub.keyRequired"));
+            } else {
+              try {
+                let connectionId = plugin.settings.tikhub.connectionId;
+                if (!UUID_PATTERN.test(connectionId)) {
+                  const originalConnectionId = connectionId;
+                  connectionId = createConnectionId();
+                  if (!UUID_PATTERN.test(connectionId)) throw new Error("invalid connection id");
+                  plugin.settings.tikhub.connectionId = connectionId;
+                  try {
+                    await plugin.saveSettings();
+                  } catch (error) {
+                    plugin.settings.tikhub.connectionId = originalConnectionId;
+                    throw error;
+                  }
+                }
+                await secretStore.set(connectionId, apiKey);
+                if (!isOperationCurrent(operation)) return;
+                hasSecret = true;
+                updateStatus();
+                secretErrorEl.setText(t("settings.tikhub.keySaved"));
+              } catch {
+                refreshAfter = true;
+                if (isOperationCurrent(operation)) {
+                  secretErrorEl.setText(t("settings.tikhub.keySaveFailed"));
+                }
+              }
             }
-            await secretStore.set(connectionId, apiKey);
-            hasSecret = true;
-            updateStatus();
-            secretErrorEl.setText(t("settings.tikhub.keySaved"));
-          } catch {
-            hasSecret = false;
-            updateStatus();
-            secretErrorEl.setText(t("settings.tikhub.keySaveFailed"));
+          } finally {
+            apiKey = undefined;
+            finishOperation(operation);
+            if (refreshAfter && isRenderCurrent()) refreshSecretStatus();
           }
         })();
       }))
@@ -225,70 +435,104 @@ export function renderTikHubSettingsTab(
       .setButtonText(t("settings.tikhub.deleteKey"))
       .setWarning()
       .onClick(() => {
+        if (secretInputEl) secretInputEl.value = "";
+        const operation = beginOperation(true);
+        if (operation === undefined) return;
+        const connectionId = plugin.settings.tikhub.connectionId;
+        const originalEnabled = plugin.settings.tikhub.enabled;
+        let refreshAfter = false;
         void (async () => {
-          if (!(await confirmDeleteSecret())) return;
           try {
-            const connectionId = plugin.settings.tikhub.connectionId;
+            if (!(await confirmDeleteSecret())) {
+              refreshAfter = true;
+              return;
+            }
+            if (!isOperationCurrent(operation)) return;
             if (UUID_PATTERN.test(connectionId)) await secretStore.delete(connectionId);
-            plugin.settings.tikhub.enabled = false;
-            await plugin.saveSettings();
             hasSecret = false;
-            updateStatus();
+            if (isOperationCurrent(operation)) updateStatus();
+            plugin.settings.tikhub.enabled = false;
+            try {
+              await plugin.saveSettings();
+            } catch (error) {
+              plugin.settings.tikhub.enabled = originalEnabled;
+              throw error;
+            }
+            if (!isOperationCurrent(operation)) return;
             secretErrorEl.setText(t("settings.tikhub.keyDeleted"));
           } catch {
+            if (!isOperationCurrent(operation)) return;
+            refreshAfter = true;
             secretErrorEl.setText(t("settings.tikhub.keyDeleteFailed"));
+          } finally {
+            finishOperation(operation);
+            if (refreshAfter && isRenderCurrent()) refreshSecretStatus();
           }
         })();
       }));
+  secretSetting.controlEl.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
+    registerControl(button);
+  });
 
   const connectionStatusEl = containerEl.createEl("p", {
     cls: "rss-dashboard-connection-status",
   });
-  new Setting(containerEl)
+  connectionStatusEl.setAttribute("role", "status");
+  connectionStatusEl.setAttribute("aria-live", "polite");
+  connectionStatusEl.setAttribute("aria-atomic", "true");
+  connectionTestSetting = new Setting(containerEl)
     .setName(t("settings.tikhub.testConnection"))
-    .setDesc([
-      t("settings.tikhub.testConnectionDesc"),
-      t("settings.tikhub.estimatedTestRequests"),
-      t("settings.tikhub.requestCaps", {
-        run: plugin.settings.tikhub.maxRequestsPerRun,
-        day: plugin.settings.tikhub.maxRequestsPerDay,
-      }),
-    ].join(" "))
-    .addButton((button) => button
+    .setDesc("");
+  renderCapDisplays();
+  connectionTestSetting.addButton((button) => {
+    registerControl(button.buttonEl);
+    button
       .setButtonText(t("settings.tikhub.testConnectionButton"))
       .onClick(() => {
+        if (secretInputEl) secretInputEl.value = "";
+        const operation = beginOperation();
+        if (operation === undefined) return;
+        const snapshot: TikHubConnectionTestInput = {
+          app: plugin.app,
+          connectionId: plugin.settings.tikhub.connectionId,
+          baseUrl: plugin.settings.tikhub.baseUrl,
+          timeoutMs: plugin.settings.tikhub.timeoutMs,
+          dataFolder: plugin.settings.collection.dataFolder,
+          maxRequestsPerRun: currentRunCap,
+          maxRequestsPerDay: currentDayCap,
+        };
+        let apiKey: string | undefined;
         void (async () => {
-          connectionStatusEl.setText("");
-          if (!(await confirmPaidRequest())) return;
-          const connectionId = plugin.settings.tikhub.connectionId;
-          if (!UUID_PATTERN.test(connectionId)) {
-            connectionStatusEl.setText(t("settings.tikhub.keyNotConfigured"));
-            return;
-          }
-          let apiKey: string | undefined;
           try {
-            apiKey = await secretStore.get(connectionId);
+            connectionStatusEl.setText("");
+            if (!(await confirmPaidRequest())) return;
+            if (!isOperationCurrent(operation)) return;
+            if (!UUID_PATTERN.test(snapshot.connectionId)) {
+              connectionStatusEl.setText(t("settings.tikhub.keyNotConfigured"));
+              return;
+            }
+            apiKey = await secretStore.get(snapshot.connectionId);
+            if (!isOperationCurrent(operation)) return;
             if (!apiKey?.trim()) {
               connectionStatusEl.setText(t("settings.tikhub.keyNotConfigured"));
               return;
             }
-            await testConnection(apiKey, {
-              app: plugin.app,
-              connectionId,
-              baseUrl: plugin.settings.tikhub.baseUrl,
-              timeoutMs: plugin.settings.tikhub.timeoutMs,
-              dataFolder: plugin.settings.collection.dataFolder,
-              maxRequestsPerRun: plugin.settings.tikhub.maxRequestsPerRun,
-              maxRequestsPerDay: plugin.settings.tikhub.maxRequestsPerDay,
-            });
+            await testConnection(apiKey, snapshot);
+            if (!isOperationCurrent(operation)) return;
             connectionStatusEl.setText(t("settings.tikhub.connectionSucceeded"));
           } catch (error) {
-            connectionStatusEl.setText(getTikHubConnectionMessage(error, t));
+            if (isOperationCurrent(operation)) {
+              connectionStatusEl.setText(getTikHubConnectionMessage(error, t));
+            }
           } finally {
             apiKey = undefined;
+            finishOperation(operation);
           }
         })();
-      }));
+      });
+  });
+
+  refreshSecretStatus();
 }
 
 export function getTikHubConnectionMessage(
@@ -328,29 +572,6 @@ export async function runTikHubConnectionTest(
     ...(input.transport ? { transport: input.transport } : {}),
   });
   await client.fetchUserPosts({ apiKey, handle: "x" });
-}
-
-function renderPositiveIntegerSetting(
-  containerEl: HTMLElement,
-  label: string,
-  value: number,
-  onSave: (value: number) => Promise<void>,
-): void {
-  new Setting(containerEl).setName(label).addText((text) => {
-    text.inputEl.type = "number";
-    text.inputEl.min = "1";
-    text.setValue(String(value));
-    text.inputEl.addEventListener("change", () => {
-      void (async () => {
-        const parsed = Number(text.inputEl.value);
-        if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-          text.setValue(String(value));
-          return;
-        }
-        await onSave(parsed);
-      })();
-    });
-  });
 }
 
 function isPresetBaseUrl(value: string): value is typeof MAINLAND_BASE_URL | typeof OVERSEAS_BASE_URL {

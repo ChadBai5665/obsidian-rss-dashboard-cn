@@ -46,6 +46,61 @@ describe("XTopicSourceModal", () => {
     expect(modal.contentEl.textContent).toContain("预计每次刷新 3 次请求");
   });
 
+  it("disables modal actions synchronously and submits only once", async () => {
+    let resolveSave!: () => void;
+    const pending = new Promise<void>((resolve) => { resolveSave = resolve; });
+    const onSave = vi.fn(() => pending);
+    const modal = new XTopicSourceModal(new obsidian.App(), {
+      locale: "zh-CN",
+      maxRequestsPerRun: 40,
+      maxRequestsPerDay: 100,
+      existingTopics: [],
+      onSave,
+    });
+    modal.open();
+    const name = setting(modal, "主题名称").querySelector<HTMLInputElement>("input")!;
+    const includes = setting(modal, "包含关键词").querySelector<HTMLInputElement>("input")!;
+    name.value = "AI 工具";
+    name.dispatchEvent(new Event("input"));
+    includes.value = "agent";
+    includes.dispatchEvent(new Event("input"));
+    const save = Array.from(modal.contentEl.querySelectorAll("button"))
+      .find((button) => button.textContent === "保存")!;
+    save.click();
+    save.click();
+    expect(save.disabled).toBe(true);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    expect(onSave).toHaveBeenCalledTimes(1);
+    resolveSave();
+    await flushPromises();
+    expect(modal.containerEl.isConnected).toBe(false);
+  });
+
+  it("restores modal actions after an asynchronous save failure", async () => {
+    const modal = new XTopicSourceModal(new obsidian.App(), {
+      locale: "zh-CN",
+      maxRequestsPerRun: 40,
+      maxRequestsPerDay: 100,
+      existingTopics: [],
+      onSave: vi.fn(async () => { throw new Error("save failed"); }),
+    });
+    modal.open();
+    const name = setting(modal, "主题名称").querySelector<HTMLInputElement>("input")!;
+    const includes = setting(modal, "包含关键词").querySelector<HTMLInputElement>("input")!;
+    name.value = "AI 工具";
+    name.dispatchEvent(new Event("input"));
+    includes.value = "agent";
+    includes.dispatchEvent(new Event("input"));
+    const save = Array.from(modal.contentEl.querySelectorAll("button"))
+      .find((button) => button.textContent === "保存")!;
+    save.click();
+    expect(save.disabled).toBe(true);
+    await flushPromises();
+    expect(save.disabled).toBe(false);
+    expect(save.getAttribute("aria-disabled")).toBe("false");
+    expect(modal.contentEl.textContent).toContain("无法保存发现主题");
+  });
+
   it("reuses topic/query validation, rejects duplicate topics, and cancel never saves", async () => {
     const onSave = vi.fn(async () => {});
     const modal = new XTopicSourceModal(new obsidian.App(), {

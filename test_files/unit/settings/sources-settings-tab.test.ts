@@ -53,4 +53,29 @@ describe("renderSourcesSettingsTab", () => {
       (button) => button.textContent === "添加 X 账号",
     )).toBe(true);
   });
+
+  it("restores the exact feed graph when account persistence fails", async () => {
+    const pluginSettings = settings();
+    const originalReference = pluginSettings.feeds;
+    const before = structuredClone(pluginSettings.feeds);
+    const containerEl = document.body.createDiv();
+    renderSourcesSettingsTab(containerEl, {
+      app: obsidian.App.createMock(),
+      settings: pluginSettings,
+      saveSettings: vi.fn(async () => { throw new Error("save failed"); }),
+    });
+    Array.from(containerEl.querySelectorAll("button"))
+      .find((button) => button.textContent === "添加 X 账号")!.click();
+    const modal = document.body.querySelector<HTMLElement>(".modal-content")!;
+    const handleSetting = Array.from(modal.querySelectorAll<HTMLElement>(".setting-item"))
+      .find((element) => element.querySelector(".setting-item-name")?.textContent === "X 账号")!;
+    const input = handleSetting.querySelector<HTMLInputElement>("input")!;
+    input.value = "AnthropicAI";
+    input.dispatchEvent(new Event("input"));
+    Array.from(modal.querySelectorAll("button"))
+      .find((button) => button.textContent === "保存")!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pluginSettings.feeds).toStrictEqual(before);
+    expect(pluginSettings.feeds).toBe(originalReference);
+  });
 });

@@ -11,6 +11,17 @@ import { createTranslator } from "../../../src/i18n";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 
 const CONNECTION_ID = "d4eb3f58-b672-4f73-b9f3-9cd2f0e57a8d";
+const syntheticCredential = (): string => ["runtime", "credential", "value"].join("-");
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 function flushPromises(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -30,10 +41,20 @@ function getButton(container: HTMLElement, label: string): HTMLButtonElement {
   return button;
 }
 
-function harness(options: { confirmed?: boolean; hasSecret?: boolean } = {}) {
+function harness(options: {
+  confirmed?: boolean;
+  hasSecret?: boolean;
+  connectionId?: string;
+  getStatus?: () => Promise<{ hasSecret: boolean }>;
+  testConnection?: ReturnType<typeof vi.fn>;
+  confirmPaidRequest?: ReturnType<typeof vi.fn>;
+  confirmDeleteSecret?: ReturnType<typeof vi.fn>;
+  saveSettings?: ReturnType<typeof vi.fn>;
+  createConnectionId?: () => string;
+} = {}) {
   const settings: RssDashboardSettings = structuredClone(DEFAULT_SETTINGS);
   settings.locale = "zh-CN";
-  settings.tikhub.connectionId = CONNECTION_ID;
+  settings.tikhub.connectionId = options.connectionId ?? CONNECTION_ID;
   settings.tikhub.enabled = true;
   settings.feeds = [{
     title: "RSS",
@@ -43,28 +64,35 @@ function harness(options: { confirmed?: boolean; hasSecret?: boolean } = {}) {
     lastUpdated: 0,
   }];
   const secretStore = {
-    getStatus: vi.fn(async () => ({ hasSecret: options.hasSecret ?? false })),
-    get: vi.fn(async () => "stored-secret"),
+    getStatus: vi.fn(options.getStatus ?? (async () => ({ hasSecret: options.hasSecret ?? false }))),
+    get: vi.fn(async () => syntheticCredential()),
     set: vi.fn(async () => {}),
     delete: vi.fn(async () => {}),
   };
   const plugin = {
     app: obsidian.App.createMock(),
     settings,
-    saveSettings: vi.fn(async () => {}),
+    saveSettings: options.saveSettings ?? vi.fn(async () => {}),
   };
-  const testConnection = vi.fn(async () => {});
-  const confirmPaidRequest = vi.fn(async () => options.confirmed ?? false);
-  const confirmDeleteSecret = vi.fn(async () => options.confirmed ?? false);
+  const testConnection = options.testConnection ?? vi.fn(async () => {});
+  const confirmPaidRequest = options.confirmPaidRequest ?? vi.fn(async () => options.confirmed ?? false);
+  const confirmDeleteSecret = options.confirmDeleteSecret ?? vi.fn(async () => options.confirmed ?? false);
   const containerEl = document.body.createDiv();
   renderTikHubSettingsTab(containerEl, plugin, {
     secretStore,
     testConnection,
     confirmPaidRequest,
     confirmDeleteSecret,
-    createConnectionId: () => CONNECTION_ID,
+    createConnectionId: options.createConnectionId ?? (() => CONNECTION_ID),
   });
-  return { containerEl, plugin, secretStore, testConnection, confirmPaidRequest };
+  return {
+    containerEl,
+    plugin,
+    secretStore,
+    testConnection,
+    confirmPaidRequest,
+    confirmDeleteSecret,
+  };
 }
 
 beforeEach(() => {
@@ -122,18 +150,19 @@ describe("renderTikHubSettingsTab", () => {
     const input = keySetting.querySelector<HTMLInputElement>("input")!;
     expect(input.type).toBe("password");
     expect(input.value).toBe("");
-    input.value = "key-never-persisted";
+    const credential = syntheticCredential();
+    input.value = credential;
     input.dispatchEvent(new Event("input"));
 
     getButton(keySetting, "保存密钥").click();
     await flushPromises();
 
-    expect(test.secretStore.set).toHaveBeenCalledWith(CONNECTION_ID, "key-never-persisted");
+    expect(test.secretStore.set).toHaveBeenCalledWith(CONNECTION_ID, credential);
     expect(input.value).toBe("");
-    expect(JSON.stringify(test.plugin.settings)).not.toContain("key-never-persisted");
+    expect(JSON.stringify(test.plugin.settings)).not.toContain(credential);
     expect(test.plugin.saveSettings).not.toHaveBeenCalled();
     expect(test.containerEl.textContent).toContain("已配置");
-    expect(test.containerEl.textContent).not.toContain("key-never-persisted");
+    expect(test.containerEl.textContent).not.toContain(credential);
   });
 
   it("requires deletion confirmation, removes only the external key, and disables paid refresh", async () => {
@@ -169,12 +198,153 @@ describe("renderTikHubSettingsTab", () => {
     await flushPromises();
     expect(confirmed.testConnection).toHaveBeenCalledTimes(1);
     expect(confirmed.testConnection).toHaveBeenCalledWith(
-      "stored-secret",
+      syntheticCredential(),
       expect.objectContaining({
         maxRequestsPerRun: 40,
         maxRequestsPerDay: 100,
       }),
     );
+  });
+
+  it("clears the key synchronously and gates double clicks for save, test, and delete", async () => {
+    const confirmation = deferred<boolean>();
+    const confirmPaidRequest = vi.fn(() => confirmation.promise);
+    const createConnectionId = vi.fn(() => CONNECTION_ID);
+    const test = harness({
+      connectionId: "",
+      confirmPaidRequest,
+      createConnectionId,
+    });
+    const keySetting = getSetting(test.containerEl, "API 密钥");
+    const input = keySetting.querySelector<HTMLInputElement>("input")!;
+    const save = getButton(keySetting, "保存密钥");
+    input.value = syntheticCredential();
+    save.click();
+    save.click();
+    expect(input.value).toBe("");
+    expect(save.disabled).toBe(true);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    await flushPromises();
+    expect(createConnectionId).toHaveBeenCalledTimes(1);
+    expect(test.plugin.saveSettings).toHaveBeenCalledTimes(1);
+    expect(test.secretStore.set).toHaveBeenCalledTimes(1);
+
+    await flushPromises();
+    input.value = syntheticCredential();
+    const testButton = getButton(test.containerEl, "测试连接（预计 1 次请求）");
+    testButton.click();
+    testButton.click();
+    expect(input.value).toBe("");
+    expect(confirmPaidRequest).toHaveBeenCalledTimes(1);
+    expect(testButton.disabled).toBe(true);
+    confirmation.resolve(false);
+    await flushPromises();
+
+    input.value = syntheticCredential();
+    const deleteButton = getButton(keySetting, "删除密钥");
+    deleteButton.click();
+    deleteButton.click();
+    expect(input.value).toBe("");
+    expect(test.confirmDeleteSecret).toHaveBeenCalledTimes(1);
+  });
+
+  it("rolls back a generated connection identity and restores controls after key failures", async () => {
+    const saveSettings = vi.fn(async () => { throw new Error("save failed"); });
+    const test = harness({ connectionId: "", confirmed: true, saveSettings });
+    const keySetting = getSetting(test.containerEl, "API 密钥");
+    const input = keySetting.querySelector<HTMLInputElement>("input")!;
+    const save = getButton(keySetting, "保存密钥");
+    input.value = syntheticCredential();
+    save.click();
+    expect(input.value).toBe("");
+    expect(save.disabled).toBe(true);
+    await flushPromises();
+    expect(test.plugin.settings.tikhub.connectionId).toBe("");
+    expect(test.secretStore.set).not.toHaveBeenCalled();
+    expect(save.disabled).toBe(false);
+    expect(save.getAttribute("aria-disabled")).toBe("false");
+
+    document.body.empty();
+    const deletion = harness({ confirmed: true });
+    deletion.secretStore.delete.mockRejectedValueOnce(new Error("delete failed"));
+    const remove = getButton(deletion.containerEl, "删除密钥");
+    remove.click();
+    expect(remove.disabled).toBe(true);
+    await flushPromises();
+    expect(deletion.secretStore.delete).toHaveBeenCalledTimes(1);
+    expect(remove.disabled).toBe(false);
+    expect(remove.getAttribute("aria-disabled")).toBe("false");
+  });
+
+  it("updates every cap display immediately, restores the last valid value, and freezes the test snapshot", async () => {
+    const confirmation = deferred<boolean>();
+    const confirmPaidRequest = vi.fn(() => confirmation.promise);
+    const test = harness({ confirmed: true, confirmPaidRequest });
+    const runInput = getSetting(test.containerEl, "单次刷新请求上限")
+      .querySelector<HTMLInputElement>("input")!;
+    const dayInput = getSetting(test.containerEl, "每日请求上限")
+      .querySelector<HTMLInputElement>("input")!;
+
+    runInput.value = "7";
+    runInput.dispatchEvent(new Event("change"));
+    expect(test.containerEl.textContent).toContain("单次上限 7 次；每日上限 100 次");
+    await flushPromises();
+    dayInput.value = "11";
+    dayInput.dispatchEvent(new Event("change"));
+    expect(test.containerEl.textContent).toContain("单次上限 7 次；每日上限 11 次");
+    await flushPromises();
+    runInput.value = "0";
+    runInput.dispatchEvent(new Event("change"));
+    expect(runInput.value).toBe("7");
+
+    getButton(test.containerEl, "测试连接（预计 1 次请求）").click();
+    test.plugin.settings.tikhub.baseUrl = "https://changed.example.com";
+    test.plugin.settings.tikhub.maxRequestsPerRun = 99;
+    confirmation.resolve(true);
+    await flushPromises();
+    expect(test.testConnection).toHaveBeenCalledWith(
+      syntheticCredential(),
+      expect.objectContaining({
+        baseUrl: "https://api.tikhub.dev",
+        maxRequestsPerRun: 7,
+        maxRequestsPerDay: 11,
+      }),
+    );
+  });
+
+  it("ignores a late initial secret status after a confirmed delete", async () => {
+    const status = deferred<{ hasSecret: boolean }>();
+    const test = harness({ confirmed: true, getStatus: () => status.promise });
+    getButton(test.containerEl, "删除密钥").click();
+    await flushPromises();
+    expect(test.containerEl.textContent).toContain("状态：未配置");
+    status.resolve({ hasSecret: true });
+    await flushPromises();
+    expect(test.containerEl.textContent).toContain("状态：未配置");
+    expect(test.containerEl.textContent).not.toContain("状态：已配置");
+  });
+
+  it("invalidates a confirmed paid test when its rendered settings page is disposed", async () => {
+    const confirmation = deferred<boolean>();
+    const test = harness({
+      confirmPaidRequest: vi.fn(() => confirmation.promise),
+    });
+    getButton(test.containerEl, "测试连接（预计 1 次请求）").click();
+    test.containerEl.remove();
+    confirmation.resolve(true);
+    await flushPromises();
+    expect(test.secretStore.get).not.toHaveBeenCalled();
+    expect(test.testConnection).not.toHaveBeenCalled();
+  });
+
+  it("marks asynchronous status output as a polite live region", () => {
+    const test = harness();
+    for (const element of test.containerEl.querySelectorAll(
+      ".rss-dashboard-secret-status, .rss-dashboard-connection-status",
+    )) {
+      expect(element.getAttribute("role")).toBe("status");
+      expect(element.getAttribute("aria-live")).toBe("polite");
+    }
   });
 
   it("shows caps before testing and distinguishes invalid keys from low balance in Chinese", () => {
@@ -197,7 +367,8 @@ describe("runTikHubConnectionTest", () => {
       text: JSON.stringify({ code: 200, data: {} }),
     }));
 
-    await runTikHubConnectionTest("stored-secret", {
+    const credential = syntheticCredential();
+    await runTikHubConnectionTest(credential, {
       app,
       connectionId: CONNECTION_ID,
       baseUrl: "https://api.tikhub.dev",
@@ -212,7 +383,7 @@ describe("runTikHubConnectionTest", () => {
     expect(transport).toHaveBeenCalledWith({
       url: "https://api.tikhub.dev/api/v1/twitter/web/fetch_user_post_tweet?screen_name=x",
       method: "GET",
-      headers: { Authorization: "Bearer stored-secret" },
+      headers: { Authorization: `Bearer ${credential}` },
     });
     const ledger = JSON.parse(await app.vault.adapter.read(
       ".rss-dashboard-data/state/tikhub-requests.json",

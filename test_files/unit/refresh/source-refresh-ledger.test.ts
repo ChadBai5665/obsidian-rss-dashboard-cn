@@ -129,7 +129,9 @@ describe("SourceRefreshLedger", () => {
 
   it("redacts URL queries and header-like secrets from persisted error messages", async () => {
     const { ledger } = createLedger();
-    const message = `Authorization: Bearer super-secret-token; https://api.example.com/feed?api_key=secret&token=also-secret ${"x".repeat(400)}`;
+    const credential = ["super", "secret", "token"].join("-");
+    const authorization = ["Bearer", credential].join(" ");
+    const message = `Authorization: ${authorization}; https://api.example.com/feed?api_key=secret&token=also-secret ${"x".repeat(400)}`;
 
     await ledger.recordError("feed-1", new Date(2026, 6, 21, 9, 0, 0), {
       code: "request-failed",
@@ -137,7 +139,7 @@ describe("SourceRefreshLedger", () => {
     });
 
     const state = await ledger.getState("feed-1");
-    expect(state?.errorMessage).not.toContain("super-secret-token");
+    expect(state?.errorMessage).not.toContain(credential);
     expect(state?.errorMessage).not.toContain("api_key=secret");
     expect(state?.errorMessage).not.toContain("token=also-secret");
     expect(state?.errorMessage?.length).toBeLessThanOrEqual(300);

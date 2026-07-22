@@ -75,6 +75,13 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
     );
     expect(tabButtons).toHaveLength(14);
     expect(tabButtons[0].textContent).toBe("常规");
+    expect(tab.containerEl.querySelector(".rss-dashboard-settings-tab-bar")?.getAttribute("role"))
+      .toBe("tablist");
+    expect(tabButtons[0].getAttribute("role")).toBe("tab");
+    expect(tabButtons[0].getAttribute("aria-selected")).toBe("true");
+    expect(tabButtons[0].getAttribute("tabindex")).toBe("0");
+    expect(tabButtons[1].getAttribute("aria-selected")).toBe("false");
+    expect(tabButtons[1].getAttribute("tabindex")).toBe("-1");
 
     expect(vi.mocked(general.renderGeneralSettingsTab)).toHaveBeenCalledTimes(1);
   });

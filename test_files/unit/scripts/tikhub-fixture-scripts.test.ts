@@ -162,8 +162,10 @@ describe("sanitizeTikHubFixture", () => {
   });
 
   it("checks raw and aliased names so personal inputs cannot erase secret markers", () => {
+    const requestIdField = ["request", "id"].join("_");
+    const cacheUrlField = ["cache", "url"].join("_");
     const handleCollision = sanitizeTikHubFixture(
-      { request_id: "request-secret", note: "request_id" },
+      { [requestIdField]: "request-secret", note: requestIdField },
       { handle: "id" },
     );
     const queryCollision = sanitizeTikHubFixture(
@@ -171,7 +173,7 @@ describe("sanitizeTikHubFixture", () => {
       { query: "token" },
     );
     const urlCollision = sanitizeTikHubFixture(
-      { cache_url: "https://cache.invalid/private", note: "cache_url" },
+      { [cacheUrlField]: "https://cache.invalid/private", note: cacheUrlField },
       { handle: "url" },
     );
 

@@ -19,6 +19,8 @@ export interface XTopicSourceModalOptions {
 }
 
 export class XTopicSourceModal extends Modal {
+  private lifecycleEpoch = 0;
+
   constructor(
     app: App,
     private readonly options: XTopicSourceModalOptions,
@@ -27,6 +29,7 @@ export class XTopicSourceModal extends Modal {
   }
 
   onOpen(): void {
+    const lifecycleToken = ++this.lifecycleEpoch;
     const t = createTranslator(this.options.locale ?? "zh-CN");
     const { contentEl } = this;
     contentEl.empty();
@@ -112,61 +115,93 @@ export class XTopicSourceModal extends Modal {
     const errorEl = contentEl.createEl("p", {
       cls: "rss-dashboard-validation-error",
     });
+    errorEl.setAttribute("role", "alert");
+    errorEl.setAttribute("aria-live", "polite");
+
+    let inFlight = false;
+    let cancelButtonEl: HTMLButtonElement | undefined;
+    let saveButtonEl: HTMLButtonElement | undefined;
+    const isCurrent = (): boolean =>
+      this.lifecycleEpoch === lifecycleToken && contentEl.isConnected;
+    const setBusy = (busy: boolean): void => {
+      for (const buttonEl of [cancelButtonEl, saveButtonEl]) {
+        if (!buttonEl) continue;
+        buttonEl.disabled = busy;
+        buttonEl.setAttribute("aria-disabled", String(busy));
+      }
+    };
 
     new Setting(contentEl)
-      .addButton((button) => button
-        .setButtonText(t("common.cancel"))
-        .onClick(() => this.close()))
-      .addButton((button) => button
-        .setButtonText(t("common.save"))
-        .setCta()
-        .onClick(() => {
-          void (async () => {
-            errorEl.setText("");
-            if (!name.trim()) {
-              errorEl.setText(t("modal.xTopic.invalidName"));
-              return;
-            }
-            if (splitList(includeKeywords).length === 0) {
-              errorEl.setText(t("modal.xTopic.includeRequired"));
-              return;
-            }
-            const duplicate = this.options.existingTopics.some((topic) =>
-              topic.id !== this.options.existing?.id &&
-              topic.name.normalize("NFC").trim().toLowerCase() ===
-                name.normalize("NFC").trim().toLowerCase(),
-            );
-            if (duplicate) {
-              errorEl.setText(t("modal.xTopic.duplicate"));
-              return;
-            }
-            let config: XTopicSourceConfig;
+      .addButton((button) => {
+        cancelButtonEl = button.buttonEl;
+        button
+          .setButtonText(t("common.cancel"))
+          .onClick(() => {
+            if (!inFlight) this.close();
+          });
+      })
+      .addButton((button) => {
+        saveButtonEl = button.buttonEl;
+        button
+          .setButtonText(t("common.save"))
+          .setCta()
+          .onClick(() => {
+            if (inFlight || !isCurrent()) return;
+            inFlight = true;
+            setBusy(true);
+            void (async () => {
             try {
-              config = createXTopicSourceConfig({
-                id: this.options.existing?.id,
-                name,
-                includeKeywords: splitList(includeKeywords),
-                excludeKeywords: splitList(excludeKeywords),
-                priorityAccounts: splitList(priorityAccounts),
-                windowDays,
-                folder,
-              });
-              buildXTopicSearchPlan(config, new Date());
-            } catch {
-              errorEl.setText(t("modal.xTopic.invalidQuery"));
-              return;
-            }
-            try {
+              errorEl.setText("");
+              if (!name.trim()) {
+                errorEl.setText(t("modal.xTopic.invalidName"));
+                return;
+              }
+              if (splitList(includeKeywords).length === 0) {
+                errorEl.setText(t("modal.xTopic.includeRequired"));
+                return;
+              }
+              const duplicate = this.options.existingTopics.some((topic) =>
+                topic.id !== this.options.existing?.id &&
+                topic.name.normalize("NFC").trim().toLowerCase() ===
+                  name.normalize("NFC").trim().toLowerCase(),
+              );
+              if (duplicate) {
+                errorEl.setText(t("modal.xTopic.duplicate"));
+                return;
+              }
+              let config: XTopicSourceConfig;
+              try {
+                config = createXTopicSourceConfig({
+                  id: this.options.existing?.id,
+                  name,
+                  includeKeywords: splitList(includeKeywords),
+                  excludeKeywords: splitList(excludeKeywords),
+                  priorityAccounts: splitList(priorityAccounts),
+                  windowDays,
+                  folder,
+                });
+                buildXTopicSearchPlan(config, new Date());
+              } catch {
+                errorEl.setText(t("modal.xTopic.invalidQuery"));
+                return;
+              }
               await this.options.onSave(config);
-              this.close();
+              if (isCurrent()) this.close();
             } catch {
-              errorEl.setText(t("modal.xTopic.saveFailed"));
+              if (isCurrent()) errorEl.setText(t("modal.xTopic.saveFailed"));
+            } finally {
+              if (isCurrent()) {
+                inFlight = false;
+                setBusy(false);
+              }
             }
-          })();
-        }));
+            })();
+          });
+      });
   }
 
   onClose(): void {
+    this.lifecycleEpoch += 1;
     this.contentEl.empty();
   }
 }

@@ -44,6 +44,55 @@ describe("XAccountSourceModal", () => {
     expect(modal.contentEl.textContent).toContain("预计每次刷新 2 次请求");
   });
 
+  it("disables modal actions synchronously and submits only once", async () => {
+    let resolveSave!: () => void;
+    const pending = new Promise<void>((resolve) => { resolveSave = resolve; });
+    const onSave = vi.fn(() => pending);
+    const modal = new XAccountSourceModal(new obsidian.App(), {
+      locale: "zh-CN",
+      maxRequestsPerRun: 40,
+      maxRequestsPerDay: 100,
+      existingAccounts: [],
+      onSave,
+    });
+    modal.open();
+    const handle = setting(modal, "X 账号").querySelector<HTMLInputElement>("input")!;
+    handle.value = "AnthropicAI";
+    handle.dispatchEvent(new Event("input"));
+    const save = Array.from(modal.contentEl.querySelectorAll("button"))
+      .find((button) => button.textContent === "保存")!;
+    save.click();
+    save.click();
+    expect(save.disabled).toBe(true);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    expect(onSave).toHaveBeenCalledTimes(1);
+    resolveSave();
+    await flushPromises();
+    expect(modal.containerEl.isConnected).toBe(false);
+  });
+
+  it("restores modal actions after an asynchronous save failure", async () => {
+    const modal = new XAccountSourceModal(new obsidian.App(), {
+      locale: "zh-CN",
+      maxRequestsPerRun: 40,
+      maxRequestsPerDay: 100,
+      existingAccounts: [],
+      onSave: vi.fn(async () => { throw new Error("save failed"); }),
+    });
+    modal.open();
+    const handle = setting(modal, "X 账号").querySelector<HTMLInputElement>("input")!;
+    handle.value = "AnthropicAI";
+    handle.dispatchEvent(new Event("input"));
+    const save = Array.from(modal.contentEl.querySelectorAll("button"))
+      .find((button) => button.textContent === "保存")!;
+    save.click();
+    expect(save.disabled).toBe(true);
+    await flushPromises();
+    expect(save.disabled).toBe(false);
+    expect(save.getAttribute("aria-disabled")).toBe("false");
+    expect(modal.contentEl.textContent).toContain("无法保存 X 账号订阅");
+  });
+
   it("reuses handle validation, rejects duplicates, and cancel never saves", async () => {
     const onSave = vi.fn(async () => {});
     const modal = new XAccountSourceModal(new obsidian.App(), {

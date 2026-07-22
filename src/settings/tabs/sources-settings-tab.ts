@@ -22,6 +22,7 @@ export function renderSourcesSettingsTab(
   new Setting(containerEl).setName(t("settings.sources.heading")).setHeading();
 
   const accounts = getXAccountConfigs(plugin.settings.feeds);
+  let saveInFlight = false;
   const openEditor = (existing?: XAccountSourceConfig): void => {
     new XAccountSourceModal(plugin.app, {
       locale: plugin.settings.locale,
@@ -30,9 +31,22 @@ export function renderSourcesSettingsTab(
       maxRequestsPerRun: plugin.settings.tikhub.maxRequestsPerRun,
       maxRequestsPerDay: plugin.settings.tikhub.maxRequestsPerDay,
       onSave: async (config) => {
-        upsertAccountFeed(plugin.settings.feeds, config);
-        await plugin.saveSettings();
-        containerEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+        if (saveInFlight) throw new Error("X source save already in progress");
+        saveInFlight = true;
+        const originalFeeds = plugin.settings.feeds;
+        try {
+          const candidateFeeds = structuredClone(originalFeeds);
+          upsertAccountFeed(candidateFeeds, config);
+          plugin.settings.feeds = candidateFeeds;
+          await plugin.saveSettings();
+          containerEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+        } catch (error) {
+          plugin.settings.feeds = originalFeeds;
+          containerEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+          throw error;
+        } finally {
+          saveInFlight = false;
+        }
       },
     }).open();
   };
