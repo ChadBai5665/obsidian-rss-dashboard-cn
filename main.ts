@@ -2024,17 +2024,7 @@ export default class RssDashboardPlugin extends Plugin {
         });
       }
 
-      const estimatedTikHubRequests = this.estimateTikHubRequests(feedsToRefresh);
-      if (estimatedTikHubRequests > 0) {
-        this.notify("plugin.refreshingWithTikHubEstimate", {
-          source: feedNoticeText,
-          count: estimatedTikHubRequests,
-          run: this.settings.tikhub.maxRequestsPerRun,
-          day: this.settings.tikhub.maxRequestsPerDay,
-        });
-      } else {
-        this.notify("plugin.refreshing", { source: feedNoticeText });
-      }
+      this.notifyRefreshStart(feedsToRefresh, feedNoticeText);
       const sourceRegistry = this.takeSourceRegistryForRun();
       if (feedsToRefresh.length === 1) {
         await this.refreshSingleFeed(
@@ -2167,7 +2157,7 @@ export default class RssDashboardPlugin extends Plugin {
         return;
       }
 
-      this.notify("plugin.refreshing", { source: feed.title });
+      this.notifyRefreshStart([feed], feed.title);
       await this.refreshSingleFeed(
         feed,
         feed.title,
@@ -4098,6 +4088,20 @@ export default class RssDashboardPlugin extends Plugin {
 
   private getRefreshableFeeds(feeds: Feed[]): Feed[] {
     return feeds.filter((feed) => !this.isFeedExcludedFromRefresh(feed));
+  }
+
+  private notifyRefreshStart(feeds: readonly Feed[], source: string): void {
+    const estimatedTikHubRequests = this.estimateTikHubRequests(feeds);
+    if (estimatedTikHubRequests > 0) {
+      this.notify("plugin.refreshingWithTikHubEstimate", {
+        source,
+        count: estimatedTikHubRequests,
+        run: this.settings.tikhub.maxRequestsPerRun,
+        day: this.settings.tikhub.maxRequestsPerDay,
+      });
+      return;
+    }
+    this.notify("plugin.refreshing", { source });
   }
 
   private estimateTikHubRequests(feeds: readonly Feed[]): number {

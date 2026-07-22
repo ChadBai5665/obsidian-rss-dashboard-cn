@@ -223,11 +223,124 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(getNoticeMessages(consoleLogSpy).filter((message) => message === expectedEnglish)).toHaveLength(1);
   });
 
-  it("does not report a paid estimate for pure RSS, disabled TikHub, or invalid X configuration", async () => {
+  it.each([
+    {
+      label: "Chinese account without replies",
+      locale: "zh-CN" as const,
+      title: "@openai",
+      url: "tikhub://x-account/openai",
+      config: {
+        kind: "x-account" as const,
+        id: "x-account-openai",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: true,
+        folder: "X",
+        topics: [],
+      },
+      count: 1,
+      expected: "正在刷新 @openai… 本次 TikHub 请求预计 1 次（单次上限 8 次；每日上限 21 次）。",
+    },
+    {
+      label: "English account with replies",
+      locale: "en" as const,
+      title: "@openai replies",
+      url: "tikhub://x-account/openai",
+      config: {
+        kind: "x-account" as const,
+        id: "x-account-openai",
+        handle: "openai",
+        includeReplies: true,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      count: 2,
+      expected: "Refreshing @openai replies… Estimated TikHub requests: 2 (per-run cap 8; daily cap 21).",
+    },
+    {
+      label: "Chinese topic without priority accounts",
+      locale: "zh-CN" as const,
+      title: "AI 应用",
+      url: "tikhub://x-topic/ai-basic",
+      config: {
+        kind: "x-topic" as const,
+        id: "ai-basic",
+        name: "AI 应用",
+        includeKeywords: ["AI"],
+        excludeKeywords: [],
+        priorityAccounts: [],
+        windowDays: 7 as const,
+        folder: "Topics",
+      },
+      count: 2,
+      expected: "正在刷新 AI 应用… 本次 TikHub 请求预计 2 次（单次上限 8 次；每日上限 21 次）。",
+    },
+    {
+      label: "English topic with priority accounts",
+      locale: "en" as const,
+      title: "AI methods",
+      url: "tikhub://x-topic/ai-priority",
+      config: {
+        kind: "x-topic" as const,
+        id: "ai-priority",
+        name: "AI methods",
+        includeKeywords: ["AI"],
+        excludeKeywords: [],
+        priorityAccounts: ["openai"],
+        windowDays: 7 as const,
+        folder: "Topics",
+      },
+      count: 3,
+      expected: "Refreshing AI methods… Estimated TikHub requests: 3 (per-run cap 8; daily cap 21).",
+    },
+  ])("reports the exact single-source estimate before provider execution: $label", async ({
+    locale,
+    title,
+    url,
+    config,
+    count,
+    expected,
+  }) => {
+    const feed = createFeed({
+      feedId: config.id,
+      sourceKind: config.kind,
+      sourceConfig: config,
+      title,
+      url,
+    });
+    const plugin = createPluginWithSettings([feed]);
+    plugin.settings.locale = locale;
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      maxRequestsPerRun: 8,
+      maxRequestsPerDay: 21,
+    };
+    const refresh = vi.fn(async () => {
+      expect(getNoticeMessages(consoleLogSpy)).toContain(expected);
+      return {
+        feed,
+        items: feed.items,
+        providerRequestCount: count,
+        warnings: [],
+      };
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({ refresh }) as unknown as SourceRegistry);
+
+    await plugin.manualRefreshSourceById(config.id);
+
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(getNoticeMessages(consoleLogSpy).filter((message) => message === expected)).toHaveLength(1);
+  });
+
+  it("uses the ordinary single-source notice for pure RSS, disabled TikHub, or invalid X configuration", async () => {
     const rss = createFeed({ feedId: "rss-source" });
     const rssPlugin = createPluginWithSettings([rss]);
     rssPlugin.feedParser.refreshFeed.mockResolvedValue({ ...rss, lastUpdated: 2 });
-    await rssPlugin.manualRefreshAllSources();
+    await rssPlugin.manualRefreshSourceById("rss-source");
+    expect(getNoticeMessages(consoleLogSpy).filter((message) => message === "正在刷新 Feed A…")).toHaveLength(1);
     expect(getNoticeMessages(consoleLogSpy).some((message) => message.includes("TikHub 请求预计"))).toBe(false);
 
     consoleLogSpy.mockClear();
@@ -254,7 +367,8 @@ describe("refreshFeeds() pipeline behavior", () => {
         warnings: [],
       }),
     }) as unknown as SourceRegistry);
-    await disabledPlugin.manualRefreshAllSources();
+    await disabledPlugin.manualRefreshSourceById("x-account-openai");
+    expect(getNoticeMessages(consoleLogSpy).filter((message) => message === "正在刷新 Feed A…")).toHaveLength(1);
     expect(getNoticeMessages(consoleLogSpy).some((message) => message.includes("TikHub 请求预计"))).toBe(false);
 
     consoleLogSpy.mockClear();
@@ -270,7 +384,8 @@ describe("refreshFeeds() pipeline behavior", () => {
       enabled: true,
       connectionId: "11111111-1111-4111-8111-111111111111",
     };
-    await invalidPlugin.manualRefreshAllSources();
+    await invalidPlugin.manualRefreshSourceById("invalid-x");
+    expect(getNoticeMessages(consoleLogSpy).filter((message) => message === "正在刷新 Feed A…")).toHaveLength(1);
     expect(getNoticeMessages(consoleLogSpy).some((message) => message.includes("TikHub 请求预计"))).toBe(false);
   });
 
