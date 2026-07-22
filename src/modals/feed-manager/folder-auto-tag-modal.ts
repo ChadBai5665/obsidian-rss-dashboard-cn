@@ -60,9 +60,7 @@ export class FolderAutoTagModal extends Modal {
 
     const autoTagSetting = new Setting(contentEl)
       .setName(t("modal.folderAuto.tags"))
-      .setDesc(
-        t("modal.folderAuto.tagsDesc"),
-      );
+      .setDesc(t("modal.folderAuto.tagsDesc"));
 
     addTagMultiSelectControl({
       setting: autoTagSetting,
@@ -81,9 +79,7 @@ export class FolderAutoTagModal extends Modal {
 
     new Setting(contentEl)
       .setName(t("modal.folderAuto.includeSubfolders"))
-      .setDesc(
-        t("modal.folderAuto.includeSubfoldersDesc"),
-      )
+      .setDesc(t("modal.folderAuto.includeSubfoldersDesc"))
       .addToggle((toggle) =>
         toggle.setValue(this.includeSubfolders).onChange((value) => {
           this.includeSubfolders = value;
@@ -92,9 +88,7 @@ export class FolderAutoTagModal extends Modal {
 
     new Setting(contentEl)
       .setName(t("modal.folderAuto.existing"))
-      .setDesc(
-        t("modal.folderAuto.existingDesc"),
-      )
+      .setDesc(t("modal.folderAuto.existingDesc"))
       .addDropdown((dropdown) => {
         dropdown
           .addOption("none", t("modal.folderAuto.dontUpdate"))
@@ -102,8 +96,7 @@ export class FolderAutoTagModal extends Modal {
           .addOption("remove_all", t("modal.folderAuto.removeAll"))
           .setValue(this.existingArticlesAction)
           .onChange((value) => {
-            this.existingArticlesAction =
-              value as FolderExistingArticleAction;
+            this.existingArticlesAction = value as FolderExistingArticleAction;
           });
       });
 
@@ -137,9 +130,7 @@ export class FolderAutoTagModal extends Modal {
           this.close();
         } catch (error) {
           console.error("Error applying folder auto-tags:", error);
-          new Notice(t("modal.folderAuto.error", {
-            error: error instanceof Error ? error.message : "Unknown error",
-          }));
+          new Notice(t("modal.folderAuto.error"));
         }
       })();
     });

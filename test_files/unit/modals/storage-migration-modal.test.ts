@@ -8,6 +8,7 @@ type MockApp = obsidian.App;
 
 interface TestPlugin {
   settings: {
+    locale?: "zh-CN" | "en";
     storageMigrationDismissedPermanently?: boolean;
     storageMode: string;
   };
@@ -30,6 +31,26 @@ beforeEach(() => {
 });
 
 describe("StorageMigrationModal", () => {
+  it("renders the complete English body when English is selected", () => {
+    const plugin: TestPlugin = {
+      settings: { storageMode: "legacy-json", locale: "en" },
+      saveSettings: vi.fn(async () => {}),
+      backupAndMigrateStorageToV2: vi.fn(async () => {}),
+    };
+    const modal = new StorageMigrationModal(
+      createMockApp(),
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+    expect(modal.contentEl.textContent).toContain(
+      "Storage mode upgrade available",
+    );
+    expect(modal.contentEl.textContent).toContain(
+      "automatically create a backup",
+    );
+    expect(modal.contentEl.textContent).toContain("Upgrade now (recommended)");
+  });
+
   it("renders Chinese by default and closes statelessly on '稍后提醒'", async () => {
     const app = createMockApp();
     const plugin: TestPlugin = {
@@ -38,17 +59,24 @@ describe("StorageMigrationModal", () => {
       backupAndMigrateStorageToV2: vi.fn(async () => {}),
     };
 
-    const modal = new StorageMigrationModal(app, plugin as unknown as RssDashboardPlugin);
+    const modal = new StorageMigrationModal(
+      app,
+      plugin as unknown as RssDashboardPlugin,
+    );
     modal.open();
 
     const buttons = Array.from(modal.contentEl.querySelectorAll("button"));
-    const remindBtn = buttons.find((b) => b.textContent === "稍后提醒") as HTMLButtonElement;
+    const remindBtn = buttons.find(
+      (b) => b.textContent === "稍后提醒",
+    ) as HTMLButtonElement;
     expect(remindBtn).toBeDefined();
 
     remindBtn.click();
     await flushPromises();
 
-    expect(plugin.settings.storageMigrationDismissedPermanently).toBeUndefined();
+    expect(
+      plugin.settings.storageMigrationDismissedPermanently,
+    ).toBeUndefined();
     expect(plugin.saveSettings).not.toHaveBeenCalled();
     expect(plugin.backupAndMigrateStorageToV2).not.toHaveBeenCalled();
   });
@@ -61,11 +89,16 @@ describe("StorageMigrationModal", () => {
       backupAndMigrateStorageToV2: vi.fn(async () => {}),
     };
 
-    const modal = new StorageMigrationModal(app, plugin as unknown as RssDashboardPlugin);
+    const modal = new StorageMigrationModal(
+      app,
+      plugin as unknown as RssDashboardPlugin,
+    );
     modal.open();
 
     const buttons = Array.from(modal.contentEl.querySelectorAll("button"));
-    const neverBtn = buttons.find((b) => b.textContent === "不再提示") as HTMLButtonElement;
+    const neverBtn = buttons.find(
+      (b) => b.textContent === "不再提示",
+    ) as HTMLButtonElement;
     expect(neverBtn).toBeDefined();
 
     neverBtn.click();
@@ -84,11 +117,16 @@ describe("StorageMigrationModal", () => {
       backupAndMigrateStorageToV2: vi.fn(async () => {}),
     };
 
-    const modal = new StorageMigrationModal(app, plugin as unknown as RssDashboardPlugin);
+    const modal = new StorageMigrationModal(
+      app,
+      plugin as unknown as RssDashboardPlugin,
+    );
     modal.open();
 
     const buttons = Array.from(modal.contentEl.querySelectorAll("button"));
-    const upgradeBtn = buttons.find((b) => b.textContent?.includes("立即升级")) as HTMLButtonElement;
+    const upgradeBtn = buttons.find((b) =>
+      b.textContent?.includes("立即升级"),
+    ) as HTMLButtonElement;
     expect(upgradeBtn).toBeDefined();
 
     upgradeBtn.click();
@@ -98,4 +136,59 @@ describe("StorageMigrationModal", () => {
     // In our test, we just check that the method was called
     expect(plugin.backupAndMigrateStorageToV2).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    ["zh-CN", "已成功迁移到 Vault Shards V2。"],
+    ["en", "Successfully migrated to Vault Shards V2."],
+  ] as const)(
+    "shows a localized migration success notice in %s",
+    async (locale, expected) => {
+      const plugin: TestPlugin = {
+        settings: { storageMode: "legacy-json", locale },
+        saveSettings: vi.fn(async () => {}),
+        backupAndMigrateStorageToV2: vi.fn(async () => {}),
+      };
+      const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      const modal = new StorageMigrationModal(
+        createMockApp(),
+        plugin as unknown as RssDashboardPlugin,
+      );
+      modal.open();
+      const upgrade = Array.from(modal.contentEl.querySelectorAll("button")).at(
+        -1,
+      )!;
+      upgrade.click();
+      await flushPromises();
+      expect(noticeSpy).toHaveBeenCalledWith("[Stub Notice]", expected);
+    },
+  );
+
+  it.each([
+    ["zh-CN", "迁移失败，请查看控制台了解详情。"],
+    ["en", "Migration failed. Check the console for details."],
+  ] as const)(
+    "localizes migration failures without leaking raw errors in %s",
+    async (locale, expected) => {
+      const raw = "migration secret";
+      const plugin: TestPlugin = {
+        settings: { storageMode: "legacy-json", locale },
+        saveSettings: vi.fn(async () => {}),
+        backupAndMigrateStorageToV2: vi.fn(async () => {
+          throw new Error(raw);
+        }),
+      };
+      const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const modal = new StorageMigrationModal(
+        createMockApp(),
+        plugin as unknown as RssDashboardPlugin,
+      );
+      modal.open();
+      Array.from(modal.contentEl.querySelectorAll("button")).at(-1)!.click();
+      await flushPromises();
+      expect(noticeSpy).toHaveBeenCalledWith("[Stub Notice]", expected);
+      expect(noticeSpy.mock.calls.flat().join(" ")).not.toContain(raw);
+      expect(errorSpy.mock.calls.flat().join(" ")).toContain(raw);
+    },
+  );
 });

@@ -7,6 +7,7 @@ function setup(opts: {
   availableTags: Tag[];
   selectedTagNames: string[];
   triggerEmptyLabel?: string;
+  locale?: "zh-CN" | "en";
 }) {
   const onChange = vi.fn();
   const container = document.createElement("div");
@@ -18,6 +19,7 @@ function setup(opts: {
     selectedTagNames: opts.selectedTagNames,
     triggerEmptyLabel: opts.triggerEmptyLabel,
     menuTitle: "Select tags",
+    locale: opts.locale ?? "en",
     onChange,
   });
 
@@ -61,9 +63,63 @@ beforeEach(() => {
   installObsidianDomPolyfills();
   document.body.empty();
   vi.restoreAllMocks();
+  window.matchMedia = vi.fn().mockReturnValue({
+    matches: false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }) as unknown as typeof window.matchMedia;
 });
 
 describe("tag-multi-select", () => {
+  it.each([
+    ["zh-CN", "已选择 2 个标签", "完成"],
+    ["en", "2 tags selected", "Done"],
+  ] as const)(
+    "localizes the mobile summary and Done action in %s",
+    (locale, summary, done) => {
+      window.matchMedia = vi.fn().mockReturnValue({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }) as unknown as typeof window.matchMedia;
+      const { trigger } = setup({
+        availableTags: [
+          { name: "News", color: "#111122" },
+          { name: "Tech", color: "#228811" },
+        ],
+        selectedTagNames: ["News", "Tech"],
+        locale,
+      });
+
+      expect(trigger.textContent).toContain(summary);
+      trigger.click();
+      const doneButton = document.body.querySelector<HTMLButtonElement>(
+        ".rss-dashboard-tag-multi-select-mobile-done",
+      );
+      expect(doneButton?.textContent).toBe(done);
+      doneButton?.click();
+      expect(
+        document.body.querySelector(".rss-dashboard-tag-multi-select-menu"),
+      ).toBeNull();
+    },
+  );
+
+  it("defaults to Simplified Chinese when locale is omitted", () => {
+    const onChange = vi.fn();
+    const container = document.body.createDiv();
+    addTagMultiSelectControl({
+      setting: {
+        controlEl: container,
+      } as unknown as import("obsidian").Setting,
+      availableTags: [
+        { name: "News", color: "#111122" },
+        { name: "Tech", color: "#228811" },
+      ],
+      selectedTagNames: ["News", "Tech"],
+      onChange,
+    });
+    expect(container.textContent).toContain("已选择 2 个标签");
+  });
   it("renders a compact trigger with the empty summary when no tags are selected", () => {
     const { trigger } = setup({
       availableTags: [{ name: "News", color: "#111122" }],
@@ -201,9 +257,9 @@ describe("tag-multi-select", () => {
       triggerEmptyLabel: "None",
     });
 
-    expect(wrapper.classList.contains("rss-dashboard-tag-multi-select--empty")).toBe(
-      true,
-    );
+    expect(
+      wrapper.classList.contains("rss-dashboard-tag-multi-select--empty"),
+    ).toBe(true);
     expect(trigger.disabled).toBe(true);
     expect(trigger.textContent).toContain("None");
   });

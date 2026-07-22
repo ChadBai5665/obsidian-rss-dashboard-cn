@@ -39,9 +39,8 @@ describe("resolveAndLoadPreview()", () => {
   });
 
   it("loads a plain RSS URL directly", async () => {
-    const { resolveAndLoadPreview } = await import(
-      "../../../src/modals/feed-manager/feed-preview-loader"
-    );
+    const { resolveAndLoadPreview } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
 
     detectPodcastPlatformMock.mockReturnValue(null);
 
@@ -56,9 +55,8 @@ describe("resolveAndLoadPreview()", () => {
   });
 
   it("converts X URLs to Nitter before loading", async () => {
-    const { resolveAndLoadPreview } = await import(
-      "../../../src/modals/feed-manager/feed-preview-loader"
-    );
+    const { resolveAndLoadPreview } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
 
     vi.spyOn(MediaService, "isXUrl").mockReturnValue(true);
     vi.spyOn(MediaService, "getNitterRssFeed").mockReturnValue(
@@ -76,9 +74,8 @@ describe("resolveAndLoadPreview()", () => {
   });
 
   it("resolves YouTube page URLs to RSS feed URLs before loading", async () => {
-    const { resolveAndLoadPreview } = await import(
-      "../../../src/modals/feed-manager/feed-preview-loader"
-    );
+    const { resolveAndLoadPreview } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
 
     vi.spyOn(MediaService, "isYouTubeFeed").mockReturnValue(true);
     vi.spyOn(MediaService, "getYouTubeRssFeed").mockResolvedValue(
@@ -98,9 +95,8 @@ describe("resolveAndLoadPreview()", () => {
   });
 
   it("resolves Mastodon profile URLs to RSS feed URLs before loading", async () => {
-    const { resolveAndLoadPreview } = await import(
-      "../../../src/modals/feed-manager/feed-preview-loader"
-    );
+    const { resolveAndLoadPreview } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
 
     vi.spyOn(MediaService, "isMastodonUrl").mockReturnValue(true);
     vi.spyOn(MediaService, "getMastodonRssFeed").mockResolvedValue(
@@ -118,9 +114,8 @@ describe("resolveAndLoadPreview()", () => {
   });
 
   it("resolves podcast platform URLs before loading", async () => {
-    const { resolveAndLoadPreview } = await import(
-      "../../../src/modals/feed-manager/feed-preview-loader"
-    );
+    const { resolveAndLoadPreview } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
 
     detectPodcastPlatformMock.mockReturnValue({
       id: "apple",
@@ -145,9 +140,8 @@ describe("resolveAndLoadPreview()", () => {
   });
 
   it("throws if Pocket Casts resolution is attempted without CORS proxy enabled", async () => {
-    const { resolveAndLoadPreview } = await import(
-      "../../../src/modals/feed-manager/feed-preview-loader"
-    );
+    const { resolveAndLoadPreview } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
 
     detectPodcastPlatformMock.mockReturnValue({
       id: "pocketcasts",
@@ -157,36 +151,76 @@ describe("resolveAndLoadPreview()", () => {
     await expect(
       resolveAndLoadPreview("https://pocketcasts.com/pod/xyz", {
         corsProxyEnabled: false,
+        locale: "en",
       }),
     ).rejects.toThrow(/Pocket Casts resolution requires the CORS Proxy/i);
   });
+
+  it.each([
+    ["zh-CN", "无法解析 YouTube 频道"],
+    ["en", "Could not resolve YouTube channel"],
+  ] as const)(
+    "localizes YouTube resolution errors in %s",
+    async (locale, expected) => {
+      const { resolveAndLoadPreview } =
+        await import("../../../src/modals/feed-manager/feed-preview-loader");
+      vi.spyOn(MediaService, "isYouTubeFeed").mockReturnValue(true);
+      vi.spyOn(MediaService, "getYouTubeRssFeed").mockResolvedValue(null);
+
+      await expect(
+        resolveAndLoadPreview("https://youtube.com/@missing", { locale }),
+      ).rejects.toThrow(expected);
+    },
+  );
+
+  it.each([
+    ["zh-CN", "（X > Nitter 转换）"],
+    ["en", " (X > Nitter conversion)"],
+  ] as const)(
+    "localizes conversion notices in %s",
+    async (locale, expected) => {
+      const { getPreviewConversionNotice } =
+        await import("../../../src/modals/feed-manager/feed-preview-loader");
+      expect(
+        getPreviewConversionNotice(
+          { isXConversion: true, isMastodonConversion: false },
+          locale,
+        ),
+      ).toBe(expected);
+    },
+  );
 });
 
 describe("formatLatestEntryLabel()", () => {
-  it("returns Today when latest pubdate is within same day offset", async () => {
-    const { formatLatestEntryLabel } = await import(
-      "../../../src/modals/feed-manager/feed-preview-loader"
+  it("defaults to Simplified Chinese", async () => {
+    const { formatLatestEntryLabel } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
+    const now = new Date("2026-03-22T12:00:00.000Z").getTime();
+    expect(formatLatestEntryLabel("2026-03-22T00:30:00.000Z", now)).toBe(
+      "今天",
     );
+  });
+  it("returns Today when latest pubdate is within same day offset", async () => {
+    const { formatLatestEntryLabel } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
     const now = new Date("2026-03-22T12:00:00.000Z").getTime();
     const latest = "2026-03-22T00:30:00.000Z";
-    expect(formatLatestEntryLabel(latest, now)).toBe("Today");
+    expect(formatLatestEntryLabel(latest, now, "en")).toBe("Today");
   });
 
   it("returns N days ago for older dates", async () => {
-    const { formatLatestEntryLabel } = await import(
-      "../../../src/modals/feed-manager/feed-preview-loader"
-    );
+    const { formatLatestEntryLabel } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
     const now = new Date("2026-03-22T12:00:00.000Z").getTime();
     const latest = "2026-03-20T00:30:00.000Z";
-    expect(formatLatestEntryLabel(latest, now)).toBe("2 days ago");
+    expect(formatLatestEntryLabel(latest, now, "en")).toBe("2 days ago");
   });
 });
 
 describe("Mastodon folder defaults", () => {
   it("routes Mastodon conversions to the configured Mastodon folder", async () => {
-    const { getDefaultFolderForResolvedFeed } = await import(
-      "../../../src/modals/feed-manager/feed-preview-loader"
-    );
+    const { getDefaultFolderForResolvedFeed } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
 
     const folder = getDefaultFolderForResolvedFeed(
       {
@@ -206,9 +240,8 @@ describe("Mastodon folder defaults", () => {
   });
 
   it("treats configured and legacy Mastodon folders as auto-assignable", async () => {
-    const { shouldAutoAssignFolder } = await import(
-      "../../../src/modals/feed-manager/feed-preview-loader"
-    );
+    const { shouldAutoAssignFolder } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
 
     expect(
       shouldAutoAssignFolder("Social/Mastodon", {
@@ -219,9 +252,8 @@ describe("Mastodon folder defaults", () => {
   });
 
   it("routes a direct Mastodon .rss feed URL to the Mastodon folder", async () => {
-    const { getDefaultFolderForResolvedFeed } = await import(
-      "../../../src/modals/feed-manager/feed-preview-loader"
-    );
+    const { getDefaultFolderForResolvedFeed } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
 
     const folder = getDefaultFolderForResolvedFeed(
       {
@@ -240,4 +272,3 @@ describe("Mastodon folder defaults", () => {
     expect(folder).toBe("Social/Mastodon");
   });
 });
-

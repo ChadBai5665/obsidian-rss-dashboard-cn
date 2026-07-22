@@ -20,7 +20,11 @@ interface TestPlugin {
   ingestFeedsForBackgroundImport: (
     feeds: unknown[],
     options: { mode: string; folders?: unknown[] },
-  ) => Promise<{ addedCount: number; skippedCount: number; queuedFeeds: unknown[] }>;
+  ) => Promise<{
+    addedCount: number;
+    skippedCount: number;
+    queuedFeeds: unknown[];
+  }>;
 }
 
 interface TestModal {
@@ -43,7 +47,6 @@ function flushPromises(): Promise<void> {
 }
 
 function cloneSettings(): typeof DEFAULT_SETTINGS {
-   
   return JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
 }
 
@@ -93,7 +96,10 @@ describe("ImportOpmlModal", () => {
       startBackgroundImport: vi.fn(),
     } as unknown as TestPlugin;
 
-    const modal = new ImportOpmlModal(app, plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1]);
+    const modal = new ImportOpmlModal(
+      app,
+      plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1],
+    );
     (modal as unknown as TestModal).open();
 
     const file = new File([readFixture("invalid.opml")], "invalid.opml", {
@@ -123,7 +129,10 @@ describe("ImportOpmlModal", () => {
       startBackgroundImport: vi.fn(),
     } as unknown as TestPlugin;
 
-    const modal = new ImportOpmlModal(app, plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1]);
+    const modal = new ImportOpmlModal(
+      app,
+      plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1],
+    );
     (modal as unknown as TestModal).open();
 
     const file = new File([""], "empty.opml", { type: "text/xml" });
@@ -168,7 +177,10 @@ describe("ImportOpmlModal", () => {
 
     const logSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
 
-    const modal = new ImportOpmlModal(app, plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1]);
+    const modal = new ImportOpmlModal(
+      app,
+      plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1],
+    );
     (modal as unknown as TestModal).open();
 
     const file = new File(
@@ -289,7 +301,10 @@ describe("ImportOpmlModal", () => {
       })),
     } as unknown as TestPlugin;
 
-    const modal = new ImportOpmlModal(app, plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1]);
+    const modal = new ImportOpmlModal(
+      app,
+      plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1],
+    );
     (modal as unknown as TestModal).open();
 
     const file = new File(
@@ -304,15 +319,15 @@ describe("ImportOpmlModal", () => {
     await (modal as unknown as TestModal).executeImport();
     await flushPromises();
 
-expect(plugin.ingestFeedsForBackgroundImport).toHaveBeenCalledWith(
-        expect.any(Array),
-        {
-          mode: "update",
-          folders: expect.arrayContaining([
-            expect.objectContaining({ name: "Tech" }),
-          ]) as unknown as { name: string }[],
-        } as unknown as object,
-      );
+    expect(plugin.ingestFeedsForBackgroundImport).toHaveBeenCalledWith(
+      expect.any(Array),
+      {
+        mode: "update",
+        folders: expect.arrayContaining([
+          expect.objectContaining({ name: "Tech" }),
+        ]) as unknown as { name: string }[],
+      } as unknown as object,
+    );
   });
 
   it("uses overwrite mode when replacing feeds", async () => {
@@ -329,7 +344,10 @@ expect(plugin.ingestFeedsForBackgroundImport).toHaveBeenCalledWith(
       })),
     } as unknown as TestPlugin;
 
-    const modal = new ImportOpmlModal(app, plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1]);
+    const modal = new ImportOpmlModal(
+      app,
+      plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1],
+    );
     (modal as unknown as TestModal).open();
 
     const file = new File(
@@ -341,7 +359,8 @@ expect(plugin.ingestFeedsForBackgroundImport).toHaveBeenCalledWith(
     );
 
     await (modal as unknown as TestModal).handleFileSelection(file);
-    (modal as unknown as { importMode: "update" | "overwrite" }).importMode = "overwrite";
+    (modal as unknown as { importMode: "update" | "overwrite" }).importMode =
+      "overwrite";
     await (modal as unknown as TestModal).executeImport();
     await flushPromises();
 
@@ -350,4 +369,97 @@ expect(plugin.ingestFeedsForBackgroundImport).toHaveBeenCalledWith(
       expect.objectContaining({ mode: "overwrite" }),
     );
   });
+
+  it.each([
+    ["zh-CN", "update", "已导入 1 个新订阅源，文章将在后台获取。"],
+    [
+      "zh-CN",
+      "overwrite",
+      "已用导入的 1 个订阅源替换全部现有订阅源，文章将在后台获取。",
+    ],
+    [
+      "en",
+      "update",
+      "Imported 1 new feeds. Articles will be fetched in the background.",
+    ],
+    [
+      "en",
+      "overwrite",
+      "Replaced all feeds with 1 imported feeds. Articles will be fetched in the background.",
+    ],
+  ] as const)(
+    "uses a complete localized %s import sentence in %s",
+    async (locale, mode, expected) => {
+      const app = createMockApp();
+      const settings = cloneSettings();
+      settings.locale = locale;
+      const plugin: TestPlugin = {
+        settings,
+        saveSettings: vi.fn(async () => {}),
+        getActiveDashboardView: vi.fn(async () => null),
+        startBackgroundImport: vi.fn(),
+        ingestFeedsForBackgroundImport: vi.fn(async () => ({
+          addedCount: 1,
+          skippedCount: 0,
+          queuedFeeds: [],
+        })),
+      };
+      const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      const modal = new ImportOpmlModal(
+        app,
+        plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1],
+      );
+      (modal as unknown as TestModal).open();
+      await (modal as unknown as TestModal).handleFileSelection(
+        new File([readFixture("single-feed.opml")], "single-feed.opml", {
+          type: "text/xml",
+        }),
+      );
+      (modal as unknown as TestModal).importMode = mode;
+
+      await (modal as unknown as TestModal).executeImport();
+
+      expect(noticeSpy).toHaveBeenCalledWith("[Stub Notice]", expected);
+    },
+  );
+
+  it.each([
+    ["zh-CN", "导入 OPML 文件失败，请查看控制台了解详情。"],
+    ["en", "Failed to import the OPML file. Check the console for details."],
+  ] as const)(
+    "localizes unknown import failures in %s without leaking raw errors",
+    async (locale, expected) => {
+      const app = createMockApp();
+      const settings = cloneSettings();
+      settings.locale = locale;
+      const secret = "raw-provider-secret";
+      const plugin: TestPlugin = {
+        settings,
+        saveSettings: vi.fn(async () => {}),
+        getActiveDashboardView: vi.fn(async () => null),
+        startBackgroundImport: vi.fn(),
+        ingestFeedsForBackgroundImport: vi.fn(async () => {
+          throw new Error(secret);
+        }),
+      };
+      const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const modal = new ImportOpmlModal(
+        app,
+        plugin as unknown as ConstructorParameters<typeof ImportOpmlModal>[1],
+      );
+      (modal as unknown as TestModal).open();
+      await (modal as unknown as TestModal).handleFileSelection(
+        new File([readFixture("single-feed.opml")], "single-feed.opml", {
+          type: "text/xml",
+        }),
+      );
+
+      await (modal as unknown as TestModal).executeImport();
+
+      expect(noticeSpy).toHaveBeenCalledWith("[Stub Notice]", expected);
+      expect(noticeSpy.mock.calls.flat().join(" ")).not.toContain(secret);
+      expect(errorSpy.mock.calls.flat().join(" ")).toContain(secret);
+    },
+  );
 });

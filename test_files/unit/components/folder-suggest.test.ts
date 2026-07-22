@@ -22,12 +22,10 @@ function createFolders(): Folder[] {
   ];
 }
 
-function getSuggestions(
-  suggest: FolderSuggest,
-  query: string,
-): string[] {
-  return (suggest as unknown as { getSuggestions: (query: string) => string[] })
-    .getSuggestions(query);
+function getSuggestions(suggest: FolderSuggest, query: string): string[] {
+  return (
+    suggest as unknown as { getSuggestions: (query: string) => string[] }
+  ).getSuggestions(query);
 }
 
 describe("FolderSuggest", () => {
@@ -37,12 +35,23 @@ describe("FolderSuggest", () => {
     vi.restoreAllMocks();
   });
 
+  it("defaults the add-new row to Simplified Chinese", () => {
+    const inputEl = document.body.appendChild(document.createElement("input"));
+    const suggest = new FolderSuggest(
+      obsidian.App.createMock(),
+      inputEl,
+      createFolders(),
+    );
+    expect(getSuggestions(suggest, "")[0]).toBe("新建文件夹…");
+  });
+
   it("includes the add-new row by default", () => {
     const inputEl = document.body.appendChild(document.createElement("input"));
     const suggest = new FolderSuggest(
       obsidian.App.createMock(),
       inputEl,
       createFolders(),
+      { locale: "en" },
     );
 
     expect(getSuggestions(suggest, "")).toEqual([
@@ -65,7 +74,7 @@ describe("FolderSuggest", () => {
       obsidian.App.createMock(),
       inputEl,
       createFolders(),
-      { showAddNewOption: true },
+      { showAddNewOption: true, locale: "en" },
     );
 
     expect(getSuggestions(suggest, "alpha")[0]).toBe("Add new folder...");
@@ -77,11 +86,19 @@ describe("FolderSuggest", () => {
       obsidian.App.createMock(),
       inputEl,
       createFolders(),
-      { showAddNewOption: false },
+      { showAddNewOption: false, locale: "en" },
     );
 
-    expect(getSuggestions(suggest, "")).toEqual(["Alpha", "Media", "Media/YouTube"]);
-    expect(getSuggestions(suggest, "media")).toEqual(["Alpha", "Media", "Media/YouTube"]);
+    expect(getSuggestions(suggest, "")).toEqual([
+      "Alpha",
+      "Media",
+      "Media/YouTube",
+    ]);
+    expect(getSuggestions(suggest, "media")).toEqual([
+      "Alpha",
+      "Media",
+      "Media/YouTube",
+    ]);
     expect(getSuggestions(suggest, "does-not-exist")).toEqual([]);
   });
 
@@ -91,7 +108,7 @@ describe("FolderSuggest", () => {
       obsidian.App.createMock(),
       inputEl,
       createFolders(),
-      { showAddNewOption: false },
+      { showAddNewOption: false, locale: "en" },
     );
 
     const inputSpy = vi.fn();
@@ -115,6 +132,7 @@ describe("FolderSuggest", () => {
       obsidian.App.createMock(),
       inputEl,
       createFolders(),
+      { locale: "en" },
     );
 
     const inputSpy = vi.fn();

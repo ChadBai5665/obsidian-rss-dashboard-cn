@@ -1,7 +1,10 @@
 import { App, Modal, Setting } from "obsidian";
 import { createTranslator, type Locale } from "../../i18n";
 
-export type TagApplicationChoice = "apply_existing" | "future_only" | "cancel_save";
+export type TagApplicationChoice =
+  | "apply_existing"
+  | "future_only"
+  | "cancel_save";
 
 /**
  * Tri-state modal shown when the user changes a feed's auto-tag selection
@@ -15,7 +18,10 @@ export class TagApplicationConfirmModal extends Modal {
   private _resolve: ((choice: TagApplicationChoice) => void) | null = null;
   private _settled = false;
 
-  constructor(app: App, private locale: Locale = "en") {
+  constructor(
+    app: App,
+    private locale: Locale = "zh-CN",
+  ) {
     super(app);
   }
 

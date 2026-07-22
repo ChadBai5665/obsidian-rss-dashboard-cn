@@ -13,6 +13,7 @@ import {
 } from "../../../src/utils/settings-loader";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import type RssDashboardPlugin from "../../../main";
+import { ImportSuccessModal } from "../../../src/modals/import-success-modal";
 
 type ObsidianHTMLElement = HTMLElement & {
   empty: () => void;
@@ -24,7 +25,9 @@ function flushPromises(): Promise<void> {
 }
 
 function cloneSettings(): typeof DEFAULT_SETTINGS {
-  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as typeof DEFAULT_SETTINGS;
+  return JSON.parse(
+    JSON.stringify(DEFAULT_SETTINGS),
+  ) as typeof DEFAULT_SETTINGS;
 }
 
 function createContainerEl(): HTMLDivElement {
@@ -153,6 +156,63 @@ describe("Auto Backup Helpers", () => {
   });
 
   describe("renderImportExportSettingsTab() factory reset section", () => {
+    it.each([
+      [
+        "zh-CN",
+        "en",
+        "Import successful",
+        "Data imported successfully! Your dashboard has been updated.",
+      ],
+      ["en", "zh-CN", "导入成功", "数据导入成功，仪表盘已更新。"],
+    ] as const)(
+      "uses the imported final locale for the real data.json success handler (%s to %s)",
+      async (initialLocale, importedLocale, expectedTitle, expectedBody) => {
+        const containerEl = createContainerEl();
+        const plugin = createPlugin();
+        plugin.settings.locale = initialLocale;
+        const openSpy = vi
+          .spyOn(ImportSuccessModal.prototype, "open")
+          .mockImplementation(function openImportSuccess() {
+            this.onOpen();
+            return this;
+          });
+        renderImportExportSettingsTab(
+          containerEl,
+          plugin as unknown as RssDashboardPlugin,
+        );
+        const importButton = Array.from(
+          containerEl.querySelectorAll<HTMLButtonElement>("button"),
+        ).find((button) => button.textContent === "Import data.json")!;
+        importButton.click();
+        const fileInput = Array.from(
+          document.body.querySelectorAll<HTMLInputElement>(
+            'input[type="file"]',
+          ),
+        ).at(-1)!;
+        Object.defineProperty(fileInput, "files", {
+          configurable: true,
+          value: [
+            new File(
+              [JSON.stringify({ locale: importedLocale })],
+              "data.json",
+              {
+                type: "application/json",
+              },
+            ),
+          ],
+        });
+        fileInput.dispatchEvent(new Event("change"));
+        await flushPromises();
+        await flushPromises();
+
+        expect(plugin.settings.locale).toBe(importedLocale);
+        expect(openSpy).toHaveBeenCalledTimes(1);
+        const successModal = openSpy.mock.instances[0] as ImportSuccessModal;
+        expect(successModal.contentEl.textContent).toContain(expectedTitle);
+        expect(successModal.contentEl.textContent).toContain(expectedBody);
+      },
+    );
+
     it("opens the shared localized modal from the real factory-reset button", async () => {
       const containerEl = createContainerEl();
       const plugin = createPlugin();
@@ -163,12 +223,20 @@ describe("Auto Backup Helpers", () => {
           this.onOpen();
           return this;
         });
-      vi.spyOn(FactoryResetConfirmModal.prototype, "waitForClose").mockResolvedValue(false);
+      vi.spyOn(
+        FactoryResetConfirmModal.prototype,
+        "waitForClose",
+      ).mockResolvedValue(false);
 
-      renderImportExportSettingsTab(containerEl, plugin as unknown as RssDashboardPlugin);
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+      );
       const resetButton = Array.from(
         containerEl.querySelectorAll<HTMLButtonElement>("button"),
-      ).find((button) => button.textContent === "Factory reset") as HTMLButtonElement;
+      ).find(
+        (button) => button.textContent === "Factory reset",
+      ) as HTMLButtonElement;
       resetButton.click();
       await flushPromises();
 
@@ -182,15 +250,13 @@ describe("Auto Backup Helpers", () => {
       const containerEl = createContainerEl();
       const plugin = createPlugin();
 
-      renderImportExportSettingsTab(containerEl, plugin as unknown as RssDashboardPlugin);
-
-      const portableSetting = getSettingByName(
+      renderImportExportSettingsTab(
         containerEl,
-        "Shard data",
+        plugin as unknown as RssDashboardPlugin,
       );
-      expect(portableSetting.textContent).toContain(
-        "cross-device migration",
-      );
+
+      const portableSetting = getSettingByName(containerEl, "Shard data");
+      expect(portableSetting.textContent).toContain("cross-device migration");
 
       const buttons = Array.from(
         containerEl.querySelectorAll<HTMLButtonElement>("button"),
@@ -203,7 +269,10 @@ describe("Auto Backup Helpers", () => {
       const containerEl = createContainerEl();
       const plugin = createPlugin();
 
-      renderImportExportSettingsTab(containerEl, plugin as unknown as RssDashboardPlugin);
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+      );
 
       const exportButton = Array.from(
         containerEl.querySelectorAll<HTMLButtonElement>("button"),
@@ -219,7 +288,10 @@ describe("Auto Backup Helpers", () => {
       const containerEl = createContainerEl();
       const plugin = createPlugin();
 
-      renderImportExportSettingsTab(containerEl, plugin as unknown as RssDashboardPlugin);
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+      );
 
       const settingNames = Array.from(
         containerEl.querySelectorAll<HTMLElement>(".setting-item-name"),
@@ -248,7 +320,10 @@ describe("Auto Backup Helpers", () => {
         "waitForClose",
       ).mockResolvedValue(false);
 
-      renderImportExportSettingsTab(containerEl, plugin as unknown as RssDashboardPlugin);
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+      );
 
       const resetButton = Array.from(
         containerEl.querySelectorAll<HTMLButtonElement>("button"),
@@ -276,7 +351,10 @@ describe("Auto Backup Helpers", () => {
         "waitForClose",
       ).mockResolvedValue(true);
 
-      renderImportExportSettingsTab(containerEl, plugin as unknown as RssDashboardPlugin);
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+      );
 
       const resetButton = Array.from(
         containerEl.querySelectorAll<HTMLButtonElement>("button"),

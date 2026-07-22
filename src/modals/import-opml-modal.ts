@@ -54,8 +54,10 @@ export class ImportOpmlModal extends Modal {
     this.onImportStarted = onImportStarted;
   }
 
-  private t = (key: Parameters<ReturnType<typeof createTranslator>>[0], params?: Record<string, string | number>) =>
-    createTranslator(this.plugin.settings.locale ?? "zh-CN")(key, params);
+  private t = (
+    key: Parameters<ReturnType<typeof createTranslator>>[0],
+    params?: Record<string, string | number>,
+  ) => createTranslator(this.plugin.settings.locale ?? "zh-CN")(key, params);
 
   onOpen() {
     const { contentEl } = this;
@@ -75,8 +77,7 @@ export class ImportOpmlModal extends Modal {
 
     // Add subtitle
     const subtitle = contentEl.createDiv({ cls: "add-feed-subtitle" });
-    subtitle.textContent =
-      this.t("modal.opml.desc");
+    subtitle.textContent = this.t("modal.opml.desc");
 
     // File selector row
     this.createFileSelector(contentEl);
@@ -186,8 +187,7 @@ export class ImportOpmlModal extends Modal {
       !fileName.endsWith(".xml") &&
       !fileName.endsWith(".backup")
     ) {
-      this.validationError =
-        this.t("modal.opml.invalidExtension");
+      this.validationError = this.t("modal.opml.invalidExtension");
       this.validationErrorKind = "invalid_extension";
       return;
     }
@@ -202,8 +202,7 @@ export class ImportOpmlModal extends Modal {
       // Check for parsing errors
       const parseError = xmlDoc.querySelector("parsererror");
       if (parseError) {
-        this.validationError =
-          this.t("modal.opml.invalidXml");
+        this.validationError = this.t("modal.opml.invalidXml");
         this.validationErrorKind = "invalid_xml";
         return;
       }
@@ -211,16 +210,14 @@ export class ImportOpmlModal extends Modal {
       // Check for OPML structure
       const opmlRoot = xmlDoc.querySelector("opml");
       if (!opmlRoot) {
-        this.validationError =
-          this.t("modal.opml.missingRoot");
+        this.validationError = this.t("modal.opml.missingRoot");
         this.validationErrorKind = "missing_opml";
         return;
       }
 
       const body = xmlDoc.querySelector("body");
       if (!body) {
-        this.validationError =
-          this.t("modal.opml.missingBody");
+        this.validationError = this.t("modal.opml.missingBody");
         this.validationErrorKind = "missing_body";
         return;
       }
@@ -244,16 +241,14 @@ export class ImportOpmlModal extends Modal {
           existingUrls,
         });
       } catch (error) {
-        this.validationError = this.t("modal.opml.parseFailed", {
-          error: error instanceof Error ? error.message : "Unknown error",
-        });
+        console.error("[RSS Dashboard] Failed to parse OPML:", error);
+        this.validationError = this.t("modal.opml.parseFailed");
         this.validationErrorKind = "parse_failed";
         return;
       }
     } catch (error) {
-      this.validationError = this.t("modal.opml.readFailed", {
-        error: error instanceof Error ? error.message : "Unknown error",
-      });
+      console.error("[RSS Dashboard] Failed to read OPML file:", error);
+      this.validationError = this.t("modal.opml.readFailed");
       this.validationErrorKind = "parse_failed";
     }
   }
@@ -343,12 +338,16 @@ export class ImportOpmlModal extends Modal {
     });
     badges.createDiv({
       cls: "import-preview-count import-preview-count--primary",
-      text: this.t("modal.opml.toImport", { count: stats.selectedImportableFeeds }),
+      text: this.t("modal.opml.toImport", {
+        count: stats.selectedImportableFeeds,
+      }),
     });
     if (this.importMode === "update" && stats.duplicateFeeds > 0) {
       badges.createDiv({
         cls: "import-preview-count",
-        text: this.t("modal.opml.alreadyExist", { count: stats.duplicateFeeds }),
+        text: this.t("modal.opml.alreadyExist", {
+          count: stats.duplicateFeeds,
+        }),
       });
     }
 
@@ -432,8 +431,7 @@ export class ImportOpmlModal extends Modal {
     );
 
     if (stats.hasBlockingErrors) {
-      this.importButton.title =
-        this.t("modal.opml.fixBefore");
+      this.importButton.title = this.t("modal.opml.fixBefore");
     } else if (count === 0) {
       this.importButton.title = this.t("modal.opml.selectBefore");
     } else {
@@ -477,7 +475,9 @@ export class ImportOpmlModal extends Modal {
       );
       if (!opened) {
         new Notice(
-          this.t("modal.opml.cleanerOpenFailed", { url: ImportOpmlModal.OPML_CLEANER_URL }),
+          this.t("modal.opml.cleanerOpenFailed", {
+            url: ImportOpmlModal.OPML_CLEANER_URL,
+          }),
         );
       }
     };
@@ -592,10 +592,7 @@ export class ImportOpmlModal extends Modal {
         const validation = isValidFolderName(next);
         if (!validation.valid) {
           input.classList.add("is-invalid");
-          input.setAttribute(
-            "title",
-            this.t("modal.opml.invalidFolder"),
-          );
+          input.setAttribute("title", this.t("modal.opml.invalidFolder"));
           input.focus();
           return;
         }
@@ -644,7 +641,9 @@ export class ImportOpmlModal extends Modal {
         "aria-label": collapsed
           ? this.t("modal.opml.expandFolder")
           : this.t("modal.opml.collapseFolder"),
-        title: collapsed ? this.t("modal.opml.expand") : this.t("modal.opml.collapse"),
+        title: collapsed
+          ? this.t("modal.opml.expand")
+          : this.t("modal.opml.collapse"),
       },
     });
     setIcon(toggle, collapsed ? "chevron-right" : "chevron-down");
@@ -876,7 +875,9 @@ export class ImportOpmlModal extends Modal {
       cls: "rss-dashboard-modal-content",
     });
 
-    new Setting(modalContent).setName(this.t("modal.opml.overwriteTitle")).setHeading();
+    new Setting(modalContent)
+      .setName(this.t("modal.opml.overwriteTitle"))
+      .setHeading();
 
     // Warning message
     const warningDiv = modalContent.createDiv({
@@ -957,25 +958,21 @@ export class ImportOpmlModal extends Modal {
         return;
       }
 
-      const modeText = this.t(
-        this.importMode === "overwrite"
-          ? "modal.opml.replaced"
-          : "modal.opml.updatedWith",
-      );
       new Notice(
-        this.t("modal.opml.updated", {
-          mode: modeText,
-          count: selectedFeeds.length,
-        }),
+        this.t(
+          this.importMode === "overwrite"
+            ? "modal.opml.overwriteSuccess"
+            : "modal.opml.updateSuccess",
+          {
+            count: selectedFeeds.length,
+          },
+        ),
       );
 
       this.close();
     } catch (error) {
-      new Notice(
-        this.t("modal.opml.importFailed", {
-          error: error instanceof Error ? error.message : "Unknown error",
-        }),
-      );
+      console.error("[RSS Dashboard] OPML import failed:", error);
+      new Notice(this.t("modal.opml.importFailed"));
     }
   }
 

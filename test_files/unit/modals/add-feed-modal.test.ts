@@ -13,6 +13,27 @@ function createMockApp(): MockApp {
 
 type OnAddFn = AddFeedModal["onAdd"];
 
+function createEnglishPlugin(locale: "zh-CN" | "en" = "en") {
+  return {
+    settings: {
+      locale,
+      defaultAutoDeleteDuration: 30,
+      maxItems: 50,
+      articleSaving: { savedTemplates: [] },
+      availableTags: [],
+      media: {},
+    },
+    ensureFolderExists: vi.fn(async () => {}),
+  };
+}
+
+function asEnglishPlugin<T extends { settings: Record<string, unknown> }>(
+  plugin: T,
+): ConstructorParameters<typeof AddFeedModal>[5] {
+  plugin.settings.locale = "en";
+  return plugin as unknown as ConstructorParameters<typeof AddFeedModal>[5];
+}
+
 function getSettingByName(containerEl: HTMLElement, name: string): HTMLElement {
   const settingEls = Array.from(containerEl.querySelectorAll(".setting-item"));
   const match = settingEls.find((el) => {
@@ -111,6 +132,13 @@ beforeEach(() => {
 });
 
 describe("AddFeedModal", () => {
+  it("defaults to Simplified Chinese when no plugin settings are supplied", () => {
+    const modal = new AddFeedModal(createMockApp(), [], vi.fn(), vi.fn());
+    modal.open();
+    expect(modal.contentEl.textContent).toContain("添加订阅源");
+    expect(modal.contentEl.textContent).toContain("订阅源 URL");
+  });
+
   it("uses Chinese for a configured Chinese dashboard", () => {
     const app = createMockApp();
     const plugin = {
@@ -129,12 +157,99 @@ describe("AddFeedModal", () => {
     expect(modal.contentEl.textContent).toContain("订阅源 URL");
   });
 
+  it.each([
+    [
+      "zh-CN",
+      ".隐藏",
+      "订阅源标题不能以句点开头。",
+      "Feed title cannot start with a dot.",
+    ],
+    [
+      "en",
+      ".hidden",
+      "Feed title cannot start with a dot.",
+      "订阅源标题不能以句点开头。",
+    ],
+  ] as const)(
+    "uses a localized typed title validation notice in %s",
+    async (locale, title, expected, forbidden) => {
+      const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      const onAdd: OnAddFn = vi.fn(async () => true);
+      const modal = new AddFeedModal(
+        createMockApp(),
+        [],
+        onAdd,
+        vi.fn(),
+        "",
+        createEnglishPlugin(locale) as never,
+      );
+      modal.open();
+      const urlInput =
+        modal.contentEl.querySelector<HTMLInputElement>(".feed-url-input")!;
+      urlInput.value = "https://example.com/feed.xml";
+      urlInput.dispatchEvent(new Event("input"));
+      const titleInput =
+        modal.contentEl.querySelector<HTMLInputElement>(".title-input")!;
+      titleInput.value = title;
+      titleInput.dispatchEvent(new Event("input"));
+
+      modal.contentEl
+        .querySelector<HTMLButtonElement>(".rss-dashboard-primary-button")!
+        .click();
+      await flushPromises();
+
+      expect(onAdd).not.toHaveBeenCalled();
+      expect(noticeSpy).toHaveBeenCalledWith("[Stub Notice]", expected);
+      expect(noticeSpy.mock.calls.flat().join(" ")).not.toContain(forbidden);
+    },
+  );
+
+  it.each(["zh-CN", "en"] as const)(
+    "trims the submitted title through the real save action in %s",
+    async (locale) => {
+      const onAdd: OnAddFn = vi.fn(async () => true);
+      const modal = new AddFeedModal(
+        createMockApp(),
+        [],
+        onAdd,
+        vi.fn(),
+        "",
+        createEnglishPlugin(locale) as never,
+      );
+      modal.open();
+      const urlInput =
+        modal.contentEl.querySelector<HTMLInputElement>(".feed-url-input")!;
+      urlInput.value = "https://example.com/feed.xml";
+      urlInput.dispatchEvent(new Event("input"));
+      const titleInput =
+        modal.contentEl.querySelector<HTMLInputElement>(".title-input")!;
+      titleInput.value = "  Trimmed feed  ";
+      titleInput.dispatchEvent(new Event("input"));
+
+      modal.contentEl
+        .querySelector<HTMLButtonElement>(".rss-dashboard-primary-button")!
+        .click();
+      await flushPromises();
+
+      expect(onAdd).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Trimmed feed" }),
+      );
+    },
+  );
+
   it("submits an explicit Off auto-refresh override as -1", async () => {
     const app = createMockApp();
     const onAdd: OnAddFn = vi.fn(async () => true);
     const onSave = vi.fn();
 
-    const modal = new AddFeedModal(app, [], onAdd, onSave);
+    const modal = new AddFeedModal(
+      app,
+      [],
+      onAdd,
+      onSave,
+      "",
+      createEnglishPlugin() as never,
+    );
     modal.open();
 
     const urlSetting = getSettingByName(modal.contentEl, "Feed URL");
@@ -166,8 +281,10 @@ describe("AddFeedModal", () => {
     await flushPromises();
 
     expect(onAdd).toHaveBeenCalledTimes(1);
-     
-    expect((onAdd as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].scanInterval).toBe(-1);
+
+    expect(
+      (onAdd as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].scanInterval,
+    ).toBe(-1);
     expect(onSave).toHaveBeenCalledTimes(1);
   });
 
@@ -176,7 +293,14 @@ describe("AddFeedModal", () => {
     const onAdd: OnAddFn = vi.fn(async () => true);
     const onSave = vi.fn();
 
-    const modal = new AddFeedModal(app, [], onAdd, onSave);
+    const modal = new AddFeedModal(
+      app,
+      [],
+      onAdd,
+      onSave,
+      "",
+      createEnglishPlugin() as never,
+    );
     modal.open();
 
     const urlSetting = getSettingByName(modal.contentEl, "Feed URL");
@@ -204,8 +328,10 @@ describe("AddFeedModal", () => {
     await flushPromises();
 
     expect(onAdd).toHaveBeenCalledTimes(1);
-     
-    expect((onAdd as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].scanInterval).toBe(0);
+
+    expect(
+      (onAdd as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].scanInterval,
+    ).toBe(0);
     expect(onSave).toHaveBeenCalledTimes(1);
   });
 
@@ -214,7 +340,14 @@ describe("AddFeedModal", () => {
     const onAdd: OnAddFn = vi.fn(async () => true);
     const onSave = vi.fn();
 
-    const modal = new AddFeedModal(app, [], onAdd, onSave);
+    const modal = new AddFeedModal(
+      app,
+      [],
+      onAdd,
+      onSave,
+      "",
+      createEnglishPlugin() as never,
+    );
     modal.open();
 
     const urlSetting = getSettingByName(modal.contentEl, "Feed URL");
@@ -242,8 +375,10 @@ describe("AddFeedModal", () => {
     await flushPromises();
 
     expect(onAdd).toHaveBeenCalledTimes(1);
-     
-    expect((onAdd as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].excludeFromRefresh).toBe(true);
+
+    expect(
+      (onAdd as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].excludeFromRefresh,
+    ).toBe(true);
     expect(onSave).toHaveBeenCalledTimes(1);
   });
 
@@ -253,7 +388,14 @@ describe("AddFeedModal", () => {
     const onSave = vi.fn();
     const logSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
 
-    const modal = new AddFeedModal(app, [], onAdd, onSave);
+    const modal = new AddFeedModal(
+      app,
+      [],
+      onAdd,
+      onSave,
+      "",
+      createEnglishPlugin() as never,
+    );
     modal.open();
 
     const titleSetting = getSettingByName(modal.contentEl, "Title");
@@ -280,7 +422,14 @@ describe("AddFeedModal", () => {
     const onAdd: OnAddFn = vi.fn(async () => false);
     const onSave = vi.fn();
 
-    const modal = new AddFeedModal(app, [], onAdd, onSave);
+    const modal = new AddFeedModal(
+      app,
+      [],
+      onAdd,
+      onSave,
+      "",
+      createEnglishPlugin() as never,
+    );
     const closeSpy = vi.spyOn(modal, "close");
     modal.open();
 
@@ -341,7 +490,7 @@ describe("AddFeedModal", () => {
       onAdd,
       onSave,
       "Uncategorized",
-      plugin as never,
+      asEnglishPlugin(plugin),
     );
     modal.open();
 
@@ -384,7 +533,14 @@ describe("AddFeedModal", () => {
       },
     };
 
-    const modal = new AddFeedModal(app, [], onAdd, onSave, "", plugin as never);
+    const modal = new AddFeedModal(
+      app,
+      [],
+      onAdd,
+      onSave,
+      "",
+      asEnglishPlugin(plugin),
+    );
     modal.open();
 
     const folderInput = getTextInputBySettingName(modal.contentEl, "Folder");
@@ -437,7 +593,7 @@ describe("AddFeedModal", () => {
       onAdd,
       onSave,
       "Uncategorized",
-      plugin as never,
+      asEnglishPlugin(plugin),
     );
     modal.open();
 
@@ -487,7 +643,14 @@ describe("AddFeedModal", () => {
       },
     };
 
-    const modal = new AddFeedModal(app, [], onAdd, onSave, "", plugin as never);
+    const modal = new AddFeedModal(
+      app,
+      [],
+      onAdd,
+      onSave,
+      "",
+      asEnglishPlugin(plugin),
+    );
     modal.open();
 
     const folderInput = getTextInputBySettingName(modal.contentEl, "Folder");
@@ -524,7 +687,14 @@ describe("AddFeedModal", () => {
       },
     };
 
-    const modal = new AddFeedModal(app, [], onAdd, onSave, "", plugin as never);
+    const modal = new AddFeedModal(
+      app,
+      [],
+      onAdd,
+      onSave,
+      "",
+      asEnglishPlugin(plugin),
+    );
     modal.open();
 
     const urlSetting = getSettingByName(modal.contentEl, "Feed URL");

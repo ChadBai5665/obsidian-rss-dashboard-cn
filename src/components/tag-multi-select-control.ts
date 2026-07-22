@@ -39,14 +39,11 @@ export function addTagMultiSelectControl(
     setting,
     availableTags,
     onChange,
-    menuTitle = createTranslator(opts.locale ?? "en")("modal.tags.select"),
+    menuTitle = createTranslator(opts.locale ?? "zh-CN")("modal.tags.select"),
     mobileSheetTitle = menuTitle,
   } = opts;
 
-  const selectedSet = normalizeSelection(
-    opts.selectedTagNames,
-    availableTags,
-  );
+  const selectedSet = normalizeSelection(opts.selectedTagNames, availableTags);
   const controlEl = setting.controlEl;
   const wrapper = controlEl.createDiv({ cls: CLS_WRAPPER });
   const trigger = wrapper.createEl("button", {
@@ -69,7 +66,11 @@ export function addTagMultiSelectControl(
     wrapper.classList.toggle(CLS_EMPTY, isEmpty);
     trigger.disabled = isEmpty;
     trigger.setAttr("aria-disabled", isEmpty ? "true" : "false");
-    triggerLabel.textContent = getSummaryLabel(selectedSet, availableTags, opts);
+    triggerLabel.textContent = getSummaryLabel(
+      selectedSet,
+      availableTags,
+      opts,
+    );
   };
 
   const rerenderOpenMenu = (menuList: HTMLElement) => {
@@ -152,7 +153,7 @@ export function addTagMultiSelectControl(
       });
       const doneButton = header.createEl("button", {
         cls: CLS_MOBILE_DONE,
-        text: createTranslator(opts.locale ?? "en")("modal.tags.done"),
+        text: createTranslator(opts.locale ?? "zh-CN")("modal.tags.done"),
         attr: { type: "button" },
       });
       doneButton.addEventListener("click", () => {
@@ -288,10 +289,14 @@ function normalizeSelection(
 function getSummaryLabel(
   selectedSet: ReadonlySet<string>,
   availableTags: ReadonlyArray<Tag>,
-  opts: Pick<TagMultiSelectControlOptions, "noneLabel" | "triggerEmptyLabel" | "locale">,
+  opts: Pick<
+    TagMultiSelectControlOptions,
+    "noneLabel" | "triggerEmptyLabel" | "locale"
+  >,
 ): string {
-  const t = createTranslator(opts.locale ?? "en");
-  const emptyLabel = opts.triggerEmptyLabel ?? opts.noneLabel ?? t("modal.tags.none");
+  const t = createTranslator(opts.locale ?? "zh-CN");
+  const emptyLabel =
+    opts.triggerEmptyLabel ?? opts.noneLabel ?? t("modal.tags.none");
   const selectedNames = availableTags
     .filter((tag) => selectedSet.has(tag.name))
     .map((tag) => tag.name);
@@ -328,9 +333,11 @@ function closeOtherOpenPortals(targetDocument: Document): void {
     .forEach((element) => {
       element.remove();
     });
-  targetDocument.querySelectorAll<HTMLElement>(`.${CLS_BACKDROP}`).forEach((el) => {
-    el.remove();
-  });
+  targetDocument
+    .querySelectorAll<HTMLElement>(`.${CLS_BACKDROP}`)
+    .forEach((el) => {
+      el.remove();
+    });
   targetDocument
     .querySelectorAll<HTMLElement>(`.${CLS_TRIGGER}[aria-expanded="true"]`)
     .forEach((trigger) => trigger.setAttr("aria-expanded", "false"));

@@ -36,6 +36,7 @@ type ArticleTestFixture = {
 type PluginTestFixture = {
   app: MockApp;
   settings: {
+    locale?: "zh-CN" | "en";
     folders: unknown[];
     maxItems: number;
     storageMode?: string;
@@ -204,7 +205,30 @@ function makeArticle(
 }
 
 function asRssDashboardPlugin(plugin: PluginTestFixture): RssDashboardPlugin {
+  plugin.settings.locale ??= "en";
   return plugin as unknown as RssDashboardPlugin;
+}
+
+function createLocalizedPlugin(
+  app: MockApp,
+  locale: "zh-CN" | "en",
+): RssDashboardPlugin {
+  return {
+    app,
+    settings: {
+      locale,
+      folders: [],
+      maxItems: 50,
+      availableTags: [],
+      storageMode: "legacy-json",
+      corsProxyEnabled: false,
+      corsProxyUrl: "",
+      articleSaving: { savedTemplates: [] },
+    },
+    ensureFolderExists: vi.fn(async () => {}),
+    saveSettings: vi.fn(async () => {}),
+    notifyFiltersUpdated: vi.fn(),
+  } as unknown as RssDashboardPlugin;
 }
 
 const AUTO_DELETE_TEST_NOW_MS = Date.parse("2026-05-01T00:00:00Z");
@@ -244,6 +268,77 @@ beforeEach(() => {
 });
 
 describe("EditFeedModal", () => {
+  it.each([
+    ["zh-CN", "订阅源标题不能为空。", "Feed title cannot be empty."],
+    ["en", "Feed title cannot be empty.", "订阅源标题不能为空。"],
+  ] as const)(
+    "uses a localized typed title validation notice in %s",
+    async (locale, expected, forbidden) => {
+      const app = createMockApp();
+      const plugin = createLocalizedPlugin(app, locale);
+      const feed = {
+        title: "Old title",
+        url: "https://example.com/feed.xml",
+        folder: "",
+        items: [],
+        lastUpdated: 0,
+      } as Feed;
+      const modal = new EditFeedModal(app, plugin, feed, vi.fn());
+      const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      modal.open();
+      const titleInput =
+        modal.contentEl.querySelector<HTMLInputElement>(".title-input")!;
+      titleInput.value = "   ";
+      titleInput.dispatchEvent(new Event("input"));
+
+      modal.contentEl
+        .querySelector<HTMLButtonElement>(".rss-dashboard-primary-button")!
+        .click();
+      await flushPromises();
+
+      expect(plugin.saveSettings).not.toHaveBeenCalled();
+      expect(noticeSpy).toHaveBeenCalledWith("[Stub Notice]", expected);
+      expect(noticeSpy.mock.calls.flat().join(" ")).not.toContain(forbidden);
+    },
+  );
+
+  it.each([
+    ["zh-CN", "订阅源已更新，并保留最新的 1 篇文章"],
+    ["en", "Feed updated and trimmed to 1 articles"],
+  ] as const)(
+    "trims the title and uses a parameterized success notice in %s",
+    async (locale, expected) => {
+      const app = createMockApp();
+      const plugin = createLocalizedPlugin(app, locale);
+      const feed = {
+        title: "Old title",
+        url: "https://example.com/feed.xml",
+        folder: "",
+        items: [
+          makeArticle("new", "2026-05-01T00:00:00Z"),
+          makeArticle("old", "2026-04-01T00:00:00Z"),
+        ],
+        lastUpdated: 0,
+        maxItemsLimit: 1,
+      } as unknown as Feed;
+      const modal = new EditFeedModal(app, plugin, feed, vi.fn());
+      const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      modal.open();
+      const titleInput =
+        modal.contentEl.querySelector<HTMLInputElement>(".title-input")!;
+      titleInput.value = "  Trimmed title  ";
+      titleInput.dispatchEvent(new Event("input"));
+
+      modal.contentEl
+        .querySelector<HTMLButtonElement>(".rss-dashboard-primary-button")!
+        .click();
+      await flushPromises();
+
+      expect(feed.title).toBe("Trimmed title");
+      expect(feed.items).toHaveLength(1);
+      expect(noticeSpy).toHaveBeenCalledWith("[Stub Notice]", expected);
+    },
+  );
   it("renders storage status text and feed ID for shard mode", () => {
     const app = createMockApp();
     const feed: Feed = {
@@ -1247,7 +1342,7 @@ describe("EditFeedModal", () => {
       notifyFiltersUpdated: vi.fn(),
     };
 
-    const rssPlugin = plugin as unknown as RssDashboardPlugin;
+    const rssPlugin = asRssDashboardPlugin(plugin);
 
     const modal = new EditFeedModal(app, rssPlugin, feed, vi.fn());
     modal.open();
@@ -1293,7 +1388,7 @@ describe("EditFeedModal", () => {
       notifyFiltersUpdated: vi.fn(),
     };
 
-    const rssPlugin = plugin as unknown as RssDashboardPlugin;
+    const rssPlugin = asRssDashboardPlugin(plugin);
 
     const modal = new EditFeedModal(app, rssPlugin, feed, vi.fn());
     modal.open();
@@ -1353,7 +1448,7 @@ describe("EditFeedModal", () => {
       notifyFiltersUpdated: vi.fn(),
     };
 
-    const rssPlugin = plugin as unknown as RssDashboardPlugin;
+    const rssPlugin = asRssDashboardPlugin(plugin);
 
     const modal = new EditFeedModal(app, rssPlugin, feed, vi.fn());
     modal.open();
@@ -1413,7 +1508,7 @@ describe("EditFeedModal", () => {
       notifyFiltersUpdated: vi.fn(),
     };
 
-    const rssPlugin = plugin as unknown as RssDashboardPlugin;
+    const rssPlugin = asRssDashboardPlugin(plugin);
 
     const modal = new EditFeedModal(app, rssPlugin, feed, vi.fn());
     modal.open();

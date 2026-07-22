@@ -9,6 +9,16 @@ describe("ImportSuccessModal", () => {
     document.body.empty();
   });
 
+  it("defaults the title and action to Simplified Chinese", () => {
+    const modal = new ImportSuccessModal(
+      obsidian.App.createMock() as unknown as obsidian.App,
+      "已完成",
+    );
+    modal.open();
+    expect(modal.contentEl.textContent).toContain("导入成功");
+    expect(modal.contentEl.querySelector("button")?.textContent).toBe("确定");
+  });
+
   it("renders a message and closes on OK click", () => {
     const app = obsidian.App.createMock();
     const modal = new ImportSuccessModal(

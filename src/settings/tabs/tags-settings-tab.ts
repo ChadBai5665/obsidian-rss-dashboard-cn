@@ -107,6 +107,7 @@ export function renderTagsSettingsTab(
       selectedTagNames: autoTagSetting.getSelectedTagNames(),
       triggerEmptyLabel: "None",
       menuTitle: autoTagSetting.menuTitle,
+      locale: plugin.settings.locale ?? "zh-CN",
       onChange: async (selected: string[]) => {
         autoTagSetting.setSelectedTagNames(selected);
         await plugin.saveSettings();

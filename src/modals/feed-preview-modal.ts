@@ -23,7 +23,7 @@ export class FeedPreviewModal extends Modal {
         app: App,
         feed: FeedMetadata,
         corsProxyEnabled: boolean = true,
-        private locale: Locale = "en",
+        private locale: Locale = "zh-CN",
     ) {
         super(app);
         this.feed = feed;
@@ -99,8 +99,8 @@ export class FeedPreviewModal extends Modal {
             
             this.renderContent();
         } catch (error) {
-            
-            this.error = error instanceof Error ? error.message : 'Unknown error occurred';
+            console.error("[RSS Dashboard] Failed to load feed preview:", error);
+            this.error = createTranslator(this.locale)("modal.preview.error");
             this.renderError();
         }
     }
@@ -234,7 +234,7 @@ export class FeedPreviewModal extends Modal {
         const container = this.contentEl;
         const errorEl = container.createDiv({ cls: "feed-preview-error" });
         setIcon(errorEl, "alert-triangle");
-        errorEl.appendText(` ${t("modal.preview.error", { error: this.error ?? "" })}`);
+        errorEl.appendText(` ${this.error ?? t("modal.preview.error")}`);
         
         const retryBtn = errorEl.createEl("button", { cls: "mod-cta" });
         retryBtn.textContent = t("common.retry");

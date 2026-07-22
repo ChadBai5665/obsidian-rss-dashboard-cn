@@ -1,6 +1,9 @@
 import { MediaService } from "../../services/media-service";
 import { MastodonService } from "../../services/mastodon-service";
-import { loadFeedForPreview, resolvePodcastPlatformUrl } from "../../services/feed-parser";
+import {
+  loadFeedForPreview,
+  resolvePodcastPlatformUrl,
+} from "../../services/feed-parser";
 import { detectPodcastPlatform } from "../../utils/podcast-platforms";
 import { createTranslator, type Locale } from "../../i18n";
 
@@ -46,7 +49,7 @@ function isYouTubeRssFeedUrl(url: string): boolean {
 export function formatLatestEntryLabel(
   latestPubDate?: string,
   now = Date.now(),
-  locale: Locale = "en",
+  locale: Locale = "zh-CN",
 ): string {
   const t = createTranslator(locale);
   if (!latestPubDate) return t("modal.feed.notAvailable");
@@ -59,8 +62,11 @@ export function formatLatestEntryLabel(
 }
 
 export function getPreviewConversionNotice(
-  preview: Pick<FeedPreviewLoadResult, "isXConversion" | "isMastodonConversion">,
-  locale: Locale = "en",
+  preview: Pick<
+    FeedPreviewLoadResult,
+    "isXConversion" | "isMastodonConversion"
+  >,
+  locale: Locale = "zh-CN",
 ): string {
   const t = createTranslator(locale);
   if (preview.isXConversion) {
@@ -102,7 +108,11 @@ export function shouldAutoAssignFolder(
 export function getDefaultFolderForResolvedFeed(
   preview: Pick<
     FeedPreviewLoadResult,
-    "detectedType" | "inputUrl" | "finalUrl" | "isXConversion" | "isMastodonConversion"
+    | "detectedType"
+    | "inputUrl"
+    | "finalUrl"
+    | "isXConversion"
+    | "isMastodonConversion"
   >,
   media?: MediaFolderDefaults,
 ): string {
@@ -133,7 +143,7 @@ export async function resolveAndLoadPreview(
   inputUrl: string,
   options?: FeedPreviewLoaderOptions,
 ): Promise<FeedPreviewLoadResult> {
-  const t = createTranslator(options?.locale ?? "en");
+  const t = createTranslator(options?.locale ?? "zh-CN");
   let url = inputUrl;
   let finalUrl = inputUrl;
   let detectedType: FeedPreviewType = "rss";
@@ -158,9 +168,7 @@ export async function resolveAndLoadPreview(
   if (MediaService.isMastodonUrl(url)) {
     const mastodonFeedUrl = await MediaService.getMastodonRssFeed(url);
     if (!mastodonFeedUrl) {
-      throw new Error(
-        t("modal.feed.mastodonResolve"),
-      );
+      throw new Error(t("modal.feed.mastodonResolve"));
     }
 
     url = mastodonFeedUrl;
@@ -182,9 +190,7 @@ export async function resolveAndLoadPreview(
     const platform = detectPodcastPlatform(url);
     if (platform) {
       if (platform.id === "pocketcasts" && !options?.corsProxyEnabled) {
-        throw new Error(
-          t("modal.feed.pocketCastsCors"),
-        );
+        throw new Error(t("modal.feed.pocketCastsCors"));
       }
 
       detectedType = "podcast";

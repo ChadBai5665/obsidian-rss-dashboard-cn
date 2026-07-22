@@ -4,9 +4,9 @@ import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import { TagApplicationConfirmModal } from "../../../src/modals/feed-manager/tag-application-confirm-modal";
 
 describe("TagApplicationConfirmModal", () => {
-  it("renders the three choices in Simplified Chinese when requested", () => {
+  it("renders the three choices in Simplified Chinese by default", () => {
     const app = createMockApp();
-    const modal = new TagApplicationConfirmModal(app, "zh-CN");
+    const modal = new TagApplicationConfirmModal(app);
     modal.open();
 
     expect(modal.contentEl.textContent).toContain("更新订阅源标签");
@@ -25,7 +25,7 @@ describe("TagApplicationConfirmModal", () => {
 
   it("renders heading, description, warning text, and action buttons", () => {
     const app = createMockApp();
-    const modal = new TagApplicationConfirmModal(app);
+    const modal = new TagApplicationConfirmModal(app, "en");
     modal.open();
 
     const textContent = modal.contentEl.textContent ?? "";
@@ -47,7 +47,7 @@ describe("TagApplicationConfirmModal", () => {
 
   it("resolves to 'apply_existing' when confirmed retroactively", async () => {
     const app = createMockApp();
-    const modal = new TagApplicationConfirmModal(app);
+    const modal = new TagApplicationConfirmModal(app, "en");
     modal.open();
 
     const promise = modal.waitForClose();
@@ -64,7 +64,7 @@ describe("TagApplicationConfirmModal", () => {
 
   it("resolves to 'future_only' when user selects future updates only", async () => {
     const app = createMockApp();
-    const modal = new TagApplicationConfirmModal(app);
+    const modal = new TagApplicationConfirmModal(app, "en");
     modal.open();
 
     const promise = modal.waitForClose();
@@ -81,7 +81,7 @@ describe("TagApplicationConfirmModal", () => {
 
   it("resolves to 'cancel_save' when cancel is clicked", async () => {
     const app = createMockApp();
-    const modal = new TagApplicationConfirmModal(app);
+    const modal = new TagApplicationConfirmModal(app, "en");
     modal.open();
 
     const promise = modal.waitForClose();
@@ -96,7 +96,7 @@ describe("TagApplicationConfirmModal", () => {
 
   it("resolves to 'cancel_save' when closed directly via Escape/backdrop", async () => {
     const app = createMockApp();
-    const modal = new TagApplicationConfirmModal(app);
+    const modal = new TagApplicationConfirmModal(app, "en");
     modal.open();
 
     const promise = modal.waitForClose();

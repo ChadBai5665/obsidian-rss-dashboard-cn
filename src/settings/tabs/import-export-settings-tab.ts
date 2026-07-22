@@ -12,6 +12,7 @@ import { ImportSuccessModal } from "../../modals/import-success-modal";
 import { FactoryResetConfirmModal } from "../modals/settings-modals";
 import { AutoBackupSettings, RssDashboardSettings } from "../../types/types";
 import { createTranslator } from "../../i18n";
+import { loadAndNormalizeSettings } from "../../utils/settings-loader";
 
 /** @deprecated Import from settings-modals; this re-export preserves integrations. */
 export { FactoryResetConfirmModal } from "../modals/settings-modals";
@@ -66,20 +67,31 @@ export function renderImportExportSettingsTab(
               const text = await file.text();
               try {
                 const data = JSON.parse(text) as Partial<RssDashboardSettings>;
-                plugin.settings = Object.assign({}, plugin.settings, data);
+                plugin.settings = loadAndNormalizeSettings(
+                  Object.assign({}, plugin.settings, data),
+                );
                 await plugin.saveSettings();
                 const view = await plugin.getActiveDashboardView();
                 if (view) {
                   await plugin.app.workspace.revealLeaf(view.leaf);
                   view.render();
                 }
+                const finalLocale = plugin.settings.locale ?? "zh-CN";
+                const finalT = createTranslator(finalLocale);
                 new ImportSuccessModal(
                   plugin.app,
-                  t("modal.importSuccess.data"),
-                  plugin.settings.locale,
+                  finalT("modal.importSuccess.data"),
+                  finalLocale,
                 ).open();
-              } catch {
-                new Notice("Import failed: invalid or corrupted data file.");
+              } catch (error) {
+                console.error(
+                  "[RSS Dashboard] data.json import failed:",
+                  error,
+                );
+                const errorT = createTranslator(
+                  plugin.settings.locale ?? "zh-CN",
+                );
+                new Notice(errorT("modal.importSuccess.dataFailed"));
               }
             })();
           };

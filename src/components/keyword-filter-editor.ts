@@ -34,7 +34,7 @@ export function renderKeywordFilterEditor(
   options: KeywordFilterEditorOptions,
 ): void {
   const { containerEl, state, showOverrideToggle, onChange } = options;
-  const t = createTranslator(options.locale ?? "en");
+  const t = createTranslator(options.locale ?? "zh-CN");
   containerEl.empty();
 
   const controlsRow = containerEl.createDiv({

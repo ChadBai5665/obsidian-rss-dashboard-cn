@@ -74,7 +74,7 @@ export class FolderSuggest extends AbstractInputSuggest<string> {
     this.inputEl = inputEl;
     this.folders = collectFolderPaths(folders, { sort: true });
     this.showAddNewOption = options?.showAddNewOption ?? true;
-    this.addNewFolderLabel = createTranslator(options?.locale ?? "en")(
+    this.addNewFolderLabel = createTranslator(options?.locale ?? "zh-CN")(
       "modal.folderSuggest.add",
     );
 

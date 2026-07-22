@@ -9,7 +9,6 @@ import type {
 import { FolderSuggest } from "../../components/folder-suggest";
 import { renderKeywordFilterEditor } from "../../components/keyword-filter-editor";
 import { shouldUseMobileSidebarLayout } from "../../utils/platform-utils";
-import { isValidFeedTitle } from "../../utils/validation";
 import {
   FEED_REFRESH_DISABLED_INTERVAL,
   getPerFeedRefreshIntervalDropdownValue,
@@ -35,7 +34,7 @@ import {
 } from "../../services/tag-applier";
 import { resolveTagObjects } from "../../utils/tag-resolver";
 import { createTranslator } from "../../i18n";
-
+import { getLocalizedFeedTitleError } from "./feed-title-validation";
 
 interface EditFeedModalOptions {
   expandSection?: "per-feed" | "rules";
@@ -114,8 +113,10 @@ export class EditFeedModal extends Modal {
         };
   }
 
-  private t = (key: Parameters<ReturnType<typeof createTranslator>>[0], params?: Record<string, string | number>) =>
-    createTranslator(this.plugin.settings.locale ?? "en")(key, params);
+  private t = (
+    key: Parameters<ReturnType<typeof createTranslator>>[0],
+    params?: Record<string, string | number>,
+  ) => createTranslator(this.plugin.settings.locale ?? "zh-CN")(key, params);
 
   onOpen() {
     this.setupModalContainer();
@@ -150,7 +151,9 @@ export class EditFeedModal extends Modal {
   }
 
   private renderHeader() {
-    new Setting(this.contentEl).setName(this.t("modal.feed.editTitle")).setHeading();
+    new Setting(this.contentEl)
+      .setName(this.t("modal.feed.editTitle"))
+      .setHeading();
     const subtitle = this.contentEl.createDiv({ cls: "add-feed-subtitle" });
     subtitle.textContent = this.t("modal.feed.editDesc");
   }
@@ -189,12 +192,12 @@ export class EditFeedModal extends Modal {
       const preview = await resolveAndLoadPreview(this.url, {
         corsProxyEnabled: this.plugin?.settings?.corsProxyEnabled,
         corsProxyUrl: this.plugin?.settings?.corsProxyUrl,
-        locale: this.plugin?.settings.locale ?? "en",
+        locale: this.plugin?.settings.locale ?? "zh-CN",
       });
 
       const conversionNotice = getPreviewConversionNotice(
         preview,
-        this.plugin.settings.locale ?? "en",
+        this.plugin.settings.locale ?? "zh-CN",
       );
 
       this.url = preview.finalUrl;
@@ -206,7 +209,7 @@ export class EditFeedModal extends Modal {
       this.latestEntry = formatLatestEntryLabel(
         preview.latestPubDate,
         Date.now(),
-        this.plugin.settings.locale ?? "en",
+        this.plugin.settings.locale ?? "zh-CN",
       );
       if (this.latestEntryDiv) {
         this.latestEntryDiv.textContent = this.latestEntry;
@@ -247,8 +250,7 @@ export class EditFeedModal extends Modal {
         this.folderInput.value = nextFolder;
       }
     } catch (e) {
-      const errorMsg = e instanceof Error ? e.message : String(e);
-      this.status = `${this.t("common.error")}: ${errorMsg}`;
+      this.status = this.t("modal.feed.loadFailed");
       this.latestEntry = "-";
       if (this.latestEntryDiv) {
         this.latestEntryDiv.textContent = this.latestEntry;
@@ -256,7 +258,7 @@ export class EditFeedModal extends Modal {
       console.error("Feed load error:", e);
       // Error state
       if (this.statusDiv) {
-        this.statusDiv.textContent = `\u274C ${errorMsg}`;
+        this.statusDiv.textContent = `\u274C ${this.t("modal.feed.loadFailed")}`;
         this.statusDiv.removeClass("status-loading");
         this.statusDiv.removeClass("status-ok");
         this.statusDiv.removeClass("rss-dashboard-status-warning");
@@ -304,7 +306,9 @@ export class EditFeedModal extends Modal {
     urlSetting.settingEl.addClass("rss-feed-form-row");
     urlSetting.settingEl.addClass("rss-feed-form-row-url");
 
-    const sourceSetting = new Setting(this.contentEl).setName(this.t("modal.feed.source"));
+    const sourceSetting = new Setting(this.contentEl).setName(
+      this.t("modal.feed.source"),
+    );
     sourceSetting.settingEl.addClass("rss-feed-form-row");
     sourceSetting.settingEl.addClass("rss-feed-source-row");
 
@@ -349,7 +353,9 @@ export class EditFeedModal extends Modal {
       cls: "add-feed-latest-entry",
     });
 
-    const statusSetting = new Setting(this.contentEl).setName(this.t("modal.feed.status"));
+    const statusSetting = new Setting(this.contentEl).setName(
+      this.t("modal.feed.status"),
+    );
     this.statusDiv = statusSetting.controlEl.createDiv({
       text: this.status,
       cls: "add-feed-status",
@@ -358,7 +364,9 @@ export class EditFeedModal extends Modal {
     const folderSetting = new Setting(this.contentEl)
       .setName(this.t("modal.feed.folder"))
       .addText((text) => {
-        text.setValue(this.folder).setPlaceholder(this.t("modal.feed.folderPlaceholder"));
+        text
+          .setValue(this.folder)
+          .setPlaceholder(this.t("modal.feed.folderPlaceholder"));
         this.folderInput = text.inputEl;
         this.folderInput.autocomplete = "off";
         this.folderInput.spellcheck = false;
@@ -371,7 +379,7 @@ export class EditFeedModal extends Modal {
           this.app,
           this.folderInput,
           this.plugin.settings.folders,
-          { locale: this.plugin.settings.locale ?? "en" },
+          { locale: this.plugin.settings.locale ?? "zh-CN" },
         );
       });
     folderSetting.settingEl.addClass("rss-feed-form-row");
@@ -423,10 +431,8 @@ export class EditFeedModal extends Modal {
 
     if (inheritedTags.length > 0) {
       const inheritedTagsSetting = new Setting(perFeedControlsBody)
-      .setName(this.t("modal.feed.inheritedTags"))
-        .setDesc(
-          "Global tags applied automatically based on the feed type and settings. Configure these in the 'auto tagging' settings tab.",
-        );
+        .setName(this.t("modal.feed.inheritedTags"))
+        .setDesc(this.t("modal.feed.inheritedTagsDesc"));
 
       const tagsList = inheritedTagsSetting.controlEl.createDiv({
         cls: "rss-dashboard-inherited-tags",
@@ -521,9 +527,7 @@ export class EditFeedModal extends Modal {
 
     const autoDeleteSetting = new Setting(perFeedControlsBody)
       .setName(this.t("modal.feed.autoDelete"))
-      .setDesc(
-        this.t("modal.feed.autoDeleteDesc"),
-      );
+      .setDesc(this.t("modal.feed.autoDeleteDesc"));
 
     let autoDeleteCustomInput: HTMLInputElement | null = null;
 
@@ -658,7 +662,10 @@ export class EditFeedModal extends Modal {
     scanIntervalSetting.addDropdown((dropdown) => {
       dropdown
         .addOption("0", this.t("modal.feed.useGlobal"))
-        .addOption(String(FEED_REFRESH_DISABLED_INTERVAL), this.t("modal.feed.off"))
+        .addOption(
+          String(FEED_REFRESH_DISABLED_INTERVAL),
+          this.t("modal.feed.off"),
+        )
         .addOption("5", this.t("settings.general.minutes", { count: 5 }))
         .addOption("10", this.t("settings.general.minutes", { count: 10 }))
         .addOption("15", this.t("settings.general.minutes", { count: 15 }))
@@ -709,9 +716,7 @@ export class EditFeedModal extends Modal {
 
     new Setting(perFeedControlsBody)
       .setName(this.t("modal.feed.excludeRefresh"))
-      .setDesc(
-        this.t("modal.feed.excludeRefreshDesc"),
-      )
+      .setDesc(this.t("modal.feed.excludeRefreshDesc"))
       .addToggle((toggle) => {
         toggle.setValue(this.excludeFromRefresh).onChange((value) => {
           this.excludeFromRefresh = value;
@@ -738,9 +743,7 @@ export class EditFeedModal extends Modal {
 
     const autoTagSetting = new Setting(perFeedControlsBody)
       .setName(this.t("modal.feed.customTags"))
-      .setDesc(
-        this.t("modal.feed.customTagsDesc"),
-      );
+      .setDesc(this.t("modal.feed.customTagsDesc"));
 
     addTagMultiSelectControl({
       setting: autoTagSetting,
@@ -748,7 +751,7 @@ export class EditFeedModal extends Modal {
       selectedTagNames: this.customTags,
       triggerEmptyLabel: this.t("modal.tags.none"),
       menuTitle: this.t("modal.feed.selectAutoTags"),
-      locale: this.plugin.settings.locale ?? "en",
+      locale: this.plugin.settings.locale ?? "zh-CN",
       onChange: (selected) => {
         this.customTags = selected;
       },
@@ -797,7 +800,7 @@ export class EditFeedModal extends Modal {
           overrideGlobalRules: this.feedKeywordRules.overrideGlobalRules,
         },
         showOverrideToggle: true,
-        locale: this.plugin.settings.locale ?? "en",
+        locale: this.plugin.settings.locale ?? "zh-CN",
         onChange: (nextState) => {
           this.feedKeywordRules = {
             includeLogic: nextState.includeLogic,
@@ -830,11 +833,14 @@ export class EditFeedModal extends Modal {
 
     saveBtn.onclick = () => {
       this.normalizeNitterUrl();
-      const validation = isValidFeedTitle(this.title);
-      if (!validation.valid) {
-        new Notice(validation.error || this.t("modal.feed.titleInvalid"));
+      const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
+      const titleError = getLocalizedFeedTitleError(this.title, t);
+      if (titleError) {
+        new Notice(titleError);
         return;
       }
+      this.title = this.title.trim();
+      if (this.titleInput) this.titleInput.value = this.title;
 
       void (async () => {
         // --- Determine if customTags changed ---
@@ -845,7 +851,7 @@ export class EditFeedModal extends Modal {
         if (tagsChanged) {
           const confirmModal = new TagApplicationConfirmModal(
             this.app,
-            this.plugin.settings.locale ?? "en",
+            this.plugin.settings.locale ?? "zh-CN",
           );
           const choice = confirmModal.waitForClose();
           confirmModal.open();
@@ -916,7 +922,9 @@ export class EditFeedModal extends Modal {
           );
           this.feed.items = this.feed.items.slice(0, newMaxItemsLimit);
           new Notice(
-            `Feed updated and trimmed to ${newMaxItemsLimit} articles`,
+            this.t("modal.feed.updatedTrimmed", {
+              count: newMaxItemsLimit,
+            }),
           );
         } else {
           new Notice(this.t("modal.feed.updated"));
