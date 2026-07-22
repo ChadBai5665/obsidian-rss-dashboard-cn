@@ -101,8 +101,9 @@ describe("settings-loader", () => {
         await import("../../../src/utils/settings-loader");
 
       expect(
-        loadAndNormalizeSettings({ locale: "fr" } as unknown as Partial<RssDashboardSettings>)
-          .locale,
+        loadAndNormalizeSettings({
+          locale: "fr",
+        } as unknown as Partial<RssDashboardSettings>).locale,
       ).toBe("zh-CN");
     });
 
@@ -122,6 +123,103 @@ describe("settings-loader", () => {
           dailyIndexFolder: "信息收集/每日采集",
           savedNoteFolder: "信息收集/已保存",
         },
+      });
+    });
+
+    it("migrates legacy feeds to the typed RSS source without changing their persisted data", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const legacy = createFeed({
+        title: "Existing upstream feed",
+        url: "https://example.com/feed.xml",
+        items: [createFeedItem()],
+      });
+
+      const result = loadAndNormalizeSettings({ feeds: [legacy] });
+
+      expect(result.feeds[0]).toMatchObject({
+        title: "Existing upstream feed",
+        url: "https://example.com/feed.xml",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        items: [legacy.items[0]],
+      });
+    });
+
+    it("normalizes persisted X account and topic source configs idempotently", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const raw = {
+        feeds: [
+          createFeed({
+            title: "OpenAI",
+            url: "tikhub://x-account/openai",
+            sourceKind: "x-account",
+            sourceConfig: {
+              kind: "x-account",
+              id: "account-1",
+              handle: " OpenAI ",
+              includeReplies: false,
+              includeReposts: false,
+              folder: " X ",
+              topics: ["AI", "ai"],
+            },
+          } as unknown as Feed),
+          createFeed({
+            title: "AI",
+            url: "tikhub://x-topic/topic-1",
+            sourceKind: "x-topic",
+            sourceConfig: {
+              kind: "x-topic",
+              id: "topic-1",
+              name: " AI ",
+              includeKeywords: ["AI", "ai"],
+              excludeKeywords: [],
+              priorityAccounts: ["OpenAI", "openai"],
+              windowDays: 7,
+              folder: " 主题 ",
+            },
+          } as unknown as Feed),
+        ],
+      } as unknown as Partial<RssDashboardSettings>;
+
+      const first = loadAndNormalizeSettings(raw);
+      const second = loadAndNormalizeSettings(first);
+
+      expect(
+        first.feeds.map((feed) => [feed.sourceKind, feed.sourceConfig]),
+      ).toEqual([
+        [
+          "x-account",
+          expect.objectContaining({ handle: "openai", topics: ["AI"] }),
+        ],
+        [
+          "x-topic",
+          expect.objectContaining({
+            includeKeywords: ["AI"],
+            priorityAccounts: ["openai"],
+            windowDays: 7,
+          }),
+        ],
+      ]);
+      expect(second.feeds).toEqual(first.feeds);
+    });
+
+    it("safely falls back to an RSS source when persisted source metadata is missing or invalid", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const result = loadAndNormalizeSettings({
+        feeds: [
+          createFeed({
+            sourceKind: "x-account",
+            sourceConfig: { kind: "x-account", handle: "@unsafe" },
+          } as unknown as Feed),
+        ],
+      });
+
+      expect(result.feeds[0]).toMatchObject({
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
       });
     });
 

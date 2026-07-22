@@ -24,6 +24,7 @@ export const en = {
   "common.saved": "Saved",
   "common.noItems": "No items",
   "common.error": "Something went wrong. Please try again.",
+  "source.unsupported": "Unsupported source: {kind}",
 
   "command.refreshAll": "Refresh all subscriptions",
   "command.refreshCurrent": "Refresh current subscription",

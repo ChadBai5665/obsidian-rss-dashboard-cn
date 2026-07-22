@@ -22,6 +22,7 @@ export const zhCN = {
   "common.saved": "已保存",
   "common.noItems": "暂无内容",
   "common.error": "发生错误，请稍后重试。",
+  "source.unsupported": "不支持的来源：{kind}",
 
   "command.refreshAll": "刷新全部订阅",
   "command.refreshCurrent": "刷新当前订阅",

@@ -1,4 +1,5 @@
 import type { Locale, TranslationKey } from "../i18n/types";
+import type { SourceConfig, SourceKind } from "../sources/source-config";
 
 export interface FeedItem {
   /** Stable collection identity once the item has entered the collection layer. */
@@ -79,6 +80,9 @@ export interface FeedItem {
 
 export interface Feed {
   feedId?: string;
+  /** Typed source metadata; absent only until legacy settings are normalized. */
+  sourceKind?: SourceKind;
+  sourceConfig?: SourceConfig;
   title: string;
   url: string;
   /**

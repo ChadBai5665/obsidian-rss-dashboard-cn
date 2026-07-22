@@ -14,6 +14,10 @@ import {
 } from "./settings-migration";
 import { canonicalizeItemIdentityUrl } from "./url-utils";
 import { normalizeRefreshIntervalMinutes } from "./validation";
+import {
+  normalizeSourceConfig,
+  sourceConfigUrl,
+} from "../sources/source-config";
 
 const DEFAULT_FEED_KEYWORD_RULES = {
   overrideGlobalRules: false,
@@ -117,14 +121,18 @@ export function loadAndNormalizeSettings(
   }
 
   // Check if savedArticleOpenLocation was provided in raw data (not inherited from defaults)
-  const savedArticleLocationProvided = rawData?.savedArticleOpenLocation !== undefined;
+  const savedArticleLocationProvided =
+    rawData?.savedArticleOpenLocation !== undefined;
   if (!savedArticleLocationProvided) {
     // Inherit from readerViewLocation, but also convert external-browser to main
     settings.savedArticleOpenLocation = settings.readerViewLocation;
   }
 
   // Migrate: convert external-browser to main for saved articles (external browser no longer supported)
-  if (savedArticleLocationProvided && rawData?.savedArticleOpenLocation === "external-browser") {
+  if (
+    savedArticleLocationProvided &&
+    rawData?.savedArticleOpenLocation === "external-browser"
+  ) {
     settings.savedArticleOpenLocation = "main";
   }
 
@@ -190,6 +198,28 @@ export function loadAndNormalizeSettings(
 
     if (typeof feed.maxItemsLimit !== "number") {
       feed.maxItemsLimit = settings.maxItems;
+    }
+
+    const normalizedConfig = normalizeSourceConfig(feed.sourceConfig);
+    const sourceKind = feed.sourceKind;
+    if (
+      (sourceKind === "x-account" || sourceKind === "x-topic") &&
+      normalizedConfig?.kind === sourceKind
+    ) {
+      feed.sourceKind = sourceKind;
+      feed.sourceConfig = normalizedConfig;
+      feed.url = sourceConfigUrl(normalizedConfig) ?? feed.url;
+    } else if (
+      sourceKind === undefined &&
+      normalizedConfig &&
+      normalizedConfig.kind !== "feed"
+    ) {
+      feed.sourceKind = normalizedConfig.kind;
+      feed.sourceConfig = normalizedConfig;
+      feed.url = sourceConfigUrl(normalizedConfig) ?? feed.url;
+    } else {
+      feed.sourceKind = "feed";
+      feed.sourceConfig = { kind: "feed" };
     }
   }
 
@@ -284,7 +314,8 @@ export function migrateSettings(settings: RssDashboardSettings): boolean {
   );
   const displayUnknown = settings.display as unknown as Record<string, unknown>;
   if (displayUnknown && displayUnknown.useDomainFavicons !== undefined) {
-    (settings.display as unknown as Record<string, unknown>).useDomainIconsRss = Boolean(displayUnknown.useDomainFavicons);
+    (settings.display as unknown as Record<string, unknown>).useDomainIconsRss =
+      Boolean(displayUnknown.useDomainFavicons);
     delete displayUnknown.useDomainFavicons;
     didChange = true;
   }
