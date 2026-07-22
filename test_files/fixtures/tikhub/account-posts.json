@@ -1,0 +1,208 @@
+{
+  "data": {
+    "user": {
+      "result": {
+        "timeline_v2": {
+          "timeline": {
+            "instructions": [
+              {
+                "type": "TimelineAddEntries",
+                "entries": [
+                  {
+                    "entryId": "tweet-fixture-original",
+                    "content": {
+                      "entryType": "TimelineTimelineItem",
+                      "itemContent": {
+                        "itemType": "TimelineTweet",
+                        "tweet_results": {
+                          "result": {
+                            "__typename": "Tweet",
+                            "rest_id": "100",
+                            "core": {
+                              "user_results": {
+                                "result": {
+                                  "legacy": {
+                                    "screen_name": "fixture_account",
+                                    "name": "Fixture Account"
+                                  }
+                                }
+                              }
+                            },
+                            "legacy": {
+                              "full_text": "Original fixture post https://t.co/article",
+                              "created_at": "Mon Jan 01 00:00:00 +0000 2024",
+                              "conversation_id_str": "100",
+                              "reply_count": 2,
+                              "retweet_count": 3,
+                              "favorite_count": 5,
+                              "quote_count": 1,
+                              "entities": {
+                                "urls": [
+                                  {
+                                    "url": "https://t.co/article",
+                                    "expanded_url": "https://example.com/fixture-article",
+                                    "display_url": "example.com/fixture-article"
+                                  }
+                                ]
+                              }
+                            },
+                            "views": { "count": "21" }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "entryId": "tweet-fixture-reply",
+                    "content": {
+                      "itemContent": {
+                        "tweet_results": {
+                          "result": {
+                            "__typename": "Tweet",
+                            "rest_id": "101",
+                            "core": {
+                              "user_results": {
+                                "result": {
+                                  "legacy": {
+                                    "screen_name": "fixture_account",
+                                    "name": "Fixture Account"
+                                  }
+                                }
+                              }
+                            },
+                            "legacy": {
+                              "full_text": "Reply fixture",
+                              "conversation_id_str": "100",
+                              "in_reply_to_status_id_str": "100"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "entryId": "tweet-fixture-repost",
+                    "content": {
+                      "itemContent": {
+                        "tweet_results": {
+                          "result": {
+                            "__typename": "Tweet",
+                            "rest_id": "102",
+                            "core": {
+                              "user_results": {
+                                "result": {
+                                  "legacy": {
+                                    "screen_name": "fixture_account",
+                                    "name": "Fixture Account"
+                                  }
+                                }
+                              }
+                            },
+                            "legacy": {
+                              "full_text": "RT @fixture_author: Repost fixture",
+                              "conversation_id_str": "102",
+                              "retweeted_status_result": {
+                                "result": { "rest_id": "90" }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "entryId": "tweet-fixture-quote",
+                    "content": {
+                      "itemContent": {
+                        "tweet_results": {
+                          "result": {
+                            "__typename": "TweetWithVisibilityResults",
+                            "tweet": {
+                              "rest_id": "103",
+                              "core": {
+                                "user_results": {
+                                  "result": {
+                                    "legacy": {
+                                      "screen_name": "fixture_account",
+                                      "name": "Fixture Account"
+                                    }
+                                  }
+                                }
+                              },
+                              "legacy": {
+                                "full_text": "Quote fixture",
+                                "conversation_id_str": "103",
+                                "quoted_status_result": {
+                                  "result": { "rest_id": "91" }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "entryId": "tweet-fixture-thread-continuation",
+                    "content": {
+                      "itemContent": {
+                        "tweet_results": {
+                          "result": {
+                            "__typename": "Tweet",
+                            "rest_id": "104",
+                            "core": {
+                              "user_results": {
+                                "result": {
+                                  "legacy": {
+                                    "screen_name": "fixture_account",
+                                    "name": "Fixture Account"
+                                  }
+                                }
+                              }
+                            },
+                            "legacy": {
+                              "full_text": "Thread continuation fixture",
+                              "conversation_id_str": "100",
+                              "in_reply_to_status_id_str": "101"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "entryId": "tweet-fixture-deleted",
+                    "content": {
+                      "itemContent": {
+                        "tweet_results": {
+                          "result": {
+                            "__typename": "TweetUnavailable",
+                            "reason": "Fixture unavailable"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "entryId": "cursor-bottom-fixture",
+                    "content": {
+                      "entryType": "TimelineTimelineCursor",
+                      "cursorType": "Bottom",
+                      "value": "fixture-cursor"
+                    }
+                  },
+                  {
+                    "entryId": "unknown-fixture-entry",
+                    "content": {
+                      "entryType": "TimelineFixtureUnknown"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

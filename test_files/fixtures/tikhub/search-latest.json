@@ -1,0 +1,53 @@
+{
+  "data": {
+    "search_by_raw_query": {
+      "search_timeline": {
+        "timeline": {
+          "instructions": [
+            {
+              "type": "TimelineAddEntries",
+              "entries": [
+                {
+                  "entryId": "search-grid-fixture",
+                  "content": {
+                    "entryType": "TimelineTimelineModule",
+                    "items": [
+                      {
+                        "entryId": "tweet-fixture-latest",
+                        "item": {
+                          "itemContent": {
+                            "tweet_results": {
+                              "result": {
+                                "__typename": "Tweet",
+                                "rest_id": "200",
+                                "core": {
+                                  "user_results": {
+                                    "result": {
+                                      "legacy": {
+                                        "screen_name": "fixture_ai",
+                                        "name": "Fixture Researcher"
+                                      }
+                                    }
+                                  }
+                                },
+                                "legacy": {
+                                  "full_text": "Latest fixture without metrics",
+                                  "conversation_id_str": "200",
+                                  "entities": { "urls": [] }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

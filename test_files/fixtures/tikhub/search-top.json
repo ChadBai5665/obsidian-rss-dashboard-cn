@@ -1,0 +1,74 @@
+{
+  "data": {
+    "timeline": {
+      "instructions": [
+        {
+          "type": "TimelineAddEntries",
+          "entries": [
+            {
+              "entryId": "tweet-fixture-top",
+              "content": {
+                "itemContent": {
+                  "tweetResult": {
+                    "result": {
+                      "__typename": "Tweet",
+                      "rest_id": "300",
+                      "core": {
+                        "user_results": {
+                          "result": {
+                            "legacy": {
+                              "screen_name": "fixture_analyst",
+                              "name": "Fixture Analyst"
+                            }
+                          }
+                        }
+                      },
+                      "note_tweet": {
+                        "note_tweet_results": {
+                          "result": {
+                            "text": "Top fixture long-form text",
+                            "entity_set": {
+                              "urls": [
+                                {
+                                  "url": "https://t.co/report",
+                                  "expanded_url": "https://example.org/fixture-report"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      },
+                      "legacy": {
+                        "full_text": "Top fixture fallback text",
+                        "conversation_id_str": "300",
+                        "reply_count": 0,
+                        "retweet_count": 1,
+                        "favorite_count": 8,
+                        "quote_count": 2
+                      },
+                      "views": { "count": "34" }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "entryId": "tweet-fixture-malformed",
+              "content": {
+                "itemContent": {
+                  "tweet_results": {
+                    "result": {
+                      "__typename": "Tweet",
+                      "rest_id": "301",
+                      "legacy": { "full_text": "Missing author fixture" }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
