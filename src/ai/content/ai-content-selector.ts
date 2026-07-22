@@ -14,7 +14,6 @@ import {
 } from "./content-size";
 
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/u;
-const SOURCE_RAW_SOFT_LIMIT = 1_000_000;
 const MAX_TITLE_CHARACTERS = 20_000;
 const MAX_SOURCE_NAME_CHARACTERS = 20_000;
 const MAX_SOURCE_URL_CHARACTERS = 8_192;
@@ -237,14 +236,9 @@ function createRequiredSelection(
 
 function normalizeSourceContent(rawContent: string): NormalizedSourceContent {
   const scanned = scanVisibleHtml(rawContent);
-  const text = decodeBasicHtmlEntities(scanned.text)
-    .replace(/\u00a0/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
   return {
-    text,
-    sourceWasBounded:
-      scanned.visibleTextWasBounded || rawContent.length > SOURCE_RAW_SOFT_LIMIT,
+    text: scanned.text,
+    sourceWasBounded: scanned.visibleTextWasBounded,
   };
 }
 
@@ -258,11 +252,12 @@ interface ParsedHtmlTag {
   name: string;
   closing: boolean;
   complete: boolean;
+  rawTextNameBoundaryValid: boolean;
 }
 
 /** Single-pass HTML scan with bounded visible-text memory and a real tail ring. */
 function scanVisibleHtml(input: string): VisibleHtmlScan {
-  const collector = new BoundedVisibleTextCollector(
+  const collector = new NormalizedVisibleTextCollector(
     MAX_AI_SELECTED_CONTENT_CHARACTERS,
   );
   let index = 0;
@@ -273,9 +268,14 @@ function scanVisibleHtml(input: string): VisibleHtmlScan {
       const opening = input.indexOf("<", index);
       if (opening === -1) break;
       const tag = parseHtmlTag(input, opening);
-      if (tag?.closing && tag.name === blockedTag) {
+      if (
+        tag?.complete &&
+        tag.closing &&
+        tag.name === blockedTag &&
+        tag.rawTextNameBoundaryValid
+      ) {
         blockedTag = undefined;
-        collector.append(" ");
+        collector.separate();
       }
       index = tag?.end ?? opening + 1;
       continue;
@@ -283,32 +283,33 @@ function scanVisibleHtml(input: string): VisibleHtmlScan {
 
     const opening = input.indexOf("<", index);
     if (opening === -1) {
-      collector.appendRange(input, index, input.length);
+      collector.appendTextRange(input, index, input.length);
       break;
     }
-    collector.appendRange(input, index, opening);
+    collector.appendTextRange(input, index, opening);
 
     if (input.startsWith("<!--", opening)) {
       const closing = input.indexOf("-->", opening + 4);
       if (closing === -1) break;
-      collector.append(" ");
+      collector.separate();
       index = closing + 3;
       continue;
     }
 
     const tag = parseHtmlTag(input, opening);
     if (!tag) {
-      collector.append("<");
+      collector.appendTextRange(input, opening, opening + 1);
       index = opening + 1;
       continue;
     }
     if (!tag.complete) {
-      collector.appendRange(input, opening, input.length);
+      collector.appendTextRange(input, opening, input.length);
       break;
     }
-    collector.append(" ");
+    collector.separate();
     if (
       !tag.closing &&
+      tag.rawTextNameBoundaryValid &&
       (tag.name === "script" || tag.name === "style")
     ) {
       blockedTag = tag.name;
@@ -342,6 +343,8 @@ function parseHtmlTag(input: string, start: number): ParsedHtmlTag | undefined {
   const name = hasName && cursor - nameStart <= 32
     ? input.slice(nameStart, cursor).toLowerCase()
     : hasName ? "other" : "";
+  const rawTextNameBoundaryValid =
+    cursor < input.length && isRawTextTagNameBoundary(input.charCodeAt(cursor));
   if (!hasName && input[cursor] !== "!" && input[cursor] !== "?") {
     return undefined;
   }
@@ -363,6 +366,7 @@ function parseHtmlTag(input: string, start: number): ParsedHtmlTag | undefined {
         name,
         closing,
         complete: true,
+        rawTextNameBoundaryValid,
       };
     }
   }
@@ -371,7 +375,12 @@ function parseHtmlTag(input: string, start: number): ParsedHtmlTag | undefined {
     name,
     closing,
     complete: false,
+    rawTextNameBoundaryValid,
   };
+}
+
+function isRawTextTagNameBoundary(code: number): boolean {
+  return isHtmlWhitespace(code) || code === 47 || code === 62;
 }
 
 function isAsciiLetterCode(code: number): boolean {
@@ -410,39 +419,20 @@ class BoundedVisibleTextCollector {
     this.trailing = new Uint16Array(this.trailingLimit);
   }
 
-  append(value: string): void {
-    this.appendRange(value, 0, value.length);
-  }
-
-  appendRange(source: string, start: number, end: number): void {
-    const length = end - start;
-    if (length <= 0) return;
-    if (!this.bounded && this.initialLength + length <= this.limit) {
-      for (let index = start; index < end; index += 1) {
-        this.initial[this.initialLength] = source.charCodeAt(index);
-        this.initialLength += 1;
-      }
+  appendCodeUnit(code: number): void {
+    if (!this.bounded && this.initialLength < this.limit) {
+      this.initial[this.initialLength] = code;
+      this.initialLength += 1;
       return;
     }
-
     if (!this.bounded) {
       this.bounded = true;
-      const retainedInitial = Math.min(
-        this.initialLength,
-        this.leadingLimit,
-      );
       this.leading = codeUnitsToString(
-        this.initial.subarray(0, retainedInitial),
+        this.initial.subarray(0, this.leadingLimit),
       );
-      const leadingRemaining = this.leadingLimit - this.leading.length;
-      if (leadingRemaining > 0) {
-        this.leading += source.slice(start, start + leadingRemaining);
-      }
       this.writeTrailingCodes(this.initial, 0, this.initialLength);
-      this.writeTrailingRange(source, start, end);
-      return;
     }
-    this.writeTrailingRange(source, start, end);
+    this.writeTrailingCode(code);
   }
 
   finish(): VisibleHtmlScan {
@@ -458,22 +448,14 @@ class BoundedVisibleTextCollector {
     };
   }
 
-  private writeTrailingRange(source: string, rangeStart: number, end: number): void {
-    let start = rangeStart;
-    if (end - start >= this.trailingLimit) {
-      start = end - this.trailingLimit;
-      this.trailingLength = 0;
-      this.trailingWriteIndex = 0;
-    }
-    for (let index = start; index < end; index += 1) {
-      this.trailing[this.trailingWriteIndex] = source.charCodeAt(index);
-      this.trailingWriteIndex =
-        (this.trailingWriteIndex + 1) % this.trailingLimit;
-      this.trailingLength = Math.min(
-        this.trailingLength + 1,
-        this.trailingLimit,
-      );
-    }
+  private writeTrailingCode(code: number): void {
+    this.trailing[this.trailingWriteIndex] = code;
+    this.trailingWriteIndex =
+      (this.trailingWriteIndex + 1) % this.trailingLimit;
+    this.trailingLength = Math.min(
+      this.trailingLength + 1,
+      this.trailingLimit,
+    );
   }
 
   private writeTrailingCodes(
@@ -510,6 +492,105 @@ class BoundedVisibleTextCollector {
   }
 }
 
+/** Decodes basic entities and collapses visible whitespace before bounding. */
+class NormalizedVisibleTextCollector {
+  private readonly collector: BoundedVisibleTextCollector;
+  private hasText = false;
+  private pendingSeparator = false;
+
+  constructor(limit: number) {
+    this.collector = new BoundedVisibleTextCollector(limit);
+  }
+
+  appendTextRange(source: string, start: number, end: number): void {
+    let index = start;
+    while (index < end) {
+      if (source.charCodeAt(index) === 38) {
+        const entity = readBasicHtmlEntity(source, index, end);
+        if (entity) {
+          this.appendDecoded(entity.value);
+          index = entity.end;
+          continue;
+        }
+      }
+      this.appendNormalizedCodeUnit(source.charCodeAt(index));
+      index += 1;
+    }
+  }
+
+  separate(): void {
+    if (this.hasText) this.pendingSeparator = true;
+  }
+
+  finish(): VisibleHtmlScan {
+    return this.collector.finish();
+  }
+
+  private appendDecoded(value: string): void {
+    for (let index = 0; index < value.length; index += 1) {
+      this.appendNormalizedCodeUnit(value.charCodeAt(index));
+    }
+  }
+
+  private appendNormalizedCodeUnit(code: number): void {
+    if (isVisibleWhitespace(code)) {
+      this.separate();
+      return;
+    }
+    if (this.pendingSeparator) {
+      this.collector.appendCodeUnit(32);
+      this.pendingSeparator = false;
+    }
+    this.collector.appendCodeUnit(code);
+    this.hasText = true;
+  }
+}
+
+interface DecodedHtmlEntity {
+  value: string;
+  end: number;
+}
+
+function readBasicHtmlEntity(
+  source: string,
+  start: number,
+  end: number,
+): DecodedHtmlEntity | undefined {
+  const semicolon = source.indexOf(";", start + 1);
+  if (semicolon === -1 || semicolon >= end || semicolon - start > 9) {
+    return undefined;
+  }
+  const token = source.slice(start + 1, semicolon);
+  if (!/^(?:#x[0-9a-f]{1,6}|#[0-9]{1,7}|amp|lt|gt|quot|apos|nbsp)$/iu.test(token)) {
+    return undefined;
+  }
+  const match = source.slice(start, semicolon + 1);
+  return {
+    value: decodeHtmlEntity(match, token),
+    end: semicolon + 1,
+  };
+}
+
+function isVisibleWhitespace(code: number): boolean {
+  return (
+    code === 9 ||
+    code === 10 ||
+    code === 11 ||
+    code === 12 ||
+    code === 13 ||
+    code === 32 ||
+    code === 0xa0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000 ||
+    code === 0xfeff
+  );
+}
+
 function codeUnitsToString(codes: Uint16Array): string {
   const chunks: string[] = [];
   const size = 8_192;
@@ -522,13 +603,6 @@ function codeUnitsToString(codes: Uint16Array): string {
     chunks.push(String.fromCharCode(...numbers));
   }
   return chunks.join("");
-}
-
-function decodeBasicHtmlEntities(value: string): string {
-  return value.replace(
-    /&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|amp|lt|gt|quot|apos|nbsp);/giu,
-    (match, token: string) => decodeHtmlEntity(match, token),
-  );
 }
 
 function decodeHtmlEntity(match: string, token: string): string {

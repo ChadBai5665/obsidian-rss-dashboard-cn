@@ -158,6 +158,69 @@ describe("AiContentSelector", () => {
     expect(result.content).not.toContain("HIDDEN");
   });
 
+  it.each(["=oops", ".foo", "\\x", "!x"])(
+    "does not close raw script text through an invalid tag-name delimiter %s",
+    async (suffix) => {
+      const selector = new AiContentSelector({ contentRepository: repository(null) });
+      const result = await selector.select({
+        item: item({
+          excerpt: `可见<script>SECRET</script${suffix}>LEAK</script>安全尾部`,
+        }),
+        maxInputCharacters: 1_000,
+        fetchFullText: false,
+      });
+
+      expect(result.content).toBe("可见 安全尾部");
+      expect(result.content).not.toContain("SECRET");
+      expect(result.content).not.toContain("LEAK");
+    },
+  );
+
+  it.each(["=oops", ".foo", "\\x", "!x"])(
+    "does not open raw script text through an invalid tag-name delimiter %s",
+    async (suffix) => {
+      const selector = new AiContentSelector({ contentRepository: repository(null) });
+      const result = await selector.select({
+        item: item({ excerpt: `可见<script${suffix}>应保留` }),
+        maxInputCharacters: 1_000,
+        fetchFullText: false,
+      });
+
+      expect(result.content).toBe("可见 应保留");
+    },
+  );
+
+  it("matches raw-text close tags case-insensitively and only when complete", async () => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+
+    const mixedCase = await selector.select({
+      item: item({ excerpt: "可见<ScRiPt>SECRET</sCrIpT>安全" }),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+    expect(mixedCase.content).toBe("可见 安全");
+
+    const incomplete = await selector.select({
+      item: item({ excerpt: "可见<script>SECRET</script" }),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+    expect(incomplete.content).toBe("可见");
+  });
+
+  it("uses the first complete raw-text close even after a nested opening", async () => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+    const result = await selector.select({
+      item: item({
+        excerpt: "可见<script>SECRET<script>INNER</script>安全尾部",
+      }),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+
+    expect(result.content).toBe("可见 安全尾部");
+  });
+
   it("labels X text as x-post and never fetches the X page", async () => {
     const contentRepository = repository(null);
     const fullTextFetcher = vi.fn();
@@ -309,6 +372,29 @@ describe("AiContentSelector", () => {
     expect(result.content.endsWith("UNIQUE_END")).toBe(true);
     expect(result.content).toContain(AI_CONTENT_OMISSION_MARKER);
     expect(result.truncated).toBe(true);
+    expect(result.content.indexOf("UNIQUE_HEAD")).toBeLessThan(
+      result.content.indexOf(AI_CONTENT_OMISSION_MARKER),
+    );
+    expect(result.content.indexOf(AI_CONTENT_OMISSION_MARKER)).toBeLessThan(
+      result.content.indexOf("UNIQUE_END"),
+    );
+    expect(result.characterCount).toBe(result.content.length);
+  });
+
+  it("normalizes a huge whitespace middle before deciding whether content was truncated", async () => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+    const result = await selector.select({
+      item: item({ excerpt: `HEAD${" ".repeat(1_000_000)}TAIL` }),
+      maxInputCharacters: 200,
+      fetchFullText: false,
+    });
+
+    expect(result).toMatchObject({
+      content: "HEAD TAIL",
+      characterCount: 9,
+      truncated: false,
+    });
+    expect(result.content).not.toContain(AI_CONTENT_OMISSION_MARKER);
   });
 
   it("strips script content before bounding hostile oversized HTML", async () => {
@@ -342,14 +428,14 @@ describe("AiContentSelector", () => {
     expect(first.content.startsWith("可见开头")).toBe(true);
     expect(first.content).not.toContain("secret");
     expect(first.content).not.toContain("hidden");
-    expect(first.content).toContain(AI_CONTENT_OMISSION_MARKER);
-    expect(first.truncated).toBe(true);
+    expect(first.content).not.toContain(AI_CONTENT_OMISSION_MARKER);
+    expect(first.truncated).toBe(false);
   });
 
   it.each([
     ["comment", `前文<!--${"注释".repeat(550_000)}-->尾文`],
     ["attribute", `前文<div data-hidden="${"属性".repeat(550_000)}">尾文</div>`],
-  ])("adds the visible omission marker after truncating a long HTML %s", async (_case, excerpt) => {
+  ])("does not report truncation for fully scanned non-visible HTML %s", async (_case, excerpt) => {
     const selector = new AiContentSelector({ contentRepository: repository(null) });
 
     const result = await selector.select({
@@ -358,9 +444,12 @@ describe("AiContentSelector", () => {
       fetchFullText: false,
     });
 
-    expect(result.truncated).toBe(true);
-    expect(result.content).toContain(AI_CONTENT_OMISSION_MARKER);
-    expect(result.content.startsWith("前文")).toBe(true);
+    expect(result).toMatchObject({
+      content: "前文 尾文",
+      characterCount: 5,
+      truncated: false,
+    });
+    expect(result.content).not.toContain(AI_CONTENT_OMISSION_MARKER);
   });
 
   it("falls back to the feed item when cached or fetched HTML has no readable text", async () => {
