@@ -29,3 +29,9 @@ export interface AiSettings {
 }
 
 export const MAX_AI_TIMEOUT_MS = 600_000;
+/** Provider boundary for the complete system + user request text. */
+export const MAX_AI_REQUEST_CHARACTERS = 1_000_000;
+/** Reserved for prompts, source metadata, delimiters, and later envelope growth. */
+export const AI_PROMPT_ENVELOPE_RESERVE_CHARACTERS = 100_000;
+export const MAX_AI_SELECTED_CONTENT_CHARACTERS =
+  MAX_AI_REQUEST_CHARACTERS - AI_PROMPT_ENVELOPE_RESERVE_CHARACTERS;

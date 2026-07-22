@@ -15,14 +15,7 @@ export function limitAiContent(
   content: string,
   maxInputCharacters: number,
 ): LimitedAiContent {
-  const minimumLimit = AI_CONTENT_OMISSION_MARKER.length + 2;
-  if (
-    typeof content !== "string" ||
-    !Number.isSafeInteger(maxInputCharacters) ||
-    maxInputCharacters < minimumLimit
-  ) {
-    throw new Error("Invalid AI input character limit");
-  }
+  validateLimit(content, maxInputCharacters);
 
   if (content.length <= maxInputCharacters) {
     return {
@@ -45,6 +38,46 @@ export function limitAiContent(
     characterCount: bounded.length,
     truncated: true,
   };
+}
+
+/** Marks an upstream bounded scan while keeping the retained visible ends. */
+export function markAiContentTruncated(
+  content: string,
+  maxInputCharacters: number,
+): LimitedAiContent {
+  validateLimit(content, maxInputCharacters);
+  if (content.length + AI_CONTENT_OMISSION_MARKER.length <= maxInputCharacters) {
+    const marked = `${content}${AI_CONTENT_OMISSION_MARKER}`;
+    return {
+      content: marked,
+      characterCount: marked.length,
+      truncated: true,
+    };
+  }
+
+  const retainedCharacters =
+    maxInputCharacters - AI_CONTENT_OMISSION_MARKER.length;
+  const requestedStartLength = Math.floor(retainedCharacters / 2);
+  const requestedEndLength = retainedCharacters - requestedStartLength;
+  const marked = `${safeLeadingSlice(content, requestedStartLength)}` +
+    `${AI_CONTENT_OMISSION_MARKER}` +
+    `${safeTrailingSlice(content, requestedEndLength)}`;
+  return {
+    content: marked,
+    characterCount: marked.length,
+    truncated: true,
+  };
+}
+
+function validateLimit(content: string, maxInputCharacters: number): void {
+  const minimumLimit = AI_CONTENT_OMISSION_MARKER.length + 2;
+  if (
+    typeof content !== "string" ||
+    !Number.isSafeInteger(maxInputCharacters) ||
+    maxInputCharacters < minimumLimit
+  ) {
+    throw new Error("Invalid AI input character limit");
+  }
 }
 
 function safeLeadingSlice(value: string, requestedLength: number): string {

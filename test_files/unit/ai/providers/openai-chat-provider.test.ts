@@ -6,6 +6,10 @@ import {
   type AiTransport,
   type AiTransportRequest,
 } from "../../../../src/ai/providers/openai-chat-provider";
+import {
+  MAX_AI_REQUEST_CHARACTERS,
+  snapshotGenerationRequest,
+} from "../../../../src/ai/providers/text-generation-provider";
 import { ProviderError } from "../../../../src/ai/providers/provider-error";
 
 const API_KEY = "provider-secret-key";
@@ -66,6 +70,19 @@ afterEach(() => {
 });
 
 describe("OpenAI-compatible provider", () => {
+  it("uses the exported single request-character boundary", () => {
+    expect(snapshotGenerationRequest({
+      system: "s",
+      user: "u".repeat(MAX_AI_REQUEST_CHARACTERS - 1),
+      maxOutputTokens: 10,
+    }).user).toHaveLength(MAX_AI_REQUEST_CHARACTERS - 1);
+    expect(() => snapshotGenerationRequest({
+      system: "s",
+      user: "u".repeat(MAX_AI_REQUEST_CHARACTERS),
+      maxOutputTokens: 10,
+    })).toThrow();
+  });
+
   it.each([
     ["https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions"],
     ["https://api.deepseek.com", "https://api.deepseek.com/chat/completions"],

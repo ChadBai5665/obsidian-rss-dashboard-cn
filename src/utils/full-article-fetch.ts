@@ -2,6 +2,7 @@ import {
   fetchWithProxyFallbackDetailed,
   type FullArticleFetchResult,
 } from "./fetch-helpers";
+import { raceWithTrustedAbort } from "../ai/trusted-abort";
 
 export const RESTRICTED_ARTICLE_REASON = "paywall or restricted";
 export const RESTRICTED_ARTICLE_BANNER =
@@ -9,6 +10,24 @@ export const RESTRICTED_ARTICLE_BANNER =
 export const RESTRICTED_ARTICLE_LINK_TEXT = "Click here to double check.";
 
 export async function fetchFullArticleContentWithOutcome(
+  url: string,
+  proxyUrl?: string,
+  signal?: AbortSignal,
+): Promise<FullArticleFetchResult> {
+  return await raceWithTrustedAbort<FullArticleFetchResult>(
+    () => fetchFullArticleContentWithoutCancellation(url, proxyUrl),
+    {
+      signal,
+      createAbortError: () => new DOMException(
+        "Full article fetch cancelled",
+        "AbortError",
+      ),
+      createInvalidSignalError: () => new TypeError("Invalid AbortSignal"),
+    },
+  );
+}
+
+async function fetchFullArticleContentWithoutCancellation(
   url: string,
   proxyUrl?: string,
 ): Promise<FullArticleFetchResult> {

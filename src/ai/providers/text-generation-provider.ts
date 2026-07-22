@@ -1,4 +1,9 @@
 import { requestUrl } from "obsidian";
+import { MAX_AI_REQUEST_CHARACTERS } from "../ai-types";
+import {
+  raceWithTrustedAbort,
+  readTrustedAbortState,
+} from "../trusted-abort";
 import {
   ProviderError,
   abortedProviderError,
@@ -8,28 +13,11 @@ import {
 } from "./provider-error";
 
 const parseUnknownJson = JSON.parse as (text: string) => unknown;
-// Invoked only through Reflect.apply with the candidate signal as receiver.
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const ABORTED_GETTER = Object.getOwnPropertyDescriptor(
-  AbortSignal.prototype,
-  "aborted",
-)?.get;
-const ABORT_SIGNAL_EVENT_TARGET = Reflect.getPrototypeOf(
-  AbortSignal.prototype,
-) as object;
-const ADD_EVENT_LISTENER: unknown = Object.getOwnPropertyDescriptor(
-  ABORT_SIGNAL_EVENT_TARGET,
-  "addEventListener",
-)?.value;
-const REMOVE_EVENT_LISTENER: unknown = Object.getOwnPropertyDescriptor(
-  ABORT_SIGNAL_EVENT_TARGET,
-  "removeEventListener",
-)?.value;
+export { MAX_AI_REQUEST_CHARACTERS } from "../ai-types";
 
 export const MAX_AI_OUTPUT_TOKENS = 65_536;
 export const MAX_AI_RESPONSE_CHARACTERS = 1_000_000;
 export const MAX_AI_OUTPUT_CHARACTERS = 500_000;
-const MAX_AI_REQUEST_CHARACTERS = 1_000_000;
 const MAX_JSON_DEPTH = 32;
 const MAX_JSON_NODES = 10_000;
 const MAX_JSON_KEYS_PER_OBJECT = 1_000;
@@ -382,80 +370,23 @@ function raceTransport(
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let listenerAdded = false;
-    let timeout: number | undefined;
-    const finish = (action: () => void) => {
-      if (settled) return;
-      settled = true;
-      if (timeout !== undefined) window.clearTimeout(timeout);
-      if (listenerAdded && signal && typeof REMOVE_EVENT_LISTENER === "function") {
-        try {
-          Reflect.apply(REMOVE_EVENT_LISTENER, signal, ["abort", onAbort]);
-        } catch {
-          // Cleanup failure must never leave the public promise pending.
-        }
-      }
-      action();
-    };
-    const onAbort = () => finish(() => reject(abortedProviderError()));
-    if (signal) {
-      try {
-        if (typeof ADD_EVENT_LISTENER !== "function") {
-          throw invalidGenerationRequest();
-        }
-        Reflect.apply(ADD_EVENT_LISTENER, signal, ["abort", onAbort, { once: true }]);
-        listenerAdded = true;
-        if (trustedAbortedState(signal)) {
-          onAbort();
-          return;
-        }
-      } catch {
-        finish(() => reject(invalidGenerationRequest()));
-        return;
-      }
-    }
-    timeout = window.setTimeout(
-      () => finish(() => reject(new ProviderError(
+  return raceWithTrustedAbort(start, {
+    signal,
+    timeoutMs,
+    createAbortError: abortedProviderError,
+    createInvalidSignalError: invalidGenerationRequest,
+    createTimeoutError: () => new ProviderError(
         "timeout",
         "The AI provider request timed out.",
-      ))),
-      timeoutMs,
-    );
-
-    let pending: unknown;
-    try {
-      pending = start();
-    } catch {
-      finish(() => reject(networkProviderError()));
-      return;
-    }
-    let normalized: Promise<unknown>;
-    try {
-      normalized = Promise.resolve(pending);
-    } catch {
-      finish(() => reject(networkProviderError()));
-      return;
-    }
-    normalized.then(
-      (value) => finish(() => resolve(value)),
-      () => finish(() => reject(networkProviderError())),
-    );
+      ),
+    mapFailure: networkProviderError,
   });
 }
 
 function trustedAbortedState(value: unknown): boolean {
-  if (!ABORTED_GETTER || (typeof value !== "object" && typeof value !== "function") || value === null) {
-    throw invalidGenerationRequest();
-  }
-  try {
-    const aborted: unknown = Reflect.apply(ABORTED_GETTER, value, []);
-    if (typeof aborted !== "boolean") throw invalidGenerationRequest();
-    return aborted;
-  } catch {
-    throw invalidGenerationRequest();
-  }
+  const aborted = readTrustedAbortState(value);
+  if (aborted === undefined) throw invalidGenerationRequest();
+  return aborted;
 }
 
 function assertBoundedPlainJson(root: unknown): void {

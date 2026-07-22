@@ -1,23 +1,23 @@
 import type { CollectedItem, ContentBasis, SourceType } from "../../collection/collected-item";
 import type { CachedItemContent } from "../../collection/content-repository";
 import type { FullArticleFetchResult } from "../../utils/fetch-helpers";
-import { htmlToReadableText } from "../../utils/html-text";
+import { MAX_AI_SELECTED_CONTENT_CHARACTERS } from "../ai-types";
+import {
+  raceWithTrustedAbort,
+  readTrustedAbortState,
+  type TrustedAbortRaceOptions,
+} from "../trusted-abort";
 import {
   AI_CONTENT_OMISSION_MARKER,
   limitAiContent,
+  markAiContentTruncated,
 } from "./content-size";
 
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/u;
-const MAX_SOURCE_HTML_CHARACTERS = 1_000_000;
-const MAX_SELECTED_CONTENT_CHARACTERS = 1_000_000;
+const SOURCE_RAW_SOFT_LIMIT = 1_000_000;
 const MAX_TITLE_CHARACTERS = 20_000;
 const MAX_SOURCE_NAME_CHARACTERS = 20_000;
 const MAX_SOURCE_URL_CHARACTERS = 8_192;
-// Invoked only through Reflect.apply with the candidate signal as receiver.
-const ABORTED_GETTER = typeof AbortSignal === "undefined"
-  ? undefined
-  // eslint-disable-next-line @typescript-eslint/unbound-method
-  : Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get;
 const FETCHABLE_SOURCE_TYPES = new Set<SourceType>([
   "rss",
   "atom",
@@ -110,8 +110,10 @@ export class AiContentSelector {
       );
     }
 
-    const cached = await this.readCurrentItemContent(selectedItem.id);
-    throwIfAborted(request.signal);
+    const cached = await this.readCurrentItemContent(
+      selectedItem.id,
+      request.signal,
+    );
     const cachedText = snapshotCachedFullText(cached, selectedItem.id);
     if (cachedText) {
       const cachedSelection = createSelection(
@@ -157,10 +159,15 @@ export class AiContentSelector {
 
   private async readCurrentItemContent(
     itemId: string,
+    signal: AbortSignal | undefined,
   ): Promise<CachedItemContent | null> {
     try {
-      return await this.contentRepository.read(itemId);
-    } catch {
+      return await raceWithTrustedAbort<CachedItemContent | null>(
+        () => this.contentRepository.read(itemId),
+        selectorAbortRaceOptions(signal),
+      );
+    } catch (error) {
+      if (isAbortError(error)) throw error;
       return null;
     }
   }
@@ -170,15 +177,17 @@ export class AiContentSelector {
     signal: AbortSignal | undefined,
   ): Promise<string | undefined> {
     try {
-      const result = await this.fullTextFetcher?.({
-        itemId: item.id,
-        url: item.sourceUrl as string,
-        signal,
-      });
-      throwIfAborted(signal);
+      const result = await raceWithTrustedAbort<FullArticleFetchResult | undefined>(
+        () => this.fullTextFetcher?.({
+          itemId: item.id,
+          url: item.sourceUrl as string,
+          signal,
+        }),
+        selectorAbortRaceOptions(signal),
+      );
       return snapshotFetchedFullText(result);
-    } catch {
-      throwIfAborted(signal);
+    } catch (error) {
+      if (isAbortError(error)) throw error;
       return undefined;
     }
   }
@@ -194,16 +203,12 @@ function createSelection(
   if (!normalized.text) return undefined;
   const effectiveLimit = Math.min(
     validateInputLimit(requestedLimit),
-    MAX_SELECTED_CONTENT_CHARACTERS,
+    MAX_AI_SELECTED_CONTENT_CHARACTERS,
   );
   let limited = limitAiContent(normalized.text, effectiveLimit);
 
   if (normalized.sourceWasBounded && !limited.truncated) {
-    limited = {
-      content: limited.content,
-      characterCount: limited.characterCount,
-      truncated: true,
-    };
+    limited = markAiContentTruncated(normalized.text, effectiveLimit);
   }
 
   return {
@@ -231,21 +236,326 @@ function createRequiredSelection(
 }
 
 function normalizeSourceContent(rawContent: string): NormalizedSourceContent {
-  const executableContentRemoved = rawContent
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, " ")
-    .replace(/<(script|style)\b[^>]*>[\s\S]*$/giu, " ");
-  const rawLimited = limitAiContent(
-    executableContentRemoved,
-    MAX_SOURCE_HTML_CHARACTERS,
-  );
-  const text = htmlToReadableText(rawLimited.content)
+  const scanned = scanVisibleHtml(rawContent);
+  const text = decodeBasicHtmlEntities(scanned.text)
     .replace(/\u00a0/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();
   return {
     text,
-    sourceWasBounded: rawLimited.truncated,
+    sourceWasBounded:
+      scanned.visibleTextWasBounded || rawContent.length > SOURCE_RAW_SOFT_LIMIT,
   };
+}
+
+interface VisibleHtmlScan {
+  text: string;
+  visibleTextWasBounded: boolean;
+}
+
+interface ParsedHtmlTag {
+  end: number;
+  name: string;
+  closing: boolean;
+  complete: boolean;
+}
+
+/** Single-pass HTML scan with bounded visible-text memory and a real tail ring. */
+function scanVisibleHtml(input: string): VisibleHtmlScan {
+  const collector = new BoundedVisibleTextCollector(
+    MAX_AI_SELECTED_CONTENT_CHARACTERS,
+  );
+  let index = 0;
+  let blockedTag: "script" | "style" | undefined;
+
+  while (index < input.length) {
+    if (blockedTag) {
+      const opening = input.indexOf("<", index);
+      if (opening === -1) break;
+      const tag = parseHtmlTag(input, opening);
+      if (tag?.closing && tag.name === blockedTag) {
+        blockedTag = undefined;
+        collector.append(" ");
+      }
+      index = tag?.end ?? opening + 1;
+      continue;
+    }
+
+    const opening = input.indexOf("<", index);
+    if (opening === -1) {
+      collector.appendRange(input, index, input.length);
+      break;
+    }
+    collector.appendRange(input, index, opening);
+
+    if (input.startsWith("<!--", opening)) {
+      const closing = input.indexOf("-->", opening + 4);
+      if (closing === -1) break;
+      collector.append(" ");
+      index = closing + 3;
+      continue;
+    }
+
+    const tag = parseHtmlTag(input, opening);
+    if (!tag) {
+      collector.append("<");
+      index = opening + 1;
+      continue;
+    }
+    if (!tag.complete) {
+      collector.appendRange(input, opening, input.length);
+      break;
+    }
+    collector.append(" ");
+    if (
+      !tag.closing &&
+      (tag.name === "script" || tag.name === "style")
+    ) {
+      blockedTag = tag.name;
+    }
+    index = tag.end;
+  }
+
+  return collector.finish();
+}
+
+function parseHtmlTag(input: string, start: number): ParsedHtmlTag | undefined {
+  let cursor = start + 1;
+  let closing = false;
+  if (input[cursor] === "/") {
+    closing = true;
+    cursor += 1;
+  }
+  if (cursor >= input.length || isHtmlWhitespace(input.charCodeAt(cursor))) {
+    return undefined;
+  }
+
+  const nameStart = cursor;
+  const declaration = input[cursor] === "!" || input[cursor] === "?";
+  if (!declaration && !isAsciiLetterCode(input.charCodeAt(cursor))) {
+    return undefined;
+  }
+  while (cursor < input.length && isAsciiTagNameCode(input.charCodeAt(cursor))) {
+    cursor += 1;
+  }
+  const hasName = cursor > nameStart;
+  const name = hasName && cursor - nameStart <= 32
+    ? input.slice(nameStart, cursor).toLowerCase()
+    : hasName ? "other" : "";
+  if (!hasName && input[cursor] !== "!" && input[cursor] !== "?") {
+    return undefined;
+  }
+
+  let quote: "\"" | "'" | undefined;
+  for (; cursor < input.length; cursor += 1) {
+    const character = input[cursor];
+    if (quote) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "\"" || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === ">") {
+      return {
+        end: cursor + 1,
+        name,
+        closing,
+        complete: true,
+      };
+    }
+  }
+  return {
+    end: input.length,
+    name,
+    closing,
+    complete: false,
+  };
+}
+
+function isAsciiLetterCode(code: number): boolean {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isAsciiTagNameCode(code: number): boolean {
+  return (
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    (code >= 48 && code <= 57) ||
+    code === 45 ||
+    code === 58
+  );
+}
+
+function isHtmlWhitespace(code: number): boolean {
+  return code === 9 || code === 10 || code === 12 || code === 13 || code === 32;
+}
+
+class BoundedVisibleTextCollector {
+  private readonly leadingLimit: number;
+  private readonly trailingLimit: number;
+  private readonly initial: Uint16Array;
+  private initialLength = 0;
+  private bounded = false;
+  private leading = "";
+  private readonly trailing: Uint16Array;
+  private trailingLength = 0;
+  private trailingWriteIndex = 0;
+
+  constructor(private readonly limit: number) {
+    this.leadingLimit = Math.floor(limit / 2);
+    this.trailingLimit = limit - this.leadingLimit;
+    this.initial = new Uint16Array(limit);
+    this.trailing = new Uint16Array(this.trailingLimit);
+  }
+
+  append(value: string): void {
+    this.appendRange(value, 0, value.length);
+  }
+
+  appendRange(source: string, start: number, end: number): void {
+    const length = end - start;
+    if (length <= 0) return;
+    if (!this.bounded && this.initialLength + length <= this.limit) {
+      for (let index = start; index < end; index += 1) {
+        this.initial[this.initialLength] = source.charCodeAt(index);
+        this.initialLength += 1;
+      }
+      return;
+    }
+
+    if (!this.bounded) {
+      this.bounded = true;
+      const retainedInitial = Math.min(
+        this.initialLength,
+        this.leadingLimit,
+      );
+      this.leading = codeUnitsToString(
+        this.initial.subarray(0, retainedInitial),
+      );
+      const leadingRemaining = this.leadingLimit - this.leading.length;
+      if (leadingRemaining > 0) {
+        this.leading += source.slice(start, start + leadingRemaining);
+      }
+      this.writeTrailingCodes(this.initial, 0, this.initialLength);
+      this.writeTrailingRange(source, start, end);
+      return;
+    }
+    this.writeTrailingRange(source, start, end);
+  }
+
+  finish(): VisibleHtmlScan {
+    if (!this.bounded) {
+      return {
+        text: codeUnitsToString(this.initial.subarray(0, this.initialLength)),
+        visibleTextWasBounded: false,
+      };
+    }
+    return {
+      text: `${this.leading}${this.readTrailing()}`,
+      visibleTextWasBounded: true,
+    };
+  }
+
+  private writeTrailingRange(source: string, rangeStart: number, end: number): void {
+    let start = rangeStart;
+    if (end - start >= this.trailingLimit) {
+      start = end - this.trailingLimit;
+      this.trailingLength = 0;
+      this.trailingWriteIndex = 0;
+    }
+    for (let index = start; index < end; index += 1) {
+      this.trailing[this.trailingWriteIndex] = source.charCodeAt(index);
+      this.trailingWriteIndex =
+        (this.trailingWriteIndex + 1) % this.trailingLimit;
+      this.trailingLength = Math.min(
+        this.trailingLength + 1,
+        this.trailingLimit,
+      );
+    }
+  }
+
+  private writeTrailingCodes(
+    source: Uint16Array,
+    rangeStart: number,
+    end: number,
+  ): void {
+    let start = rangeStart;
+    if (end - start >= this.trailingLimit) {
+      start = end - this.trailingLimit;
+      this.trailingLength = 0;
+      this.trailingWriteIndex = 0;
+    }
+    for (let index = start; index < end; index += 1) {
+      this.trailing[this.trailingWriteIndex] = source[index];
+      this.trailingWriteIndex =
+        (this.trailingWriteIndex + 1) % this.trailingLimit;
+      this.trailingLength = Math.min(
+        this.trailingLength + 1,
+        this.trailingLimit,
+      );
+    }
+  }
+
+  private readTrailing(): string {
+    const start =
+      (this.trailingWriteIndex - this.trailingLength + this.trailingLimit) %
+      this.trailingLimit;
+    const codes = new Uint16Array(this.trailingLength);
+    for (let index = 0; index < this.trailingLength; index += 1) {
+      codes[index] = this.trailing[(start + index) % this.trailingLimit];
+    }
+    return codeUnitsToString(codes);
+  }
+}
+
+function codeUnitsToString(codes: Uint16Array): string {
+  const chunks: string[] = [];
+  const size = 8_192;
+  for (let offset = 0; offset < codes.length; offset += size) {
+    const numbers: number[] = [];
+    const end = Math.min(offset + size, codes.length);
+    for (let index = offset; index < end; index += 1) {
+      numbers.push(codes[index]);
+    }
+    chunks.push(String.fromCharCode(...numbers));
+  }
+  return chunks.join("");
+}
+
+function decodeBasicHtmlEntities(value: string): string {
+  return value.replace(
+    /&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|amp|lt|gt|quot|apos|nbsp);/giu,
+    (match, token: string) => decodeHtmlEntity(match, token),
+  );
+}
+
+function decodeHtmlEntity(match: string, token: string): string {
+  const normalized = token.toLowerCase();
+  const named: Readonly<Record<string, string>> = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: "\"",
+    apos: "'",
+    nbsp: " ",
+  };
+  if (Object.prototype.hasOwnProperty.call(named, normalized)) {
+    return named[normalized];
+  }
+  const codePoint = normalized.startsWith("#x")
+    ? Number.parseInt(normalized.slice(2), 16)
+    : Number.parseInt(normalized.slice(1), 10);
+  if (
+    !Number.isInteger(codePoint) ||
+    codePoint <= 0 ||
+    codePoint > 0x10ffff ||
+    (codePoint >= 0xd800 && codePoint <= 0xdfff)
+  ) {
+    return match;
+  }
+  return String.fromCodePoint(codePoint);
 }
 
 function joinTitleAndDescription(title: string, excerpt: string | undefined): string {
@@ -269,7 +579,7 @@ function snapshotSelectionRequest(input: SelectAiContentInput): {
     item === null ||
     typeof maxInputCharacters !== "number" ||
     typeof fetchFullText !== "boolean" ||
-    (signal !== undefined && readAbortState(signal) === undefined)
+    (signal !== undefined && readTrustedAbortState(signal) === undefined)
   ) {
     throw new Error("Invalid AI content selection request");
   }
@@ -282,21 +592,29 @@ function snapshotSelectionRequest(input: SelectAiContentInput): {
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal && readAbortState(signal)) {
-    throw new DOMException("AI content selection cancelled", "AbortError");
+  if (signal && readTrustedAbortState(signal)) {
+    throw createSelectionAbortError();
   }
 }
 
-function readAbortState(value: unknown): boolean | undefined {
-  if (!ABORTED_GETTER || typeof value !== "object" || value === null) {
-    return undefined;
-  }
-  try {
-    const aborted: unknown = Reflect.apply(ABORTED_GETTER, value, []);
-    return typeof aborted === "boolean" ? aborted : undefined;
-  } catch {
-    return undefined;
-  }
+function selectorAbortRaceOptions(
+  signal: AbortSignal | undefined,
+): TrustedAbortRaceOptions {
+  return {
+    signal,
+    createAbortError: createSelectionAbortError,
+    createInvalidSignalError: () => new Error(
+      "Invalid AI content selection request",
+    ),
+  };
+}
+
+function createSelectionAbortError(): DOMException {
+  return new DOMException("AI content selection cancelled", "AbortError");
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function snapshotItem(item: CollectedItem): SelectedItemSnapshot {

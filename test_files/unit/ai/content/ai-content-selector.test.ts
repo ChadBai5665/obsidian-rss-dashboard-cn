@@ -1,4 +1,10 @@
+import { getEventListeners } from "node:events";
 import { describe, expect, it, vi } from "vitest";
+import {
+  AI_PROMPT_ENVELOPE_RESERVE_CHARACTERS,
+  MAX_AI_REQUEST_CHARACTERS,
+  MAX_AI_SELECTED_CONTENT_CHARACTERS,
+} from "../../../../src/ai/ai-types";
 import type { CollectedItem } from "../../../../src/collection/collected-item";
 import type { CachedItemContent } from "../../../../src/collection/content-repository";
 import {
@@ -9,6 +15,20 @@ import {
 import { AI_CONTENT_OMISSION_MARKER } from "../../../../src/ai/content/content-size";
 
 const ITEM_ID = "a".repeat(64);
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 function item(overrides: Partial<CollectedItem> = {}): CollectedItem {
   return {
@@ -103,6 +123,39 @@ describe("AiContentSelector", () => {
     expect(result.basis).toBe("feed");
     expect(contentRepository.read).toHaveBeenCalledTimes(1);
     expect(contentRepository.read).toHaveBeenCalledWith(ITEM_ID);
+  });
+
+  it.each([
+    "I <3 Obsidian",
+    "x < y > z",
+    "保留 <not-really-closed ordinary text",
+  ])("preserves non-tag angle-bracket text: %s", async (excerpt) => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+
+    const result = await selector.select({
+      item: item({ excerpt }),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+
+    expect(result.content).toBe(excerpt);
+  });
+
+  it.each([
+    "<script/>SECRET",
+    "<style/>HIDDEN",
+  ])("does not treat a raw-text opening slash as self-closing: %s", async (excerpt) => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+
+    const result = await selector.select({
+      item: item({ excerpt: `可见${excerpt}` }),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+
+    expect(result.content).toBe("可见");
+    expect(result.content).not.toContain("SECRET");
+    expect(result.content).not.toContain("HIDDEN");
   });
 
   it("labels X text as x-post and never fetches the X page", async () => {
@@ -225,6 +278,39 @@ describe("AiContentSelector", () => {
     expect(result.truncated).toBe(true);
   });
 
+  it("reserves provider request capacity for the prompt envelope", async () => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+
+    const result = await selector.select({
+      item: item({ excerpt: "甲".repeat(MAX_AI_REQUEST_CHARACTERS) }),
+      maxInputCharacters: MAX_AI_REQUEST_CHARACTERS,
+      fetchFullText: false,
+    });
+
+    expect(result.characterCount).toBe(MAX_AI_SELECTED_CONTENT_CHARACTERS);
+    expect(result.content).toContain(AI_CONTENT_OMISSION_MARKER);
+    expect(result.truncated).toBe(true);
+    expect(MAX_AI_REQUEST_CHARACTERS - result.characterCount).toBeGreaterThanOrEqual(
+      AI_PROMPT_ENVELOPE_RESERVE_CHARACTERS,
+    );
+  });
+
+  it("retains the real visible beginning and end across a very large middle", async () => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+    const result = await selector.select({
+      item: item({
+        excerpt: `UNIQUE_HEAD ${"中".repeat(2_000_000)} UNIQUE_END`,
+      }),
+      maxInputCharacters: 200,
+      fetchFullText: false,
+    });
+
+    expect(result.content.startsWith("UNIQUE_HEAD")).toBe(true);
+    expect(result.content.endsWith("UNIQUE_END")).toBe(true);
+    expect(result.content).toContain(AI_CONTENT_OMISSION_MARKER);
+    expect(result.truncated).toBe(true);
+  });
+
   it("strips script content before bounding hostile oversized HTML", async () => {
     const selector = new AiContentSelector({ contentRepository: repository(null) });
     const oversized = `${"正文".repeat(300_000)}<script>${"SECRET".repeat(200_000)}</script>`;
@@ -238,6 +324,43 @@ describe("AiContentSelector", () => {
     expect(result.content).toContain(AI_CONTENT_OMISSION_MARKER);
     expect(result.content).not.toContain("SECRET");
     expect(result.content.endsWith("正文正文")).toBe(true);
+  });
+
+  it("uses a bounded deterministic scan for repeated unclosed script and style tags", async () => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+    const hostile = `可见开头${"<script>secret".repeat(80_000)}${"<style>hidden".repeat(80_000)}`;
+    const select = () => selector.select({
+      item: item({ excerpt: hostile }),
+      maxInputCharacters: 200,
+      fetchFullText: false,
+    });
+
+    const first = await select();
+    const second = await select();
+
+    expect(second).toEqual(first);
+    expect(first.content.startsWith("可见开头")).toBe(true);
+    expect(first.content).not.toContain("secret");
+    expect(first.content).not.toContain("hidden");
+    expect(first.content).toContain(AI_CONTENT_OMISSION_MARKER);
+    expect(first.truncated).toBe(true);
+  });
+
+  it.each([
+    ["comment", `前文<!--${"注释".repeat(550_000)}-->尾文`],
+    ["attribute", `前文<div data-hidden="${"属性".repeat(550_000)}">尾文</div>`],
+  ])("adds the visible omission marker after truncating a long HTML %s", async (_case, excerpt) => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+
+    const result = await selector.select({
+      item: item({ excerpt }),
+      maxInputCharacters: 200,
+      fetchFullText: false,
+    });
+
+    expect(result.truncated).toBe(true);
+    expect(result.content).toContain(AI_CONTENT_OMISSION_MARKER);
+    expect(result.content.startsWith("前文")).toBe(true);
   });
 
   it("falls back to the feed item when cached or fetched HTML has no readable text", async () => {
@@ -366,6 +489,83 @@ describe("AiContentSelector", () => {
       }),
     ).rejects.toMatchObject({ name: "AbortError" });
     expect(fullTextFetcher).not.toHaveBeenCalled();
+  });
+
+  it("aborts a never-settling repository read and absorbs its late rejection", async () => {
+    const controller = new AbortController();
+    const pendingRead = deferred<CachedItemContent | null>();
+    const baselineListeners = getEventListeners(controller.signal, "abort").length;
+    const selector = new AiContentSelector({
+      contentRepository: { read: () => pendingRead.promise },
+    });
+
+    const pending = selector.select({
+      item: item(),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => {
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(
+        baselineListeners + 1,
+      );
+    });
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(
+      baselineListeners,
+    );
+    pendingRead.reject(new Error("late repository failure"));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it("aborts a never-settling full-text fetch, absorbs late completion, and cleans listeners", async () => {
+    const controller = new AbortController();
+    const pendingFetch = deferred<Awaited<ReturnType<AiFullTextFetcher>>>();
+    const baselineListeners = getEventListeners(controller.signal, "abort").length;
+    const selector = new AiContentSelector({
+      contentRepository: repository(null),
+      fullTextFetcher: () => pendingFetch.promise,
+    });
+
+    const pending = selector.select({
+      item: item(),
+      maxInputCharacters: 1_000,
+      fetchFullText: true,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => {
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(
+        baselineListeners + 1,
+      );
+    });
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(
+      baselineListeners,
+    );
+    pendingFetch.resolve({ content: "<p>迟到正文</p>", failureType: "none" });
+    await Promise.resolve();
+  });
+
+  it("removes trusted abort listeners after a normal selection", async () => {
+    const controller = new AbortController();
+    const baselineListeners = getEventListeners(controller.signal, "abort").length;
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+
+    await selector.select({
+      item: item(),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+      signal: controller.signal,
+    });
+
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(
+      baselineListeners,
+    );
   });
 
   it("does not invoke item or fetch-result accessors", async () => {

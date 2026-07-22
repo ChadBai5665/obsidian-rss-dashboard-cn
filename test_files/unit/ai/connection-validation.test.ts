@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { MAX_AI_SELECTED_CONTENT_CHARACTERS } from "../../../src/ai/ai-types";
+
 import {
   normalizeAiBaseUrl,
   normalizeAiConnection,
@@ -128,6 +130,17 @@ describe("AI connection validation", () => {
       connections: [connection({ id: "legacy-connection" })],
       defaultConnectionId: "legacy-connection",
     })).toEqual({ connections: [] });
+  });
+
+  it("caps configured source content below the provider request envelope", () => {
+    expect(normalizeAiConnection(connection({
+      maxInputCharacters: MAX_AI_SELECTED_CONTENT_CHARACTERS,
+    }))).toMatchObject({
+      maxInputCharacters: MAX_AI_SELECTED_CONTENT_CHARACTERS,
+    });
+    expect(normalizeAiConnection(connection({
+      maxInputCharacters: MAX_AI_SELECTED_CONTENT_CHARACTERS + 1,
+    }))).toBeUndefined();
   });
 
   it("rejects unknown keys, inherited fields, getters, and sparse connection arrays", () => {

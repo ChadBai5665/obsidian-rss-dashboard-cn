@@ -1,4 +1,5 @@
 import {
+  MAX_AI_SELECTED_CONTENT_CHARACTERS,
   MAX_AI_TIMEOUT_MS,
   type AiConnection,
   type AiProviderKind,
@@ -95,6 +96,7 @@ export function normalizeAiConnection(
     !positiveSafeInteger(timeoutMs) ||
     timeoutMs > MAX_AI_TIMEOUT_MS ||
     !positiveSafeInteger(maxInputCharacters) ||
+    maxInputCharacters > MAX_AI_SELECTED_CONTENT_CHARACTERS ||
     typeof enabled !== "boolean"
   ) {
     return undefined;
