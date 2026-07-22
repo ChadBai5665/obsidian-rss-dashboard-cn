@@ -393,6 +393,22 @@ describe("AiContentSelector", () => {
     expect(result.truncated).toBe(true);
   });
 
+  it("rejects a 14-character limit and accepts the shared 15-character minimum", async () => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+
+    await expect(selector.select({
+      item: item({ excerpt: "abcdefghijklmnopqrstuvwxyz" }),
+      maxInputCharacters: 14,
+      fetchFullText: false,
+    })).rejects.toThrow("AI input character limit");
+
+    await expect(selector.select({
+      item: item({ excerpt: "abcdefghijklmnopqrstuvwxyz" }),
+      maxInputCharacters: 15,
+      fetchFullText: false,
+    })).resolves.toMatchObject({ characterCount: 15, truncated: true });
+  });
+
   it("reserves provider request capacity for the prompt envelope", async () => {
     const selector = new AiContentSelector({ contentRepository: repository(null) });
 

@@ -1,10 +1,10 @@
 import {
   MAX_AI_REQUEST_CHARACTERS,
   MAX_AI_SELECTED_CONTENT_CHARACTERS,
+  MIN_AI_INPUT_CHARACTERS,
 } from "../ai-types";
 import type { SelectedAiContent } from "../content/ai-content-selector";
 import {
-  AI_CONTENT_OMISSION_MARKER,
   limitAiContent,
   type LimitedAiContent,
 } from "../content/content-size";
@@ -24,7 +24,6 @@ const CONTENT_BASES = new Set<ContentBasis>([
   "x-post",
   "linked-page",
 ]);
-const MINIMUM_CONTENT_LIMIT = AI_CONTENT_OMISSION_MARKER.length + 2;
 const MAX_TITLE_CHARACTERS = 20_000;
 const MAX_SOURCE_NAME_CHARACTERS = 20_000;
 const MAX_SOURCE_URL_CHARACTERS = 8_192;
@@ -106,7 +105,7 @@ function fitSerializedContent(
   system: string,
   highLimit: number,
 ): { content: LimitedAiContent; user: string } {
-  let low = MINIMUM_CONTENT_LIMIT;
+  let low = MIN_AI_INPUT_CHARACTERS;
   let high = highLimit;
   let best: { content: LimitedAiContent; user: string } | undefined;
 
@@ -183,7 +182,7 @@ function snapshotBuildRequest(input: BuildAiPromptInput): BuildRequestSnapshot {
     !selectedContent ||
     typeof maxContentCharacters !== "number" ||
     !Number.isSafeInteger(maxContentCharacters) ||
-    maxContentCharacters < MINIMUM_CONTENT_LIMIT ||
+    maxContentCharacters < MIN_AI_INPUT_CHARACTERS ||
     maxContentCharacters > MAX_AI_SELECTED_CONTENT_CHARACTERS
   ) {
     throw new Error("Invalid AI prompt request");

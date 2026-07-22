@@ -143,6 +143,18 @@ describe("AI connection validation", () => {
     }))).toBeUndefined();
   });
 
+  it("rejects 14 input characters consistently and accepts the 15-character minimum", () => {
+    expect(normalizeAiConnection(connection({
+      maxInputCharacters: 14,
+    }))).toBeUndefined();
+    expect(normalizeAiSettings({
+      connections: [connection({ maxInputCharacters: 14 })],
+    })).toEqual({ connections: [] });
+    expect(normalizeAiConnection(connection({
+      maxInputCharacters: 15,
+    }))).toMatchObject({ maxInputCharacters: 15 });
+  });
+
   it("rejects unknown keys, inherited fields, getters, and sparse connection arrays", () => {
     expect(
       normalizeAiConnection(connection({ apiKey: "must-not-survive" })),

@@ -1,3 +1,5 @@
+import { MIN_AI_INPUT_CHARACTERS } from "../ai-types";
+
 export const AI_CONTENT_OMISSION_MARKER = "[中间内容因输入上限省略]";
 
 export interface LimitedAiContent {
@@ -70,11 +72,10 @@ export function markAiContentTruncated(
 }
 
 function validateLimit(content: string, maxInputCharacters: number): void {
-  const minimumLimit = AI_CONTENT_OMISSION_MARKER.length + 2;
   if (
     typeof content !== "string" ||
     !Number.isSafeInteger(maxInputCharacters) ||
-    maxInputCharacters < minimumLimit
+    maxInputCharacters < MIN_AI_INPUT_CHARACTERS
   ) {
     throw new Error("Invalid AI input character limit");
   }

@@ -1,14 +1,16 @@
 import type { CollectedItem, ContentBasis, SourceType } from "../../collection/collected-item";
 import type { CachedItemContent } from "../../collection/content-repository";
 import type { FullArticleFetchResult } from "../../utils/fetch-helpers";
-import { MAX_AI_SELECTED_CONTENT_CHARACTERS } from "../ai-types";
+import {
+  MAX_AI_SELECTED_CONTENT_CHARACTERS,
+  MIN_AI_INPUT_CHARACTERS,
+} from "../ai-types";
 import {
   raceWithTrustedAbort,
   readTrustedAbortState,
   type TrustedAbortRaceOptions,
 } from "../trusted-abort";
 import {
-  AI_CONTENT_OMISSION_MARKER,
   limitAiContent,
   markAiContentTruncated,
 } from "./content-size";
@@ -803,7 +805,7 @@ function snapshotFetchedFullText(
 function validateInputLimit(value: number): number {
   if (
     !Number.isSafeInteger(value) ||
-    value < AI_CONTENT_OMISSION_MARKER.length + 2
+    value < MIN_AI_INPUT_CHARACTERS
   ) {
     throw new Error("Invalid AI input character limit");
   }

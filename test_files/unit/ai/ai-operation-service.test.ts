@@ -207,6 +207,35 @@ describe("manual AI operation service", () => {
     expect(missing.generate).not.toHaveBeenCalled();
   });
 
+  it("fails a 14-character connection before factory, secret, or selection and accepts 15", async () => {
+    const invalid = harness({
+      aiSettings: { connections: [connection({ maxInputCharacters: 14 })] },
+    });
+    const invalidError = await caught(invalid.service.run(runInput()));
+
+    expect(invalidError.code).toBe("connection-not-found");
+    expect(invalid.providerFactory).not.toHaveBeenCalled();
+    expect(invalid.get).not.toHaveBeenCalled();
+    expect(invalid.select).not.toHaveBeenCalled();
+
+    const valid = harness({
+      aiSettings: { connections: [connection({ maxInputCharacters: 15 })] },
+      selectedContent: selected({
+        content: "abcdefghijklmnopqrstuvwxyz",
+        characterCount: 26,
+      }),
+    });
+    await expect(valid.service.run(runInput())).resolves.toMatchObject({
+      inputCharacterCount: 15,
+      inputTruncated: true,
+    });
+    expect(valid.providerFactory).toHaveBeenCalledTimes(1);
+    expect(valid.get).toHaveBeenCalledTimes(1);
+    expect(valid.select).toHaveBeenCalledWith(expect.objectContaining({
+      maxInputCharacters: 15,
+    }));
+  });
+
   it.each([
     "invalid-key",
     "insufficient-balance",

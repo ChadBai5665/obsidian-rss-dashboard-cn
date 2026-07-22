@@ -204,4 +204,18 @@ describe("AI prompt builder", () => {
     });
     expect((JSON.parse(prompt.user) as SerializedAiPromptData).sourceUrl).toBeNull();
   });
+
+  it("rejects a 14-character limit and accepts the shared 15-character minimum", () => {
+    expect(() => buildAiPrompt({
+      operation: "summary",
+      selectedContent: selected({ content: "abcdefghijklmnopqrstuvwxyz" }),
+      maxContentCharacters: 14,
+    })).toThrow("Invalid AI prompt request");
+
+    expect(buildAiPrompt({
+      operation: "summary",
+      selectedContent: selected({ content: "abcdefghijklmnopqrstuvwxyz" }),
+      maxContentCharacters: 15,
+    })).toMatchObject({ inputCharacterCount: 15, inputTruncated: true });
+  });
 });

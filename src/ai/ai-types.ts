@@ -29,6 +29,8 @@ export interface AiSettings {
 }
 
 export const MAX_AI_TIMEOUT_MS = 600_000;
+/** Omission marker plus at least one retained character from each end. */
+export const MIN_AI_INPUT_CHARACTERS = 15;
 /** Provider boundary for the complete system + user request text. */
 export const MAX_AI_REQUEST_CHARACTERS = 1_000_000;
 /** Reserved for prompts, source metadata, delimiters, and later envelope growth. */

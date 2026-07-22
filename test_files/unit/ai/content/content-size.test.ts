@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MIN_AI_INPUT_CHARACTERS } from "../../../../src/ai/ai-types";
 import {
   AI_CONTENT_OMISSION_MARKER,
   limitAiContent,
@@ -34,9 +35,9 @@ describe("limitAiContent", () => {
   });
 
   it("rejects unsafe or impossible input limits", () => {
-    const minimum = AI_CONTENT_OMISSION_MARKER.length + 2;
+    expect(MIN_AI_INPUT_CHARACTERS).toBe(AI_CONTENT_OMISSION_MARKER.length + 2);
 
-    expect(() => limitAiContent("long enough", minimum - 1)).toThrow(
+    expect(() => limitAiContent("long enough", MIN_AI_INPUT_CHARACTERS - 1)).toThrow(
       "AI input character limit",
     );
     expect(() => limitAiContent("long enough", Number.MAX_SAFE_INTEGER + 1)).toThrow(
