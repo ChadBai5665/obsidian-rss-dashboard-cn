@@ -407,6 +407,38 @@ describe("renderAiSettingsTab", () => {
     ]);
   });
 
+  it("shows a metadata rollback failure in the current lifecycle renderer", async () => {
+    const test = harness({
+      saveSettings: vi.fn(async () => { throw new Error("save failed"); }),
+    });
+    const dependencies = {
+      secretStore: test.secretStore,
+      providerFactory: test.providerFactory,
+      confirmPaidRequest: test.confirmPaidRequest,
+      confirmDeleteKey: test.confirmDeleteKey,
+      confirmDeleteConnection: test.confirmDeleteConnection,
+    };
+    test.containerEl.addEventListener("rss-settings-refresh", () => {
+      test.containerEl.dispatchEvent(new CustomEvent("rss-settings-dispose"));
+      test.containerEl.empty();
+      renderAiSettingsTab(test.containerEl, test.plugin, dependencies);
+    });
+
+    button(row(test.containerEl, "Claude 研究"), "上移").click();
+    await flushPromises();
+    await flushPromises();
+
+    expect(test.plugin.settings.ai.connections.map(({ id }) => id)).toEqual([
+      FIRST_ID,
+      SECOND_ID,
+    ]);
+    expect(connectionNames(test.containerEl)).toEqual([
+      "Kimi 工作",
+      "Claude 研究",
+    ]);
+    expect(test.containerEl.textContent).toContain("无法保存连接设置");
+  });
+
   it("keeps delete-key and delete-connection as separate confirmed actions", async () => {
     const declined = harness({
       confirmDeleteKey: vi.fn(async () => false),
@@ -439,6 +471,24 @@ describe("renderAiSettingsTab", () => {
     const metadataFailure = harness({
       saveSettings: vi.fn(async () => { throw new Error("metadata failed"); }),
     });
+    const metadataFailureDependencies = {
+      secretStore: metadataFailure.secretStore,
+      providerFactory: metadataFailure.providerFactory,
+      confirmPaidRequest: metadataFailure.confirmPaidRequest,
+      confirmDeleteKey: metadataFailure.confirmDeleteKey,
+      confirmDeleteConnection: metadataFailure.confirmDeleteConnection,
+    };
+    metadataFailure.containerEl.addEventListener("rss-settings-refresh", () => {
+      metadataFailure.containerEl.dispatchEvent(
+        new CustomEvent("rss-settings-dispose"),
+      );
+      metadataFailure.containerEl.empty();
+      renderAiSettingsTab(
+        metadataFailure.containerEl,
+        metadataFailure.plugin,
+        metadataFailureDependencies,
+      );
+    });
     button(row(metadataFailure.containerEl, "Kimi 工作"), "删除连接").click();
     await flushPromises();
     await flushPromises();
@@ -448,6 +498,9 @@ describe("renderAiSettingsTab", () => {
     expect(metadataFailure.secretStore.delete).toHaveBeenCalledWith(FIRST_ID);
     expect(metadataFailure.secretStore.set).toHaveBeenCalledWith(FIRST_ID, API_KEY);
     expect(metadataFailure.plugin.saveSettings).toHaveBeenCalledTimes(1);
+    expect(metadataFailure.containerEl.textContent).toContain(
+      "删除未完成，连接已保留",
+    );
 
     document.body.empty();
     let storedKey: string | undefined = API_KEY;
@@ -482,6 +535,18 @@ describe("renderAiSettingsTab", () => {
         throw new Error(API_KEY);
       }),
       secretSet: vi.fn(async () => { throw new Error(API_KEY); }),
+    });
+    const dependencies = {
+      secretStore: test.secretStore,
+      providerFactory: test.providerFactory,
+      confirmPaidRequest: test.confirmPaidRequest,
+      confirmDeleteKey: test.confirmDeleteKey,
+      confirmDeleteConnection: test.confirmDeleteConnection,
+    };
+    test.containerEl.addEventListener("rss-settings-refresh", () => {
+      test.containerEl.dispatchEvent(new CustomEvent("rss-settings-dispose"));
+      test.containerEl.empty();
+      renderAiSettingsTab(test.containerEl, test.plugin, dependencies);
     });
     button(row(test.containerEl, "Kimi 工作"), "删除连接").click();
     await flushPromises();

@@ -23,6 +23,7 @@ const TEST_OUTPUT_TOKENS = 8;
 const RENDER_EPOCHS = new WeakMap<HTMLElement, number>();
 const AI_OPERATION_QUEUES = new WeakMap<object, Promise<void>>();
 const AI_RENDER_SUBSCRIBERS = new WeakMap<object, Set<() => void>>();
+const AI_FLASH_MESSAGES = new WeakMap<object, TranslationKey>();
 const AI_ACTIVE_TESTS = new WeakMap<object, ActiveAiTest>();
 const AI_TEST_GATE_SUBSCRIBERS = new WeakMap<
   object,
@@ -139,6 +140,16 @@ export function renderAiSettingsTab(
     .setName(t("settings.ai.heading"))
     .setDesc(t("settings.ai.description"))
     .setHeading();
+  const flashMessage = AI_FLASH_MESSAGES.get(plugin);
+  if (flashMessage) {
+    AI_FLASH_MESSAGES.delete(plugin);
+    const flashEl = containerEl.createEl("p", {
+      text: t(flashMessage),
+      cls: "rss-dashboard-validation-error",
+    });
+    flashEl.setAttribute("role", "alert");
+    flashEl.setAttribute("aria-live", "assertive");
+  }
   containerEl.createEl("p", {
     text: t("settings.ai.generalGuidance"),
     cls: "rss-dashboard-ai-guidance",
@@ -501,7 +512,10 @@ function runMetadataMutation(
   void mutateAiSettings(input.plugin, next).then(
     () => {},
     () => {
-      if (input.isCurrent()) statusEl.setText(input.t("settings.ai.metadataSaveFailed"));
+      if (input.isCurrent()) {
+        statusEl.setText(input.t("settings.ai.metadataSaveFailed"));
+        clearAiSettingsFlash(input.plugin, "settings.ai.metadataSaveFailed");
+      }
     },
   ).finally(() => {
     if (input.isCurrent()) input.setMutationBusy(false);
@@ -588,18 +602,28 @@ function runDeleteConnection(
           keyBackup = undefined;
         }
       });
-      notifyAiSettingsRenderers(input.plugin);
-      if (!input.isCurrent()) return;
       if (result === "deleted") {
+        notifyAiSettingsRenderers(input.plugin);
         return;
-      } else {
-        statusEl.setText(input.t(result === "retained"
-          ? "settings.ai.connectionDeleteRetained"
-          : "settings.ai.connectionDeleteKeyRestoreFailed"));
       }
+      const message = result === "retained"
+        ? "settings.ai.connectionDeleteRetained" as const
+        : "settings.ai.connectionDeleteKeyRestoreFailed" as const;
+      refreshAiSettingsWithFlash(input.plugin, message);
+      if (!input.isCurrent()) return;
+      statusEl.setText(input.t(message));
+      clearAiSettingsFlash(input.plugin, message);
     } catch {
+      refreshAiSettingsWithFlash(
+        input.plugin,
+        "settings.ai.connectionDeleteRetained",
+      );
       if (input.isCurrent()) {
         statusEl.setText(input.t("settings.ai.connectionDeleteRetained"));
+        clearAiSettingsFlash(
+          input.plugin,
+          "settings.ai.connectionDeleteRetained",
+        );
       }
     } finally {
       input.actionGates.delete(gate);
@@ -630,6 +654,9 @@ async function mutateAiSettings(
       plugin,
       () => mutateAiSettingsUnlocked(plugin, next),
     );
+  } catch (error) {
+    AI_FLASH_MESSAGES.set(plugin, "settings.ai.metadataSaveFailed");
+    throw error;
   } finally {
     notifyAiSettingsRenderers(plugin);
   }
@@ -674,6 +701,23 @@ function notifyAiSettingsRenderers(plugin: AiSettingsPlugin): void {
   const subscribers = AI_RENDER_SUBSCRIBERS.get(plugin);
   if (!subscribers) return;
   for (const subscriber of [...subscribers]) subscriber();
+}
+
+function refreshAiSettingsWithFlash(
+  plugin: AiSettingsPlugin,
+  message: TranslationKey,
+): void {
+  AI_FLASH_MESSAGES.set(plugin, message);
+  notifyAiSettingsRenderers(plugin);
+}
+
+function clearAiSettingsFlash(
+  plugin: AiSettingsPlugin,
+  message: TranslationKey,
+): void {
+  if (AI_FLASH_MESSAGES.get(plugin) === message) {
+    AI_FLASH_MESSAGES.delete(plugin);
+  }
 }
 
 function setActiveAiTest(
