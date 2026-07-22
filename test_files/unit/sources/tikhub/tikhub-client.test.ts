@@ -700,7 +700,7 @@ describe("TikHub settings metadata", () => {
     expect(loadAndNormalizeSettings(first).tikhub).toEqual(first.tikhub);
   });
 
-  it("removes top-level and nested TikHub secret aliases without touching AI settings", () => {
+  it("removes scoped TikHub and AI secret aliases without touching unrelated top-level settings", () => {
     const raw = {
       tikhubApiKey: TIKHUB_SECRET_SENTINEL,
       TikHubApiKey: TIKHUB_SECRET_SENTINEL,
@@ -734,10 +734,7 @@ describe("TikHub settings metadata", () => {
     expect(normalized.tikhubToken).toBeUndefined();
     expect(normalized.apiKey).toBe("unrelated-top-level-key");
     expect(normalized.token).toBe("unrelated-top-level-token");
-    expect(normalized.ai).toEqual({
-      apiKey: "ai-key-preserved",
-      accessToken: "ai-token-preserved",
-    });
+    expect(normalized.ai).toEqual({ connections: [] });
     expect(JSON.stringify(normalized)).not.toContain(TIKHUB_SECRET_SENTINEL);
   });
 

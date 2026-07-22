@@ -1,5 +1,6 @@
 import type { Locale, TranslationKey } from "../i18n/types";
 import type { SourceConfig, SourceKind } from "../sources/source-config";
+import type { AiSettings } from "../ai/ai-types";
 
 export interface FeedItem {
   /** Stable collection identity once the item has entered the collection layer. */
@@ -462,6 +463,7 @@ export interface RssDashboardSettings {
   startupRefreshDelaySeconds: number;
   collection: CollectionSettings;
   tikhub: TikHubSettings;
+  ai: AiSettings;
   maxItems: number;
   defaultAutoDeleteDuration: number;
   viewStyle: "list" | "card" | "feed";
@@ -630,6 +632,9 @@ export const DEFAULT_SETTINGS: RssDashboardSettings = {
     timeoutMs: 20_000,
     maxRequestsPerRun: 40,
     maxRequestsPerDay: 100,
+  },
+  ai: {
+    connections: [],
   },
   maxItems: 50,
   defaultAutoDeleteDuration: 30,

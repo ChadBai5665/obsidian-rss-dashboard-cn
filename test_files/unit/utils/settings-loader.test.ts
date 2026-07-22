@@ -123,7 +123,139 @@ describe("settings-loader", () => {
           dailyIndexFolder: "信息收集/每日采集",
           savedNoteFolder: "信息收集/已保存",
         },
+        ai: { connections: [] },
       });
+    });
+
+    it("migrates AI metadata additively without inventing a connection or key", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const feed = createFeed({ title: "Existing" });
+      const raw = {
+        locale: "en",
+        feeds: [feed],
+        collection: { ...DEFAULT_SETTINGS.collection },
+        tikhub: { ...DEFAULT_SETTINGS.tikhub, connectionId: "" },
+        ai: {
+          API_Key: "legacy-ai-secret",
+          token: "legacy-ai-token",
+          connections: [],
+        },
+        aiApiKey: "legacy-top-level-ai-secret",
+        unrelatedToken: "keep-unrelated-context",
+      } as unknown as Partial<RssDashboardSettings>;
+
+      const first = loadAndNormalizeSettings(raw);
+      const second = loadAndNormalizeSettings(first);
+      const firstRecord = first as unknown as Record<string, unknown>;
+
+      expect(first.ai).toEqual({ connections: [] });
+      expect(second).toEqual(first);
+      expect(first.locale).toBe("en");
+      expect(first.feeds).toHaveLength(1);
+      expect(first.collection).toEqual(DEFAULT_SETTINGS.collection);
+      expect(first.tikhub).toEqual(DEFAULT_SETTINGS.tikhub);
+      expect(firstRecord.aiApiKey).toBeUndefined();
+      expect(firstRecord.unrelatedToken).toBe("keep-unrelated-context");
+      expect(JSON.stringify(first.ai)).not.toMatch(/api.?key|token|secret/iu);
+    });
+
+    it("removes key aliases only from AI connection context", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const feedWithUnrelatedField = createFeed() as Feed & {
+        apiKey: string;
+      };
+      feedWithUnrelatedField.apiKey = "unrelated-feed-field";
+
+      const result = loadAndNormalizeSettings({
+        feeds: [feedWithUnrelatedField],
+        ai: {
+          connections: [
+            {
+              id: "connection-1",
+              name: "Relay",
+              providerKind: "openai-compatible",
+              protocol: "openai-chat",
+              baseUrl: "https://relay.example.com/v1",
+              model: "relay-model",
+              timeoutMs: 60_000,
+              maxInputCharacters: 80_000,
+              enabled: true,
+              Api_Key: "legacy-secret",
+            },
+          ],
+        },
+      } as unknown as Partial<RssDashboardSettings>);
+
+      expect((result.feeds[0] as Feed & { apiKey?: string }).apiKey).toBe(
+        "unrelated-feed-field",
+      );
+      expect(result.ai).toEqual({
+        connections: [
+          {
+            id: "connection-1",
+            name: "Relay",
+            providerKind: "openai-compatible",
+            protocol: "openai-chat",
+            baseUrl: "https://relay.example.com/v1",
+            model: "relay-model",
+            timeoutMs: 60_000,
+            maxInputCharacters: 80_000,
+            enabled: true,
+          },
+        ],
+      });
+    });
+
+    it("does not sanitize unknown AI structure into an apparently valid connection", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const unknownField = Symbol("unknown-field");
+      const candidate = {
+        id: "connection-1",
+        name: "Relay",
+        providerKind: "openai-compatible",
+        protocol: "openai-chat",
+        baseUrl: "https://relay.example.com/v1",
+        model: "relay-model",
+        timeoutMs: 60_000,
+        maxInputCharacters: 80_000,
+        enabled: true,
+        [unknownField]: "must-reject",
+      };
+      const connections = [candidate];
+      Object.defineProperty(connections, "extra", {
+        enumerable: true,
+        value: "must-reject",
+      });
+
+      expect(
+        loadAndNormalizeSettings({
+          ai: { connections },
+        } as unknown as Partial<RssDashboardSettings>).ai,
+      ).toEqual({ connections: [] });
+    });
+
+    it("fails closed when hostile AI array reflection throws", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const connections = new Proxy([], {
+        getPrototypeOf() {
+          throw new Error("hostile AI array");
+        },
+      });
+
+      expect(() =>
+        loadAndNormalizeSettings({
+          ai: { connections },
+        } as unknown as Partial<RssDashboardSettings>),
+      ).not.toThrow();
+      expect(
+        loadAndNormalizeSettings({
+          ai: { connections },
+        } as unknown as Partial<RssDashboardSettings>).ai,
+      ).toEqual({ connections: [] });
     });
 
     it("migrates legacy feeds to the typed RSS source without changing their persisted data", async () => {

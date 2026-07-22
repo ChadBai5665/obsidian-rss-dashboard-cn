@@ -21,6 +21,7 @@ import {
   sourceConfigUrl,
 } from "../sources/source-config";
 import { normalizeTikHubBaseUrl } from "../sources/tikhub/tikhub-types";
+import { normalizeAiSettings } from "../ai/connection-validation";
 
 const DEFAULT_FEED_KEYWORD_RULES = {
   overrideGlobalRules: false,
@@ -41,6 +42,40 @@ const TIKHUB_SCOPED_SECRET_ALIAS_KEYS = new Set([
   "token",
   "accesstoken",
   "bearertoken",
+]);
+
+const TOP_LEVEL_AI_SECRET_ALIAS_KEYS = new Set([
+  "aiapikey",
+  "aitoken",
+  "aiaccesstoken",
+  "aibearertoken",
+  "openaikey",
+  "openaiapikey",
+  "openaitoken",
+  "anthropickey",
+  "anthropicapikey",
+  "anthropictoken",
+  "claudeapikey",
+  "claudetoken",
+  "kimiapikey",
+  "kimitoken",
+  "deepseekapikey",
+  "deepseektoken",
+  "qwenapikey",
+  "qwentoken",
+  "glmapikey",
+  "glmtoken",
+]);
+
+const AI_SCOPED_SECRET_ALIAS_KEYS = new Set([
+  "apikey",
+  "key",
+  "token",
+  "accesstoken",
+  "bearertoken",
+  "secret",
+  "clientsecret",
+  ...TOP_LEVEL_AI_SECRET_ALIAS_KEYS,
 ]);
 
 const PAGE_SIZE_FIELDS: Array<
@@ -99,6 +134,7 @@ export function loadAndNormalizeSettings(
   removeTopLevelTikHubSecretAliases(
     settings as unknown as Record<string, unknown>,
   );
+  removeTopLevelAiSecretAliases(settings as unknown as Record<string, unknown>);
 
   if (settings.locale !== "zh-CN" && settings.locale !== "en") {
     settings.locale = DEFAULT_SETTINGS.locale;
@@ -174,6 +210,7 @@ export function loadAndNormalizeSettings(
   );
 
   settings.tikhub = normalizeTikHubSettings(settings.tikhub);
+  settings.ai = normalizeAiSettings(copyAiSettingsWithoutSecrets(settings.ai));
 
   settings.media = Object.assign(
     {},
@@ -279,7 +316,10 @@ export function loadAndNormalizeSettings(
 function copyOwnTopLevelSettings(
   rawData: Partial<RssDashboardSettings> | null | undefined,
 ): RssDashboardSettings {
-  const settings = { ...DEFAULT_SETTINGS } as unknown as Record<string, unknown>;
+  const settings = { ...DEFAULT_SETTINGS } as unknown as Record<
+    string,
+    unknown
+  >;
   if (!isRecord(rawData)) return settings as unknown as RssDashboardSettings;
 
   let keys: string[];
@@ -293,7 +333,8 @@ function copyOwnTopLevelSettings(
       key === "__proto__" ||
       key === "prototype" ||
       key === "constructor" ||
-      isTopLevelTikHubSecretAlias(key)
+      isTopLevelTikHubSecretAlias(key) ||
+      isTopLevelAiSecretAlias(key)
     ) {
       continue;
     }
@@ -314,7 +355,133 @@ function copyOwnTopLevelSettings(
   return settings as unknown as RssDashboardSettings;
 }
 
-function normalizeTikHubSettings(value: unknown): RssDashboardSettings["tikhub"] {
+function removeTopLevelAiSecretAliases(
+  settings: Record<string, unknown>,
+): void {
+  for (const key of Object.getOwnPropertyNames(settings)) {
+    if (isTopLevelAiSecretAlias(key)) delete settings[key];
+  }
+}
+
+function copyAiSettingsWithoutSecrets(value: unknown): unknown {
+  try {
+    return copyAiSettingsWithoutSecretsUnsafe(value);
+  } catch {
+    return Object.create(null) as Record<string, unknown>;
+  }
+}
+
+function copyAiSettingsWithoutSecretsUnsafe(value: unknown): unknown {
+  const record = safeRecord(value);
+  if (!record) return value;
+  const sanitized = copyOwnRecordWithoutSecrets(record);
+  const connections = ownDataDescriptorValue(sanitized, "connections");
+  if (!Array.isArray(connections)) return sanitized;
+
+  const safeConnections: unknown[] = [];
+  if (Reflect.getPrototypeOf(connections) !== Array.prototype) return sanitized;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(
+    connections,
+    "length",
+  );
+  const length: unknown =
+    lengthDescriptor && "value" in lengthDescriptor
+      ? lengthDescriptor.value
+      : undefined;
+  if (
+    typeof length !== "number" ||
+    !Number.isSafeInteger(length) ||
+    length < 0 ||
+    length > 1_000
+  ) {
+    return sanitized;
+  }
+  const connectionKeys = Reflect.ownKeys(connections);
+  if (
+    connectionKeys.length !== length + 1 ||
+    !connectionKeys.includes("length")
+  ) {
+    return sanitized;
+  }
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      connections,
+      String(index),
+    );
+    if (!descriptor || !("value" in descriptor)) return sanitized;
+    const connection = safeRecord(descriptor.value);
+    safeConnections.push(
+      connection ? copyOwnRecordWithoutSecrets(connection) : descriptor.value,
+    );
+  }
+  Object.defineProperty(sanitized, "connections", {
+    configurable: true,
+    enumerable: true,
+    value: safeConnections,
+    writable: true,
+  });
+  return sanitized;
+}
+
+function copyOwnRecordWithoutSecrets(
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const sanitized = Object.create(null) as Record<string, unknown>;
+  try {
+    for (const key of Reflect.ownKeys(record)) {
+      if (typeof key === "string" && isAiScopedSecretAlias(key)) continue;
+      const descriptor = Object.getOwnPropertyDescriptor(record, key);
+      if (!descriptor || !("value" in descriptor)) continue;
+      Object.defineProperty(sanitized, key, {
+        configurable: true,
+        enumerable: true,
+        value: descriptor.value,
+        writable: true,
+      });
+    }
+  } catch {
+    return Object.create(null) as Record<string, unknown>;
+  }
+  return sanitized;
+}
+
+function safeRecord(value: unknown): Record<string, unknown> | undefined {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return undefined;
+    }
+    const prototype = Reflect.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null
+      ? (value as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function ownDataDescriptorValue(
+  record: Record<string, unknown>,
+  key: string,
+): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isTopLevelAiSecretAlias(key: string): boolean {
+  return TOP_LEVEL_AI_SECRET_ALIAS_KEYS.has(normalizeSecretAliasKey(key));
+}
+
+function isAiScopedSecretAlias(key: string): boolean {
+  return AI_SCOPED_SECRET_ALIAS_KEYS.has(normalizeSecretAliasKey(key));
+}
+
+function normalizeTikHubSettings(
+  value: unknown,
+): RssDashboardSettings["tikhub"] {
   const sanitized = copyOwnTikHubSettingsWithoutSecrets(value);
   if (!sanitized) return { ...DEFAULT_SETTINGS.tikhub };
   const baseUrl = normalizeTikHubBaseUrl(sanitized.baseUrl);
@@ -386,10 +553,14 @@ function isTikHubScopedSecretAlias(key: string): boolean {
 }
 
 function normalizeSecretAliasKey(key: string): string {
-  return key.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/gu, "");
+  return key
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/gu, "");
 }
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function positiveIntegerOrDefault(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0
