@@ -1,5 +1,46 @@
 import type { AiConnection, AiProviderKind, AiSettings } from "./ai-types";
-import { AI_PROVIDER_PRESETS, type AiProviderPreset } from "./provider-presets";
+import type { AiProviderPreset } from "./provider-presets";
+
+const VALIDATION_PROVIDER_PRESETS = Object.freeze({
+  kimi: Object.freeze({
+    providerKind: "kimi",
+    protocol: "openai-chat",
+    baseUrl: "https://api.moonshot.cn/v1",
+  }),
+  deepseek: Object.freeze({
+    providerKind: "deepseek",
+    protocol: "openai-chat",
+    baseUrl: "https://api.deepseek.com",
+  }),
+  qwen: Object.freeze({
+    providerKind: "qwen",
+    protocol: "openai-chat",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  }),
+  glm: Object.freeze({
+    providerKind: "glm",
+    protocol: "openai-chat",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+  }),
+  openai: Object.freeze({
+    providerKind: "openai",
+    protocol: "openai-chat",
+    baseUrl: "https://api.openai.com/v1",
+  }),
+  claude: Object.freeze({
+    providerKind: "claude",
+    protocol: "anthropic-messages",
+    baseUrl: "https://api.anthropic.com",
+  }),
+  "openai-compatible": Object.freeze({
+    providerKind: "openai-compatible",
+    protocol: "openai-chat",
+  }),
+  "anthropic-compatible": Object.freeze({
+    providerKind: "anthropic-compatible",
+    protocol: "anthropic-messages",
+  }),
+} as const satisfies Readonly<Record<AiProviderKind, AiProviderPreset>>);
 
 const CONNECTION_KEYS = new Set([
   "id",
@@ -170,9 +211,13 @@ export function normalizeAiBaseUrl(
 }
 
 function providerPreset(value: unknown): AiProviderPreset | undefined {
-  return typeof value === "string"
-    ? AI_PROVIDER_PRESETS.find((preset) => preset.providerKind === value)
+  return typeof value === "string" && hasOwn(VALIDATION_PROVIDER_PRESETS, value)
+    ? VALIDATION_PROVIDER_PRESETS[value as AiProviderKind]
     : undefined;
+}
+
+function hasOwn(object: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key);
 }
 
 function normalizedText(value: unknown): string | undefined {

@@ -5,6 +5,7 @@ import {
   createAiConnection,
   getAiProviderPreset,
 } from "../../../src/ai/provider-presets";
+import { normalizeAiConnection } from "../../../src/ai/connection-validation";
 
 describe("AI provider presets", () => {
   it("defines the six fixed providers with exact protocols and base URLs", () => {
@@ -84,5 +85,98 @@ describe("AI provider presets", () => {
         model: "relay-model",
       }),
     ).toThrow("Invalid AI connection");
+  });
+
+  it("keeps canonical creation and validation isolated from exported preset mutation", () => {
+    const publicPresets = AI_PROVIDER_PRESETS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const kimi = publicPresets.find((preset) => preset.providerKind === "kimi");
+    expect(kimi).toBeDefined();
+    const originalProtocol = kimi?.protocol;
+    const originalBaseUrl = kimi?.baseUrl;
+
+    try {
+      if (kimi) {
+        Reflect.set(kimi, "protocol", "anthropic-messages");
+        Reflect.set(kimi, "baseUrl", "https://attacker.invalid/v1");
+      }
+      expect(
+        createAiConnection({
+          id: "connection-1",
+          name: "Kimi",
+          providerKind: "kimi",
+          model: "selected-model",
+        }),
+      ).toMatchObject({
+        protocol: "openai-chat",
+        baseUrl: "https://api.moonshot.cn/v1",
+      });
+      expect(
+        normalizeAiConnection({
+          id: "connection-1",
+          name: "Kimi",
+          providerKind: "kimi",
+          protocol: "openai-chat",
+          baseUrl: "https://api.moonshot.cn/v1",
+          model: "selected-model",
+          timeoutMs: 60_000,
+          maxInputCharacters: 80_000,
+          enabled: true,
+        }),
+      ).toBeDefined();
+    } finally {
+      if (kimi) {
+        Reflect.set(kimi, "protocol", originalProtocol);
+        Reflect.set(kimi, "baseUrl", originalBaseUrl);
+      }
+    }
+  });
+
+  it("keeps canonical creation isolated from public reorder and deletion", () => {
+    const publicPresets = AI_PROVIDER_PRESETS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const snapshot = [...publicPresets];
+    try {
+      Reflect.set(publicPresets, 0, publicPresets[1]);
+      Reflect.deleteProperty(publicPresets, 1);
+      expect(
+        createAiConnection({
+          id: "connection-1",
+          name: "Kimi",
+          providerKind: "kimi",
+          model: "selected-model",
+        }),
+      ).toMatchObject({
+        protocol: "openai-chat",
+        baseUrl: "https://api.moonshot.cn/v1",
+      });
+    } finally {
+      snapshot.forEach((preset, index) => {
+        Reflect.set(publicPresets, index, preset);
+      });
+    }
+  });
+
+  it("returns immutable independent preset snapshots across calls", () => {
+    const first = getAiProviderPreset("openai") as Record<string, unknown>;
+    const originalBaseUrl = first.baseUrl;
+    try {
+      Reflect.set(first, "baseUrl", "https://attacker.invalid/v1");
+      Reflect.deleteProperty(first, "protocol");
+      const second = getAiProviderPreset("openai");
+
+      expect(second).not.toBe(first);
+      expect(second).toEqual({
+        providerKind: "openai",
+        protocol: "openai-chat",
+        baseUrl: "https://api.openai.com/v1",
+      });
+      expect(Object.isFrozen(second)).toBe(true);
+    } finally {
+      Reflect.set(first, "baseUrl", originalBaseUrl);
+      Reflect.set(first, "protocol", "openai-chat");
+    }
   });
 });

@@ -160,6 +160,82 @@ describe("settings-loader", () => {
       expect(JSON.stringify(first.ai)).not.toMatch(/api.?key|token|secret/iu);
     });
 
+    it("removes explicit AI and provider-prefixed top-level key aliases only", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const sentinel = ["runtime", "ai", "credential"].join("-");
+      const aliases = [
+        "aiKey",
+        "AI_Access_Token",
+        "Claude_Key",
+        "KimiKey",
+        "MoonshotBearerToken",
+        "DeepSeekKey",
+        "QwenKey",
+        "DashscopeApiKey",
+        "GlmKey",
+        "BigModelToken",
+        "ZhipuAccessToken",
+        "OpenAIKey",
+        "OpenAI_ApiKey",
+        "AnthropicBearerToken",
+      ];
+      const raw: Record<string, unknown> = {
+        apiKey: "generic-top-level-kept",
+        token: "generic-top-level-token-kept",
+        TikHubApiKey: sentinel,
+        OtherAppApiKey: "other-app-kept",
+        ai: { connections: [] },
+      };
+      for (const alias of aliases) raw[alias] = sentinel;
+
+      const normalized = loadAndNormalizeSettings(
+        raw as unknown as Partial<RssDashboardSettings>,
+      ) as unknown as Record<string, unknown>;
+
+      for (const alias of aliases) expect(normalized[alias]).toBeUndefined();
+      expect(normalized.apiKey).toBe("generic-top-level-kept");
+      expect(normalized.token).toBe("generic-top-level-token-kept");
+      expect(normalized.OtherAppApiKey).toBe("other-app-kept");
+      expect(normalized.TikHubApiKey).toBeUndefined();
+      expect(JSON.stringify(normalized)).not.toContain(sentinel);
+    });
+
+    it("does not read inherited or getter-backed AI key aliases", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const sentinel = ["runtime", "ai", "credential"].join("-");
+      let getterCalls = 0;
+      const ai = { connections: [] } as Record<string, unknown>;
+      Object.defineProperty(ai, "OpenAI_ApiKey", {
+        enumerable: true,
+        get() {
+          getterCalls += 1;
+          return sentinel;
+        },
+      });
+      const inheritedAi = Object.create({ KimiKey: sentinel }) as Record<
+        string,
+        unknown
+      >;
+      Object.defineProperty(inheritedAi, "connections", {
+        enumerable: true,
+        value: [],
+      });
+
+      expect(
+        loadAndNormalizeSettings({
+          ai,
+        } as unknown as Partial<RssDashboardSettings>).ai,
+      ).toEqual({ connections: [] });
+      expect(
+        loadAndNormalizeSettings({
+          ai: inheritedAi,
+        } as unknown as Partial<RssDashboardSettings>).ai,
+      ).toEqual({ connections: [] });
+      expect(getterCalls).toBe(0);
+    });
+
     it("removes key aliases only from AI connection context", async () => {
       const { loadAndNormalizeSettings } =
         await import("../../../src/utils/settings-loader");

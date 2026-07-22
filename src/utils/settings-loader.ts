@@ -44,28 +44,38 @@ const TIKHUB_SCOPED_SECRET_ALIAS_KEYS = new Set([
   "bearertoken",
 ]);
 
-const TOP_LEVEL_AI_SECRET_ALIAS_KEYS = new Set([
-  "aiapikey",
-  "aitoken",
-  "aiaccesstoken",
-  "aibearertoken",
-  "openaikey",
-  "openaiapikey",
-  "openaitoken",
-  "anthropickey",
-  "anthropicapikey",
-  "anthropictoken",
-  "claudeapikey",
-  "claudetoken",
-  "kimiapikey",
-  "kimitoken",
-  "deepseekapikey",
-  "deepseektoken",
-  "qwenapikey",
-  "qwentoken",
-  "glmapikey",
-  "glmtoken",
-]);
+const AI_SECRET_PREFIXES = [
+  "ai",
+  "openai",
+  "anthropic",
+  "claude",
+  "kimi",
+  "moonshot",
+  "moonshotai",
+  "deepseek",
+  "qwen",
+  "dashscope",
+  "aliyun",
+  "alibaba",
+  "glm",
+  "bigmodel",
+  "zhipu",
+  "zhipuai",
+] as const;
+
+const AI_SECRET_SUFFIXES = [
+  "key",
+  "apikey",
+  "token",
+  "accesstoken",
+  "bearertoken",
+] as const;
+
+const TOP_LEVEL_AI_SECRET_ALIAS_KEYS = new Set(
+  AI_SECRET_PREFIXES.flatMap((prefix) =>
+    AI_SECRET_SUFFIXES.map((suffix) => `${prefix}${suffix}`),
+  ),
+);
 
 const AI_SCOPED_SECRET_ALIAS_KEYS = new Set([
   "apikey",

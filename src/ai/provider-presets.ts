@@ -7,7 +7,7 @@ export interface AiProviderPreset {
   baseUrl?: string;
 }
 
-export const AI_PROVIDER_PRESETS = [
+const CANONICAL_PROVIDER_PRESETS = Object.freeze([
   {
     providerKind: "kimi",
     protocol: "openai-chat",
@@ -46,14 +46,22 @@ export const AI_PROVIDER_PRESETS = [
     providerKind: "anthropic-compatible",
     protocol: "anthropic-messages",
   },
-] as const satisfies readonly AiProviderPreset[];
+] as const satisfies readonly AiProviderPreset[]);
+for (const preset of CANONICAL_PROVIDER_PRESETS) Object.freeze(preset);
+
+/** Public snapshots are frozen and never used as canonical runtime input. */
+export const AI_PROVIDER_PRESETS: readonly Readonly<AiProviderPreset>[] =
+  Object.freeze(
+    CANONICAL_PROVIDER_PRESETS.map((preset) => Object.freeze({ ...preset })),
+  );
 
 export function getAiProviderPreset(
   providerKind: AiProviderKind,
 ): AiProviderPreset | undefined {
-  return AI_PROVIDER_PRESETS.find(
+  const preset = CANONICAL_PROVIDER_PRESETS.find(
     (preset) => preset.providerKind === providerKind,
   );
+  return preset ? Object.freeze({ ...preset }) : undefined;
 }
 
 export interface CreateAiConnectionInput {
@@ -68,14 +76,18 @@ export interface CreateAiConnectionInput {
 export function createAiConnection(
   input: CreateAiConnectionInput,
 ): AiConnection {
-  const preset = getAiProviderPreset(input.providerKind);
+  const preset = CANONICAL_PROVIDER_PRESETS.find(
+    (candidate) => candidate.providerKind === input.providerKind,
+  );
+  const baseUrl =
+    preset && "baseUrl" in preset ? preset.baseUrl : input.baseUrl;
   const connection = preset
     ? normalizeAiConnection({
         id: input.id,
         name: input.name,
         providerKind: input.providerKind,
         protocol: preset.protocol,
-        baseUrl: preset.baseUrl ?? input.baseUrl,
+        baseUrl,
         model: input.model,
         timeoutMs: 60_000,
         maxInputCharacters: 80_000,
