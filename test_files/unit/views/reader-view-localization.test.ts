@@ -10,6 +10,7 @@ type ReaderInternals = {
   readingContainer: HTMLElement;
   currentItem: FeedItem | null;
   displayRequestSequence: number;
+  localizedReadingBindings: Map<HTMLElement, unknown>;
   readOrFetchExplicitArticleContent(item: FeedItem): Promise<{
     content: string;
     failureType: "none";
@@ -81,6 +82,118 @@ describe("Reader Chinese localization", () => {
     expect(document.body.querySelector(".rss-reader-title")?.textContent).toBe(
       "RSS reader",
     );
+  });
+
+  it("ignores spoofed localization attributes in external rich HTML", async () => {
+    const view = makeReader("zh-CN");
+    const internal = view as unknown as ReaderInternals;
+    await view.onOpen();
+    vi.spyOn(internal, "readOrFetchExplicitArticleContent").mockResolvedValue({
+      content: "",
+      failureType: "none",
+    });
+    const externalUrl = "https://external.example.com/immutable";
+    const item = makeArticle({
+      guid: "spoofed-localization-attributes",
+      description: "",
+      content: `<p id="external-spoof-text" data-rss-reader-i18n-key="reader.feedDescription">External immutable text</p><a id="external-spoof-link" data-rss-reader-i18n-key="reader.openVideoSource" data-rss-reader-i18n-attribute="href" href="${externalUrl}">External immutable link</a>`,
+    });
+
+    await view.displayItem(item);
+    const externalText = internal.readingContainer.querySelector<HTMLElement>(
+      "#external-spoof-text",
+    );
+    const externalLink = internal.readingContainer.querySelector<HTMLAnchorElement>(
+      "#external-spoof-link",
+    );
+    const ownedSummary = internal.readingContainer.querySelector(
+      ".rss-reader-description-callout summary",
+    );
+    expect(externalText?.textContent).toBe("External immutable text");
+    expect(externalLink?.textContent).toBe("External immutable link");
+    expect(externalLink?.href).toBe(externalUrl);
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "en";
+    view.refreshLocalization();
+    expect(ownedSummary?.textContent).toBe("Feed description");
+    expect(internal.readingContainer.querySelector("#external-spoof-text")).toBe(externalText);
+    expect(internal.readingContainer.querySelector("#external-spoof-link")).toBe(externalLink);
+    expect(externalText?.textContent).toBe("External immutable text");
+    expect(externalLink?.textContent).toBe("External immutable link");
+    expect(externalLink?.href).toBe(externalUrl);
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "zh-CN";
+    view.refreshLocalization();
+    expect(ownedSummary?.textContent).toBe("订阅源简介");
+    expect(externalText?.textContent).toBe("External immutable text");
+    expect(externalLink?.href).toBe(externalUrl);
+  });
+
+  it("clears disconnected bindings on a new display and never registers a stale request", async () => {
+    const view = makeReader("zh-CN");
+    const internal = view as unknown as ReaderInternals;
+    await view.onOpen();
+    const fetch = vi.spyOn(internal, "readOrFetchExplicitArticleContent");
+    fetch.mockResolvedValue({ content: "", failureType: "none" });
+
+    await view.displayItem(makeArticle({
+      guid: "binding-first",
+      description: "",
+      content: "<p>First external body</p>",
+    }));
+    const detachedOwnedNode = internal.readingContainer.querySelector<HTMLElement>(
+      ".rss-reader-description-callout summary",
+    );
+    expect(internal.localizedReadingBindings.size).toBeGreaterThan(0);
+    detachedOwnedNode?.remove();
+    view.refreshLocalization();
+    expect(internal.localizedReadingBindings.has(detachedOwnedNode!)).toBe(false);
+
+    await view.displayItem(makeArticle({
+      guid: "binding-reconnected",
+      description: "",
+      content: "<p>Reconnected external body</p>",
+    }));
+    const disconnectedOwnedNode = internal.readingContainer.querySelector(
+      ".rss-reader-description-callout summary",
+    );
+    expect(internal.localizedReadingBindings.size).toBeGreaterThan(0);
+
+    await view.displayItem(makeArticle({
+      guid: "binding-second",
+      description: "<p>Second external body</p>",
+      content: "",
+    }));
+    expect(disconnectedOwnedNode?.isConnected).toBe(false);
+    expect(internal.localizedReadingBindings.size).toBe(0);
+
+    let finishStale!: (value: { content: string; failureType: "none" }) => void;
+    fetch.mockClear();
+    fetch.mockImplementationOnce(
+      () => new Promise((resolve) => { finishStale = resolve; }),
+    ).mockResolvedValueOnce({ content: "", failureType: "none" });
+    const staleItem = makeArticle({ guid: "binding-stale", description: "" });
+    const currentItem = makeArticle({
+      guid: "binding-current",
+      description: "<p>Current external body</p>",
+    });
+    const openingStale = view.displayItem(staleItem);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    await view.displayItem(currentItem);
+    finishStale({
+      content: `<article><p>${"Stale fetched content ".repeat(30)}</p></article>`,
+      failureType: "none",
+    });
+    await openingStale;
+
+    expect(internal.currentItem).toBe(currentItem);
+    expect(internal.readingContainer.textContent).toContain("Current external body");
+    expect(internal.readingContainer.textContent).not.toContain("Stale fetched content");
+    expect(
+      Array.from(internal.localizedReadingBindings.keys()).every(
+        (element) => element.isConnected && internal.readingContainer.contains(element),
+      ),
+    ).toBe(true);
   });
 
   it("updates open reader chrome in place without losing article, scroll, media, or content context", async () => {

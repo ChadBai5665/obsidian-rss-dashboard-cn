@@ -56,13 +56,23 @@ import { ExplicitContentCoordinator } from "../collection/explicit-content-coord
 import { getContentBasisLabel } from "../collection/content-basis-display";
 import type { ContentBasis } from "../collection/collected-item";
 import { isYouTubeItem } from "../utils/youtube-detection";
-import { createTranslator, type TranslationKey } from "../i18n";
+import {
+  createTranslator,
+  type TranslationKey,
+  type TranslationParams,
+} from "../i18n";
 
 export const RSS_READER_VIEW_TYPE = "rss-reader-view";
 
 /** Durable collection metadata supplied separately from legacy FeedItem data. */
 export interface ReaderContentContext {
   contentBasis: ContentBasis;
+}
+
+interface LocalizedReadingBinding {
+  key: TranslationKey;
+  attribute?: string;
+  params?: TranslationParams;
 }
 
 const RAW_SUBSTACK_FETCH_URL_RE =
@@ -109,6 +119,10 @@ export class ReaderView extends ItemView {
   private readonly explicitContentCoordinator: ExplicitContentCoordinator;
   private disposed = false;
   private actualContentBasis: ContentBasis | null = null;
+  private readonly localizedReadingBindings = new Map<
+    HTMLElement,
+    LocalizedReadingBinding
+  >();
 
   private readerFormatPortal: { close: (flushSave: boolean) => void } | null =
     null;
@@ -1074,36 +1088,38 @@ export class ReaderView extends ItemView {
   private bindLocalizedReadingText(
     element: HTMLElement,
     key: TranslationKey,
+    params?: TranslationParams,
   ): void {
-    element.dataset.rssReaderI18nKey = key;
-    element.setText(this.t(key));
+    this.localizedReadingBindings.set(element, { key, params });
+    element.setText(this.t(key, params));
   }
 
   private bindLocalizedReadingAttribute(
     element: HTMLElement,
     attribute: string,
     key: TranslationKey,
+    params?: TranslationParams,
   ): void {
-    element.dataset.rssReaderI18nKey = key;
-    element.dataset.rssReaderI18nAttribute = attribute;
-    element.setAttribute(attribute, this.t(key));
+    this.localizedReadingBindings.set(element, { key, attribute, params });
+    element.setAttribute(attribute, this.t(key, params));
   }
 
   private refreshLocalizedReadingDom(): void {
-    this.readingContainer
-      ?.querySelectorAll<HTMLElement>("[data-rss-reader-i18n-key]")
-      .forEach((element) => {
-        const key = element.dataset.rssReaderI18nKey as
-          | TranslationKey
-          | undefined;
-        if (!key) return;
-        const attribute = element.dataset.rssReaderI18nAttribute;
-        if (attribute) {
-          element.setAttribute(attribute, this.t(key));
-        } else {
-          element.setText(this.t(key));
-        }
-      });
+    for (const [element, binding] of this.localizedReadingBindings) {
+      if (
+        !element.isConnected ||
+        !this.readingContainer?.contains(element)
+      ) {
+        this.localizedReadingBindings.delete(element);
+        continue;
+      }
+      const value = this.t(binding.key, binding.params);
+      if (binding.attribute) {
+        element.setAttribute(binding.attribute, value);
+      } else {
+        element.setText(value);
+      }
+    }
   }
 
   async onClose(): Promise<void> {
@@ -1153,6 +1169,7 @@ export class ReaderView extends ItemView {
       this.videoPlayer.destroy();
       this.videoPlayer = null;
     }
+    this.localizedReadingBindings.clear();
     this.currentItem = null;
     this.currentFullContent = undefined;
 
@@ -1347,6 +1364,7 @@ export class ReaderView extends ItemView {
     }
 
     this.closeTagsDropdown();
+    this.localizedReadingBindings.clear();
     if (this.readingContainer) {
       this.readingContainer.empty();
     }

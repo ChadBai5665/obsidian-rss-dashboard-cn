@@ -7,7 +7,13 @@ import {
   createTranslator,
   type Locale,
   type TranslationKey,
+  type TranslationParams,
 } from "../i18n";
+
+interface LocalizedPodcastBinding {
+  key: TranslationKey;
+  params?: TranslationParams;
+}
 
 export class PodcastPlayer {
   private container: HTMLElement;
@@ -60,6 +66,10 @@ export class PodcastPlayer {
   private sleepTimerRestartBtn: HTMLElement | null = null;
   private lastSleepTimerDuration: number | "end" | null = null;
   private locale: Locale;
+  private readonly localizedBindings = new Map<
+    HTMLElement,
+    LocalizedPodcastBinding
+  >();
 
   constructor(
     container: HTMLElement,
@@ -146,27 +156,27 @@ export class PodcastPlayer {
     this.container
       .querySelector<HTMLElement>(".playlist-empty")
       ?.setText(this.t("media.noEpisodes"));
-    this.refreshLocalizedEpisodeDetails();
+    this.refreshOwnedLocalization();
     this.updateSleepTimerDisplay();
   }
 
-  private bindLocalizedEpisodeDetail(
+  private bindLocalizedText(
     element: HTMLElement,
     key: TranslationKey,
+    params?: TranslationParams,
   ): void {
-    element.dataset.podcastI18nKey = key;
-    element.setText(this.t(key));
+    this.localizedBindings.set(element, { key, params });
+    element.setText(this.t(key, params));
   }
 
-  private refreshLocalizedEpisodeDetails(): void {
-    this.container
-      .querySelectorAll<HTMLElement>("[data-podcast-i18n-key]")
-      .forEach((element) => {
-        const key = element.dataset.podcastI18nKey as
-          | TranslationKey
-          | undefined;
-        if (key) element.setText(this.t(key));
-      });
+  private refreshOwnedLocalization(): void {
+    for (const [element, binding] of this.localizedBindings) {
+      if (!element.isConnected || !this.container.contains(element)) {
+        this.localizedBindings.delete(element);
+        continue;
+      }
+      element.setText(this.t(binding.key, binding.params));
+    }
   }
 
   setPlaylist(playlist: FeedItem[]) {
@@ -277,10 +287,12 @@ export class PodcastPlayer {
 
     if (remainingCount > 0) {
       const overflowTitle = remainingTags.map((t) => t.name).join("\n");
-      tagsStrip.createDiv({
+      const more = tagsStrip.createDiv({
         cls: "podcast-tag podcast-tag-more",
-        text: this.t("podcast.more", { count: remainingCount }),
         attr: { title: overflowTitle, "aria-label": overflowTitle },
+      });
+      this.bindLocalizedText(more, "podcast.more", {
+        count: remainingCount,
       });
     }
   }
@@ -289,6 +301,7 @@ export class PodcastPlayer {
     if (!this.currentItem) return;
     const playlistEl = this.container.querySelector(".playlist-list");
     const savedScrollTop = playlistEl ? playlistEl.scrollTop : 0;
+    this.localizedBindings.clear();
     this.container.empty();
 
     const podcastContainer = this.container.createDiv({
@@ -455,11 +468,10 @@ export class PodcastPlayer {
     }
 
     if (!this.hasAudioForCurrentItem) {
-      const errorText = this.t("podcast.audioMissing");
-      podcastContainer.createDiv({
+      const error = podcastContainer.createDiv({
         cls: "podcast-player-error",
-        text: errorText,
       });
+      this.bindLocalizedText(error, "podcast.audioMissing");
     }
 
     const forwardBtn = transportSection.createDiv({
@@ -1037,7 +1049,7 @@ export class PodcastPlayer {
     details.setAttribute("data-podcast-theme", this.theme);
 
     const summary = details.createEl("summary");
-    this.bindLocalizedEpisodeDetail(summary, "podcast.details");
+    this.bindLocalizedText(summary, "podcast.details");
     const body = details.createDiv({ cls: "podcast-episode-details-body" });
 
     if (hasMeta) {
@@ -1046,7 +1058,7 @@ export class PodcastPlayer {
         const label = grid.createDiv({
           cls: "podcast-episode-meta-label",
         });
-        this.bindLocalizedEpisodeDetail(label, entry.labelKey);
+        this.bindLocalizedText(label, entry.labelKey);
         const valueEl = grid.createDiv({ cls: "podcast-episode-meta-value" });
         if (entry.href) {
           const a = valueEl.createEl("a", {
@@ -1054,12 +1066,12 @@ export class PodcastPlayer {
             attr: { href: entry.href },
           });
           if (entry.valueKey) {
-            this.bindLocalizedEpisodeDetail(a, entry.valueKey);
+            this.bindLocalizedText(a, entry.valueKey);
           }
           a.target = "_blank";
           a.rel = "noopener noreferrer";
         } else if (entry.valueKey) {
-          this.bindLocalizedEpisodeDetail(valueEl, entry.valueKey);
+          this.bindLocalizedText(valueEl, entry.valueKey);
         } else {
           valueEl.textContent = entry.value;
         }
@@ -1071,7 +1083,7 @@ export class PodcastPlayer {
       const notesTitle = notes.createDiv({
         cls: "podcast-episode-notes-title",
       });
-      this.bindLocalizedEpisodeDetail(notesTitle, "podcast.showNotes");
+      this.bindLocalizedText(notesTitle, "podcast.showNotes");
       const notesBody = notes.createDiv({ cls: "podcast-episode-notes-body" });
       sanitizeAndAppendHtml(notesBody, notesHtml);
     }
@@ -1135,10 +1147,12 @@ export class PodcastPlayer {
 
     if (remainingCount > 0) {
       const overflowTitle = remainingTags.map((t) => t.name).join("\n");
-      tagsWrap.createDiv({
+      const more = tagsWrap.createDiv({
         cls: "playlist-ep-tag playlist-ep-tag-more",
-        text: this.t("podcast.more", { count: remainingCount }),
         attr: { title: overflowTitle, "aria-label": overflowTitle },
+      });
+      this.bindLocalizedText(more, "podcast.more", {
+        count: remainingCount,
       });
     }
   }
@@ -1716,6 +1730,7 @@ export class PodcastPlayer {
 
   destroy(): void {
     this.stopProgressTracking();
+    this.localizedBindings.clear();
 
     if (this.audioElement) {
       this.saveProgress(true);

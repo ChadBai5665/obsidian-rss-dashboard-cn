@@ -50,6 +50,66 @@ describe("PodcastPlayer", () => {
     expect(container.querySelector(".rss-sleep-timer-btn")?.getAttribute("title")).toBe("Sleep Timer");
   });
 
+  it("refreshes both tag overflow counts zh-en-zh without changing source tags or audio", () => {
+    const container = document.body.createDiv();
+    const player = new PodcastPlayer(container, new App(), "obsidian");
+    const tags = ["One", "Two", "Three", "External Four", "External Five"].map(
+      (name) => ({ name, color: "#123456" }),
+    );
+    const episode = { ...baseEpisode(), tags };
+    const otherEpisode = {
+      ...baseEpisode(),
+      guid: "other-overflow",
+      title: "Other external episode",
+      tags,
+    };
+    player.loadEpisode(episode, [episode, otherEpisode]);
+    const audio = container.querySelector("audio")!;
+    audio.currentTime = 19;
+    Object.defineProperty(audio, "paused", { configurable: true, value: false });
+    const playerMore = container.querySelector(".podcast-tag-more");
+    const playlistMore = container.querySelector(".playlist-ep-tag-more");
+    const sourceOverflowTitle = playerMore?.getAttribute("title");
+    expect(playerMore?.textContent).toBe("+2 项");
+    expect(playlistMore?.textContent).toBe("+2 项");
+
+    player.refreshLocalization("en");
+    expect(playerMore?.textContent).toBe("+2 more");
+    expect(playlistMore?.textContent).toBe("+2 more");
+    expect(sourceOverflowTitle).toBe("External Four\nExternal Five");
+    expect(playerMore?.getAttribute("title")).toBe(sourceOverflowTitle);
+    expect(playlistMore?.getAttribute("title")).toBe(sourceOverflowTitle);
+    expect(container.querySelector("audio")).toBe(audio);
+    expect(audio.currentTime).toBe(19);
+    expect(audio.paused).toBe(false);
+
+    player.refreshLocalization("zh-CN");
+    expect(playerMore?.textContent).toBe("+2 项");
+    expect(playlistMore?.textContent).toBe("+2 项");
+  });
+
+  it("refreshes the missing-audio prompt zh-en-zh in place", () => {
+    const container = document.body.createDiv();
+    const player = new PodcastPlayer(container, new App(), "obsidian");
+    const episode = {
+      ...baseEpisode(),
+      audioUrl: undefined,
+      description: "<p>External notes without media</p>",
+    };
+    player.loadEpisode(episode);
+    const audio = container.querySelector("audio");
+    const error = container.querySelector(".podcast-player-error");
+    expect(error?.textContent).toBe("未找到音频 URL，无法播放此播客。");
+
+    player.refreshLocalization("en");
+    expect(error?.textContent).toBe("Audio URL not found. Cannot play this podcast.");
+    expect(container.querySelector("audio")).toBe(audio);
+    expect(container.textContent).toContain("External notes without media");
+
+    player.refreshLocalization("zh-CN");
+    expect(error?.textContent).toBe("未找到音频 URL，无法播放此播客。");
+  });
+
   it("refreshes current episode detail labels zh-en-zh without replacing audio or source values", () => {
     const container = document.body.createDiv();
     const player = new PodcastPlayer(container, new App(), "obsidian");

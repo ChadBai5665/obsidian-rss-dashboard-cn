@@ -51,4 +51,15 @@ describe("Task 5 visible-string audit", () => {
 
     expect(removedMethods.filter((method) => source.includes(method))).toEqual([]);
   });
+
+  it("does not trust DOM localization attributes as Reader or Podcast ownership", () => {
+    const source = ["src/views/reader-view.ts", "src/views/podcast-player.ts"]
+      .map((file) => readFileSync(file, "utf8"))
+      .join("\n");
+
+    expect(source).not.toContain("data-rss-reader-i18n-key");
+    expect(source).not.toContain("rssReaderI18nKey");
+    expect(source).not.toContain("data-podcast-i18n-key");
+    expect(source).not.toContain("podcastI18nKey");
+  });
 });
