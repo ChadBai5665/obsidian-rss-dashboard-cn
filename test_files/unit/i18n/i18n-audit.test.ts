@@ -220,4 +220,46 @@ describe("i18n literal audit", () => {
     expect(result.stdout).not.toContain("Not direct");
     expect(result.stdout).not.toContain("getPlaceholder");
   });
+
+  it("keeps regex, control-close, and postfix boundaries in the expression stream", () => {
+    const root = createFixture({
+      "src/boundaries.ts": [
+        "const expression = /a/ / 2; button.setText(\"After regex division\");",
+        "if (enabled) /button.setText(\"Ignored control regex\")/.test(value); button.setText(\"After control regex\");",
+        "counter++ / total; button.setDesc(\"After postfix division\");",
+      ].join("\n"),
+    });
+
+    const result = runAudit(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('src/boundaries.ts:1 setText "After regex division"');
+    expect(result.stdout).toContain('src/boundaries.ts:2 setText "After control regex"');
+    expect(result.stdout).toContain('src/boundaries.ts:3 setDesc "After postfix division"');
+    expect(result.stdout).not.toContain("Ignored control regex");
+  });
+
+  it("accepts parenthesized union and intersection assertions without accepting runtime method chains", () => {
+    const root = createFixture({
+      "main.ts": [
+        "plugin.addCommand({",
+        "  callback: () => { const ignored = /[}]/; },",
+        '  "name": (("Typed command" as string | null) satisfies (Namespace.Command & Audited)[]),',
+        "});",
+      ].join("\n"),
+      "src/types.ts": [
+        'button.setText("Union" as string | null);',
+        'button.setName(("Intersection" satisfies (Namespace.Label & Named)[]));',
+        'button.setDesc(("Runtime chain" as string).toUpperCase());',
+      ].join("\n"),
+    });
+
+    const result = runAudit(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('main.ts:3 addCommand name "Typed command"');
+    expect(result.stdout).toContain('src/types.ts:1 setText "Union"');
+    expect(result.stdout).toContain('src/types.ts:2 setName "Intersection"');
+    expect(result.stdout).not.toContain("Runtime chain");
+  });
 });

@@ -18,6 +18,7 @@ const DOM_TAGS = new Set([
 const MIME_PREFIXES = ["application/", "audio/", "font/", "image/", "text/", "video/"];
 const OPENERS = new Map([["(", ")"], ["{", "}"], ["[", "]"]]);
 const CLOSERS = new Set([")", "}", "]"]);
+const CONTROL_PAREN_KEYWORDS = new Set(["if", "while", "for", "with", "switch", "catch"]);
 
 function compareCodePoints(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -75,7 +76,8 @@ function isDigit(character) {
 
 function canStartRegularExpression(previousToken) {
   if (!previousToken) return true;
-  if (previousToken.type === "literal" || previousToken.type === "number") return false;
+  if (previousToken.type === "literal" || previousToken.type === "number" || previousToken.type === "regex" || previousToken.type === "postfix") return false;
+  if (previousToken.type === "control-close") return true;
   if (previousToken.type === "identifier") {
     return new Set([
       "return", "case", "throw", "typeof", "void", "delete", "new",
@@ -92,6 +94,7 @@ function canStartRegularExpression(previousToken) {
  */
 function tokenize(source) {
   const tokens = [];
+  const parenContexts = [];
   let index = 0;
   let line = 1;
 
@@ -191,11 +194,15 @@ function tokenize(source) {
     return { type: "literal", value: source.slice(start + 1), line: tokenLine, index: start };
   };
   const skipRegularExpression = () => {
+    const start = index;
+    const tokenLine = line;
     advance();
     let inCharacterClass = false;
     while (index < source.length) {
       const character = source[index];
-      if (character === "\n" || character === "\r") return;
+      if (character === "\n" || character === "\r") {
+        return { type: "punct", value: "/", line: tokenLine, index: start };
+      }
       if (character === "\\") {
         advance();
         if (index < source.length && source[index] !== "\n" && source[index] !== "\r") advance();
@@ -208,11 +215,12 @@ function tokenize(source) {
       } else if (!inCharacterClass && character === "/") {
         advance();
         while (isIdentifierPart(source[index])) advance();
-        return;
+        return { type: "regex", value: source.slice(start, index), line: tokenLine, index: start };
       } else {
         advance();
       }
     }
+    return { type: "punct", value: "/", line: tokenLine, index: start };
   };
 
   while (index < source.length) {
@@ -226,7 +234,7 @@ function tokenize(source) {
     } else if (character === "/" && source[index + 1] === "*") {
       skipBlockComment();
     } else if (character === "/" && canStartRegularExpression(tokens.at(-1))) {
-      skipRegularExpression();
+      tokens.push(skipRegularExpression());
     } else if (character === "\"" || character === "'" || character === "`") {
       tokens.push(readLiteral(character));
     } else if (isIdentifierStart(character)) {
@@ -244,7 +252,22 @@ function tokenize(source) {
     } else {
       const tokenLine = line;
       const start = index;
-      if (character === "?" && source[index + 1] === ".") {
+      if ((character === "+" && source[index + 1] === "+") || (character === "-" && source[index + 1] === "-")) {
+        const previous = tokens.at(-1);
+        const postfix = previous && (previous.type === "literal" || previous.type === "number" || previous.type === "regex" || previous.type === "postfix" || previous.type === "control-close" || previous.type === "identifier" || [")", "]", "}"].includes(previous.value));
+        advance();
+        advance();
+        tokens.push({ type: postfix ? "postfix" : "operator", value: `${character}${character}`, line: tokenLine, index: start });
+      } else if (character === "(") {
+        const control = tokens.at(-1)?.type === "identifier" && CONTROL_PAREN_KEYWORDS.has(tokens.at(-1).value);
+        advance();
+        parenContexts.push(control);
+        tokens.push({ type: control ? "control-open" : "punct", value: "(", line: tokenLine, index: start });
+      } else if (character === ")") {
+        const control = parenContexts.pop() === true;
+        advance();
+        tokens.push({ type: control ? "control-close" : "punct", value: ")", line: tokenLine, index: start });
+      } else if (character === "?" && source[index + 1] === ".") {
         advance();
         advance();
         tokens.push({ type: "punct", value: "?.", line: tokenLine, index: start });
@@ -344,10 +367,12 @@ function consumeTypeWrapper(tokens, start, end) {
       sawTypeToken = true;
     } else if (token.value === "<") {
       expectedClosers.push(">");
-    } else if (token.value === "[") {
-      expectedClosers.push("]");
+    } else if (token.value === "[" || token.value === "(") {
+      expectedClosers.push(token.value === "[" ? "]" : ")");
     } else if (token.value === ",") {
       if (expectedClosers.length === 0) return -1;
+    } else if (token.value === "|" || token.value === "&") {
+      if (!sawTypeToken) return -1;
     } else if (token.value === expectedClosers.at(-1)) {
       expectedClosers.pop();
     } else {
