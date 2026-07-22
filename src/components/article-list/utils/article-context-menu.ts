@@ -2,6 +2,8 @@ import { Menu, MenuItem, Notice } from "obsidian";
 import type { FeedItem } from "../../../types/types";
 import { createTranslator } from "../../../i18n";
 import type { Locale } from "../../../i18n";
+import type { AiOperation } from "../../../ai/prompts/prompt-types";
+import { addAiOperationMenuItems } from "./article-actions";
 
 export interface ArticleContext {
   callbacks: {
@@ -14,6 +16,7 @@ export interface ArticleContext {
     ) => void;
     onArticleSave?: (article: FeedItem) => Promise<void> | void;
     onArticleClick?: (article: FeedItem) => void;
+    onAiOperation?: (article: FeedItem, operation: AiOperation) => unknown;
   };
   settings: {
     articleSaving: {
@@ -125,6 +128,11 @@ export function showArticleContextMenu(
           false,
         );
       });
+  });
+
+  menu.addSeparator();
+  addAiOperationMenuItems(menu, ctx.settings.locale, (operation) => {
+    ctx.callbacks.onAiOperation?.(article, operation);
   });
 
   if (!article.saved) {

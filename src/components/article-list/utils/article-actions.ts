@@ -1,4 +1,4 @@
-import { Notice, setIcon } from "obsidian";
+import { Menu, Notice, setIcon } from "obsidian";
 import type {
   ArticleSavingSettings,
   DisplaySettings,
@@ -6,6 +6,21 @@ import type {
 } from "../../../types/types";
 import { createTranslator } from "../../../i18n";
 import type { Locale } from "../../../i18n";
+import type { AiOperation } from "../../../ai/prompts/prompt-types";
+
+export const AI_OPERATION_MENU_ITEMS: ReadonlyArray<{
+  operation: AiOperation;
+  labelKey:
+    | "ai.operation.summary"
+    | "ai.operation.translateZhCn"
+    | "ai.operation.corePoints"
+    | "ai.operation.deepAnalysis";
+}> = Object.freeze([
+  { operation: "summary", labelKey: "ai.operation.summary" },
+  { operation: "translate-zh-cn", labelKey: "ai.operation.translateZhCn" },
+  { operation: "core-points", labelKey: "ai.operation.corePoints" },
+  { operation: "deep-analysis", labelKey: "ai.operation.deepAnalysis" },
+]);
 
 function toggleClickableIcon(
   el: HTMLElement,
@@ -44,6 +59,7 @@ export type CreateActionButtonArgs = {
     onOpenInReaderView?: (article: FeedItem) => void;
     onArticleClick?: (article: FeedItem) => void;
     onOpenInBrowser?: (article: FeedItem) => void;
+    onAiOperation?: (article: FeedItem, operation: AiOperation) => unknown;
     onMarkPageAsRead?: () => void;
     onMarkAllAsRead?: () => void;
     onMarkAllAsUnread?: () => void;
@@ -260,6 +276,51 @@ export function createTagsToggle(
   return tagsToggle;
 }
 
+export function addAiOperationMenuItems(
+  menu: Menu,
+  locale: Locale | undefined,
+  onSelect: (operation: AiOperation) => void,
+): void {
+  const t = createTranslator(locale ?? "zh-CN");
+  for (const item of AI_OPERATION_MENU_ITEMS) {
+    menu.addItem((menuItem) => {
+      menuItem
+        .setTitle(t(item.labelKey))
+        .setIcon("sparkles")
+        .onClick(() => onSelect(item.operation));
+    });
+  }
+}
+
+export function createAiActionsButton(
+  arg: Pick<
+    CreateActionButtonArgs,
+    "article" | "actionToolbar" | "settings" | "callbacks"
+  >,
+): HTMLElement {
+  const t = createTranslator(arg.settings.locale ?? "zh-CN");
+  const button = arg.actionToolbar.createDiv({
+    cls: "rss-dashboard-ai-toggle clickable-icon",
+    attr: {
+      title: t("ai.actions"),
+      role: "button",
+      tabindex: "0",
+      "aria-label": t("ai.actions"),
+    },
+  });
+  setIcon(button, "sparkles");
+  const openMenu = (event: MouseEvent | KeyboardEvent): void => {
+    event.stopPropagation();
+    const menu = new Menu();
+    addAiOperationMenuItems(menu, arg.settings.locale, (operation) => {
+      arg.callbacks.onAiOperation?.(arg.article, operation);
+    });
+    menu.showAtMouseEvent(event as MouseEvent);
+  };
+  toggleClickableIcon(button, openMenu);
+  return button;
+}
+
 export function createActionButtons(arg: CreateActionButtonArgs): void {
   createReadToggle(arg);
   if (arg.mode === "minimal-read") {
@@ -268,4 +329,5 @@ export function createActionButtons(arg: CreateActionButtonArgs): void {
   createSaveButton(arg);
   createStarToggle(arg);
   createTagsToggle(arg);
+  createAiActionsButton(arg);
 }

@@ -61,6 +61,8 @@ import {
   type TranslationKey,
   type TranslationParams,
 } from "../i18n";
+import type { AiOperation } from "../ai/prompts/prompt-types";
+import { addAiOperationMenuItems } from "../components/article-list/utils/article-actions";
 
 export const RSS_READER_VIEW_TYPE = "rss-reader-view";
 
@@ -119,6 +121,11 @@ export class ReaderView extends ItemView {
   private readonly explicitContentCoordinator: ExplicitContentCoordinator;
   private disposed = false;
   private actualContentBasis: ContentBasis | null = null;
+  private onAiOperation?: (
+    item: FeedItem,
+    operation: AiOperation,
+  ) => { close(): void } | null | void;
+  private activeAiModal: { close(): void } | null = null;
   private readonly localizedReadingBindings = new Map<
     HTMLElement,
     LocalizedReadingBinding
@@ -201,6 +208,10 @@ export class ReaderView extends ItemView {
         duration: number,
         flush?: boolean,
       ) => void;
+      onAiOperation?: (
+        item: FeedItem,
+        operation: AiOperation,
+      ) => { close(): void } | null | void;
     },
   ) {
     super(leaf);
@@ -209,6 +220,7 @@ export class ReaderView extends ItemView {
     this.onArticleSave = onArticleSave;
     this.onArticleUpdate = onArticleUpdate;
     this.onPlaybackProgress = options?.onPlaybackProgress;
+    this.onAiOperation = options?.onAiOperation;
     this.explicitContentCoordinator = new ExplicitContentCoordinator(
       this.app.vault,
     );
@@ -1038,6 +1050,33 @@ export class ReaderView extends ItemView {
       activeWindow.open(url, "_blank");
     });
 
+    const aiButton = actions.createDiv({
+      cls: "rss-reader-action-button rss-reader-ai-button",
+      attr: {
+        title: this.t("ai.actions"),
+        "aria-label": this.t("ai.actions"),
+        role: "button",
+        tabindex: "0",
+      },
+    });
+    setIcon(aiButton, "sparkles");
+    const openAiMenu = (event: MouseEvent | KeyboardEvent): void => {
+      event.stopPropagation();
+      const menu = new Menu();
+      addAiOperationMenuItems(menu, this.settings.locale, (operation) => {
+        if (!this.currentItem || !this.onAiOperation) return;
+        this.activeAiModal?.close();
+        this.activeAiModal = this.onAiOperation(this.currentItem, operation) ?? null;
+      });
+      menu.showAtMouseEvent(event as MouseEvent);
+    };
+    aiButton.addEventListener("click", openAiMenu);
+    aiButton.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openAiMenu(event);
+    });
+
     this.readingContainer = this.contentEl.createDiv({
       cls: "rss-reader-content",
     });
@@ -1067,6 +1106,7 @@ export class ReaderView extends ItemView {
     setAccessibleLabel(".rss-dashboard-tags-toggle", this.t("article.manageTags"));
     setAccessibleLabel(".rss-reader-format-button", this.t("reader.format"));
     setAccessibleLabel(".rss-reader-browser-button", this.t("reader.openBrowser"));
+    setAccessibleLabel(".rss-reader-ai-button", this.t("ai.actions"));
 
     const basis = this.readingContainer?.querySelector<HTMLElement>(
       ".rss-reader-content-basis",
@@ -1127,6 +1167,8 @@ export class ReaderView extends ItemView {
     this.disposed = true;
     this.displayRequestSequence += 1;
     this.closeTagsDropdown();
+    this.activeAiModal?.close();
+    this.activeAiModal = null;
 
     if (this.readerFormatPortal) {
       this.readerFormatPortal.close(true);

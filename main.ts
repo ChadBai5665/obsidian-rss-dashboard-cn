@@ -6,6 +6,7 @@ import {
   Platform,
   requireApiVersion,
   TFolder,
+  TFile,
   type EventRef,
   type ObsidianProtocolData,
 } from "obsidian";
@@ -91,6 +92,20 @@ import type { CollectedItem } from "./src/collection/collected-item";
 import { createTranslator, type Translator } from "./src/i18n";
 import { isLocalizedView } from "./src/views/localized-view";
 import { DesktopSecretStore } from "./src/security/desktop-secret-store";
+import { normalizeFeedItem } from "./src/collection/feed-normalizer";
+import { ContentRepository } from "./src/collection/content-repository";
+import { AiContentSelector } from "./src/ai/content/ai-content-selector";
+import { AiOperationService } from "./src/ai/ai-operation-service";
+import { AnalysisRepository } from "./src/ai/analysis-repository";
+import { AnalysisNoteInserter } from "./src/ai/analysis-note-inserter";
+import type { AiOperation } from "./src/ai/prompts/prompt-types";
+import {
+  AiOperationModal,
+  aiOperationLabel,
+  openAiOperationModal,
+} from "./src/modals/ai-operation-modal";
+import { fetchFullArticleContentWithOutcome } from "./src/utils/full-article-fetch";
+import { getContentBasisLabel } from "./src/collection/content-basis-display";
 import { SourceRegistry } from "./src/sources/source-registry";
 import {
   normalizeSourceConfig,
@@ -1416,6 +1431,150 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
+  /** Opens one explicitly requested AI operation for one selected feed item. */
+  public openAiOperationForItem(
+    item: FeedItem,
+    operation: AiOperation,
+    options: { saveArticleFirst?: () => Promise<void> | void } = {},
+  ): AiOperationModal | null {
+    try {
+      return openAiOperationModal({
+        connections: this.settings.ai.connections,
+        locale: this.settings.locale,
+        openSettings: () => { void this.openSettingsToTab("ai"); },
+        showNotice: () => { this.notify("ai.noEnabledConnection"); },
+        createModal: (enabledConnections) => {
+          const feed = this.settings.feeds.find(
+            (candidate) => candidate.url === item.feedUrl,
+          );
+          if (!feed) throw new Error("Selected AI item has no owning feed");
+          const selectedItem = normalizeFeedItem(feed, item, new Date());
+          const dataRoot = this.settings.collection.dataFolder.trim();
+          const contentSelector = new AiContentSelector({
+            contentRepository: new ContentRepository(
+              this.app.vault,
+              dataRoot,
+              () => new Date(),
+            ),
+            fullTextFetcher: async ({ url, signal }) =>
+              await fetchFullArticleContentWithOutcome(
+                url,
+                this.settings.corsProxyEnabled && this.settings.corsProxyUrl
+                  ? this.settings.corsProxyUrl
+                  : undefined,
+                signal,
+              ),
+          });
+          const operationService = new AiOperationService({
+            getAiSettings: () => this.settings.ai,
+            secretStore: new DesktopSecretStore(),
+            contentSelector,
+          });
+          const analysisRepository = new AnalysisRepository(
+            this.app.vault,
+            dataRoot,
+          );
+          const noteInserter = new AnalysisNoteInserter(this.app.vault);
+          const t = createTranslator(this.settings.locale ?? "zh-CN");
+
+          return new AiOperationModal(this.app, {
+            locale: this.settings.locale,
+            operation,
+            item: selectedItem,
+            connections: enabledConnections,
+            defaultConnectionId: this.settings.ai.defaultConnectionId,
+            contentSelector,
+            operationService,
+            analysisRepository,
+            openAnalysis: async (path) => {
+              await this.openAiVaultFile(path);
+            },
+            getSavedNotePath: () => this.resolveExistingSavedNotePath(item),
+            insertIntoSavedNote: async (result, notePath) =>
+              await noteInserter.insert({
+                notePath,
+                result,
+                operationLabel: aiOperationLabel(result.operation, t),
+                contentBasisLabel: getContentBasisLabel(
+                  result.contentBasis,
+                  this.settings.locale ?? "zh-CN",
+                ),
+              }),
+            openSavedNote: async (notePath, marker) => {
+              await this.openAiVaultFile(notePath, marker);
+            },
+            saveArticleFirst: options.saveArticleFirst ?? (() =>
+              this.saveArticleForAiInsertion(item)),
+          });
+        },
+      });
+    } catch {
+      this.notify("ai.error.failed");
+      return null;
+    }
+  }
+
+  private resolveExistingSavedNotePath(item: FeedItem): string | undefined {
+    const path = item.savedFilePath;
+    if (!item.saved || !path) return undefined;
+    const file = this.app.vault.getAbstractFileByPath(path);
+    return file instanceof TFile && file.path === path && file.extension === "md"
+      ? path
+      : undefined;
+  }
+
+  private async saveArticleForAiInsertion(item: FeedItem): Promise<void> {
+    const feed = this.settings.feeds.find(
+      (candidate) => candidate.url === item.feedUrl,
+    );
+    const template = feed?.customTemplate
+      ? this.settings.articleSaving.savedTemplates.find(
+          ({ id }) => id === feed.customTemplate,
+        )?.template
+      : undefined;
+    const file = this.settings.articleSaving.saveFullContent
+      ? await this.articleSaver.saveArticleWithFullContent(
+          item,
+          undefined,
+          template,
+        )
+      : await this.articleSaver.saveArticle(item, undefined, template);
+    if (!file) throw new Error("The source article could not be saved");
+    item.saved = true;
+    item.savedFilePath = file.path;
+    await this.onArticleSaved(item);
+  }
+
+  private async openAiVaultFile(path: string, marker?: string): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile) || file.path !== path || file.extension !== "md") {
+      throw new Error("AI Markdown file is missing");
+    }
+    const leaf = this.app.workspace.getLeaf("tab");
+    if (!leaf) throw new Error("No workspace leaf is available");
+    await leaf.openFile(file);
+    await this.app.workspace.revealLeaf(leaf);
+    if (!marker) return;
+    const contents = await this.app.vault.read(file);
+    const line = contents
+      .slice(0, Math.max(0, contents.indexOf(`<!-- ${marker}:START -->`)))
+      .split(/\r?\n/u).length - 1;
+    if (!contents.includes(`<!-- ${marker}:START -->`)) return;
+    const editor = (leaf.view as unknown as {
+      editor?: {
+        setCursor(position: { line: number; ch: number }): void;
+        scrollIntoView?(range: {
+          from: { line: number; ch: number };
+          to: { line: number; ch: number };
+        }, center?: boolean): void;
+      };
+    }).editor;
+    if (!editor) return;
+    const position = { line, ch: 0 };
+    editor.setCursor(position);
+    editor.scrollIntoView?.({ from: position, to: position }, true);
+  }
+
   async onload() {
     const adapter = this.app.vault.adapter as unknown as VaultAdapterPathAccess;
     if (typeof adapter.getBasePath === "function") {
@@ -1498,6 +1657,8 @@ export default class RssDashboardPlugin extends Plugin {
                   item,
                 );
               },
+              onAiOperation: (item, operation) =>
+                this.openAiOperationForItem(item, operation),
             },
           ),
       );

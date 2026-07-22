@@ -27,6 +27,7 @@ import type {
   BaseViewContext,
   ViewDeps,
 } from "./article-list/views/view-types";
+import type { AiOperation } from "../ai/prompts/prompt-types";
 
 interface ArticleListCallbacks {
   onArticleClick: (article: FeedItem) => void;
@@ -45,6 +46,7 @@ interface ArticleListCallbacks {
   onOpenSavedArticle?: (article: FeedItem) => Promise<void> | void;
   onOpenInReaderView?: (article: FeedItem) => void;
   onOpenInBrowser?: (article: FeedItem) => void;
+  onAiOperation?: (article: FeedItem, operation: AiOperation) => unknown;
   onToggleSidebar: () => void;
   onSortChange: (value: "newest" | "oldest") => void;
   onGroupChange: (value: "none" | "feed" | "date" | "folder") => void;

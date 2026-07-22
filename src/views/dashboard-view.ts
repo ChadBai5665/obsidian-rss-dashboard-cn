@@ -147,6 +147,7 @@ export class RssDashboardView extends ItemView {
   private inlineArticleRenderGeneration = 0;
   private readonly inlineActionPendingKeys = new Set<string>();
   private articleRenderer: ArticleRenderer | null = null;
+  private activeAiModal: { close(): void } | null = null;
   private lastClickAnchorKey: string | null = null;
   private readonly collectionQueryService = new CollectionQueryService();
   private collectionSection: CollectionSection = "today";
@@ -898,6 +899,8 @@ export class RssDashboardView extends ItemView {
       if (this.articleList) {
         this.articleList.destroy();
       }
+      this.activeAiModal?.close();
+      this.activeAiModal = null;
       this.clearCardLayoutRefreshTimeout();
 
       if (this.settings.sidebarCollapsed) {
@@ -1021,6 +1024,18 @@ export class RssDashboardView extends ItemView {
           },
           onOpenInReaderView: (article) => {
             void this.handleOpenInReaderView(article);
+          },
+          onAiOperation: (article, operation) => {
+            this.activeAiModal?.close();
+            this.activeAiModal = this.plugin.openAiOperationForItem(
+              article,
+              operation,
+              {
+                saveArticleFirst: async () => {
+                  await this.handleArticleSave(article);
+                },
+              },
+            );
           },
           onToggleSidebar: this.handleToggleSidebar.bind(this),
           onSortChange: this.handleSortChange.bind(this),
@@ -4103,6 +4118,8 @@ export class RssDashboardView extends ItemView {
     this.inlineActionPendingKeys.clear();
     this.articleRenderer?.dispose();
     this.articleRenderer = null;
+    this.activeAiModal?.close();
+    this.activeAiModal = null;
     this.closeMobileSidebarModal();
     this.lastViewportMobileSidebarMode = null;
 
