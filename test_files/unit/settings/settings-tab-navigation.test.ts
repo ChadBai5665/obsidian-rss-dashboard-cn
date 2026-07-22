@@ -32,13 +32,16 @@ describe("SETTINGS_TAB_IDS", () => {
     expect(SETTINGS_TAB_NAMES).not.toBe(SETTINGS_TAB_IDS);
     expect(oldName).toBe("General");
   });
-  it("contains exactly 11 tabs", () => {
-    expect(SETTINGS_TAB_IDS).toHaveLength(11);
+  it("contains exactly 14 tabs", () => {
+    expect(SETTINGS_TAB_IDS).toHaveLength(14);
   });
 
   it("includes all expected stable tab ids", () => {
     const expected = [
       "general",
+      "sources",
+      "topic-discovery",
+      "tikhub",
       "storage",
       "display",
       "sidebar",

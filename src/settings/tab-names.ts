@@ -24,6 +24,9 @@ export type SettingsTabId =
 /** Tabs that exist in this version of the settings UI, in display order. */
 export const SETTINGS_TAB_IDS = [
   "general",
+  "sources",
+  "topic-discovery",
+  "tikhub",
   "storage",
   "display",
   "sidebar",

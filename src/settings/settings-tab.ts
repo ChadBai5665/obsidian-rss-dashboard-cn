@@ -30,6 +30,9 @@ export type { SettingsTabName } from "./tab-names";
 
 // Tab renderer imports
 import { renderGeneralSettingsTab } from "./tabs/general-settings-tab";
+import { renderSourcesSettingsTab } from "./tabs/sources-settings-tab";
+import { renderTopicDiscoverySettingsTab } from "./tabs/topic-discovery-settings-tab";
+import { renderTikHubSettingsTab } from "./tabs/tikhub-settings-tab";
 import { renderStorageSettingsTab } from "./tabs/storage-settings-tab";
 import { renderDisplaySettingsTab } from "./tabs/display-settings-tab";
 import { renderSidebarSettingsTab } from "./tabs/sidebar-settings-tab";
@@ -106,6 +109,18 @@ export class RssDashboardSettingTab extends PluginSettingTab {
     switch (this.currentTab) {
       case "general":
         renderGeneralSettingsTab(tabContent, this.plugin);
+        this.pendingSection = null;
+        break;
+      case "sources":
+        renderSourcesSettingsTab(tabContent, this.plugin);
+        this.pendingSection = null;
+        break;
+      case "topic-discovery":
+        renderTopicDiscoverySettingsTab(tabContent, this.plugin);
+        this.pendingSection = null;
+        break;
+      case "tikhub":
+        renderTikHubSettingsTab(tabContent, this.plugin);
         this.pendingSection = null;
         break;
       case "storage":

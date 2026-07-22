@@ -6,6 +6,15 @@ import type RssDashboardPlugin from "../../../main";
 vi.mock("../../../src/settings/tabs/general-settings-tab", () => ({
   renderGeneralSettingsTab: vi.fn(),
 }));
+vi.mock("../../../src/settings/tabs/sources-settings-tab", () => ({
+  renderSourcesSettingsTab: vi.fn(),
+}));
+vi.mock("../../../src/settings/tabs/topic-discovery-settings-tab", () => ({
+  renderTopicDiscoverySettingsTab: vi.fn(),
+}));
+vi.mock("../../../src/settings/tabs/tikhub-settings-tab", () => ({
+  renderTikHubSettingsTab: vi.fn(),
+}));
 vi.mock("../../../src/settings/tabs/storage-settings-tab", () => ({
   renderStorageSettingsTab: vi.fn(),
 }));
@@ -64,7 +73,7 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
     const tabButtons = Array.from(
       tab.containerEl.querySelectorAll(".rss-dashboard-settings-tab-btn"),
     );
-    expect(tabButtons).toHaveLength(11);
+    expect(tabButtons).toHaveLength(14);
     expect(tabButtons[0].textContent).toBe("常规");
 
     expect(vi.mocked(general.renderGeneralSettingsTab)).toHaveBeenCalledTimes(1);
