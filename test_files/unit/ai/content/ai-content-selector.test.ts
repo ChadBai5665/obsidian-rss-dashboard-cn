@@ -1,0 +1,414 @@
+import { describe, expect, it, vi } from "vitest";
+import type { CollectedItem } from "../../../../src/collection/collected-item";
+import type { CachedItemContent } from "../../../../src/collection/content-repository";
+import {
+  AiContentSelector,
+  type AiContentRepository,
+  type AiFullTextFetcher,
+} from "../../../../src/ai/content/ai-content-selector";
+import { AI_CONTENT_OMISSION_MARKER } from "../../../../src/ai/content/content-size";
+
+const ITEM_ID = "a".repeat(64);
+
+function item(overrides: Partial<CollectedItem> = {}): CollectedItem {
+  return {
+    schemaVersion: 1,
+    id: ITEM_ID,
+    sourceType: "rss",
+    sourceId: "source-1",
+    sourceName: "示例来源",
+    sourceBucket: "研究",
+    title: "示例标题",
+    fetchedAt: "2026-07-23T00:00:00.000Z",
+    firstSeenAt: "2026-07-23T00:00:00.000Z",
+    lastSeenAt: "2026-07-23T00:00:00.000Z",
+    url: "https://example.com/article",
+    observationType: "new",
+    topics: [],
+    excerpt: "订阅源摘要",
+    contentBasis: "feed",
+    read: false,
+    starred: false,
+    saved: false,
+    collectionStatus: "collected",
+    ...overrides,
+  };
+}
+
+function cached(text: string): CachedItemContent {
+  return {
+    schemaVersion: 1,
+    itemId: ITEM_ID,
+    sourceUrl: "https://example.com/article",
+    fetchedAt: "2026-07-23T00:00:00.000Z",
+    contentBasis: "full-text",
+    text,
+  };
+}
+
+function repository(
+  result: CachedItemContent | null,
+  order?: string[],
+): AiContentRepository & { read: ReturnType<typeof vi.fn> } {
+  return {
+    read: vi.fn(async (itemId: string) => {
+      order?.push(`repository:${itemId}`);
+      return result;
+    }),
+  };
+}
+
+describe("AiContentSelector", () => {
+  it("prefers cached full text, removes active HTML, and preserves source language", async () => {
+    const contentRepository = repository(
+      cached(
+        "<style>.hidden { display: none }</style><p>第一段 English 123</p>" +
+          "<script>stealSecret()</script><p>第二段</p>",
+      ),
+    );
+    const fullTextFetcher = vi.fn();
+    const selector = new AiContentSelector({ contentRepository, fullTextFetcher });
+
+    const result = await selector.select({
+      item: item(),
+      maxInputCharacters: 1_000,
+      fetchFullText: true,
+    });
+
+    expect(result).toEqual({
+      itemId: ITEM_ID,
+      title: "示例标题",
+      sourceName: "示例来源",
+      sourceUrl: "https://example.com/article",
+      content: "第一段 English 123 第二段",
+      basis: "full-text",
+      characterCount: 19,
+      truncated: false,
+    });
+    expect(contentRepository.read).toHaveBeenCalledWith(ITEM_ID);
+    expect(fullTextFetcher).not.toHaveBeenCalled();
+  });
+
+  it("uses only the selected feed item's description when no full text exists", async () => {
+    const contentRepository = repository(null);
+    const selector = new AiContentSelector({ contentRepository });
+
+    const result = await selector.select({
+      item: item({ excerpt: "<p>当前条目</p><style>不应出现</style> 的摘要" }),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+
+    expect(result.content).toBe("当前条目 的摘要");
+    expect(result.basis).toBe("feed");
+    expect(contentRepository.read).toHaveBeenCalledTimes(1);
+    expect(contentRepository.read).toHaveBeenCalledWith(ITEM_ID);
+  });
+
+  it("labels X text as x-post and never fetches the X page", async () => {
+    const contentRepository = repository(null);
+    const fullTextFetcher = vi.fn();
+    const selector = new AiContentSelector({ contentRepository, fullTextFetcher });
+
+    const result = await selector.select({
+      item: item({
+        sourceType: "x-account",
+        contentBasis: "x-post",
+        excerpt: "这是 X 帖子的原文",
+        url: "https://x.com/example/status/1",
+      }),
+      maxInputCharacters: 1_000,
+      fetchFullText: true,
+    });
+
+    expect(result.content).toBe("这是 X 帖子的原文");
+    expect(result.basis).toBe("x-post");
+    expect(fullTextFetcher).not.toHaveBeenCalled();
+  });
+
+  it("uses only a YouTube title and channel-provided description", async () => {
+    const contentRepository = repository(cached("不应使用的缓存转录文本"));
+    const fullTextFetcher = vi.fn();
+    const selector = new AiContentSelector({ contentRepository, fullTextFetcher });
+
+    const result = await selector.select({
+      item: item({
+        sourceType: "youtube",
+        contentBasis: "title-description",
+        title: "视频标题",
+        excerpt: "频道提供的视频说明".repeat(30),
+        url: "https://www.youtube.com/watch?v=video-id",
+      }),
+      maxInputCharacters: 120,
+      fetchFullText: true,
+    });
+
+    expect(result.content.startsWith("视频标题 频道提供的视频说明")).toBe(true);
+    expect(result.content).toContain(AI_CONTENT_OMISSION_MARKER);
+    expect(result.basis).toBe("title-description");
+    expect(result.truncated).toBe(true);
+    expect(contentRepository.read).not.toHaveBeenCalled();
+    expect(fullTextFetcher).not.toHaveBeenCalled();
+  });
+
+  it("makes a network request only for an explicit AI full-text action and only after the cache read", async () => {
+    const order: string[] = [];
+    const contentRepository = repository(null, order);
+    const fullTextFetcher: AiFullTextFetcher = vi.fn(async (request) => {
+      order.push(`network:${request.itemId}`);
+      return {
+        content: "<article><p>明确请求后取得的正文</p></article>",
+        failureType: "none",
+      };
+    });
+    const selector = new AiContentSelector({ contentRepository, fullTextFetcher });
+
+    const withoutRequest = await selector.select({
+      item: item(),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+
+    expect(withoutRequest.basis).toBe("feed");
+    expect(fullTextFetcher).not.toHaveBeenCalled();
+
+    const withRequest = await selector.select({
+      item: item(),
+      maxInputCharacters: 1_000,
+      fetchFullText: true,
+    });
+
+    expect(withRequest.content).toBe("明确请求后取得的正文");
+    expect(withRequest.basis).toBe("full-text");
+    expect(order).toEqual([
+      `repository:${ITEM_ID}`,
+      `repository:${ITEM_ID}`,
+      `network:${ITEM_ID}`,
+    ]);
+    expect(fullTextFetcher).toHaveBeenCalledWith({
+      itemId: ITEM_ID,
+      url: "https://example.com/article",
+      signal: undefined,
+    });
+  });
+
+  it("never asks for unrelated vault files or another collected item", async () => {
+    const requestedItemIds: string[] = [];
+    const contentRepository: AiContentRepository = {
+      read: async (itemId: string) => {
+        requestedItemIds.push(itemId);
+        return null;
+      },
+    };
+    const selector = new AiContentSelector({ contentRepository });
+
+    await selector.select({
+      item: item(),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+
+    expect(requestedItemIds).toEqual([ITEM_ID]);
+  });
+
+  it("bounds oversized source input before returning it to the model", async () => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+
+    const result = await selector.select({
+      item: item({ excerpt: `<p>${"甲".repeat(2_500_000)}</p>` }),
+      maxInputCharacters: 80,
+      fetchFullText: false,
+    });
+
+    expect(result.characterCount).toBe(80);
+    expect(result.content).toContain(AI_CONTENT_OMISSION_MARKER);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("strips script content before bounding hostile oversized HTML", async () => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+    const oversized = `${"正文".repeat(300_000)}<script>${"SECRET".repeat(200_000)}</script>`;
+
+    const result = await selector.select({
+      item: item({ excerpt: oversized }),
+      maxInputCharacters: 100,
+      fetchFullText: false,
+    });
+
+    expect(result.content).toContain(AI_CONTENT_OMISSION_MARKER);
+    expect(result.content).not.toContain("SECRET");
+    expect(result.content.endsWith("正文正文")).toBe(true);
+  });
+
+  it("falls back to the feed item when cached or fetched HTML has no readable text", async () => {
+    const cachedSelector = new AiContentSelector({
+      contentRepository: repository(cached("<script>cachedSecret()</script>")),
+    });
+
+    const cachedFallback = await cachedSelector.select({
+      item: item({ excerpt: "可读的订阅源摘要" }),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+    expect(cachedFallback).toMatchObject({
+      basis: "feed",
+      content: "可读的订阅源摘要",
+    });
+
+    const fetchedSelector = new AiContentSelector({
+      contentRepository: repository(null),
+      fullTextFetcher: vi.fn(async () => ({
+        content: "<style>fetched-secret { color: red }</style>",
+        failureType: "none",
+      })),
+    });
+    const fetchedFallback = await fetchedSelector.select({
+      item: item({ excerpt: "仍应使用当前摘要" }),
+      maxInputCharacters: 1_000,
+      fetchFullText: true,
+    });
+    expect(fetchedFallback).toMatchObject({
+      basis: "feed",
+      content: "仍应使用当前摘要",
+    });
+  });
+
+  it("rejects an invalid input limit before reading cache or making a network request", async () => {
+    const contentRepository = repository(null);
+    const fullTextFetcher = vi.fn();
+    const selector = new AiContentSelector({ contentRepository, fullTextFetcher });
+
+    await expect(
+      selector.select({
+        item: item(),
+        maxInputCharacters: 1,
+        fetchFullText: true,
+      }),
+    ).rejects.toThrow("AI input character limit");
+    expect(contentRepository.read).not.toHaveBeenCalled();
+    expect(fullTextFetcher).not.toHaveBeenCalled();
+  });
+
+  it("honors genuine cancellation without invoking a hostile signal accessor", async () => {
+    const contentRepository = repository(null);
+    const fullTextFetcher = vi.fn();
+    const selector = new AiContentSelector({ contentRepository, fullTextFetcher });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      selector.select({
+        item: item(),
+        maxInputCharacters: 1_000,
+        fetchFullText: true,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(contentRepository.read).not.toHaveBeenCalled();
+    expect(fullTextFetcher).not.toHaveBeenCalled();
+
+    let accessorInvoked = false;
+    const hostileSignal = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(hostileSignal, "aborted", {
+      get() {
+        accessorInvoked = true;
+        throw new Error("private signal accessor");
+      },
+    });
+    await expect(
+      selector.select({
+        item: item(),
+        maxInputCharacters: 1_000,
+        fetchFullText: true,
+        signal: hostileSignal as unknown as AbortSignal,
+      }),
+    ).rejects.toThrow("Invalid AI content selection request");
+    expect(accessorInvoked).toBe(false);
+  });
+
+  it("does not continue with feed input when cancellation happens during full-text fetch", async () => {
+    const controller = new AbortController();
+    const selector = new AiContentSelector({
+      contentRepository: repository(null),
+      fullTextFetcher: vi.fn(async () => {
+        controller.abort();
+        throw new Error("transport stopped");
+      }),
+    });
+
+    await expect(
+      selector.select({
+        item: item(),
+        maxInputCharacters: 1_000,
+        fetchFullText: true,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("does not use cached or feed input when cancellation happens during repository read", async () => {
+    const controller = new AbortController();
+    const contentRepository: AiContentRepository = {
+      read: vi.fn(async () => {
+        controller.abort();
+        return cached("<p>取消后不应使用的缓存正文</p>");
+      }),
+    };
+    const fullTextFetcher = vi.fn();
+    const selector = new AiContentSelector({ contentRepository, fullTextFetcher });
+
+    await expect(
+      selector.select({
+        item: item(),
+        maxInputCharacters: 1_000,
+        fetchFullText: true,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(fullTextFetcher).not.toHaveBeenCalled();
+  });
+
+  it("does not invoke item or fetch-result accessors", async () => {
+    let itemAccessorInvoked = false;
+    const accessorItem = item() as unknown as Record<string, unknown>;
+    Object.defineProperty(accessorItem, "title", {
+      enumerable: true,
+      get() {
+        itemAccessorInvoked = true;
+        throw new Error("private item accessor");
+      },
+    });
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+
+    await expect(
+      selector.select({
+        item: accessorItem as unknown as CollectedItem,
+        maxInputCharacters: 1_000,
+        fetchFullText: false,
+      }),
+    ).rejects.toThrow("Invalid selected item");
+    expect(itemAccessorInvoked).toBe(false);
+
+    let resultAccessorInvoked = false;
+    const hostileResult: Record<string, unknown> = { failureType: "none" };
+    Object.defineProperty(hostileResult, "content", {
+      enumerable: true,
+      get() {
+        resultAccessorInvoked = true;
+        throw new Error("private fetched accessor");
+      },
+    });
+    const fetchSelector = new AiContentSelector({
+      contentRepository: repository(null),
+      fullTextFetcher: vi.fn(async () => hostileResult as never),
+    });
+
+    const fallback = await fetchSelector.select({
+      item: item(),
+      maxInputCharacters: 1_000,
+      fetchFullText: true,
+    });
+    expect(fallback.basis).toBe("feed");
+    expect(resultAccessorInvoked).toBe(false);
+  });
+});
