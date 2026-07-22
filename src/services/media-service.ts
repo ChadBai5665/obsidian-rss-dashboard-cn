@@ -10,6 +10,7 @@ import { isKnownVideoUrl } from "../utils/video-detection";
 import { MastodonService } from "./mastodon-service";
 import { resolveArticleTags } from "../utils/tag-utils";
 import { resolveTagObjects } from "../utils/tag-resolver";
+import { createTranslator, type Locale } from "../i18n";
 
 export interface YouTubeEmbedConfig {
   videoId: string;
@@ -305,7 +306,10 @@ export class MediaService {
     return null;
   }
 
-  static async getYouTubeRssFeed(input: string): Promise<string | null> {
+  static async getYouTubeRssFeed(
+    input: string,
+    locale: Locale = "en",
+  ): Promise<string | null> {
     if (!input) {
       return null;
     }
@@ -355,7 +359,9 @@ export class MediaService {
           } catch (error) {
             console.error(`[YouTube] Error fetching channel:`, error);
             new Notice(
-              `Error fetching YouTube channel: ${error instanceof Error ? error.message : "Unknown error"}`,
+              createTranslator(locale)("service.media.youtubeChannelFailed", {
+                error: error instanceof Error ? error.message : "Unknown error",
+              }),
             );
           }
         }
@@ -392,7 +398,9 @@ export class MediaService {
           } catch (error) {
             console.error(`[YouTube] Error fetching channel:`, error);
             new Notice(
-              `Error fetching YouTube channel: ${error instanceof Error ? error.message : "Unknown error"}`,
+              createTranslator(locale)("service.media.youtubeChannelFailed", {
+                error: error instanceof Error ? error.message : "Unknown error",
+              }),
             );
           }
         }
@@ -409,7 +417,9 @@ export class MediaService {
       }
     } catch (error) {
       new Notice(
-        `Error processing YouTube feed: ${error instanceof Error ? error.message : "Unknown error"}`,
+        createTranslator(locale)("service.media.youtubeFeedFailed", {
+          error: error instanceof Error ? error.message : "Unknown error",
+        }),
       );
     }
 

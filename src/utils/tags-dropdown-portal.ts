@@ -2,6 +2,7 @@ import { Notice, setIcon } from "obsidian";
 import type { FeedItem, RssDashboardSettings, Tag } from "../types/types";
 import { showEditTagModal } from "./tag-utils";
 import { windowInstanceOf } from "./platform-utils";
+import { createTranslator, type Locale } from "../i18n";
 
 export type TagsDropdownPortalOptions = {
   anchor: HTMLElement;
@@ -13,6 +14,7 @@ export type TagsDropdownPortalOptions = {
   onOpenTagsSettings?: () => Promise<void> | void;
   appContainer?: HTMLElement | null;
   onClosed?: () => void;
+  locale?: Locale;
 };
 
 export function createTagsDropdownPortal(
@@ -28,7 +30,9 @@ export function createTagsDropdownPortal(
     onOpenTagsSettings,
     appContainer,
     onClosed,
+    locale = "en",
   } = options;
+  const t = createTranslator(locale);
 
   const targetDocument = anchor.ownerDocument;
   const targetBody = targetDocument.body;
@@ -78,14 +82,14 @@ export function createTagsDropdownPortal(
     });
     sheetHeader.createDiv({
       cls: "rss-dashboard-tags-sheet-title",
-      text: "Manage tags",
+      text: t("tags.manage"),
     });
     const sheetActions = sheetHeader.createDiv({
       cls: "rss-dashboard-tags-sheet-actions",
     });
     const addTagBtn = sheetActions.createEl("button", {
       cls: "rss-dashboard-tags-sheet-btn",
-      text: "Add tag",
+      text: t("tags.add"),
     });
     setIcon(addTagBtn, "plus");
     addTagBtn.addEventListener("click", (e) => {
@@ -96,7 +100,7 @@ export function createTagsDropdownPortal(
     });
     const doneBtn = sheetActions.createEl("button", {
       cls: "rss-dashboard-tags-sheet-btn rss-dashboard-tags-sheet-btn-done",
-      text: "Done",
+      text: t("tags.done"),
     });
     doneBtn.addEventListener("click", (e) => {
       e.preventDefault();
@@ -140,7 +144,7 @@ export function createTagsDropdownPortal(
 
     persistSettings();
     notifySettingsTagsMutated();
-    new Notice(`Tag "${tag.name}" deleted successfully!`);
+    new Notice(t("tags.deleted", { tag: tag.name }));
     updateTagSeparatorVisibility();
   };
 
@@ -166,8 +170,8 @@ export function createTagsDropdownPortal(
     const editButton = tagItem.createDiv({
       cls: "rss-dashboard-tag-action-button rss-dashboard-tag-edit-button clickable-icon",
       attr: {
-        title: `Edit "${tag.name}" tag`,
-        "aria-label": "Edit tag",
+        title: t("tags.edit", { tag: tag.name }),
+        "aria-label": t("tags.editLabel"),
         role: "button",
         tabindex: "0",
       },
@@ -177,8 +181,8 @@ export function createTagsDropdownPortal(
     const deleteButton = tagItem.createDiv({
       cls: "rss-dashboard-tag-action-button rss-dashboard-tag-delete-button clickable-icon",
       attr: {
-        title: `Delete "${tag.name}" tag`,
-        "aria-label": "Delete tag",
+        title: t("tags.delete", { tag: tag.name }),
+        "aria-label": t("tags.deleteLabel"),
         role: "button",
         tabindex: "0",
       },
@@ -278,7 +282,7 @@ export function createTagsDropdownPortal(
     const nameInput = inlineAddRow.createEl("input", {
       attr: {
         type: "text",
-        placeholder: "Add new tag...",
+        placeholder: t("tags.addPlaceholder"),
         autocomplete: "off",
       },
       cls: "rss-dashboard-tag-inline-input",
@@ -287,15 +291,15 @@ export function createTagsDropdownPortal(
 
     const addButton = inlineAddRow.createDiv({
       cls: "rss-dashboard-tag-inline-button clickable-icon",
-      attr: { title: "Add tag", role: "button", tabindex: "0" },
+      attr: { title: t("tags.add"), role: "button", tabindex: "0" },
     });
     setIcon(addButton, "plus");
 
     const settingsButton = inlineAddRow.createDiv({
       cls: "rss-dashboard-tag-inline-settings rss-dashboard-tag-inline-button clickable-icon",
       attr: {
-        title: "Tag settings",
-        "aria-label": "Open tag settings",
+        title: t("tags.settings"),
+        "aria-label": t("tags.openSettings"),
         role: "button",
         tabindex: "0",
       },
@@ -307,7 +311,7 @@ export function createTagsDropdownPortal(
       const tagColor = colorInput.value;
 
       if (!tagName) {
-        new Notice("Please enter a tag name!");
+        new Notice(t("tags.required"));
         return;
       }
 
@@ -317,7 +321,7 @@ export function createTagsDropdownPortal(
             existingTag.name.toLowerCase() === tagName.toLowerCase(),
         )
       ) {
-        new Notice("A tag with this name already exists!");
+        new Notice(t("tags.exists"));
         return;
       }
 
@@ -334,7 +338,7 @@ export function createTagsDropdownPortal(
 
       nameInput.value = "";
       window.requestAnimationFrame(() => nameInput.focus());
-      new Notice(`Tag "${tagName}" added`);
+      new Notice(t("tags.added", { tag: tagName }));
     };
 
     addButton.addEventListener("click", (e) => {

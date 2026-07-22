@@ -12,6 +12,8 @@
     "check:compliance": "npm run check:css-scope && npm run check:platform && npm run check:important && npm run check:commit-message",
     "check:commit-message": "node scripts/check-commit-message.mjs",
     "build": "npm run check:compliance && npm run lint && tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "audit:i18n": "node scripts/audit-i18n.mjs",
+    "check": "npm run test:unit && npm run audit:i18n && npm run lint && npm run build",
     "lint": "eslint . --max-warnings=0",
     "lint:dev": "eslint .",
     "test:unit": "vitest run --config vitest.config.mjs",

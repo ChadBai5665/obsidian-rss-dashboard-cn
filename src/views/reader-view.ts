@@ -240,6 +240,7 @@ export class ReaderView extends ItemView {
         this.webViewerIntegration = new WebViewerIntegration(
           this.app as unknown as ObsidianApp,
           settings.articleSaving,
+          settings.locale,
         );
       }
     } catch {
@@ -3311,6 +3312,7 @@ export class ReaderView extends ItemView {
         this.openTagsSettings();
       },
       appContainer: this.contentEl,
+      locale: this.settings.locale,
       onClosed: () => {
         if (this.tagsDropdownCleanup === cleanup) {
           this.tagsDropdownCleanup = null;

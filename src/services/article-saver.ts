@@ -44,6 +44,7 @@ import {
 } from "../utils/html-text";
 import { normalizeSubstackImageUrl } from "../utils/substack-image-url";
 import { isYouTubeItem } from "../utils/youtube-detection";
+import { createTranslator, type Locale, type Translator } from "../i18n";
 
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/;
 const OWNED_FRONTMATTER_KEYS = [
@@ -94,6 +95,7 @@ export class ArticleSaver {
   private collectionSyncCallbacks:
     | { onMetadataSyncFailed?: () => void; onMetadataSyncSucceeded?: () => void }
     | undefined;
+  private readonly t: Translator;
 
   constructor(
     app: App,
@@ -104,12 +106,14 @@ export class ArticleSaver {
       onMetadataSyncFailed?: () => void;
       onMetadataSyncSucceeded?: () => void;
     },
+    locale: Locale = "en",
   ) {
     this.app = app;
     this.settings = settings;
     this.corsProxyUrl = corsProxyUrl;
     this.collectionSettings = collectionSettings;
     this.collectionSyncCallbacks = collectionSyncCallbacks;
+    this.t = createTranslator(locale);
     this.turndownService = new TurndownService();
 
     this.turndownService.addRule("math", {
@@ -887,7 +891,7 @@ guid: "{{guid}}"
         const feedContent = this.getPreferredFeedHtml(item);
         const fetchExplicitly = async (): Promise<FullArticleFetchResult> => {
           const loadingNotice = new Notice(
-            "Fetching full article content...",
+            this.t("service.article.fetchingFull"),
             0,
           );
           try {
@@ -913,7 +917,7 @@ guid: "{{guid}}"
             item.restrictedReason = RESTRICTED_ARTICLE_REASON;
           } else {
             new Notice(
-              "Could not fetch full content. Saving with available content.",
+              this.t("service.article.fullFallback"),
             );
           }
           const fallbackMarkdown = feedContent
@@ -963,7 +967,7 @@ guid: "{{guid}}"
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      new Notice(`Error saving article with full content: ${message}`);
+      new Notice(this.t("service.article.saveFullFailed", { error: message }));
       return null;
     }
   }
@@ -992,7 +996,7 @@ guid: "{{guid}}"
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      new Notice(`Error saving article: ${message}`);
+      new Notice(this.t("service.article.saveFailed", { error: message }));
       return null;
     }
   }
@@ -1064,9 +1068,7 @@ guid: "{{guid}}"
 
     this.applySavedState(input.item, file.path);
     await this.syncSavedNoteMetadata(input.itemId, input.item, file.path);
-    new Notice(
-      "Article saved. Click/tap the icon again to open the article in your vault.",
-    );
+    new Notice(this.t("service.article.saved"));
     return file;
   }
 
@@ -1539,9 +1541,7 @@ guid: "{{guid}}"
       } catch {
         // A UI callback cannot change the durable metadata outcome.
       }
-      new Notice(
-        "Saved note metadata could not be updated. The note remains saved and will be repaired later.",
-      );
+      new Notice(this.t("service.article.metadataRepair"));
       return;
     }
 

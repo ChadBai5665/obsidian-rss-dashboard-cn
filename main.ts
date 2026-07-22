@@ -752,6 +752,8 @@ export default class RssDashboardPlugin extends Plugin {
       this.settings.articleSaving,
       undefined,
       this.settings.collection,
+      undefined,
+      this.settings.locale,
     );
     this.importExportService = new ImportExportService({
       settings: this.settings,
@@ -759,6 +761,7 @@ export default class RssDashboardPlugin extends Plugin {
       getPortableDataBundle: () => this.getPortableDataBundle(),
       importPortableDataBundle: (bundle) =>
         this.applyPortableDataBundleImport(bundle),
+      locale: this.settings.locale,
     });
     this.backupService = new BackupService({
       settings: this.settings,
@@ -778,6 +781,7 @@ export default class RssDashboardPlugin extends Plugin {
       ensureFolderExists: (folder, opts) =>
         this.ensureFolderExists(folder, opts),
       addStatusBarItem: () => this.addStatusBarItem(),
+      getLocale: () => this.settings.locale,
     });
   }
 
@@ -3112,7 +3116,10 @@ export default class RssDashboardPlugin extends Plugin {
 
   async addYouTubeFeed(input: string, customTitle?: string) {
     try {
-      const feedUrl = await MediaService.getYouTubeRssFeed(input);
+      const feedUrl = await MediaService.getYouTubeRssFeed(
+        input,
+        this.settings.locale,
+      );
 
       if (!feedUrl) {
         this.notify("plugin.youtube.unresolved");

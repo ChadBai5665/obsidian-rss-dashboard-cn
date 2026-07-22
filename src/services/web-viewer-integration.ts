@@ -2,6 +2,7 @@ import { App, Notice, TFile, setIcon, Setting } from "obsidian";
 import { FeedItem, ArticleSavingSettings } from "../types/types";
 import { sanitizeFilename } from "./article-saver";
 import { normalizeSubstackImageUrl } from "../utils/substack-image-url";
+import { createTranslator, type Locale, type Translator } from "../i18n";
 
 interface WebViewerPlugin {
   openWebpage?(url: string, title: string): Promise<void>;
@@ -24,10 +25,16 @@ interface ObsidianApp extends App {
 export class WebViewerIntegration {
   private app: ObsidianApp;
   private settings: ArticleSavingSettings;
+  private readonly t: Translator;
 
-  constructor(app: ObsidianApp, settings: ArticleSavingSettings) {
+  constructor(
+    app: ObsidianApp,
+    settings: ArticleSavingSettings,
+    locale: Locale = "en",
+  ) {
     this.app = app;
     this.settings = settings;
+    this.t = createTranslator(locale);
   }
 
   async openInWebViewer(url: string, title: string): Promise<boolean> {
@@ -44,7 +51,9 @@ export class WebViewerIntegration {
         return true;
       } catch (error) {
         new Notice(
-          `Error opening URL in web viewer: ${error instanceof Error ? error.message : "Unknown error"}`,
+          this.t("service.webViewer.openFailed", {
+            error: error instanceof Error ? error.message : "Unknown error",
+          }),
         );
         return false;
       }
@@ -75,10 +84,10 @@ export class WebViewerIntegration {
     });
     setIcon(iconSpan, "save");
     saveButton.createSpan({
-      text: "Save with template",
+      text: this.t("service.webViewer.saveWithTemplate"),
     });
 
-    saveButton.title = "Save with custom template";
+    saveButton.title = this.t("service.webViewer.saveCustomTemplate");
 
     saveButton.addEventListener("click", () => {
       this.showSaveDialog();
@@ -103,16 +112,18 @@ export class WebViewerIntegration {
       cls: "rss-dashboard-modal-content",
     });
 
-    new Setting(modalContent).setName("Save with template").setHeading();
+    new Setting(modalContent)
+      .setName(this.t("service.webViewer.saveWithTemplate"))
+      .setHeading();
 
     const folderLabel = modalContent.createEl("label", {
-      text: "Save to folder:",
+      text: this.t("service.webViewer.saveToFolder"),
     });
 
     const folderInput = modalContent.createEl("input", {
       attr: {
         type: "text",
-        placeholder: "Enter folder path",
+        placeholder: this.t("service.webViewer.folderPlaceholder"),
         value: this.settings.defaultFolder || "RSS articles/",
         autocomplete: "off",
       },
@@ -121,12 +132,12 @@ export class WebViewerIntegration {
     folderInput.addEventListener("focus", () => folderInput.select());
 
     const templateLabel = modalContent.createEl("label", {
-      text: "Use template:",
+      text: this.t("service.webViewer.useTemplate"),
     });
 
     const templateInput = modalContent.createEl("textarea", {
       attr: {
-        placeholder: "Enter template",
+        placeholder: this.t("service.webViewer.templatePlaceholder"),
         rows: "6",
         autocomplete: "off",
       },
@@ -151,7 +162,7 @@ export class WebViewerIntegration {
 
     includeFrontmatterCheck.createEl("label", {
       attr: { htmlFor: "include-frontmatter" },
-      text: "Include frontmatter",
+      text: this.t("service.webViewer.includeFrontmatter"),
     });
 
     const buttonContainer = modalContent.createDiv({
@@ -159,14 +170,14 @@ export class WebViewerIntegration {
     });
 
     const cancelButton = buttonContainer.createEl("button", {
-      text: "Cancel",
+      text: this.t("common.cancel"),
     });
     cancelButton.addEventListener("click", () => {
       activeDocument.body.removeChild(modal);
     });
 
     const saveButton = buttonContainer.createEl("button", {
-      text: "Save",
+      text: this.t("common.save"),
       cls: "rss-dashboard-primary-button",
     });
     saveButton.addEventListener("click", () => {
@@ -200,7 +211,7 @@ export class WebViewerIntegration {
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
-          new Notice(`Error saving article: ${message}`);
+          new Notice(this.t("service.webViewer.saveFailed", { error: message }));
         }
       })();
     });
@@ -254,7 +265,7 @@ export class WebViewerIntegration {
     const filePath = folder ? `${folder}/${filename}.md` : `${filename}.md`;
 
     if (this.app.vault.getAbstractFileByPath(filePath) !== null) {
-      new Notice(`File already exists: ${filename}`);
+      new Notice(this.t("service.webViewer.fileExists", { filename }));
       return null;
     }
 
@@ -268,7 +279,7 @@ export class WebViewerIntegration {
 
     const file = await this.app.vault.create(filePath, content);
 
-    new Notice(`Article saved: ${filename}`);
+    new Notice(this.t("service.webViewer.saved", { filename }));
 
     return file;
   }

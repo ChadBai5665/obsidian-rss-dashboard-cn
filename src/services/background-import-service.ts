@@ -16,6 +16,7 @@ import {
 } from "./feed-timeout";
 import { globalFetchSemaphore } from "./feed-parser/fetch-semaphore";
 import { setCssProps } from "../utils/platform-utils";
+import { createTranslator, type Locale, type Translator } from "../i18n";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,6 +46,7 @@ export interface BackgroundImportServiceDeps {
     opts: { saveSettings: boolean; refreshView: boolean },
   ) => Promise<boolean>;
   addStatusBarItem: () => HTMLElement;
+  getLocale?: () => Locale;
 }
 
 // ── Service ──────────────────────────────────────────────────────────────────
@@ -65,6 +67,7 @@ export class BackgroundImportService {
     opts: { saveSettings: boolean; refreshView: boolean },
   ) => Promise<boolean>;
   private readonly addStatusBarItem: () => HTMLElement;
+  private readonly getLocale: (() => Locale) | undefined;
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -78,6 +81,13 @@ export class BackgroundImportService {
     | RssDashboardSettings["storageMode"]
     | null = null;
 
+  private t(
+    key: Parameters<Translator>[0],
+    params?: Parameters<Translator>[1],
+  ): string {
+    return createTranslator(this.getLocale?.() ?? "en")(key, params);
+  }
+
   constructor(deps: BackgroundImportServiceDeps) {
     this.feedParser = deps.feedParser;
     this.getSettings = deps.getSettings;
@@ -85,6 +95,7 @@ export class BackgroundImportService {
     this.saveSettings = deps.saveSettings;
     this.ensureFolderExists = deps.ensureFolderExists;
     this.addStatusBarItem = deps.addStatusBarItem;
+    this.getLocale = deps.getLocale;
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -264,7 +275,9 @@ export class BackgroundImportService {
       }
 
       new Notice(
-        `Background import completed. Processed ${this.backgroundImportProcessedCount} feeds.`,
+        this.t("service.background.completed", {
+          count: this.backgroundImportProcessedCount,
+        }),
       );
     } finally {
       if (this.importStatusBarItem) {
@@ -563,17 +576,19 @@ export class BackgroundImportService {
       cls: "rss-dashboard-import-modal-header",
     });
 
-    new Setting(modalHeader).setName("Importing OPML feeds").setHeading();
+    new Setting(modalHeader)
+      .setName(this.t("service.background.importingOpml"))
+      .setHeading();
 
     const minimizeButton = modalHeader.createEl("button", {
       cls: "clickable-icon",
-      attr: { "aria-label": "Minimize" },
+      attr: { "aria-label": this.t("service.background.minimize") },
     });
     setIcon(minimizeButton, "minus");
     minimizeButton.onclick = onMinimize;
 
     const abortButton = modalHeader.createEl("button", {
-      text: "Abort",
+      text: this.t("service.background.abort"),
       cls: "rss-dashboard-import-abort-button",
     });
     abortButton.onclick = onAbort;
@@ -587,7 +602,7 @@ export class BackgroundImportService {
     modalContent.createDiv({
       attr: { id: "import-progress-text" },
       cls: "rss-dashboard-center-text rss-dashboard-import-progress-text",
-      text: `Preparing to import ${totalFeeds} feeds...`,
+      text: this.t("service.background.preparing", { count: totalFeeds }),
     });
 
     const progressBar = modalContent.createDiv({

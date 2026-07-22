@@ -178,7 +178,10 @@ export async function resolveAndLoadPreview(
 
   if (isYouTubePageUrl(url)) {
     detectedType = "youtube";
-    const rssUrl = await MediaService.getYouTubeRssFeed(url);
+    const rssUrl = await MediaService.getYouTubeRssFeed(
+      url,
+      options?.locale ?? "zh-CN",
+    );
     if (!rssUrl) {
       throw new Error(t("modal.feed.youtubeResolve"));
     }

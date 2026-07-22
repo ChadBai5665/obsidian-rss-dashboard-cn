@@ -10,6 +10,7 @@ import type {
   UserStateFile,
 } from "../types/types";
 import { bindFeedItemsToSourceIdentity } from "../collection/item-identity";
+import { createTranslator } from "../i18n";
 
 const SHARD_VERSION = 1;
 
@@ -316,9 +317,10 @@ export class FeedStorageRepository {
         });
         feed.items = Array.isArray(feed.items) ? feed.items : [];
         new Notice(
-          `RSS Dashboard: Failed to read shard for "${feed.title}". ${
-            error instanceof Error ? error.message : "Unknown error"
-          }`,
+          createTranslator(settings.locale)("service.storage.shardReadFailed", {
+            feed: feed.title,
+            error: error instanceof Error ? error.message : "Unknown error",
+          }),
         );
       }
     }

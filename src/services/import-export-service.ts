@@ -1,6 +1,7 @@
 import { Notice } from "obsidian";
 import type { PortableDataBundle, RssDashboardSettings } from "../types/types";
 import { OpmlManager } from "./opml-manager";
+import { createTranslator, type Locale, type Translator } from "../i18n";
 import {
   exportBlob,
   copyTextToClipboard,
@@ -16,17 +17,20 @@ export class ImportExportService {
   private isMobile: boolean;
   private getPortableDataBundle?: () => PortableDataBundle;
   private importPortableDataBundle?: (bundle: unknown) => Promise<void>;
+  private readonly t: Translator;
 
   constructor(options: {
     settings: RssDashboardSettings;
     isMobile: boolean;
     getPortableDataBundle?: () => PortableDataBundle;
     importPortableDataBundle?: (bundle: unknown) => Promise<void>;
+    locale?: Locale;
   }) {
     this.settings = options.settings;
     this.isMobile = options.isMobile;
     this.getPortableDataBundle = options.getPortableDataBundle;
     this.importPortableDataBundle = options.importPortableDataBundle;
+    this.t = createTranslator(options.locale ?? "en");
   }
 
   getUserSettingsJson(): string {
@@ -116,23 +120,23 @@ export class ImportExportService {
     }
 
     await this.importPortableDataBundle(parsed);
-    new Notice("Portable data bundle imported");
+    new Notice(this.t("service.import.portableImported"));
   }
 
   public showExportNotice(result: ExportBlobResult, filename: string): void {
     if (result === "downloaded") {
-      new Notice(`Downloading ${filename}`);
+      new Notice(this.t("service.import.downloading", { filename }));
       return;
     }
     if (result === "shared" || result === "opened") {
-      new Notice(`Opened save menu for ${filename}`);
+      new Notice(this.t("service.import.openedSaveMenu", { filename }));
       return;
     }
     if (result === "canceled") {
-      new Notice("Export canceled");
+      new Notice(this.t("service.import.canceled"));
       return;
     }
-    new Notice(`Unable to export ${filename}`);
+    new Notice(this.t("service.import.exportFailed", { filename }));
   }
 
   async copyDataJsonToClipboard(): Promise<void> {
@@ -161,9 +165,9 @@ export class ImportExportService {
 
   public showCopyNotice(result: "copied" | "failed", filename: string): void {
     if (result === "copied") {
-      new Notice(`Copied ${filename} to clipboard`);
+      new Notice(this.t("service.import.copied", { filename }));
       return;
     }
-    new Notice(`Unable to copy ${filename}`);
+    new Notice(this.t("service.import.copyFailed", { filename }));
   }
 }

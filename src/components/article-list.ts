@@ -1533,6 +1533,7 @@ export class ArticleList {
       },
       onOpenTagsSettings: this.callbacks.onOpenTagsSettings,
       appContainer: this.container,
+      locale: this.settings.locale,
       onClosed: () => {
         if (this.tagsDropdownCleanup === cleanup) {
           this.tagsDropdownCleanup = null;
