@@ -25,6 +25,7 @@ export const zhCN = {
   "source.unsupported": "不支持的来源：{kind}",
   "source.tikhubKeyMissing": "尚未配置有效的 API 密钥。请在 TikHub 设置中配置后重试。",
   "source.tikhubKeyInvalid": "TikHub API 密钥无效。请在 TikHub 设置中重新配置后重试。",
+  "source.tikhubBudgetUnavailable": "本次刷新没有可用的 TikHub 请求预算，请稍后重试。",
   "source.tikhubDisabled": "TikHub 已关闭。请在 TikHub 设置中启用后再刷新这个 X 来源。",
   "source.invalidConfiguration": "这个来源的配置无效，请编辑或重新创建后再试。",
 

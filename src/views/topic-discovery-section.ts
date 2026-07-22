@@ -1,4 +1,5 @@
 import { createTranslator, type Locale } from "../i18n";
+import { normalizeXPostSourceMetadata } from "../collection/source-metadata";
 import { canonicalExternalPageUrl } from "../sources/tikhub/linked-page-grouper";
 
 type TopicSectionId = "latest" | "platform-top" | "priority-account";
@@ -106,7 +107,9 @@ export function renderTopicDiscoverySection(
       row.createDiv({ text: item.title });
       row.createDiv({
         cls: "rss-dashboard-topic-discovery-fetched",
-        text: t("dashboard.fetchedAt", { time: formatFetchedAt(item.fetchedAt) }),
+        text: t("dashboard.fetchedAt", {
+          time: formatFetchedAt(item.fetchedAt, locale),
+        }),
       });
       const metrics = row.createDiv({
         cls: "rss-dashboard-topic-discovery-metrics",
@@ -138,7 +141,12 @@ function snapshotTopicItem(value: unknown): SafeTopicItem | undefined {
   const record = plainRecord(value);
   if (!record) return undefined;
   const sourceType = ownData(record, "sourceType");
-  if (sourceType !== "x-topic") return undefined;
+  const sourceBucket = ownString(record, "sourceBucket");
+  const legacyObservationTag = sourceBucket === "topic-latest"
+    ? "latest"
+    : sourceBucket === "topic-top"
+      ? "platform-top"
+      : undefined;
   const id = ownString(record, "id");
   const title = ownString(record, "title");
   const sourceName = ownString(record, "sourceName");
@@ -146,19 +154,19 @@ function snapshotTopicItem(value: unknown): SafeTopicItem | undefined {
   if (!id || title === undefined || sourceName === undefined || !fetchedAt) {
     return undefined;
   }
-  const metadata = plainRecord(ownData(record, "sourceMetadata"));
-  if (!metadata || ownData(metadata, "kind") !== "x-post") return undefined;
-  const observationTags = snapshotDenseArray(
-    ownData(metadata, "observationTags"),
-    (entry) => SECTION_IDS.includes(entry as TopicSectionId)
-      ? entry as TopicSectionId
-      : undefined,
+  const metadata = normalizeXPostSourceMetadata(
+    ownData(record, "sourceMetadata"),
   );
-  const externalUrls = snapshotDenseArray(
-    ownData(metadata, "externalUrls"),
-    (entry) => typeof entry === "string" ? entry : undefined,
-  );
-  if (!observationTags || !externalUrls) return undefined;
+  const observedByTopic = metadata?.observedSources?.some(
+    (source) => source.type === "x-topic",
+  ) ?? false;
+  if (sourceType !== "x-topic" && !observedByTopic && !legacyObservationTag) {
+    return undefined;
+  }
+  if (!metadata && !legacyObservationTag) return undefined;
+  const observationTags = metadata?.observationTags ??
+    (legacyObservationTag ? [legacyObservationTag] : []);
+  const externalUrls = metadata?.externalUrls ?? [];
   return {
     id,
     title,
@@ -303,11 +311,18 @@ function metricLabel(name: MetricName, locale: Locale): string {
   return t(keys[name]);
 }
 
-function formatFetchedAt(value: string): string {
+function formatFetchedAt(value: string, locale: Locale): string {
   const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp)
-    ? new Date(timestamp).toISOString().replace("T", " ").slice(0, 19)
-    : value;
+  if (!Number.isFinite(timestamp)) return value;
+  return new Intl.DateTimeFormat(locale, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  }).format(new Date(timestamp));
 }
 
 function compareText(left: string, right: string): number {

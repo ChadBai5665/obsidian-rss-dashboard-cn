@@ -18,7 +18,7 @@ export function mergeCollectedItems(
       previous.sourceMetadata,
       incoming.sourceMetadata,
     ),
-    read: incoming.read,
+    read: previous.read || incoming.read,
     starred: previous.starred || incoming.starred,
     saved: previous.saved || incoming.saved,
     savedNotePath: preferNonEmpty(

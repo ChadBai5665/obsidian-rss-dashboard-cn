@@ -119,6 +119,7 @@ type PluginPrivateAPI = {
   backgroundImportService: { startBackgroundImport: (feeds: Feed[]) => void };
   articleSaver: { fixSavedFilePaths: (...args: unknown[]) => Promise<unknown> };
   validateSavedArticles: () => Promise<void>;
+  refreshFeedsWithinSession: (feeds?: Feed[]) => Promise<void>;
   onArticleSaved: (item: FeedItem) => Promise<void>;
   ingestFeedsForBackgroundImport: (
     feeds: Array<{ title: string; url: string; folder: string }>,
@@ -645,7 +646,7 @@ describe("onload() initialization", () => {
       feeds: [{ ...sampleFeed, feedId: "feed-1" }],
     });
     const refreshSpy = vi
-      .spyOn(plugin, "refreshFeeds")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -741,7 +742,9 @@ describe("onload() initialization", () => {
     const originalExists = adapter.exists;
     const ledgerExists = vi.fn((path: string) => originalExists(path));
     adapter.exists = ledgerExists;
-    const refreshSpy = vi.spyOn(plugin, "refreshFeeds").mockResolvedValue(undefined);
+    const refreshSpy = vi
+      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .mockResolvedValue(undefined);
 
     await plugin.onload();
     await flushPromises();
@@ -770,7 +773,9 @@ describe("onload() initialization", () => {
       startupRefreshDelaySeconds: 0,
       feeds: [sourceFeed],
     });
-    const refreshSpy = vi.spyOn(plugin, "refreshFeeds").mockResolvedValue(undefined);
+    const refreshSpy = vi
+      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .mockResolvedValue(undefined);
 
     await plugin.onload();
     plugin.onunload();
@@ -810,7 +815,9 @@ describe("onload() initialization", () => {
         },
       }),
     );
-    const refreshSpy = vi.spyOn(plugin, "refreshFeeds").mockResolvedValue(undefined);
+    const refreshSpy = vi
+      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .mockResolvedValue(undefined);
 
     await plugin.onload();
     plugin.app.workspace.triggerLayoutReady();
@@ -842,7 +849,9 @@ describe("onload() initialization", () => {
         },
       }),
     );
-    const refreshSpy = vi.spyOn(plugin, "refreshFeeds").mockResolvedValue(undefined);
+    const refreshSpy = vi
+      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .mockResolvedValue(undefined);
 
     await plugin.onload();
     plugin.app.workspace.triggerLayoutReady();
@@ -873,10 +882,13 @@ describe("onload() initialization", () => {
         },
       }),
     );
-    const refreshSpy = vi.spyOn(plugin, "refreshFeeds").mockResolvedValue(undefined);
+    const refreshSpy = vi
+      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .mockResolvedValue(undefined);
 
     await plugin.onload();
     plugin.app.workspace.triggerLayoutReady();
+    await flushPromises();
     await flushPromises();
     await plugin.manualRefreshAllSources();
 
@@ -1207,7 +1219,7 @@ describe("onload() initialization", () => {
       startupRefreshDelaySeconds: 0,
     });
     const refreshSpy = vi
-      .spyOn(plugin, "refreshFeeds")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
       .mockResolvedValue(undefined);
 
     await plugin.onload();

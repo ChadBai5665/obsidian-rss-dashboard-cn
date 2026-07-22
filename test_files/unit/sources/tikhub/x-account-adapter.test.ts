@@ -495,7 +495,16 @@ describe("X account feed mapping", () => {
       quoteOfId: "193",
       externalUrls: ["https://example.com/report"],
     });
-    expect(collected.sourceMetadata).toEqual(item.sourceMetadata);
+    expect(collected.sourceMetadata).toEqual({
+      ...item.sourceMetadata,
+      observedSources: [
+        {
+          type: "x-account",
+          id: "account-openai",
+          bucket: "X/关注账号",
+        },
+      ],
+    });
     expect(collected.sourceMetadata).not.toBe(item.sourceMetadata);
   });
 

@@ -1,7 +1,10 @@
 import { createHash } from "crypto";
 import type { Feed, FeedItem } from "../types/types";
 import type { CollectedItem, SourceType } from "./collected-item";
-import { normalizeXPostSourceMetadata } from "./source-metadata";
+import {
+  mergeXPostSourceMetadata,
+  normalizeXPostSourceMetadata,
+} from "./source-metadata";
 import {
   bindFeedItemSourceIdentity,
   canonicalizeUrl,
@@ -41,7 +44,12 @@ export function normalizeFeedItem(
   const publishedAt = nonEmpty(item.pubDate);
   const guid = nonEmpty(item.guid);
   const url = canonicalizeUrl(item.link);
-  const sourceMetadata = resolveSourceMetadata(item);
+  const sourceMetadata = seedObservedSource(
+    resolveSourceMetadata(item),
+    sourceType,
+    sourceId,
+    feed.folder,
+  );
 
   const id = sourceType === "x-account" || sourceType === "x-topic"
     ? createXPostCollectedItemId(item.guid)
@@ -133,6 +141,24 @@ function resolveSourceMetadata(item: FeedItem): CollectedItem["sourceMetadata"] 
   const normalized = normalizeXPostSourceMetadata(raw);
   if (!normalized) throw new Error("Invalid X post source metadata.");
   return normalized;
+}
+
+function seedObservedSource(
+  metadata: CollectedItem["sourceMetadata"],
+  sourceType: SourceType,
+  sourceId: string,
+  sourceBucket: string,
+): CollectedItem["sourceMetadata"] {
+  if (sourceType !== "x-account" && sourceType !== "x-topic") {
+    return metadata;
+  }
+  return mergeXPostSourceMetadata(metadata, {
+    kind: "x-post",
+    externalUrls: [],
+    observedSources: [
+      { type: sourceType, id: sourceId, bucket: sourceBucket },
+    ],
+  });
 }
 
 function resolveSourceType(feed: Feed, item: FeedItem): SourceType {

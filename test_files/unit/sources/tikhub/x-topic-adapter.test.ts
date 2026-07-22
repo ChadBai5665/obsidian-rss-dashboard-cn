@@ -247,18 +247,18 @@ describe("XTopicAdapter request planning and neutral observations", () => {
     },
   );
 
-  it("makes zero calls and returns a warning when the whole batch cannot be reserved", async () => {
+  it("makes zero calls and rejects with a typed error when the whole batch cannot be reserved", async () => {
     const test = harness({ reserveError: new TikHubRequestBudgetError() });
 
-    const result = await test.adapter.refresh(topic(), { now: NOW });
+    await expect(test.adapter.refresh(topic(), { now: NOW })).rejects.toMatchObject({
+      name: "XTopicRefreshError",
+      code: "budget-unavailable",
+      translationKey: "source.tikhubBudgetUnavailable",
+    });
 
     expect(test.reserveBatch).toHaveBeenCalledWith(2);
     expect(test.fetchSearchTimeline).not.toHaveBeenCalled();
-    expect(result.items).toEqual([]);
-    expect(result.providerRequestCount).toBe(0);
-    expect(result.warnings).toEqual([
-      "TikHub request budget could not reserve this topic batch.",
-    ]);
+    expect(test.releaseBatch).not.toHaveBeenCalled();
   });
 
   it("releases the unattempted batch tail after an early failure or abort", async () => {

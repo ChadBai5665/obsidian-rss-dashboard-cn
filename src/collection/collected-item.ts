@@ -19,6 +19,12 @@ export type ContentBasis =
 
 export type CollectionStatus = "collected" | "partial" | "parse-error";
 
+export interface XObservedSource {
+  type: "x-account" | "x-topic";
+  id: string;
+  bucket: string;
+}
+
 export interface XPostSourceMetadata {
   kind: "x-post";
   conversationId?: string;
@@ -28,6 +34,8 @@ export interface XPostSourceMetadata {
   externalUrls: string[];
   /** Provider observation categories, not plugin quality judgments. */
   observationTags?: Array<"latest" | "platform-top" | "priority-account">;
+  /** Every configured X source that observed this post. */
+  observedSources?: XObservedSource[];
 }
 
 export interface CollectedItem {

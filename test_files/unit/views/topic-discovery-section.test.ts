@@ -83,7 +83,17 @@ describe("topic discovery section", () => {
     expect(root.textContent).toContain("平台 Top");
     expect(root.textContent).toContain("重点账号命中");
     expect(root.textContent).toContain("未提供");
-    expect(root.textContent).toContain("2026-07-22");
+    expect(root.textContent).toContain(
+      new Intl.DateTimeFormat("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        timeZoneName: "short",
+      }).format(new Date(latest.fetchedAt)),
+    );
     expect(root.querySelector("[data-quality-score]")).toBeNull();
   });
 
@@ -102,5 +112,46 @@ describe("topic discovery section", () => {
     expect(createTopicDiscoveryModel(sparse, "en").sections.every((section) => section.items.length === 0)).toBe(true);
     expect(createTopicDiscoveryModel([accessor as unknown as CollectedItem], "en").sections.every((section) => section.items.length === 0)).toBe(true);
     expect(getterCalls).toBe(0);
+  });
+
+  it("maps legacy topic buckets into visible provider sections without metadata", () => {
+    const latest = post({
+      id: "legacy-latest",
+      sourceBucket: "topic-latest",
+      sourceMetadata: undefined,
+    });
+    const top = post({
+      id: "legacy-top",
+      sourceBucket: "topic-top",
+      sourceMetadata: undefined,
+    });
+
+    const model = createTopicDiscoveryModel([latest, top], "en");
+
+    expect(
+      model.sections.find((section) => section.id === "latest")?.items,
+    ).toHaveLength(1);
+    expect(
+      model.sections.find((section) => section.id === "platform-top")?.items,
+    ).toHaveLength(1);
+  });
+
+  it("formats fetched time in the selected locale and identifies the local timezone", () => {
+    const fetchedAt = "2026-07-21T16:30:00.000Z";
+    const root = document.body.createDiv();
+
+    renderTopicDiscoverySection(root, [post({ fetchedAt })], "zh-CN");
+
+    const formatter = new Intl.DateTimeFormat("zh-CN", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      timeZoneName: "short",
+    });
+    expect(root.textContent).toContain(formatter.format(new Date(fetchedAt)));
+    expect(root.textContent).not.toContain("2026-07-21 16:30:00");
   });
 });

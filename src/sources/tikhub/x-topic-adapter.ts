@@ -49,7 +49,10 @@ export interface XTopicAdapterOptions {
   parseTimeline?: TimelineParser;
 }
 
-export type XTopicRefreshErrorCode = "missing-key" | "invalid-key";
+export type XTopicRefreshErrorCode =
+  | "missing-key"
+  | "invalid-key"
+  | "budget-unavailable";
 
 export class XTopicRefreshError extends Error {
   constructor(
@@ -64,8 +67,6 @@ export class XTopicRefreshError extends Error {
 
 const MISSING_TIMESTAMP_WARNING =
   "Skipped an X post without an in-window timestamp.";
-const BUDGET_WARNING =
-  "TikHub request budget could not reserve this topic batch.";
 const OBSERVATION_ORDER: XObservationTag[] = [
   "latest",
   "platform-top",
@@ -113,13 +114,7 @@ export class XTopicAdapter implements SourceAdapter<XTopicSourceConfig> {
         batch = await this.client.reserveBatch(requestCount);
       } catch (error) {
         if (!isInsufficientBudget(error)) throw error;
-        const empty = mapXTopicPostsToFeed(config, [], context.now);
-        return {
-          ...empty,
-          providerRequestCount: 0,
-          warnings: [BUDGET_WARNING],
-          linkedPageGroups: [],
-        };
+        throw this.budgetUnavailableError();
       }
 
       const window = dateWindow(context.now, config.windowDays);
@@ -197,6 +192,14 @@ export class XTopicAdapter implements SourceAdapter<XTopicSourceConfig> {
     return new XTopicRefreshError(
       "invalid-key",
       "source.tikhubKeyInvalid",
+      this.translate,
+    );
+  }
+
+  private budgetUnavailableError(): XTopicRefreshError {
+    return new XTopicRefreshError(
+      "budget-unavailable",
+      "source.tikhubBudgetUnavailable",
       this.translate,
     );
   }

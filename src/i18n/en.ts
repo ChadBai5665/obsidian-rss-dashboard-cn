@@ -27,6 +27,7 @@ export const en = {
   "source.unsupported": "Unsupported source: {kind}",
   "source.tikhubKeyMissing": "No valid API key is configured. Configure one in TikHub settings and try again.",
   "source.tikhubKeyInvalid": "The TikHub API key is invalid. Replace it in TikHub settings and try again.",
+  "source.tikhubBudgetUnavailable": "The TikHub request budget is unavailable for this refresh. Try again later.",
   "source.tikhubDisabled": "TikHub is disabled. Enable it in TikHub settings to refresh this X source.",
   "source.invalidConfiguration": "This source configuration is invalid. Edit or recreate the source, then try again.",
 

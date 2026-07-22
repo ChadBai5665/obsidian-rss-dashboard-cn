@@ -148,4 +148,29 @@ describe("normalizeFeedItem", () => {
     expect(collected.metrics).toEqual({ likes: 12, replies: 3 });
     expect(collected.metrics).not.toBe(sourceItem.metrics);
   });
+
+  it("seeds the typed source observation for every normalized X post", () => {
+    const xFeed = createFeed({
+      feedId: "ai-apps",
+      folder: "X/Topics",
+    }) as Feed & { sourceType: "x-topic" };
+    xFeed.sourceType = "x-topic";
+    const xItem = createItem({
+      guid: "200",
+      link: "https://x.com/openai/status/200",
+    }) as FeedItem & { sourceMetadata: unknown };
+    xItem.sourceMetadata = {
+      kind: "x-post",
+      externalUrls: [],
+      observationTags: ["latest"],
+    };
+
+    const normalized = normalizeFeedItem(xFeed, xItem, now);
+
+    expect(normalized.sourceMetadata).toMatchObject({
+      observedSources: [
+        { type: "x-topic", id: "ai-apps", bucket: "X/Topics" },
+      ],
+    });
+  });
 });

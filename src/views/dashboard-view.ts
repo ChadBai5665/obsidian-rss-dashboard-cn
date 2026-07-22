@@ -50,7 +50,13 @@ import {
   CollectionQueryService,
   type CollectionQueryInput,
 } from "../collection/collection-query-service";
-import type { CollectedItem, ContentBasis } from "../collection/collected-item";
+import type {
+  CollectedItem,
+  ContentBasis,
+  SourceType,
+  XObservedSource,
+} from "../collection/collected-item";
+import { normalizeXPostSourceMetadata } from "../collection/source-metadata";
 import { getContentBasisLabel } from "../collection/content-basis-display";
 import { toLocalCalendarDate } from "../refresh/local-calendar-day";
 import { createTranslator } from "../i18n";
@@ -1149,10 +1155,14 @@ export class RssDashboardView extends ItemView {
         return;
       }
       this.collectionItems = items;
-      const availableTypes = new Set(items.map((item) => item.sourceType));
-      const availableTopics = new Set(items.flatMap((item) => item.topics));
+      const availableTypes = new Set(items.flatMap(collectionSourceTypes));
+      const availableTopics = new Set(
+        items.flatMap((item) => collectionTopicNames(item, this.settings.feeds)),
+      );
       const availableAccounts = new Set(
-        items.map(collectionAccountHandle).filter((value): value is string => Boolean(value)),
+        items.flatMap((item) =>
+          collectionAccountHandles(item, this.settings.feeds),
+        ),
       );
       const availableObservations = new Set(
         items.flatMap(collectionObservationTags),
@@ -1211,18 +1221,31 @@ export class RssDashboardView extends ItemView {
     const input: CollectionQueryInput = {
       items: this.collectionItems,
       text: this.collectionQueryText,
-      sourceTypes: [...this.collectionSourceTypes],
-      topics: [...this.collectionTopics],
+      sourceTypes: [],
+      topics: [],
       read: this.collectionRead,
       starred: this.collectionStarred,
       saved: this.collectionSaved,
     };
 
     input.items = input.items.filter((item) => {
-      const account = collectionAccountHandle(item);
       if (
         this.collectionAccounts.size > 0 &&
-        (!account || !this.collectionAccounts.has(account))
+        !collectionAccountHandles(item, this.settings.feeds).some((account) =>
+          this.collectionAccounts.has(account),
+        )
+      ) return false;
+      if (
+        this.collectionSourceTypes.size > 0 &&
+        !collectionSourceTypes(item).some((sourceType) =>
+          this.collectionSourceTypes.has(sourceType),
+        )
+      ) return false;
+      if (
+        this.collectionTopics.size > 0 &&
+        !collectionTopicNames(item, this.settings.feeds).some((topic) =>
+          this.collectionTopics.has(topic),
+        )
       ) return false;
       if (this.collectionObservationTags.size > 0) {
         const tags = collectionObservationTags(item);
@@ -1240,14 +1263,16 @@ export class RssDashboardView extends ItemView {
         this.settings.feeds.map((feed) => feed.feedId ?? feed.url),
       );
       input.items = input.items.filter((item) =>
-        currentSourceIds.has(item.sourceId),
+        collectionSourceIds(item).some((sourceId) =>
+          currentSourceIds.has(sourceId),
+        ),
       );
     } else if (this.collectionSection === "topic-discovery") {
       // These stable buckets reflect TikHub/X result categories, not a plugin
       // recommendation. Keep the raw values out of translated UI copy.
       input.items = input.items.filter(
         (item) =>
-          (item.sourceType === "x-topic" &&
+          (collectionSourceTypes(item).includes("x-topic") &&
             collectionObservationTags(item).length > 0) ||
           item.sourceBucket === "topic-latest" ||
           item.sourceBucket === "topic-top",
@@ -1363,7 +1388,7 @@ export class RssDashboardView extends ItemView {
       void this.loadCollectionItems();
     });
     const sourceTypes = [
-      ...new Set(this.collectionItems.map((item) => item.sourceType)),
+      ...new Set(this.collectionItems.flatMap(collectionSourceTypes)),
     ].sort();
     for (const sourceType of sourceTypes) {
       const sourceTypeButton = filterControls.createEl("button", {
@@ -1392,8 +1417,9 @@ export class RssDashboardView extends ItemView {
     const accounts = [
       ...new Set(
         this.collectionItems
-          .map(collectionAccountHandle)
-          .filter((value): value is string => Boolean(value)),
+          .flatMap((item) =>
+            collectionAccountHandles(item, this.settings.feeds),
+          ),
       ),
     ].sort();
     for (const account of accounts) {
@@ -1420,8 +1446,9 @@ export class RssDashboardView extends ItemView {
     const topics = [
       ...new Set(
         this.collectionItems
-          .flatMap((item) => item.topics)
-          .filter((topic) => !topic.startsWith("x:")),
+          .flatMap((item) =>
+            collectionTopicNames(item, this.settings.feeds),
+          ),
       ),
     ].sort();
     for (const topic of topics) {
@@ -5309,7 +5336,7 @@ const COLLECTION_OBSERVATION_TAGS = new Set<CollectionObservationTag>([
   "priority-account",
 ]);
 
-function collectionAccountHandle(item: CollectedItem): string | undefined {
+function collectionUrlAccountHandle(item: CollectedItem): string | undefined {
   const urlValue = ownDataValue(item as unknown as Record<string, unknown>, "url");
   if (typeof urlValue !== "string") return undefined;
   try {
@@ -5325,6 +5352,67 @@ function collectionAccountHandle(item: CollectedItem): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function collectionObservedSources(item: CollectedItem): XObservedSource[] {
+  const metadata = ownDataValue(
+    item as unknown as Record<string, unknown>,
+    "sourceMetadata",
+  );
+  return normalizeXPostSourceMetadata(metadata)?.observedSources ?? [];
+}
+
+function collectionSourceTypes(item: CollectedItem): SourceType[] {
+  return [...new Set([
+    item.sourceType,
+    ...collectionObservedSources(item).map((source) => source.type),
+  ])];
+}
+
+function collectionSourceIds(item: CollectedItem): string[] {
+  return [...new Set([
+    item.sourceId,
+    ...collectionObservedSources(item).map((source) => source.id),
+  ])];
+}
+
+function collectionAccountHandles(
+  item: CollectedItem,
+  feeds: readonly Feed[],
+): string[] {
+  const handles = new Set<string>();
+  const urlHandle = collectionUrlAccountHandle(item);
+  if (urlHandle) handles.add(urlHandle);
+
+  for (const source of collectionObservedSources(item)) {
+    if (source.type !== "x-account") continue;
+    const feed = feeds.find(
+      (candidate) => (candidate.feedId ?? candidate.url) === source.id,
+    );
+    const config = feed?.sourceConfig;
+    if (config?.kind !== "x-account") continue;
+    const handle = config.handle.toLowerCase();
+    if (/^[a-z0-9_]{1,15}$/u.test(handle)) handles.add(handle);
+  }
+  return [...handles];
+}
+
+function collectionTopicNames(
+  item: CollectedItem,
+  feeds: readonly Feed[],
+): string[] {
+  const topics = new Set(item.topics.filter((topic) => !topic.startsWith("x:")));
+  for (const source of collectionObservedSources(item)) {
+    if (source.type !== "x-topic") continue;
+    const feed = feeds.find(
+      (candidate) => (candidate.feedId ?? candidate.url) === source.id,
+    );
+    const config = feed?.sourceConfig;
+    if (config?.kind === "x-topic" && config.name.trim()) {
+      topics.add(config.name.trim());
+    }
+  }
+  return [...topics];
 }
 
 function collectionObservationTags(

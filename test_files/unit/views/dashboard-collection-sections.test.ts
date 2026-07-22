@@ -85,7 +85,12 @@ interface CollectionDashboardTestApi {
   loadCollectionItems(): Promise<void>;
   onClose(): Promise<void>;
   setCollectionSection(
-    section: "today" | "subscriptions" | "starred" | "saved",
+    section:
+      | "today"
+      | "subscriptions"
+      | "starred"
+      | "saved"
+      | "topic-discovery",
   ): void;
   getCollectionSectionItems(): CollectedItem[];
   setCollectionQueryText(text: string): void;
@@ -344,6 +349,95 @@ describe("Dashboard collection sections", () => {
 
     expect(view.getCollectionSectionItems().map((entry) => entry.id)).toEqual([
       "match",
+    ]);
+  });
+
+  it("uses additive observed sources when account and topic writers arrive in either order", async () => {
+    const observedSources = [
+      { type: "x-account", id: "x-account-openai", bucket: "X/Accounts" },
+      { type: "x-topic", id: "ai-apps", bucket: "X/Topics" },
+    ];
+    const sourceMetadata = {
+      kind: "x-post",
+      externalUrls: [],
+      observationTags: ["latest"],
+      observedSources,
+    } as unknown as CollectedItem["sourceMetadata"];
+    const accountLast = item({
+      id: "account-last",
+      sourceType: "x-account",
+      sourceId: "x-account-openai",
+      sourceName: "@openai",
+      sourceBucket: "X/Accounts",
+      url: "https://x.com/anthropicai/status/301",
+      topics: ["AI applications", "x:latest"],
+      sourceMetadata,
+    });
+    const topicLast = item({
+      id: "topic-last",
+      sourceType: "x-topic",
+      sourceId: "ai-apps",
+      sourceName: "AI applications",
+      sourceBucket: "X/Topics",
+      url: "https://x.com/anthropicai/status/302",
+      topics: ["AI applications", "x:latest"],
+      sourceMetadata,
+    });
+    const accountFeed = {
+      ...feed("x-account-openai"),
+      sourceKind: "x-account" as const,
+      sourceConfig: {
+        kind: "x-account" as const,
+        id: "x-account-openai",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X/Accounts",
+        topics: [],
+      },
+    };
+    const topicFeed = {
+      ...feed("ai-apps"),
+      sourceKind: "x-topic" as const,
+      sourceConfig: {
+        kind: "x-topic" as const,
+        id: "ai-apps",
+        name: "AI applications",
+        includeKeywords: ["AI"],
+        excludeKeywords: [],
+        priorityAccounts: [],
+        windowDays: 7 as const,
+        folder: "X/Topics",
+      },
+    };
+    const { view } = await makeView({
+      items: [accountLast, topicLast],
+      feeds: [accountFeed, topicFeed],
+    });
+
+    await view.loadCollectionItems();
+    view.setCollectionSection("topic-discovery");
+    const root = document.body.createDiv();
+    view.renderCollectionSections(root);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-collection-account="openai"]',
+      )
+      ?.click();
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-collection-topic="AI applications"]',
+      )
+      ?.click();
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-collection-observation="latest"]',
+      )
+      ?.click();
+
+    expect(view.getCollectionSectionItems().map((entry) => entry.id)).toEqual([
+      "account-last",
+      "topic-last",
     ]);
   });
 

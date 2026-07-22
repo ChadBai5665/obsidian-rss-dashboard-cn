@@ -107,4 +107,58 @@ describe("mergeCollectedItems", () => {
       ],
     });
   });
+
+  it("never resets durable read, starred, or saved flags during observation merge", () => {
+    const merged = mergeCollectedItems(
+      createItem({ read: true, starred: true, saved: true }),
+      createItem({ read: false, starred: false, saved: false }),
+    );
+
+    expect(merged).toMatchObject({ read: true, starred: true, saved: true });
+  });
+
+  it("unions account and topic observation sources deterministically in either arrival order", () => {
+    const account = createItem({
+      sourceType: "x-account",
+      sourceId: "x-account-openai",
+      sourceBucket: "X/Accounts",
+      contentBasis: "x-post",
+      sourceMetadata: {
+        kind: "x-post",
+        externalUrls: [],
+        observedSources: [
+          { type: "x-account", id: "x-account-openai", bucket: "X/Accounts" },
+        ],
+      } as unknown as CollectedItem["sourceMetadata"],
+    });
+    const topic = createItem({
+      sourceType: "x-topic",
+      sourceId: "ai-apps",
+      sourceBucket: "X/Topics",
+      contentBasis: "x-post",
+      sourceMetadata: {
+        kind: "x-post",
+        externalUrls: [],
+        observationTags: ["latest"],
+        observedSources: [
+          { type: "x-topic", id: "ai-apps", bucket: "X/Topics" },
+        ],
+      } as unknown as CollectedItem["sourceMetadata"],
+    });
+
+    const expected = [
+      { type: "x-account", id: "x-account-openai", bucket: "X/Accounts" },
+      { type: "x-topic", id: "ai-apps", bucket: "X/Topics" },
+    ];
+    expect(
+      (mergeCollectedItems(account, topic).sourceMetadata as unknown as {
+        observedSources: unknown[];
+      }).observedSources,
+    ).toEqual(expected);
+    expect(
+      (mergeCollectedItems(topic, account).sourceMetadata as unknown as {
+        observedSources: unknown[];
+      }).observedSources,
+    ).toEqual(expected);
+  });
 });

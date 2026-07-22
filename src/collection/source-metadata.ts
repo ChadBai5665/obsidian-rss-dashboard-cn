@@ -1,4 +1,7 @@
-import type { XPostSourceMetadata } from "./collected-item";
+import type {
+  XObservedSource,
+  XPostSourceMetadata,
+} from "./collected-item";
 
 const POST_ID = /^\d{1,30}$/u;
 const ALLOWED_KEYS = new Set([
@@ -9,6 +12,7 @@ const ALLOWED_KEYS = new Set([
   "quoteOfId",
   "externalUrls",
   "observationTags",
+  "observedSources",
 ]);
 const RELATION_KEYS = [
   "conversationId",
@@ -40,6 +44,13 @@ export function normalizeXPostSourceMetadata(
     const observationTags = safeObservationTags(ownData(record, "observationTags"));
     if (!observationTags) return undefined;
     result.observationTags = observationTags;
+  }
+  if (Object.prototype.hasOwnProperty.call(record, "observedSources")) {
+    const observedSources = safeObservedSources(
+      ownData(record, "observedSources"),
+    );
+    if (!observedSources) return undefined;
+    result.observedSources = observedSources;
   }
   for (const key of RELATION_KEYS) {
     if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
@@ -83,6 +94,15 @@ export function mergeXPostSourceMetadata(
           ]),
         }
       : {}),
+    ...((previous.observedSources?.length ?? 0) > 0 ||
+    (incoming.observedSources?.length ?? 0) > 0
+      ? {
+          observedSources: orderedObservedSources([
+            ...(previous.observedSources ?? []),
+            ...(incoming.observedSources ?? []),
+          ]),
+        }
+      : {}),
   };
 }
 
@@ -93,7 +113,93 @@ function cloneMetadata(value: XPostSourceMetadata): XPostSourceMetadata {
     ...(value.observationTags
       ? { observationTags: [...value.observationTags] }
       : {}),
+    ...(value.observedSources
+      ? {
+          observedSources: value.observedSources.map((source) => ({
+            ...source,
+          })),
+        }
+      : {}),
   };
+}
+
+function safeObservedSources(value: unknown): XObservedSource[] | undefined {
+  try {
+    if (!Array.isArray(value) || Reflect.getPrototypeOf(value) !== Array.prototype) {
+      return undefined;
+    }
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    const length: unknown = lengthDescriptor && "value" in lengthDescriptor
+      ? lengthDescriptor.value
+      : undefined;
+    if (
+      typeof length !== "number" ||
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > 100_000
+    ) return undefined;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== length + 1 || !keys.includes("length")) return undefined;
+
+    const result: XObservedSource[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !("value" in descriptor)) return undefined;
+      const entry = plainRecord(descriptor.value);
+      if (!entry || !hasExactObservedSourceKeys(entry)) return undefined;
+      const type = ownData(entry, "type");
+      const id = ownData(entry, "id");
+      const bucket = ownData(entry, "bucket");
+      if (
+        (type !== "x-account" && type !== "x-topic") ||
+        typeof id !== "string" ||
+        !id ||
+        id.length > 4_096 ||
+        typeof bucket !== "string" ||
+        bucket.length > 4_096
+      ) return undefined;
+      result.push({ type, id, bucket });
+    }
+    return orderedObservedSources(result);
+  } catch {
+    return undefined;
+  }
+}
+
+function hasExactObservedSourceKeys(record: Record<string, unknown>): boolean {
+  try {
+    const keys = Reflect.ownKeys(record);
+    return (
+      keys.length === 3 &&
+      keys.every(
+        (key) => key === "type" || key === "id" || key === "bucket",
+      ) &&
+      hasOwnData(record, "type") &&
+      hasOwnData(record, "id") &&
+      hasOwnData(record, "bucket")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function orderedObservedSources(
+  values: readonly XObservedSource[],
+): XObservedSource[] {
+  const unique = new Map<string, XObservedSource>();
+  for (const value of values) {
+    const key = `${value.type}\u0000${value.id}\u0000${value.bucket}`;
+    if (!unique.has(key)) unique.set(key, { ...value });
+  }
+  return [...unique.values()].sort((left, right) =>
+    compareText(left.type, right.type) ||
+    compareText(left.id, right.id) ||
+    compareText(left.bucket, right.bucket),
+  );
+}
+
+function compareText(left: string, right: string): number {
+  return left === right ? 0 : left < right ? -1 : 1;
 }
 
 const OBSERVATION_TAGS = [

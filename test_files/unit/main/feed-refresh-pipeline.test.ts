@@ -10,6 +10,8 @@ import { RssDashboardView } from "../../../src/views/dashboard-view";
 import { ReaderView } from "../../../src/views/reader-view";
 import type { CollectedItem } from "../../../src/collection/collected-item";
 import type { SourceRegistry } from "../../../src/sources/source-registry";
+import { createTranslator } from "../../../src/i18n";
+import { XTopicRefreshError } from "../../../src/sources/tikhub/x-topic-adapter";
 
 let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
@@ -80,6 +82,7 @@ interface TestPlugin {
   saveData: ReturnType<typeof vi.fn>;
   feedParser: TestFeedParser;
   refreshFeeds: (selectedFeeds?: Feed[]) => Promise<void>;
+  refreshFeedsWithinSession: (selectedFeeds?: Feed[]) => Promise<void>;
   activeRefreshState: Map<string, unknown>;
   getActiveDashboardView: ReturnType<typeof vi.fn>;
   validateSavedArticles: ReturnType<typeof vi.fn>;
@@ -334,12 +337,15 @@ describe("refreshFeeds() pipeline behavior", () => {
         "ai-apps",
       ]),
     }));
-    plugin.refreshFeeds = vi.fn().mockResolvedValue(undefined);
+    plugin.refreshFeedsWithinSession = vi.fn().mockResolvedValue(undefined);
 
     await plugin.refreshOnOpenIfNeeded();
     await flushMicrotasks();
 
-    expect(plugin.refreshFeeds).toHaveBeenCalledWith([account, topic]);
+    expect(plugin.refreshFeedsWithinSession).toHaveBeenCalledWith([
+      account,
+      topic,
+    ]);
   });
 
   it("contains a missing TikHub key to the X source while RSS completes", async () => {
@@ -385,6 +391,120 @@ describe("refreshFeeds() pipeline behavior", () => {
       "x-account-openai",
       expect.any(Date),
       expect.objectContaining({ code: "missing-key" }),
+    );
+  });
+
+  it("admits exactly one refresh session across overlapping single, all, failed, and startup entries", async () => {
+    const account = createFeed({
+      feedId: "x-account-openai",
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "x-account-openai",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      url: "tikhub://x-account/openai",
+    });
+    const plugin = createPluginWithSettings([account]);
+    plugin.settings.collection = { ...plugin.settings.collection, enabled: false };
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const refresh = vi.fn(async () => {
+      await pending;
+      return {
+        feed: { ...account, lastUpdated: 2 },
+        items: account.items,
+        providerRequestCount: 1,
+        warnings: [],
+      };
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({ refresh }) as unknown as SourceRegistry);
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getDueSourceIds: vi.fn().mockResolvedValue(["x-account-openai"]),
+      recordAttempt: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+    }));
+    plugin.settings.refreshMode = "daily-on-open";
+    plugin.settings.startupRefreshDelaySeconds = 0;
+
+    const startup = plugin.refreshOnOpenIfNeeded();
+    expect(plugin.isMultiFeedRefreshActive).toBe(true);
+    const single = plugin.manualRefreshSourceById("x-account-openai");
+    const all = plugin.manualRefreshAllSources();
+    const failed = plugin.manualRefreshFailedSources();
+    await flushMicrotasks();
+
+    expect(plugin.createSourceRegistryForRun).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    release();
+    await Promise.all([single, all, failed, startup]);
+  });
+
+  it("records topic budget reservation failure without collection or daily success", async () => {
+    const topic = createFeed({
+      feedId: "ai-apps",
+      sourceKind: "x-topic",
+      sourceConfig: {
+        kind: "x-topic",
+        id: "ai-apps",
+        name: "AI applications",
+        includeKeywords: ["AI"],
+        excludeKeywords: [],
+        priorityAccounts: [],
+        windowDays: 7,
+        folder: "Topics",
+      },
+      url: "tikhub://x-topic/ai-apps",
+    });
+    const plugin = createPluginWithSettings([topic]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    const ledger = {
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+    };
+    const collectFeedRefresh = vi.fn();
+    plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: vi.fn().mockRejectedValue(
+        new XTopicRefreshError(
+          "budget-unavailable",
+          "source.tikhubBudgetUnavailable",
+          createTranslator("zh-CN"),
+        ),
+      ),
+    }) as unknown as SourceRegistry);
+
+    await plugin.manualRefreshAllSources();
+
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(ledger.recordSuccess).not.toHaveBeenCalled();
+    expect(ledger.recordError).toHaveBeenCalledWith(
+      "ai-apps",
+      expect.any(Date),
+      {
+        code: "budget-unavailable",
+        message: expect.stringContaining("预算"),
+      },
     );
   });
   it("restores vault metadata and its plugin pointer with feed files", async () => {
