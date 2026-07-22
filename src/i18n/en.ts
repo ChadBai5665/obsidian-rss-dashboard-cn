@@ -540,9 +540,19 @@ export const en = {
   "ai.preview.notTruncated": "Not truncated",
   "ai.preview.connection": "Connection",
   "ai.preview.model": "Model",
-  "ai.preview.fullText": "Fetch full article text after confirmation",
+  "ai.preview.fullText": "Prepare a full-article preview",
   "ai.preview.fullTextDesc":
-    "This may request the publisher page only after you confirm. YouTube media or transcripts are never fetched.",
+    "The first confirmation only fetches and previews the publisher page. Review the updated basis and size, then confirm again to send it to AI. YouTube media or transcripts are never fetched.",
+  "ai.preview.fullTextNeedsConfirmation":
+    "Confirm once to fetch the full-text preview. This does not contact the AI provider.",
+  "ai.preview.fetchingFullText":
+    "Fetching the full-text preview. Nothing has been sent to AI.",
+  "ai.preview.fullTextReady":
+    "The preview was updated. Review it and confirm again to send it to AI.",
+  "ai.preview.fullTextFallback":
+    "The full article text was unavailable. The preview still uses feed content; review it and confirm again only if you want to send that content.",
+  "ai.preview.fullTextFailed":
+    "The full-text preview could not be prepared. Nothing was sent to AI and no analysis file was created.",
   "ai.preview.loading": "Preparing a local preview…",
   "ai.preview.failed": "The selected item could not be prepared for preview.",
   "ai.confirm": "Confirm and send",
@@ -567,6 +577,8 @@ export const en = {
   "ai.result.insertFailed": "The analysis could not be inserted safely.",
   "ai.result.saveSourceFailed": "The source article could not be saved.",
   "ai.result.artifactSaveFailed": "The analysis file could not be saved safely.",
+  "ai.result.artifactInvalid":
+    "The analysis file is missing or changed, so the source note was not modified.",
   "ai.error.missingKey": "No API key is configured for this connection.",
   "ai.error.invalidKey": "The API key is invalid or expired.",
   "ai.error.insufficientBalance": "The provider account balance is insufficient.",

@@ -3,7 +3,10 @@ import type {
   AiProviderKind,
   AiSettings,
 } from "./ai-types";
-import { normalizeAiSettings } from "./connection-validation";
+import {
+  normalizeAiConnection,
+  normalizeAiSettings,
+} from "./connection-validation";
 import type {
   AiContentSelector,
   SelectedAiContent,
@@ -93,6 +96,15 @@ export interface AiOperationRunInput {
   signal?: AbortSignal;
 }
 
+export interface AiPreparedOperationRunInput {
+  operation: AiOperation;
+  itemId: string;
+  connectionId: string;
+  connection: AiConnection;
+  selectedContent: SelectedAiContent;
+  signal?: AbortSignal;
+}
+
 export type AiOperationProviderFactory = (
   connection: AiConnection,
   secretStore: AiSecretReader,
@@ -169,6 +181,51 @@ export class AiOperationService {
     };
   }
 
+  /** Sends the already-previewed content snapshot without selecting again. */
+  async runPrepared(
+    input: AiPreparedOperationRunInput,
+  ): Promise<AiOperationResult> {
+    const request = snapshotPreparedRunInput(input);
+    const connection = this.selectedConnection(request.connectionId);
+    if (!sameConnection(connection, request.connection)) {
+      throw new AiOperationError("invalid-connection");
+    }
+    const prompt = buildPromptSafely(
+      request.operation,
+      request.selectedContent,
+      connection.maxInputCharacters,
+    );
+    const provider = await this.runStage<TextGenerationProvider>(
+      () => this.providerFactory(connection, this.secretStore),
+      request.signal,
+      "provider",
+    );
+    const generated = await this.runStage<TextGenerationResult>(
+      () => provider.generate({
+        system: prompt.system,
+        user: prompt.user,
+        maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+        ...(request.signal ? { signal: request.signal } : {}),
+      }),
+      request.signal,
+      "provider",
+    );
+    const text = safeOutputText(generated);
+
+    return {
+      operation: request.operation,
+      itemId: request.itemId,
+      connectionId: connection.id,
+      connectionName: connection.name,
+      providerKind: connection.providerKind,
+      model: connection.model,
+      contentBasis: prompt.contentBasis,
+      inputCharacterCount: prompt.inputCharacterCount,
+      inputTruncated: prompt.inputTruncated,
+      text,
+    };
+  }
+
   private selectedConnection(connectionId: string): AiConnection {
     let settings: AiSettings;
     try {
@@ -206,6 +263,15 @@ interface RunInputSnapshot {
   signal?: AbortSignal;
 }
 
+interface PreparedRunInputSnapshot {
+  operation: AiOperation;
+  itemId: string;
+  connectionId: string;
+  connection: AiConnection;
+  selectedContent: SelectedAiContent;
+  signal?: AbortSignal;
+}
+
 function snapshotRunInput(input: AiOperationRunInput): RunInputSnapshot {
   const record = plainRecord(input);
   const operation = ownData(record, "operation");
@@ -232,6 +298,56 @@ function snapshotRunInput(input: AiOperationRunInput): RunInputSnapshot {
     fetchFullText,
     ...(signal === undefined ? {} : { signal: signal as AbortSignal }),
   };
+}
+
+function snapshotPreparedRunInput(
+  input: AiPreparedOperationRunInput,
+): PreparedRunInputSnapshot {
+  const record = plainRecord(input);
+  const operation = ownData(record, "operation");
+  const itemId = ownData(record, "itemId");
+  const rawConnectionId = ownData(record, "connectionId");
+  const connection = normalizeAiConnection(ownData(record, "connection"));
+  const selectedContent = ownData(record, "selectedContent");
+  const signal = ownOptionalData(record, "signal");
+  const selectedRecord = plainRecord(selectedContent);
+  if (
+    typeof operation !== "string" ||
+    !AI_OPERATIONS.has(operation as AiOperation) ||
+    typeof itemId !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(itemId) ||
+    !connection ||
+    ownData(selectedRecord, "itemId") !== itemId ||
+    (signal !== undefined && readTrustedAbortState(signal) === undefined)
+  ) {
+    throw new AiOperationError("selection-failed");
+  }
+  const connectionId = normalizeConnectionId(rawConnectionId);
+  if (!connectionId || connection.id !== connectionId) {
+    throw new AiOperationError("connection-not-found");
+  }
+  return {
+    operation: operation as AiOperation,
+    itemId,
+    connectionId,
+    connection,
+    selectedContent: selectedContent as SelectedAiContent,
+    ...(signal === undefined ? {} : { signal: signal as AbortSignal }),
+  };
+}
+
+function sameConnection(left: AiConnection, right: AiConnection): boolean {
+  return (
+    left.id === right.id &&
+    left.name === right.name &&
+    left.providerKind === right.providerKind &&
+    left.protocol === right.protocol &&
+    left.baseUrl === right.baseUrl &&
+    left.model === right.model &&
+    left.timeoutMs === right.timeoutMs &&
+    left.maxInputCharacters === right.maxInputCharacters &&
+    left.enabled === right.enabled
+  );
 }
 
 function buildPromptSafely(

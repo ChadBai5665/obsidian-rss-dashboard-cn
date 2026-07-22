@@ -14,6 +14,10 @@ vi.mock("../../../src/security/desktop-secret-store", () => ({
 }));
 
 import RssDashboardPlugin from "../../../main";
+import { AiOperationError, AiOperationService } from "../../../src/ai/ai-operation-service";
+import { AiContentSelector } from "../../../src/ai/content/ai-content-selector";
+import { AnalysisRepository } from "../../../src/ai/analysis-repository";
+import { AnalysisNoteInserter } from "../../../src/ai/analysis-note-inserter";
 import { createAiConnection } from "../../../src/ai/provider-presets";
 import { createCollectedItemId } from "../../../src/collection/item-identity";
 import {
@@ -25,6 +29,59 @@ import {
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 
 const CONNECTION_ID = "9a76f539-c9ec-4c45-a8e5-156cc6740a8d";
+
+function button(container: HTMLElement, label: string): HTMLButtonElement {
+  const match = Array.from(container.querySelectorAll("button")).find(
+    (candidate) => candidate.textContent === label,
+  );
+  if (!(match instanceof HTMLButtonElement)) {
+    throw new Error(`Missing button: ${label}`);
+  }
+  return match;
+}
+
+function enableConnection(test: ReturnType<typeof harness>): void {
+  test.settings.ai.connections = [createAiConnection({
+    id: CONNECTION_ID,
+    name: "Kimi work",
+    providerKind: "kimi",
+    model: "account-model",
+  })];
+  test.settings.ai.defaultConnectionId = CONNECTION_ID;
+}
+
+function installAtomicAdapter(test: ReturnType<typeof harness>): void {
+  const adapter = test.app.vault.adapter;
+  adapter.copy = async (from: string, to: string) => {
+    if (await adapter.exists(to)) throw new Error(`Destination exists: ${to}`);
+    await adapter.write(to, await adapter.read(from));
+  };
+  adapter.process = async (
+    path: string,
+    update: (current: string) => string,
+  ) => {
+    const current = await adapter.read(path);
+    const next = update(current);
+    await adapter.write(path, next);
+    return next;
+  };
+}
+
+function mockPreparedSuccess(): ReturnType<typeof vi.spyOn> {
+  return vi.spyOn(AiOperationService.prototype, "runPrepared")
+    .mockImplementation(async (input) => ({
+      operation: input.operation,
+      itemId: input.itemId,
+      connectionId: CONNECTION_ID,
+      connectionName: "Kimi work",
+      providerKind: "kimi",
+      model: "account-model",
+      contentBasis: input.selectedContent.basis,
+      inputCharacterCount: input.selectedContent.content.length,
+      inputTruncated: input.selectedContent.truncated,
+      text: "Production wiring analysis",
+    }));
+}
 
 function feedItem(guid: string, title: string): FeedItem {
   return {
@@ -100,13 +157,7 @@ describe("production AI operation wiring", () => {
 
   it("previews only the selected FeedItem and does not read a key or unrelated item before confirmation", async () => {
     const test = harness();
-    test.settings.ai.connections = [createAiConnection({
-      id: CONNECTION_ID,
-      name: "Kimi work",
-      providerKind: "kimi",
-      model: "account-model",
-    })];
-    test.settings.ai.defaultConnectionId = CONNECTION_ID;
+    enableConnection(test);
     const exists = vi.spyOn(test.app.vault.adapter, "exists");
     const read = vi.spyOn(test.app.vault.adapter, "read");
     const selectedId = createCollectedItemId({
@@ -142,4 +193,106 @@ describe("production AI operation wiring", () => {
     expect(read).not.toHaveBeenCalled();
     modal?.close();
   });
+
+  it("submits the production preview snapshot without selecting a cache file that appears later", async () => {
+    const test = harness();
+    enableConnection(test);
+    const select = vi.spyOn(AiContentSelector.prototype, "select");
+    const legacyRun = vi.spyOn(AiOperationService.prototype, "run")
+      .mockRejectedValue(new Error("legacy selection path must not run"));
+    const runPrepared = vi.spyOn(AiOperationService.prototype, "runPrepared")
+      .mockImplementation(async (input) => await new Promise((_, reject) => {
+        input.signal?.addEventListener("abort", () => {
+          reject(new AiOperationError("aborted"));
+        }, { once: true });
+      }));
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+    await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(
+      button(modal!.contentEl, "确认发送").disabled,
+    ).toBe(false));
+    const itemId = test.selected.rssDashboardId as string;
+    const cachePath = `${test.settings.collection.dataFolder}/content/${itemId}.md`;
+    await test.app.vault.adapter.write(cachePath, [
+      "---",
+      "schemaVersion: 1",
+      `itemId: ${JSON.stringify(itemId)}`,
+      `sourceUrl: ${JSON.stringify(test.selected.link)}`,
+      `fetchedAt: ${JSON.stringify("2026-07-23T02:00:00.000Z")}`,
+      `contentBasis: ${JSON.stringify("full-text")}`,
+      "---",
+      "",
+      "Later cached full text that was never previewed",
+    ].join("\n"));
+
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(runPrepared).toHaveBeenCalledTimes(1));
+
+    expect(legacyRun).not.toHaveBeenCalled();
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(runPrepared).toHaveBeenCalledWith(expect.objectContaining({
+      itemId,
+      selectedContent: expect.objectContaining({
+        content: "Selected item feed excerpt",
+        basis: "feed",
+      }),
+    }));
+    modal?.close();
+  });
+
+  it.each(["valid", "deleted", "replaced"] as const)(
+    "binds note insertion to the current saved artifact in production wiring: %s",
+    async (scenario) => {
+      const test = harness();
+      enableConnection(test);
+      installAtomicAdapter(test);
+      await test.app.vault.createFolder("Notes");
+      const sourceNote = await test.app.vault.create(
+        "Notes/source.md",
+        "User-authored source bytes",
+      );
+      test.selected.saved = true;
+      test.selected.savedFilePath = sourceNote.path;
+      mockPreparedSuccess();
+      const save = vi.spyOn(AnalysisRepository.prototype, "save");
+      const insert = vi.spyOn(AnalysisNoteInserter.prototype, "insert");
+      const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+        "Selected item",
+      ));
+
+      button(modal!.contentEl, "确认发送").click();
+      await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+      const artifactPath = await save.mock.results[0].value;
+      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+        artifactPath,
+      ));
+      if (scenario === "deleted") {
+        await test.app.vault.adapter.remove(artifactPath);
+      } else if (scenario === "replaced") {
+        await test.app.vault.adapter.write(
+          artifactPath,
+          "---\nresultId: \"forged\"\nsourceItemId: \"other\"\n---\n",
+        );
+      }
+
+      button(modal!.contentEl, "插入已保存原文").click();
+
+      if (scenario === "valid") {
+        await vi.waitFor(() => expect(insert).toHaveBeenCalledTimes(1));
+        expect(await test.app.vault.read(sourceNote)).toContain(
+          "RSS-DASHBOARD-CN:AI:",
+        );
+      } else {
+        await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+          "分析文档已缺失或发生变化",
+        ));
+        expect(insert).not.toHaveBeenCalled();
+        expect(await test.app.vault.read(sourceNote)).toBe(
+          "User-authored source bytes",
+        );
+      }
+      modal?.close();
+    },
+  );
 });

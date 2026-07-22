@@ -9,13 +9,17 @@ import {
   snapshotAiAnalysisResult,
   type AiAnalysisResult,
 } from "../ai/analysis-result";
-import type { AnalysisRepository } from "../ai/analysis-repository";
+import {
+  AnalysisArtifactVerificationError,
+  type AnalysisRepository,
+} from "../ai/analysis-repository";
 import type {
   AiContentSelector,
   SelectedAiContent,
 } from "../ai/content/ai-content-selector";
 import { normalizeAiConnection } from "../ai/connection-validation";
 import type { AnalysisNoteInsertResult } from "../ai/analysis-note-inserter";
+import { buildAiPrompt } from "../ai/prompts/prompt-builder";
 import type { AiOperation } from "../ai/prompts/prompt-types";
 import { waitForTrustedAbortWork } from "../ai/trusted-abort";
 import { getContentBasisLabel } from "../collection/content-basis-display";
@@ -43,6 +47,13 @@ const OPERATION_LABEL_KEYS: Readonly<Record<AiOperation, TranslationKey>> =
     "deep-analysis": "ai.operation.deepAnalysis",
   });
 
+interface PreparedAiPreview {
+  selectedContent: SelectedAiContent;
+  contentBasis: SelectedAiContent["basis"];
+  inputCharacterCount: number;
+  inputTruncated: boolean;
+}
+
 export interface AiOperationModalOptions {
   locale?: Locale;
   operation: AiOperation;
@@ -50,7 +61,7 @@ export interface AiOperationModalOptions {
   connections: AiConnection[];
   defaultConnectionId?: string;
   contentSelector: Pick<AiContentSelector, "select">;
-  operationService: Pick<AiOperationService, "run">;
+  operationService: Pick<AiOperationService, "runPrepared">;
   analysisRepository: Pick<AnalysisRepository, "save">;
   createResultId?: () => string;
   now?: () => Date;
@@ -58,6 +69,7 @@ export interface AiOperationModalOptions {
   getSavedNotePath(): string | undefined;
   insertIntoSavedNote(
     result: AiAnalysisResult,
+    artifactPath: string,
     notePath: string,
   ): Promise<AnalysisNoteInsertResult>;
   openSavedNote(notePath: string, marker: string): Promise<void> | void;
@@ -100,6 +112,7 @@ export class AiOperationModal extends Modal {
   private storageInFlight = false;
   private closeAfterStorage = false;
   private activeController: AbortController | null = null;
+  private activePreviewController: AbortController | null = null;
 
   constructor(app: App, private readonly options: AiOperationModalOptions) {
     super(app);
@@ -112,6 +125,7 @@ export class AiOperationModal extends Modal {
     this.storageInFlight = false;
     this.closeAfterStorage = false;
     this.activeController = null;
+    this.activePreviewController = null;
 
     const locale = this.options.locale ?? "zh-CN";
     const t = createTranslator(locale);
@@ -123,8 +137,10 @@ export class AiOperationModal extends Modal {
       ({ id }) => id === this.options.defaultConnectionId,
     );
     let selectedConnection = selectedDefault ?? connections[0];
-    let preview: SelectedAiContent | null = null;
+    let preview: PreparedAiPreview | null = null;
     let fetchFullText = false;
+    let previewReadyForSend = false;
+    let previewInFlight = false;
     let pendingResult: AiAnalysisResult | null = null;
     let savedPath: string | null = null;
     let cancelled = false;
@@ -182,12 +198,20 @@ export class AiOperationModal extends Modal {
       lifecycle === this.lifecycleEpoch && this.contentEl.isConnected;
     const setRequestBusy = (busy: boolean): void => {
       this.requestInFlight = busy;
-      confirmButton.disabled = busy || !preview;
+      const controlsBlocked = busy || previewInFlight;
+      confirmButton.disabled = controlsBlocked || !preview;
       confirmButton.setAttribute("aria-disabled", String(confirmButton.disabled));
-      connectionSelect.disabled = busy;
-      connectionSelect.setAttribute("aria-disabled", String(busy));
+      connectionSelect.disabled = controlsBlocked;
+      connectionSelect.setAttribute("aria-disabled", String(controlsBlocked));
       cancelButton.disabled = !busy;
       cancelButton.setAttribute("aria-disabled", String(!busy));
+      const toggle = previewEl.querySelector<HTMLInputElement>(
+        ".rss-dashboard-ai-full-text-toggle",
+      );
+      if (toggle) {
+        toggle.disabled = controlsBlocked;
+        toggle.setAttribute("aria-disabled", String(controlsBlocked));
+      }
     };
 
     const renderPreview = (): void => {
@@ -197,17 +221,27 @@ export class AiOperationModal extends Modal {
         previewEl.createEl("p", { text: t("ai.preview.loading") });
         return;
       }
-      addPreviewRow(previewEl, t("ai.preview.sourceTitle"), preview.title);
-      addPreviewRow(previewEl, t("ai.preview.sourceName"), preview.sourceName);
       addPreviewRow(
         previewEl,
-        t("ai.preview.contentBasis"),
-        getContentBasisLabel(preview.basis, locale),
+        t("ai.preview.sourceTitle"),
+        preview.selectedContent.title,
       );
       addPreviewRow(
         previewEl,
-        t("ai.preview.characterCount", { count: preview.characterCount }),
-        t(preview.truncated ? "ai.preview.truncated" : "ai.preview.notTruncated"),
+        t("ai.preview.sourceName"),
+        preview.selectedContent.sourceName,
+      );
+      addPreviewRow(
+        previewEl,
+        t("ai.preview.contentBasis"),
+        getContentBasisLabel(preview.contentBasis, locale),
+      );
+      addPreviewRow(
+        previewEl,
+        t("ai.preview.characterCount", { count: preview.inputCharacterCount }),
+        t(preview.inputTruncated
+          ? "ai.preview.truncated"
+          : "ai.preview.notTruncated"),
       );
       addPreviewRow(
         previewEl,
@@ -217,7 +251,7 @@ export class AiOperationModal extends Modal {
       addPreviewRow(previewEl, t("ai.preview.model"), selectedConnection.model);
 
       if (
-        preview.basis !== "full-text" &&
+        preview.contentBasis !== "full-text" &&
         FETCHABLE_SOURCE_TYPES.has(this.options.item.sourceType)
       ) {
         const toggleRow = previewEl.createDiv({
@@ -235,44 +269,89 @@ export class AiOperationModal extends Modal {
         toggleRow.createEl("p", { text: t("ai.preview.fullTextDesc") });
         toggle.addEventListener("change", () => {
           fetchFullText = toggle.checked;
+          previewReadyForSend = !fetchFullText;
+          if (fetchFullText) {
+            statusEl.setText(t("ai.preview.fullTextNeedsConfirmation"));
+          } else {
+            void loadPreview(false);
+          }
         });
       } else {
-        fetchFullText = false;
+        previewReadyForSend = true;
       }
+      setRequestBusy(this.requestInFlight);
     };
 
-    const loadPreview = async (): Promise<void> => {
-      if (!selectedConnection || !isCurrent() || this.requestInFlight) return;
+    const loadPreview = async (requestFullText: boolean): Promise<boolean> => {
+      if (
+        !selectedConnection ||
+        !isCurrent() ||
+        this.requestInFlight ||
+        previewInFlight
+      ) return false;
       const request = ++this.previewEpoch;
+      const connection = selectedConnection;
+      const controller = new AbortController();
+      this.activePreviewController?.abort();
+      this.activePreviewController = controller;
+      previewInFlight = true;
+      previewReadyForSend = false;
+      const previousPreview = preview;
       preview = null;
-      fetchFullText = false;
-      confirmButton.disabled = true;
       renderPreview();
+      setRequestBusy(false);
       try {
         const selected = await this.options.contentSelector.select({
           item: this.options.item,
-          maxInputCharacters: selectedConnection.maxInputCharacters,
-          fetchFullText: false,
+          maxInputCharacters: connection.maxInputCharacters,
+          fetchFullText: requestFullText,
+          signal: controller.signal,
         });
-        if (!isCurrent() || request !== this.previewEpoch) return;
-        preview = selected;
-        statusEl.setText("");
+        if (
+          !isCurrent() ||
+          request !== this.previewEpoch ||
+          controller.signal.aborted
+        ) return false;
+        preview = preparePreview(
+          selected,
+          this.options.item.id,
+          this.options.operation,
+          connection.maxInputCharacters,
+        );
+        previewReadyForSend = true;
+        statusEl.setText(requestFullText
+          ? t(preview.contentBasis === "full-text"
+            ? "ai.preview.fullTextReady"
+            : "ai.preview.fullTextFallback")
+          : "");
         renderPreview();
-        setRequestBusy(false);
+        return true;
       } catch {
-        if (!isCurrent() || request !== this.previewEpoch) return;
-        preview = null;
-        previewEl.empty();
-        statusEl.setText(t("ai.preview.failed"));
-        setRequestBusy(false);
+        if (!isCurrent() || request !== this.previewEpoch) return false;
+        preview = requestFullText ? previousPreview : null;
+        if (preview) renderPreview();
+        else previewEl.empty();
+        statusEl.setText(t(requestFullText
+          ? "ai.preview.fullTextFailed"
+          : "ai.preview.failed"));
+        return false;
+      } finally {
+        if (this.activePreviewController === controller) {
+          this.activePreviewController = null;
+        }
+        if (request === this.previewEpoch) {
+          previewInFlight = false;
+          if (isCurrent()) setRequestBusy(false);
+        }
       }
     };
 
     const renderSavedActions = (): void => {
       if (!isCurrent() || !pendingResult || !savedPath) return;
+      const artifactPath = savedPath;
       resultEl.empty();
       resultEl.createEl("p", {
-        text: t("ai.result.saved", { path: savedPath }),
+        text: t("ai.result.saved", { path: artifactPath }),
       });
       const openButton = resultEl.createEl("button", {
         text: t("ai.result.open"),
@@ -280,7 +359,7 @@ export class AiOperationModal extends Modal {
       openButton.addEventListener("click", () => {
         void (async () => {
           try {
-            await this.options.openAnalysis(savedPath as string);
+            await this.options.openAnalysis(artifactPath);
           } catch {
             if (isCurrent()) statusEl.setText(t("ai.result.openFailed"));
           }
@@ -333,6 +412,7 @@ export class AiOperationModal extends Modal {
           try {
             const outcome = await this.options.insertIntoSavedNote(
               result,
+              artifactPath,
               savedNotePath,
             );
             const closed = this.finishPersistence();
@@ -343,10 +423,12 @@ export class AiOperationModal extends Modal {
             if (outcome.status === "existing") {
               await this.options.openSavedNote(outcome.notePath, outcome.marker);
             }
-          } catch {
+          } catch (error) {
             const closed = this.finishPersistence();
             if (!closed && isCurrent()) {
-              statusEl.setText(t("ai.result.insertFailed"));
+              statusEl.setText(t(error instanceof AnalysisArtifactVerificationError
+                ? "ai.result.artifactInvalid"
+                : "ai.result.insertFailed"));
             }
           } finally {
             if (isCurrent() && !this.storageInFlight) {
@@ -361,10 +443,18 @@ export class AiOperationModal extends Modal {
       if (
         !isCurrent() ||
         this.requestInFlight ||
+        previewInFlight ||
         this.storageInFlight ||
         !preview ||
         !selectedConnection
       ) return;
+      if (fetchFullText && !previewReadyForSend) {
+        statusEl.setText(t("ai.preview.fetchingFullText"));
+        await loadPreview(true);
+        return;
+      }
+      if (!previewReadyForSend) return;
+      const confirmedPreview = preview;
       cancelled = false;
       pendingResult = null;
       savedPath = null;
@@ -375,11 +465,12 @@ export class AiOperationModal extends Modal {
       this.activeController = controller;
       setRequestBusy(true);
       try {
-        const operationResult = await this.options.operationService.run({
+        const operationResult = await this.options.operationService.runPrepared({
           operation: this.options.operation,
-          item: this.options.item,
+          itemId: this.options.item.id,
           connectionId: selectedConnection.id,
-          fetchFullText,
+          connection: selectedConnection,
+          selectedContent: confirmedPreview.selectedContent,
           signal: controller.signal,
         });
         if (!isCurrent() || cancelled || controller.signal.aborted) return;
@@ -388,6 +479,7 @@ export class AiOperationModal extends Modal {
           this.options.item,
           this.options.operation,
           selectedConnection,
+          confirmedPreview,
           (this.options.createResultId ?? defaultResultId)(),
           (this.options.now ?? (() => new Date()))(),
         );
@@ -428,11 +520,13 @@ export class AiOperationModal extends Modal {
     };
 
     connectionSelect.addEventListener("change", () => {
-      if (this.requestInFlight) return;
+      if (this.requestInFlight || previewInFlight) return;
       const connection = connections.find(({ id }) => id === connectionSelect.value);
       if (!connection) return;
       selectedConnection = connection;
-      void loadPreview();
+      fetchFullText = false;
+      previewReadyForSend = false;
+      void loadPreview(false);
     });
     confirmButton.addEventListener("click", () => { void runOperation(); });
     cancelButton.addEventListener("click", () => {
@@ -444,7 +538,7 @@ export class AiOperationModal extends Modal {
     });
     setRequestBusy(false);
     renderPreview();
-    void loadPreview();
+    void loadPreview(false);
   }
 
   override close(): void {
@@ -465,6 +559,8 @@ export class AiOperationModal extends Modal {
   override onClose(): void {
     this.lifecycleEpoch += 1;
     this.previewEpoch += 1;
+    this.activePreviewController?.abort();
+    this.activePreviewController = null;
     this.activeController?.abort();
     this.activeController = null;
     this.contentEl.empty();
@@ -486,6 +582,7 @@ function createAnalysisResult(
   item: CollectedItem,
   operation: AiOperation,
   connection: AiConnection,
+  preview: PreparedAiPreview,
   id: string,
   now: Date,
 ): AiAnalysisResult {
@@ -495,7 +592,10 @@ function createAnalysisResult(
     generated.connectionId !== connection.id ||
     generated.connectionName !== connection.name ||
     generated.providerKind !== connection.providerKind ||
-    generated.model !== connection.model
+    generated.model !== connection.model ||
+    generated.contentBasis !== preview.contentBasis ||
+    generated.inputCharacterCount !== preview.inputCharacterCount ||
+    generated.inputTruncated !== preview.inputTruncated
   ) {
     throw new Error("AI operation provenance mismatch");
   }
@@ -514,6 +614,38 @@ function createAnalysisResult(
     inputCharacterCount: generated.inputCharacterCount,
     inputTruncated: generated.inputTruncated,
     text: generated.text,
+  });
+}
+
+function preparePreview(
+  selected: SelectedAiContent,
+  expectedItemId: string,
+  operation: AiOperation,
+  maxInputCharacters: number,
+): PreparedAiPreview {
+  const selectedContent = Object.freeze({
+    itemId: selected.itemId,
+    title: selected.title,
+    sourceName: selected.sourceName,
+    ...(selected.sourceUrl === undefined ? {} : { sourceUrl: selected.sourceUrl }),
+    content: selected.content,
+    basis: selected.basis,
+    characterCount: selected.content.length,
+    truncated: selected.truncated,
+  });
+  if (selectedContent.itemId !== expectedItemId) {
+    throw new Error("AI preview item provenance mismatch");
+  }
+  const prompt = buildAiPrompt({
+    operation,
+    selectedContent,
+    maxContentCharacters: maxInputCharacters,
+  });
+  return Object.freeze({
+    selectedContent,
+    contentBasis: prompt.contentBasis,
+    inputCharacterCount: prompt.inputCharacterCount,
+    inputTruncated: prompt.inputTruncated,
   });
 }
 

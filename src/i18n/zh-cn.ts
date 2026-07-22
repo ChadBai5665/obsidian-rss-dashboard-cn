@@ -530,9 +530,17 @@ export const zhCN = {
   "ai.preview.notTruncated": "未截断",
   "ai.preview.connection": "连接",
   "ai.preview.model": "模型",
-  "ai.preview.fullText": "确认后再获取文章全文",
+  "ai.preview.fullText": "准备文章全文预览",
   "ai.preview.fullTextDesc":
-    "只有点击确认后才可能请求来源网页；不会获取 YouTube 媒体或字幕。",
+    "第一次确认只获取并展示来源网页；请核对更新后的内容依据和字符数，再次确认后才发送给 AI。不会获取 YouTube 媒体或字幕。",
+  "ai.preview.fullTextNeedsConfirmation":
+    "点击确认只获取全文预览，此时不会请求 AI。",
+  "ai.preview.fetchingFullText": "正在获取全文预览，尚未向 AI 发送内容。",
+  "ai.preview.fullTextReady": "全文预览已更新，请核对后再次确认发送。",
+  "ai.preview.fullTextFallback":
+    "未取得文章全文，预览仍使用订阅源内容；请核对后，仅在愿意发送当前内容时再次确认。",
+  "ai.preview.fullTextFailed":
+    "无法准备全文预览；未请求 AI，也未创建分析文档。",
   "ai.preview.loading": "正在准备本地预览…",
   "ai.preview.failed": "无法为当前信息准备预览。",
   "ai.confirm": "确认发送",
@@ -555,6 +563,7 @@ export const zhCN = {
   "ai.result.insertFailed": "无法安全地插入这份分析。",
   "ai.result.saveSourceFailed": "无法保存原文。",
   "ai.result.artifactSaveFailed": "无法安全保存分析文档。",
+  "ai.result.artifactInvalid": "分析文档已缺失或发生变化，未修改原文笔记。",
   "ai.error.missingKey": "当前连接尚未配置 API 密钥。",
   "ai.error.invalidKey": "API 密钥无效或已过期。",
   "ai.error.insufficientBalance": "服务商账户余额不足。",

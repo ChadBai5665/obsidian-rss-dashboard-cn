@@ -1490,16 +1490,20 @@ export default class RssDashboardPlugin extends Plugin {
               await this.openAiVaultFile(path);
             },
             getSavedNotePath: () => this.resolveExistingSavedNotePath(item),
-            insertIntoSavedNote: async (result, notePath) =>
-              await noteInserter.insert({
-                notePath,
+            insertIntoSavedNote: async (result, artifactPath, notePath) =>
+              await analysisRepository.withVerifiedArtifact(
+                artifactPath,
                 result,
-                operationLabel: aiOperationLabel(result.operation, t),
-                contentBasisLabel: getContentBasisLabel(
-                  result.contentBasis,
-                  this.settings.locale ?? "zh-CN",
-                ),
-              }),
+                async (trustedResult) => await noteInserter.insert({
+                  notePath,
+                  result: trustedResult,
+                  operationLabel: aiOperationLabel(trustedResult.operation, t),
+                  contentBasisLabel: getContentBasisLabel(
+                    trustedResult.contentBasis,
+                    this.settings.locale ?? "zh-CN",
+                  ),
+                }),
+              ),
             openSavedNote: async (notePath, marker) => {
               await this.openAiVaultFile(notePath, marker);
             },

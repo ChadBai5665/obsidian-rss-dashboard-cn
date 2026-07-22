@@ -128,6 +128,74 @@ async function caught(promise: Promise<unknown>): Promise<AiOperationError> {
 }
 
 describe("manual AI operation service", () => {
+  it("sends one immutable prepared-content snapshot without selecting content again", async () => {
+    const prepared = selected({
+      content: "用户在预览中看见的订阅摘要",
+      characterCount: 13,
+    });
+    const test = harness();
+
+    const pending = test.service.runPrepared({
+      operation: "summary",
+      itemId: ITEM_ID,
+      connectionId: CONNECTION_ID,
+      connection: connection(),
+      selectedContent: prepared,
+    });
+    prepared.content = "后来出现的缓存全文不得替换预览";
+    prepared.characterCount = prepared.content.length;
+    const result = await pending;
+
+    expect(test.select).not.toHaveBeenCalled();
+    expect(test.providerFactory).toHaveBeenCalledTimes(1);
+    expect(test.generate).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(test.generate.mock.calls[0][0].user)).toMatchObject({
+      content: "用户在预览中看见的订阅摘要",
+      contentBasis: "feed",
+    });
+    expect(result).toMatchObject({
+      itemId: ITEM_ID,
+      contentBasis: "feed",
+      inputCharacterCount: 13,
+      inputTruncated: false,
+    });
+  });
+
+  it("rejects prepared content for another item before provider or secret access", async () => {
+    const test = harness();
+
+    const error = await caught(test.service.runPrepared({
+      operation: "summary",
+      itemId: ITEM_ID,
+      connectionId: CONNECTION_ID,
+      connection: connection(),
+      selectedContent: selected({ itemId: "c".repeat(64) }),
+    }));
+
+    expect(error.code).toBe("selection-failed");
+    expect(test.select).not.toHaveBeenCalled();
+    expect(test.providerFactory).not.toHaveBeenCalled();
+    expect(test.get).not.toHaveBeenCalled();
+  });
+
+  it("rejects a changed connection snapshot before provider or secret access", async () => {
+    const test = harness({
+      aiSettings: { connections: [connection({ model: "changed-model" })] },
+    });
+
+    const error = await caught(test.service.runPrepared({
+      operation: "summary",
+      itemId: ITEM_ID,
+      connectionId: CONNECTION_ID,
+      connection: connection(),
+      selectedContent: selected(),
+    }));
+
+    expect(error.code).toBe("invalid-connection");
+    expect(test.providerFactory).not.toHaveBeenCalled();
+    expect(test.get).not.toHaveBeenCalled();
+  });
+
   it("selects one explicit connection and makes exactly one provider request", async () => {
     const test = harness({
       aiSettings: {

@@ -1,6 +1,9 @@
 import { normalizePath, type DataAdapter, type Vault } from "obsidian";
 import { renderAnalysisMarkdown } from "./analysis-markdown";
-import { snapshotAiAnalysisResult } from "./analysis-result";
+import {
+  snapshotAiAnalysisResult,
+  type AiAnalysisResult,
+} from "./analysis-result";
 
 export interface AnalysisRepositoryOptions {
   /** Test seam; production values must remain unique and high entropy. */
@@ -23,6 +26,13 @@ const adapterQueues = new WeakMap<object, Map<string, Promise<void>>>();
 const CLAIM_SOURCE_CONTENT = "rss-dashboard-cn-analysis-claim-source-v1";
 const MAX_COLLISION_ATTEMPTS = 10_000;
 const MAX_TEMP_ATTEMPTS = 32;
+
+export class AnalysisArtifactVerificationError extends Error {
+  constructor() {
+    super("The saved AI analysis artifact could not be verified");
+    this.name = "AnalysisArtifactVerificationError";
+  }
+}
 
 /** Stores only AI output artifacts below `{dataRoot}/analysis`. */
 export class AnalysisRepository {
@@ -63,6 +73,33 @@ export class AnalysisRepository {
         transactionId,
         claimToken,
       );
+    });
+  }
+
+  /**
+   * Revalidates an exact repository-owned artifact immediately before handing
+   * its trusted result snapshot to a consumer. The adapter cannot lock out an
+   * unrelated external process after the read, so the consumer is invoked in
+   * the same repository queue with no additional repository await boundary.
+   */
+  async withVerifiedArtifact<T>(
+    path: unknown,
+    value: unknown,
+    consume: (result: AiAnalysisResult) => Promise<T> | T,
+  ): Promise<T> {
+    const result = Object.freeze(snapshotAiAnalysisResult(value));
+    const markdown = renderAnalysisMarkdown(result);
+    const artifactPath = this.expectedArtifactPath(path, result);
+    if (typeof consume !== "function") {
+      throw new AnalysisArtifactVerificationError();
+    }
+    const adapter = this.atomicAdapter();
+
+    return await this.withItemLock(adapter.identity, result.itemId, async () => {
+      if (!(await this.fileEquals(adapter, artifactPath, markdown))) {
+        throw new AnalysisArtifactVerificationError();
+      }
+      return await consume(result);
     });
   }
 
@@ -284,6 +321,48 @@ export class AnalysisRepository {
 
   private get claimSourcePath(): string {
     return normalizePath(`${this.analysisDirectory}/.claim-source-v1`);
+  }
+
+  private expectedArtifactPath(
+    value: unknown,
+    result: AiAnalysisResult,
+  ): string {
+    if (
+      typeof value !== "string" ||
+      !value ||
+      value.startsWith("/") ||
+      value.includes("\\") ||
+      value.includes("\0") ||
+      /^[A-Za-z]:/u.test(value) ||
+      normalizePath(value) !== value
+    ) {
+      throw new AnalysisArtifactVerificationError();
+    }
+    const directory = this.itemDirectory(result.itemId);
+    const prefix = `${directory}/`;
+    if (!value.startsWith(prefix)) {
+      throw new AnalysisArtifactVerificationError();
+    }
+    const filename = value.slice(prefix.length);
+    if (!filename || filename.includes("/")) {
+      throw new AnalysisArtifactVerificationError();
+    }
+    const stem = `${utcPathTimestamp(result.createdAt)}-${result.operation}`;
+    if (filename === `${stem}.md`) return value;
+    if (!filename.startsWith(`${stem}-`) || !filename.endsWith(".md")) {
+      throw new AnalysisArtifactVerificationError();
+    }
+    const suffix = filename.slice(stem.length + 1, -3);
+    const collisionIndex = Number(suffix);
+    if (
+      !Number.isSafeInteger(collisionIndex) ||
+      collisionIndex < 2 ||
+      collisionIndex > MAX_COLLISION_ATTEMPTS ||
+      String(collisionIndex) !== suffix
+    ) {
+      throw new AnalysisArtifactVerificationError();
+    }
+    return value;
   }
 
   private itemDirectory(itemId: string): string {

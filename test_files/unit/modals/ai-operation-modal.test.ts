@@ -5,7 +5,9 @@ import {
   openAiOperationModal,
 } from "../../../src/modals/ai-operation-modal";
 import { AiOperationError } from "../../../src/ai/ai-operation-service";
+import { AnalysisArtifactVerificationError } from "../../../src/ai/analysis-repository";
 import { createAiConnection } from "../../../src/ai/provider-presets";
+import type { SelectedAiContent } from "../../../src/ai/content/ai-content-selector";
 import type { CollectedItem } from "../../../src/collection/collected-item";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 
@@ -64,9 +66,11 @@ function harness(overrides: {
   connections?: ReturnType<typeof createAiConnection>[];
   select?: ReturnType<typeof vi.fn>;
   run?: ReturnType<typeof vi.fn>;
+  runPrepared?: ReturnType<typeof vi.fn>;
   save?: ReturnType<typeof vi.fn>;
   getSavedNotePath?: () => string | undefined;
   saveArticleFirst?: ReturnType<typeof vi.fn>;
+  insertIntoSavedNote?: ReturnType<typeof vi.fn>;
 } = {}) {
   const defaultConnections = [
     createAiConnection({
@@ -91,7 +95,7 @@ function harness(overrides: {
     sourceUrl: "https://example.com/article",
     content: "本地订阅摘要",
     basis: "feed" as const,
-    characterCount: 8,
+    characterCount: 6,
     truncated: false,
   }));
   const run = overrides.run ?? vi.fn(async () => ({
@@ -102,14 +106,15 @@ function harness(overrides: {
     providerKind: "kimi" as const,
     model: "moonshot-account-model",
     contentBasis: "feed" as const,
-    inputCharacterCount: 8,
+    inputCharacterCount: 6,
     inputTruncated: false,
     text: "摘要结果",
   }));
+  const runPrepared = overrides.runPrepared ?? run;
   const save = overrides.save ?? vi.fn(async () =>
     `.rss-dashboard-data/analysis/${ITEM_ID}/20260723T010203004-summary.md`);
   const openAnalysis = vi.fn(async () => {});
-  const insertIntoSavedNote = vi.fn()
+  const insertIntoSavedNote = overrides.insertIntoSavedNote ?? vi.fn()
     .mockResolvedValueOnce({
       status: "inserted" as const,
       notePath: "Notes/source.md",
@@ -129,7 +134,7 @@ function harness(overrides: {
     connections,
     defaultConnectionId: FIRST_ID,
     contentSelector: { select },
-    operationService: { run },
+    operationService: { run, runPrepared },
     analysisRepository: { save },
     createResultId: () => RESULT_ID,
     now: () => new Date("2026-07-23T01:02:03.004Z"),
@@ -144,6 +149,7 @@ function harness(overrides: {
     modal,
     select,
     run,
+    runPrepared,
     save,
     openAnalysis,
     insertIntoSavedNote,
@@ -159,6 +165,247 @@ beforeEach(() => {
 });
 
 describe("AiOperationModal", () => {
+  it("sends the previewed feed snapshot even if cached full text appears before confirmation", async () => {
+    let cacheAppeared = false;
+    const select = vi.fn(async () => cacheAppeared
+      ? {
+          itemId: ITEM_ID,
+          title: "AI 行业观察",
+          sourceName: "麦肯锡",
+          sourceUrl: "https://example.com/article",
+          content: "后来出现的缓存全文",
+          basis: "full-text" as const,
+          characterCount: 9,
+          truncated: false,
+        }
+      : {
+          itemId: ITEM_ID,
+          title: "AI 行业观察",
+          sourceName: "麦肯锡",
+          sourceUrl: "https://example.com/article",
+          content: "本地订阅摘要",
+          basis: "feed" as const,
+          characterCount: 6,
+          truncated: false,
+        });
+    const legacyRun = vi.fn(async () => ({
+      operation: "summary" as const,
+      itemId: ITEM_ID,
+      connectionId: FIRST_ID,
+      connectionName: "Kimi 工作",
+      providerKind: "kimi" as const,
+      model: "moonshot-account-model",
+      contentBasis: "full-text" as const,
+      inputCharacterCount: 9,
+      inputTruncated: false,
+      text: "错误地改用了缓存全文",
+    }));
+    const runPrepared = vi.fn(async () => ({
+      operation: "summary" as const,
+      itemId: ITEM_ID,
+      connectionId: FIRST_ID,
+      connectionName: "Kimi 工作",
+      providerKind: "kimi" as const,
+      model: "moonshot-account-model",
+      contentBasis: "feed" as const,
+      inputCharacterCount: 6,
+      inputTruncated: false,
+      text: "只使用预览摘要",
+    }));
+    const test = harness({ select, run: legacyRun, runPrepared });
+    await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(1));
+    cacheAppeared = true;
+
+    button(test.modal.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(runPrepared).toHaveBeenCalledTimes(1));
+
+    expect(legacyRun).not.toHaveBeenCalled();
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(runPrepared).toHaveBeenCalledWith(expect.objectContaining({
+      itemId: ITEM_ID,
+      selectedContent: expect.objectContaining({
+        content: "本地订阅摘要",
+        basis: "feed",
+      }),
+    }));
+  });
+
+  it("refreshes and displays the real full-text preview before a second confirmation sends it once", async () => {
+    const select = vi.fn(async ({ fetchFullText }: { fetchFullText: boolean }) =>
+      fetchFullText
+        ? {
+            itemId: ITEM_ID,
+            title: "AI 行业观察",
+            sourceName: "麦肯锡",
+            sourceUrl: "https://example.com/article",
+            content: "获取后的网页全文内容",
+            basis: "full-text" as const,
+            characterCount: 10,
+            truncated: true,
+          }
+        : {
+            itemId: ITEM_ID,
+            title: "AI 行业观察",
+            sourceName: "麦肯锡",
+            sourceUrl: "https://example.com/article",
+            content: "本地订阅摘要",
+            basis: "feed" as const,
+            characterCount: 6,
+            truncated: false,
+          });
+    const pending = deferred<never>();
+    const legacyRun = vi.fn(() => pending.promise);
+    const runPrepared = vi.fn(() => pending.promise);
+    const test = harness({ select, run: legacyRun, runPrepared });
+    await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(1));
+    test.modal.contentEl.querySelector<HTMLInputElement>(
+      ".rss-dashboard-ai-full-text-toggle",
+    )!.click();
+
+    const confirm = button(test.modal.contentEl, "确认发送");
+    confirm.click();
+    confirm.click();
+    await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(2));
+
+    expect(select).toHaveBeenLastCalledWith(expect.objectContaining({
+      fetchFullText: true,
+    }));
+    expect(legacyRun).not.toHaveBeenCalled();
+    expect(runPrepared).not.toHaveBeenCalled();
+    expect(test.modal.contentEl.textContent).toContain("已取得全文");
+    expect(test.modal.contentEl.textContent).toContain("约 10 个字符");
+    expect(test.modal.contentEl.textContent).toContain("已按当前输入上限截断");
+    expect(test.modal.contentEl.textContent).toContain("再次确认发送");
+
+    button(test.modal.contentEl, "确认发送").click();
+    button(test.modal.contentEl, "重试").click();
+    expect(runPrepared).toHaveBeenCalledTimes(1);
+    expect(runPrepared).toHaveBeenCalledWith(expect.objectContaining({
+      selectedContent: expect.objectContaining({
+        content: "获取后的网页全文内容",
+        basis: "full-text",
+        truncated: true,
+      }),
+    }));
+  });
+
+  it("creates no AI request or artifact when full-text preview preparation fails", async () => {
+    const select = vi.fn()
+      .mockResolvedValueOnce({
+        itemId: ITEM_ID,
+        title: "AI 行业观察",
+        sourceName: "麦肯锡",
+        sourceUrl: "https://example.com/article",
+        content: "本地订阅摘要",
+        basis: "feed" as const,
+        characterCount: 6,
+        truncated: false,
+      })
+      .mockRejectedValueOnce(new Error("publisher unavailable"));
+    const runPrepared = vi.fn();
+    const test = harness({ select, runPrepared });
+    await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(1));
+    test.modal.contentEl.querySelector<HTMLInputElement>(
+      ".rss-dashboard-ai-full-text-toggle",
+    )!.click();
+
+    button(test.modal.contentEl, "确认发送").click();
+
+    await vi.waitFor(() => expect(test.modal.contentEl.textContent).toContain(
+      "无法准备全文预览",
+    ));
+    expect(test.modal.contentEl.textContent).toContain("订阅源正文");
+    expect(test.modal.contentEl.querySelector<HTMLInputElement>(
+      ".rss-dashboard-ai-full-text-toggle",
+    )?.checked).toBe(true);
+    expect(button(test.modal.contentEl, "确认发送").disabled).toBe(false);
+    expect(runPrepared).not.toHaveBeenCalled();
+    expect(test.save).not.toHaveBeenCalled();
+  });
+
+  it("labels a full-text fetch fallback honestly and still requires a second confirmation", async () => {
+    const select = vi.fn(async () => ({
+      itemId: ITEM_ID,
+      title: "AI 行业观察",
+      sourceName: "麦肯锡",
+      sourceUrl: "https://example.com/article",
+      content: "仍然只有订阅摘要",
+      basis: "feed" as const,
+      characterCount: 8,
+      truncated: false,
+    }));
+    const runPrepared = vi.fn(async () => ({
+      operation: "summary" as const,
+      itemId: ITEM_ID,
+      connectionId: FIRST_ID,
+      connectionName: "Kimi 工作",
+      providerKind: "kimi" as const,
+      model: "moonshot-account-model",
+      contentBasis: "feed" as const,
+      inputCharacterCount: 8,
+      inputTruncated: false,
+      text: "摘要结果",
+    }));
+    const test = harness({ select, runPrepared });
+    await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(1));
+    test.modal.contentEl.querySelector<HTMLInputElement>(
+      ".rss-dashboard-ai-full-text-toggle",
+    )!.click();
+
+    button(test.modal.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(2));
+
+    expect(test.modal.contentEl.textContent).toContain("未取得文章全文");
+    expect(runPrepared).not.toHaveBeenCalled();
+    button(test.modal.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(runPrepared).toHaveBeenCalledTimes(1));
+    expect(runPrepared).toHaveBeenCalledWith(expect.objectContaining({
+      selectedContent: expect.objectContaining({ basis: "feed" }),
+    }));
+  });
+
+  it("aborts a pending full-text preview on close without an AI request or artifact", async () => {
+    const pendingFullText = deferred<SelectedAiContent>();
+    const select = vi.fn()
+      .mockResolvedValueOnce({
+        itemId: ITEM_ID,
+        title: "AI 行业观察",
+        sourceName: "麦肯锡",
+        sourceUrl: "https://example.com/article",
+        content: "本地订阅摘要",
+        basis: "feed" as const,
+        characterCount: 6,
+        truncated: false,
+      })
+      .mockImplementationOnce(() => pendingFullText.promise);
+    const runPrepared = vi.fn();
+    const test = harness({ select, runPrepared });
+    await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(1));
+    test.modal.contentEl.querySelector<HTMLInputElement>(
+      ".rss-dashboard-ai-full-text-toggle",
+    )!.click();
+    button(test.modal.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(2));
+    const signal = select.mock.calls[1][0].signal as AbortSignal;
+
+    test.modal.close();
+    pendingFullText.resolve({
+      itemId: ITEM_ID,
+      title: "AI 行业观察",
+      sourceName: "麦肯锡",
+      sourceUrl: "https://example.com/article",
+      content: "晚到的网页全文",
+      basis: "full-text",
+      characterCount: 8,
+      truncated: false,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(signal.aborted).toBe(true);
+    expect(runPrepared).not.toHaveBeenCalled();
+    expect(test.save).not.toHaveBeenCalled();
+  });
+
   it("routes an empty enabled-connection set to localized settings guidance without touching AI dependencies", () => {
     const openSettings = vi.fn();
     const createModal = vi.fn();
@@ -186,7 +433,7 @@ describe("AiOperationModal", () => {
     expect(test.modal.contentEl.textContent).toContain("AI 行业观察");
     expect(test.modal.contentEl.textContent).toContain("麦肯锡");
     expect(test.modal.contentEl.textContent).toContain("订阅源正文");
-    expect(test.modal.contentEl.textContent).toContain("约 8 个字符");
+    expect(test.modal.contentEl.textContent).toContain("约 6 个字符");
     expect(test.modal.contentEl.textContent).toContain("未截断");
     expect(test.modal.contentEl.textContent).toContain("Kimi 工作");
     expect(test.modal.contentEl.textContent).toContain("moonshot-account-model");
@@ -220,6 +467,35 @@ describe("AiOperationModal", () => {
     expect(test.run).not.toHaveBeenCalled();
   });
 
+  it("shows the exact prompt-bounded character count and truncation used by the prepared request", async () => {
+    const limited = createAiConnection({
+      id: FIRST_ID,
+      name: "Kimi 工作",
+      providerKind: "kimi",
+      model: "moonshot-account-model",
+    });
+    limited.maxInputCharacters = 15;
+    const content = "abcdefghijklmnopqrstuvwxyz";
+    const test = harness({
+      connections: [limited],
+      select: vi.fn(async () => ({
+        itemId: ITEM_ID,
+        title: "AI 行业观察",
+        sourceName: "麦肯锡",
+        sourceUrl: "https://example.com/article",
+        content,
+        basis: "feed" as const,
+        characterCount: content.length,
+        truncated: false,
+      })),
+    });
+    await vi.waitFor(() => expect(test.select).toHaveBeenCalledTimes(1));
+
+    expect(test.modal.contentEl.textContent).toContain("订阅源正文");
+    expect(test.modal.contentEl.textContent).toContain("约 15 个字符");
+    expect(test.modal.contentEl.textContent).toContain("已按当前输入上限截断");
+  });
+
   it("does not offer a full-text toggle for YouTube title/description input", async () => {
     const test = harness({
       item: item({ sourceType: "youtube", contentBasis: "title-description" }),
@@ -240,16 +516,22 @@ describe("AiOperationModal", () => {
       ".rss-dashboard-ai-full-text-toggle",
     )).toBeNull();
     expect(test.modal.contentEl.textContent).toContain("标题和摘要");
+    button(test.modal.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(test.runPrepared).toHaveBeenCalledTimes(1));
+    expect(test.select).toHaveBeenCalledTimes(1);
+    expect(test.runPrepared).toHaveBeenCalledWith(expect.objectContaining({
+      selectedContent: expect.objectContaining({
+        content: "Video description",
+        basis: "title-description",
+      }),
+    }));
   });
 
-  it("allows one confirm only and passes the explicit connection and full-text choice", async () => {
+  it("allows one confirm only and passes the explicit connection plus preview snapshot", async () => {
     const pending = deferred<never>();
     const run = vi.fn(() => pending.promise);
     const test = harness({ run });
     await vi.waitFor(() => expect(test.select).toHaveBeenCalled());
-    test.modal.contentEl.querySelector<HTMLInputElement>(
-      ".rss-dashboard-ai-full-text-toggle",
-    )!.click();
     const confirm = button(test.modal.contentEl, "确认发送");
 
     confirm.click();
@@ -258,9 +540,13 @@ describe("AiOperationModal", () => {
     expect(run).toHaveBeenCalledTimes(1);
     expect(run).toHaveBeenCalledWith(expect.objectContaining({
       operation: "summary",
+      itemId: ITEM_ID,
       connectionId: FIRST_ID,
-      fetchFullText: true,
-      item: expect.objectContaining({ id: ITEM_ID }),
+      selectedContent: expect.objectContaining({
+        itemId: ITEM_ID,
+        content: "本地订阅摘要",
+        basis: "feed",
+      }),
       signal: expect.any(AbortSignal),
     }));
     expect(confirm.disabled).toBe(true);
@@ -295,7 +581,7 @@ describe("AiOperationModal", () => {
       providerKind: "kimi",
       model: "moonshot-account-model",
       contentBasis: "feed",
-      inputCharacterCount: 8,
+      inputCharacterCount: 6,
       inputTruncated: false,
       text: "late success",
     });
@@ -340,7 +626,7 @@ describe("AiOperationModal", () => {
       providerKind: "kimi",
       model: "moonshot-account-model",
       contentBasis: "feed",
-      inputCharacterCount: 8,
+      inputCharacterCount: 6,
       inputTruncated: false,
       text: "摘要结果",
     });
@@ -354,6 +640,7 @@ describe("AiOperationModal", () => {
     await vi.waitFor(() => expect(test.insertIntoSavedNote).toHaveBeenCalledTimes(1));
     expect(test.insertIntoSavedNote).toHaveBeenCalledWith(
       expect.objectContaining({ id: RESULT_ID }),
+      `.rss-dashboard-data/analysis/${ITEM_ID}/20260723T010203004-summary.md`,
       "Notes/source.md",
     );
 
@@ -366,11 +653,32 @@ describe("AiOperationModal", () => {
     );
   });
 
+  it("shows a localized error and performs no note insertion when the saved artifact no longer verifies", async () => {
+    const insertIntoSavedNote = vi.fn(async () => {
+      throw new AnalysisArtifactVerificationError();
+    });
+    const test = harness({ insertIntoSavedNote });
+    await vi.waitFor(() => expect(test.select).toHaveBeenCalled());
+    button(test.modal.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(test.save).toHaveBeenCalledTimes(1));
+
+    button(test.modal.contentEl, "插入已保存原文").click();
+
+    await vi.waitFor(() => expect(test.modal.contentEl.textContent).toContain(
+      "分析文档已缺失或发生变化",
+    ));
+    expect(insertIntoSavedNote).toHaveBeenCalledTimes(1);
+    expect(test.openSavedNote).not.toHaveBeenCalled();
+  });
+
   it("rejects operation results whose item, operation, or connection provenance differs from the confirmed request", async () => {
     const maliciousResults = [
       { itemId: "c".repeat(64) },
       { operation: "deep-analysis" as const },
       { connectionId: SECOND_ID },
+      { contentBasis: "full-text" as const },
+      { inputCharacterCount: 7 },
+      { inputTruncated: true },
     ];
     for (const malicious of maliciousResults) {
       const run = vi.fn(async () => ({
@@ -381,7 +689,7 @@ describe("AiOperationModal", () => {
         providerKind: "kimi" as const,
         model: "moonshot-account-model",
         contentBasis: "feed" as const,
-        inputCharacterCount: 8,
+        inputCharacterCount: 6,
         inputTruncated: false,
         text: "摘要结果",
         ...malicious,
@@ -473,7 +781,7 @@ describe("AiOperationModal", () => {
     }>();
     const test = harness();
     test.insertIntoSavedNote.mockReset();
-    test.insertIntoSavedNote.mockImplementationOnce(() => pendingInsert.promise);
+    test.insertIntoSavedNote.mockReturnValueOnce(pendingInsert.promise);
     await vi.waitFor(() => expect(test.select).toHaveBeenCalled());
     button(test.modal.contentEl, "确认发送").click();
     await vi.waitFor(() => expect(test.save).toHaveBeenCalled());

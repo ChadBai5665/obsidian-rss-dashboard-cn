@@ -1,6 +1,7 @@
 import type { Vault } from "obsidian";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AiAnalysisResult } from "../../../src/ai/analysis-result";
+import { renderAnalysisMarkdown } from "../../../src/ai/analysis-markdown";
 import { AnalysisRepository } from "../../../src/ai/analysis-repository";
 
 const DATA_ROOT = ".rss-dashboard-data";
@@ -209,6 +210,56 @@ function temporaryFiles(adapter: InMemoryAdapter): string[] {
 }
 
 describe("AnalysisRepository", () => {
+  it("binds a valid saved artifact to the expected result before running a consumer", async () => {
+    const adapter = new InMemoryAdapter();
+    const target = repository(adapter);
+    const expected = analysis();
+    const path = await target.save(expected);
+    const consume = vi.fn(async (trusted: AiAnalysisResult) => trusted.id);
+
+    await expect(target.withVerifiedArtifact(path, expected, consume))
+      .resolves.toBe(RESULT_ID);
+
+    expect(consume).toHaveBeenCalledTimes(1);
+    expect(consume).toHaveBeenCalledWith(expected);
+  });
+
+  it("fails closed before the consumer when the artifact is missing, moved, replaced, or outside its controlled path", async () => {
+    const cases = ["missing", "moved", "replaced", "outside"] as const;
+
+    for (const scenario of cases) {
+      const adapter = new InMemoryAdapter();
+      const target = repository(adapter);
+      const expected = analysis();
+      const path = await target.save(expected);
+      const consume = vi.fn(async () => "must-not-run");
+      let candidatePath = path;
+
+      if (scenario === "missing") {
+        adapter.files.delete(path);
+      } else if (scenario === "moved") {
+        const moved = `${DATA_ROOT}/analysis/${ITEM_ID}/moved.md`;
+        adapter.files.set(moved, adapter.files.get(path)!);
+        adapter.files.delete(path);
+      } else if (scenario === "replaced") {
+        adapter.files.set(path, renderAnalysisMarkdown(analysis({
+          id: "69a10bdf-6d36-4388-bbe4-219da9c3ea46",
+          itemId: "c".repeat(64),
+        })));
+      } else {
+        candidatePath = `Notes/${path.split("/").pop()}`;
+        adapter.files.set(candidatePath, adapter.files.get(path)!);
+      }
+
+      await expect(target.withVerifiedArtifact(
+        candidatePath,
+        expected,
+        consume,
+      )).rejects.toThrow(/artifact/iu);
+      expect(consume).not.toHaveBeenCalled();
+    }
+  });
+
   it("stores one standalone artifact under the stable item and UTC timestamp path", async () => {
     const adapter = new InMemoryAdapter();
 
