@@ -5,7 +5,10 @@ import {
   SourceRegistry,
   UnsupportedSourceError,
 } from "../../../src/sources/source-registry";
-import type { XAccountSourceConfig } from "../../../src/sources/source-config";
+import type {
+  XAccountSourceConfig,
+  XTopicSourceConfig,
+} from "../../../src/sources/source-config";
 
 const account: XAccountSourceConfig = {
   kind: "x-account",
@@ -75,6 +78,16 @@ describe("SourceRegistry", () => {
     expect(() => registry.register(adapter)).toThrow("x-account");
   });
 
+  it("rejects an adapter with an unsupported runtime kind", () => {
+    const registry = new SourceRegistry();
+    expect(() =>
+      registry.register({
+        kind: "unknown",
+        refresh: vi.fn(),
+      } as never),
+    ).toThrow("Invalid source adapter");
+  });
+
   it("throws a localized unsupported-source error instead of falling back to RSS", async () => {
     const rssRefresh = vi.fn();
     const registry = new SourceRegistry({
@@ -82,10 +95,16 @@ describe("SourceRegistry", () => {
     });
     registry.register({ kind: "feed", refresh: rssRefresh });
 
-    const unknown = {
-      ...account,
+    const unknown: XTopicSourceConfig = {
       kind: "x-topic",
-    } as unknown as XAccountSourceConfig;
+      id: "topic-1",
+      name: "AI",
+      includeKeywords: [],
+      excludeKeywords: [],
+      priorityAccounts: [],
+      windowDays: 7,
+      folder: "X",
+    };
     await expect(
       registry.refresh(unknown, { now: new Date() }),
     ).rejects.toMatchObject({
@@ -111,5 +130,44 @@ describe("SourceRegistry", () => {
     await expect(
       registry.refresh(account, { now: new Date() }),
     ).rejects.toThrow("Invalid source refresh output");
+  });
+
+  it("validates the returned feed against the normalized source and clones warnings", async () => {
+    const controller = new AbortController();
+    const context = { now: new Date("2026-07-22"), signal: controller.signal };
+    const warnings = ["first"];
+    const refresh = vi.fn().mockResolvedValue({
+      feed: { ...feed, sourceConfig: { ...account, topics: [] } },
+      items: [{ ...item }],
+      providerRequestCount: 1,
+      warnings,
+    });
+    const registry = new SourceRegistry();
+    registry.register({ kind: "x-account", refresh });
+
+    const output = await registry.refresh(account, context);
+    warnings.push("mutated after return");
+    expect(output.warnings).toEqual(["first"]);
+    expect(refresh).toHaveBeenCalledWith(account, context);
+    expect(refresh.mock.calls[0][1]).toBe(context);
+
+    const mismatched = new SourceRegistry();
+    mismatched.register({
+      kind: "x-account",
+      refresh: vi.fn().mockResolvedValue({
+        feed: {
+          ...feed,
+          url: "https://example.com/rss",
+          sourceKind: "feed",
+          sourceConfig: { kind: "feed" },
+        },
+        items: [],
+        providerRequestCount: 0,
+        warnings: [],
+      }),
+    });
+    await expect(mismatched.refresh(account, context)).rejects.toMatchObject({
+      code: "invalid-source-output",
+    });
   });
 });

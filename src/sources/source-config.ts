@@ -72,10 +72,11 @@ function normalizedText(value: unknown): string | undefined {
 
 function normalizedId(value: unknown): string | undefined {
   const id = normalizedText(value);
-  return id &&
-    !UNSAFE_IDS.has(id) &&
-    /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)
-    ? id
+  const canonicalId = id?.toLowerCase();
+  return canonicalId &&
+    !UNSAFE_IDS.has(canonicalId) &&
+    /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(canonicalId)
+    ? canonicalId
     : undefined;
 }
 
@@ -85,13 +86,32 @@ export function normalizeXHandle(value: unknown): string | undefined {
   return handle && /^[a-z0-9_]{1,15}$/.test(handle) ? handle : undefined;
 }
 
-function normalizedStringList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
+function ownDenseStringEntries(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const entries: string[] = [];
+  for (let index = 0; index < value.length; index++) {
+    if (!hasOwn(value, index)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (
+      !descriptor ||
+      !("value" in descriptor) ||
+      typeof descriptor.value !== "string"
+    ) {
+      return undefined;
+    }
+    entries.push(descriptor.value);
+  }
+  return entries;
+}
+
+function normalizedStringList(value: unknown): string[] | undefined {
+  const entries = ownDenseStringEntries(value);
+  if (!entries) return undefined;
   const result: string[] = [];
   const seen = new Set<string>();
-  for (const entry of value) {
+  for (const entry of entries) {
     const text = normalizedText(entry);
-    const key = text?.toLocaleLowerCase();
+    const key = text?.toLowerCase();
     if (!text || !key || seen.has(key)) continue;
     seen.add(key);
     result.push(text);
@@ -99,11 +119,12 @@ function normalizedStringList(value: unknown): string[] {
   return result;
 }
 
-function normalizedAccountList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
+function normalizedAccountList(value: unknown): string[] | undefined {
+  const entries = ownDenseStringEntries(value);
+  if (!entries) return undefined;
   const result: string[] = [];
   const seen = new Set<string>();
-  for (const entry of value) {
+  for (const entry of entries) {
     const handle = normalizeXHandle(entry);
     if (!handle || seen.has(handle)) continue;
     seen.add(handle);
@@ -139,7 +160,11 @@ export function normalizeXAccountSourceConfig(
   const handle = normalizeXHandle(value.handle);
   const id = normalizedId(value.id);
   if (value.kind !== "x-account" || !handle || !id) return undefined;
-  const displayName = normalizedText(value.displayName);
+  const topics = normalizedStringList(value.topics);
+  if (!topics) return undefined;
+  const displayName = hasOwn(value, "displayName")
+    ? normalizedText(value.displayName)
+    : undefined;
   return {
     kind: "x-account",
     id,
@@ -148,7 +173,7 @@ export function normalizeXAccountSourceConfig(
     includeReplies: value.includeReplies === true,
     includeReposts: value.includeReposts === true,
     folder: normalizedText(value.folder) ?? "",
-    topics: normalizedStringList(value.topics),
+    topics,
   };
 }
 
@@ -180,13 +205,18 @@ export function normalizeXTopicSourceConfig(
   ) {
     return undefined;
   }
+  const includeKeywords = normalizedStringList(value.includeKeywords);
+  const excludeKeywords = normalizedStringList(value.excludeKeywords);
+  const priorityAccounts = normalizedAccountList(value.priorityAccounts);
+  if (!includeKeywords || !excludeKeywords || !priorityAccounts)
+    return undefined;
   return {
     kind: "x-topic",
     id,
     name,
-    includeKeywords: normalizedStringList(value.includeKeywords),
-    excludeKeywords: normalizedStringList(value.excludeKeywords),
-    priorityAccounts: normalizedAccountList(value.priorityAccounts),
+    includeKeywords,
+    excludeKeywords,
+    priorityAccounts,
     windowDays: value.windowDays as XTopicSourceConfig["windowDays"],
     folder: normalizedText(value.folder) ?? "",
   };
@@ -248,10 +278,51 @@ export function createXTopicSourceConfig(
 }
 
 /** Stable synthetic URLs keep X inputs out of the RSS parser path. */
-export function sourceConfigUrl(config: SourceConfig): string | undefined {
-  if (config.kind === "x-account") return `tikhub://x-account/${config.handle}`;
-  if (config.kind === "x-topic") return `tikhub://x-topic/${config.id}`;
+export function sourceConfigUrl(config: unknown): string | undefined {
+  const normalized = normalizeSourceConfig(config);
+  if (normalized?.kind === "x-account") {
+    return `tikhub://x-account/${normalized.handle}`;
+  }
+  if (normalized?.kind === "x-topic") {
+    return `tikhub://x-topic/${normalized.id}`;
+  }
   return undefined;
+}
+
+export function isSourceKind(value: unknown): value is SourceKind {
+  return value === "feed" || value === "x-account" || value === "x-topic";
+}
+
+export function inferXSourceKind(
+  value: unknown,
+): "x-account" | "x-topic" | undefined {
+  if (value === "x-account" || value === "x-topic") return value;
+  if (
+    isRecord(value) &&
+    hasOwn(value, "kind") &&
+    (value.kind === "x-account" || value.kind === "x-topic")
+  ) {
+    return value.kind;
+  }
+  if (typeof value !== "string") return undefined;
+  const match =
+    /^tikhub:\/\/(x-account|x-topic)\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})$/.exec(
+      value,
+    );
+  return match?.[1] as "x-account" | "x-topic" | undefined;
+}
+
+export function isSyntheticUrlForKind(
+  url: unknown,
+  kind: "x-account" | "x-topic",
+): boolean {
+  if (typeof url !== "string") return false;
+  const inferred = inferXSourceKind(url);
+  if (inferred !== kind) return false;
+  const identifier = url.slice(`tikhub://${kind}/`.length);
+  return kind === "x-account"
+    ? normalizeXHandle(identifier) === identifier
+    : normalizedId(identifier) === identifier;
 }
 
 /** Returns a fresh list while retaining only the first case-insensitive account. */

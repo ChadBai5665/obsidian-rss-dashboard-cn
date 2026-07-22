@@ -205,7 +205,7 @@ describe("settings-loader", () => {
       expect(second.feeds).toEqual(first.feeds);
     });
 
-    it("safely falls back to an RSS source when persisted source metadata is missing or invalid", async () => {
+    it("quarantines invalid declared X sources instead of routing them through RSS", async () => {
       const { loadAndNormalizeSettings } =
         await import("../../../src/utils/settings-loader");
       const result = loadAndNormalizeSettings({
@@ -218,9 +218,100 @@ describe("settings-loader", () => {
       });
 
       expect(result.feeds[0]).toMatchObject({
-        sourceKind: "feed",
-        sourceConfig: { kind: "feed" },
+        sourceKind: "x-account",
+        url: "tikhub://x-account/unconfigured-1",
+        excludeFromRefresh: true,
+        lastFetchError: "Invalid X source configuration",
       });
+      expect(result.feeds[0].sourceConfig).toBeUndefined();
+    });
+
+    it("quarantines an X source inferred from a synthetic URL even when its config is absent", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const result = loadAndNormalizeSettings({
+        feeds: [
+          createFeed({
+            url: "tikhub://x-topic/topic-1",
+            sourceConfig: undefined,
+          } as unknown as Feed),
+        ],
+      });
+
+      expect(result.feeds[0]).toMatchObject({
+        sourceKind: "x-topic",
+        url: "tikhub://x-topic/topic-1",
+        excludeFromRefresh: true,
+      });
+    });
+
+    it("quarantines an X source inferred from an invalid raw X config", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const result = loadAndNormalizeSettings({
+        feeds: [
+          createFeed({
+            sourceConfig: { kind: "x-topic", id: "invalid/identifier" },
+          } as unknown as Feed),
+        ],
+      });
+
+      expect(result.feeds[0]).toMatchObject({
+        sourceKind: "x-topic",
+        url: "tikhub://x-topic/unconfigured-1",
+        excludeFromRefresh: true,
+      });
+    });
+
+    it("deduplicates loaded X sources by canonical account handle or topic id", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const account = (handle: string) =>
+        createFeed({
+          sourceKind: "x-account",
+          sourceConfig: {
+            kind: "x-account",
+            id: `account-${handle}`,
+            handle,
+            includeReplies: false,
+            includeReposts: false,
+            folder: "X",
+            topics: [],
+          },
+        } as unknown as Feed);
+      const topic = (id: string) =>
+        createFeed({
+          sourceKind: "x-topic",
+          sourceConfig: {
+            kind: "x-topic",
+            id,
+            name: id,
+            includeKeywords: [],
+            excludeKeywords: [],
+            priorityAccounts: [],
+            windowDays: 7,
+            folder: "X",
+          },
+        } as unknown as Feed);
+
+      const first = loadAndNormalizeSettings({
+        feeds: [
+          account("OpenAI"),
+          account("openai"),
+          topic("topic-1"),
+          topic("topic-1"),
+          topic("topic-2"),
+        ],
+      });
+      const second = loadAndNormalizeSettings(first);
+
+      expect(first.feeds).toHaveLength(3);
+      expect(first.feeds.map((feed) => feed.url)).toEqual([
+        "tikhub://x-account/openai",
+        "tikhub://x-topic/topic-1",
+        "tikhub://x-topic/topic-2",
+      ]);
+      expect(second.feeds).toEqual(first.feeds);
     });
 
     it("merges partial collection settings with their defaults", async () => {

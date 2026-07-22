@@ -15,6 +15,8 @@ import {
 import { canonicalizeItemIdentityUrl } from "./url-utils";
 import { normalizeRefreshIntervalMinutes } from "./validation";
 import {
+  inferXSourceKind,
+  isSyntheticUrlForKind,
   normalizeSourceConfig,
   sourceConfigUrl,
 } from "../sources/source-config";
@@ -183,7 +185,7 @@ export function loadAndNormalizeSettings(
 
   settings.feeds = Array.isArray(settings.feeds) ? settings.feeds : [];
 
-  for (const feed of settings.feeds) {
+  for (const [index, feed] of settings.feeds.entries()) {
     feed.items = Array.isArray(feed.items) ? feed.items : [];
 
     feed.keywordRules = Object.assign(
@@ -201,27 +203,44 @@ export function loadAndNormalizeSettings(
     }
 
     const normalizedConfig = normalizeSourceConfig(feed.sourceConfig);
-    const sourceKind = feed.sourceKind;
-    if (
-      (sourceKind === "x-account" || sourceKind === "x-topic") &&
-      normalizedConfig?.kind === sourceKind
-    ) {
-      feed.sourceKind = sourceKind;
+    const declaredXKind =
+      inferXSourceKind(feed.sourceKind) ??
+      inferXSourceKind(feed.sourceConfig) ??
+      inferXSourceKind(feed.url);
+    if (declaredXKind && normalizedConfig?.kind === declaredXKind) {
+      feed.sourceKind = declaredXKind;
       feed.sourceConfig = normalizedConfig;
       feed.url = sourceConfigUrl(normalizedConfig) ?? feed.url;
-    } else if (
-      sourceKind === undefined &&
-      normalizedConfig &&
-      normalizedConfig.kind !== "feed"
-    ) {
-      feed.sourceKind = normalizedConfig.kind;
-      feed.sourceConfig = normalizedConfig;
-      feed.url = sourceConfigUrl(normalizedConfig) ?? feed.url;
+    } else if (declaredXKind) {
+      feed.sourceKind = declaredXKind;
+      delete feed.sourceConfig;
+      feed.url = isSyntheticUrlForKind(feed.url, declaredXKind)
+        ? feed.url
+        : `tikhub://${declaredXKind}/unconfigured-${index + 1}`;
+      feed.excludeFromRefresh = true;
+      feed.lastFetchError = "Invalid X source configuration";
     } else {
       feed.sourceKind = "feed";
       feed.sourceConfig = { kind: "feed" };
     }
   }
+
+  const seenXSourceKeys = new Set<string>();
+  settings.feeds = settings.feeds.filter((feed) => {
+    if (
+      (feed.sourceKind !== "x-account" && feed.sourceKind !== "x-topic") ||
+      !feed.sourceConfig ||
+      feed.sourceConfig.kind !== feed.sourceKind
+    ) {
+      return true;
+    }
+    const key = sourceConfigUrl(feed.sourceConfig);
+    if (!key || seenXSourceKeys.has(key)) {
+      return false;
+    }
+    seenXSourceKeys.add(key);
+    return true;
+  });
 
   const canonicalPageSizeRaw = settings.allArticlesPageSize;
   const canonicalPageSize =

@@ -4,6 +4,7 @@ import {
   createXTopicSourceConfig,
   dedupeXAccountSourceConfigs,
   normalizeXAccountSourceConfig,
+  normalizeXHandle,
   normalizeXTopicSourceConfig,
   sourceConfigUrl,
 } from "../../../src/sources/source-config";
@@ -152,6 +153,66 @@ describe("X source configuration", () => {
       topics: [],
     });
     expect(normalizeXAccountSourceConfig(inherited)).toBeUndefined();
+  });
+
+  it("reads optional fields only from own properties and rejects sparse or polluted arrays", () => {
+    const input = Object.create({ displayName: "Inherited name" }) as Record<
+      string,
+      unknown
+    >;
+    Object.assign(input, {
+      kind: "x-account",
+      id: "account-1",
+      handle: "openai",
+      includeReplies: false,
+      includeReposts: false,
+      folder: "X",
+      topics: [],
+    });
+    expect(normalizeXAccountSourceConfig(input)).not.toHaveProperty(
+      "displayName",
+    );
+
+    const sparseTopics = new Array<string>(1);
+    (Array.prototype as unknown as Record<number, unknown>)[0] = "polluted";
+    try {
+      expect(
+        normalizeXAccountSourceConfig({
+          kind: "x-account",
+          id: "account-1",
+          handle: "openai",
+          includeReplies: false,
+          includeReposts: false,
+          folder: "X",
+          topics: sparseTopics,
+        }),
+      ).toBeUndefined();
+    } finally {
+      delete (Array.prototype as unknown as Record<number, unknown>)[0];
+    }
+  });
+
+  it.each(["openai\\path", "openai\u0000", "a".repeat(16)])(
+    "rejects an X handle with a path, control character, or oversized value: %j",
+    (handle) => {
+      expect(normalizeXHandle(handle)).toBeUndefined();
+    },
+  );
+
+  it("revalidates public configs before producing synthetic URLs", () => {
+    expect(
+      sourceConfigUrl({
+        kind: "x-topic",
+        id: "a/b?x",
+        name: "AI",
+        includeKeywords: [],
+        excludeKeywords: [],
+        priorityAccounts: [],
+        windowDays: 7,
+        folder: "X",
+      }),
+    ).toBeUndefined();
+    expect(sourceConfigUrl({ kind: "feed" })).toBeUndefined();
   });
 
   it("creates a topic with a stable generated identifier and URL", () => {
