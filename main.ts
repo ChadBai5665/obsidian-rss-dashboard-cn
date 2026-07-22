@@ -146,6 +146,45 @@ export interface FiltersUpdatedEventPayload {
   timestamp: number;
 }
 
+/**
+ * Resolves the source that actually owns an item. Feed URLs are not unique:
+ * users may subscribe to the same endpoint more than once with different
+ * folders or source identities, so an ambiguous URL must never select the
+ * first source and leak its metadata into an AI request.
+ */
+function resolveAiOwningFeed(feeds: Feed[], item: FeedItem): Feed | undefined {
+  const referenceMatch = feeds.find((candidate) =>
+    candidate.items.includes(item));
+  if (referenceMatch) return referenceMatch;
+
+  const sourceId = ownStringData(item, "rssDashboardSourceId")?.trim();
+  if (sourceId) {
+    return feeds.find((candidate) => {
+      const feedId = ownStringData(candidate, "feedId")?.trim();
+      const feedUrl = ownStringData(candidate, "url")?.trim();
+      return (feedId || feedUrl) === sourceId;
+    });
+  }
+
+  const itemFeedUrl = ownStringData(item, "feedUrl");
+  if (!itemFeedUrl) return undefined;
+  const urlMatches = feeds.filter((candidate) =>
+    ownStringData(candidate, "url") === itemFeedUrl);
+  return urlMatches.length === 1 ? urlMatches[0] : undefined;
+}
+
+function ownStringData(value: object, key: string): string | undefined {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor &&
+        typeof descriptor.value === "string"
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function storageLog(_message: string, _details?: unknown): void {}
 
 function storageError(
@@ -1444,9 +1483,7 @@ export default class RssDashboardPlugin extends Plugin {
         openSettings: () => { void this.openSettingsToTab("ai"); },
         showNotice: () => { this.notify("ai.noEnabledConnection"); },
         createModal: (enabledConnections) => {
-          const feed = this.settings.feeds.find(
-            (candidate) => candidate.url === item.feedUrl,
-          );
+          const feed = resolveAiOwningFeed(this.settings.feeds, item);
           if (!feed) throw new Error("Selected AI item has no owning feed");
           const selectedItem = normalizeFeedItem(feed, item, new Date());
           const dataRoot = this.settings.collection.dataFolder.trim();
