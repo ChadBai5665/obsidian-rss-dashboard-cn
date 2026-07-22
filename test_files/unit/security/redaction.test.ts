@@ -26,6 +26,19 @@ describe("redactSensitiveText", () => {
     expect(output).not.toContain("token-secret");
     expect(output).not.toContain("still-secret");
   });
+
+  it("removes URL fragments, quoted JSON key values, and repeated mixed-case headers", () => {
+    const output = redactSensitiveText([
+      'https://api.example.test/v1?safe=secret#token=fragment-secret',
+      '{"X-API-Key":"quoted-secret", "token":"unicode-秘密"}',
+      "X-Api-Key: first-secret; TOKEN=second-secret",
+    ].join("\n"));
+
+    for (const secret of ["secret", "fragment-secret", "quoted-secret", "unicode-秘密", "first-secret", "second-secret"]) {
+      expect(output).not.toContain(secret);
+    }
+    expect(output).toContain("https://api.example.test/v1");
+  });
 });
 
 describe("sanitizeExternalError", () => {
@@ -53,5 +66,30 @@ describe("sanitizeExternalError", () => {
     expect(result.message.length).toBeLessThanOrEqual(300);
     expect(result.message).not.toContain("response-secret");
     expect(result.message).not.toContain("a".repeat(30));
+  });
+
+  it("drops response-body fragments at the start or after a newline", () => {
+    for (const raw of [
+      "Body: body-secret",
+      "Provider failed\nResponse body: body-secret",
+    ]) {
+      const result = sanitizeExternalError(new Error(raw));
+      expect(result.message).not.toContain("body-secret");
+      expect(result.message).not.toContain("Response body");
+    }
+  });
+
+  it("does not invoke a malicious error message getter", () => {
+    const result = sanitizeExternalError(Object.defineProperty({}, "message", {
+      enumerable: true,
+      get(): never {
+        throw new Error("getter-secret");
+      },
+    }));
+
+    expect(result).toEqual({
+      code: "external-error",
+      message: "External provider request failed.",
+    });
   });
 });

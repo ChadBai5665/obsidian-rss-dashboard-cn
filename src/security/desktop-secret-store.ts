@@ -3,10 +3,11 @@ import {
   lstat,
   mkdir,
   open,
-  readFile,
+  realpath,
   rename,
-  writeFile,
+  unlink,
 } from "node:fs/promises";
+import { constants as fileSystemConstants } from "node:fs";
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
 import process from "node:process";
@@ -30,21 +31,40 @@ interface PathStats {
   isSymbolicLink(): boolean;
   isDirectory(): boolean;
   isFile(): boolean;
+  dev: number;
+  ino: number;
+}
+
+interface SecretFileHandle {
+  stat(): Promise<PathStats>;
+  readFile(): Promise<string>;
+  writeFile(content: string): Promise<void>;
+  sync(): Promise<void>;
+  close(): Promise<void>;
+}
+
+interface SecretDirectoryHandle {
+  stat(): Promise<PathStats>;
+  sync(): Promise<void>;
+  close(): Promise<void>;
+}
+
+interface SecureParentDirectory {
+  handle: SecretDirectoryHandle;
+  dev: number;
+  ino: number;
+  realPath: string;
 }
 
 export interface DesktopSecretFileSystem {
   lstat(path: string): Promise<PathStats>;
   mkdir(path: string, options: { recursive: true; mode: number }): Promise<unknown>;
-  readFile(path: string, encoding: "utf8"): Promise<string>;
-  writeFile(
-    path: string,
-    content: string,
-    options: { encoding: "utf8"; mode: number; flag: "wx" },
-  ): Promise<void>;
   rename(from: string, to: string): Promise<void>;
+  unlink(path: string): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
-  fsyncFile(path: string): Promise<void>;
-  fsyncDirectory(path: string): Promise<void>;
+  realpath(path: string): Promise<string>;
+  openFile(path: string, flags: number, mode?: number): Promise<SecretFileHandle>;
+  openDirectory(path: string, flags: number): Promise<SecretDirectoryHandle>;
 }
 
 export interface DesktopSecretStoreOptions {
@@ -134,40 +154,73 @@ export class DesktopSecretStore {
   }
 
   private async readSecretFile(): Promise<SecretFileV1> {
-    await this.assertSecretPathSafe();
+    let parent: SecureParentDirectory | undefined;
     try {
-      const raw = await this.fileSystem.readFile(this.secretPath, "utf8");
+      parent = await this.openSecureParentDirectory();
+      await this.assertSecretPathSafe();
+      const handle = await this.fileSystem.openFile(this.secretPath, READ_SECRET_FLAGS);
+      let raw: string;
+      try {
+        const stats = await handle.stat();
+        if (stats.isSymbolicLink() || !stats.isFile()) {
+          throw new SecretStoreSecurityError("The external secret file must be a regular file.");
+        }
+        raw = await handle.readFile();
+        await this.assertSameParentDirectory(parent);
+      } finally {
+        await handle.close();
+      }
       return parseSecretFile(raw);
     } catch (error) {
       if (isMissingFile(error)) return EMPTY_SECRET_FILE();
-      if (error instanceof SecretStoreCorruptError || error instanceof SecretStoreSecurityError) {
-        throw error;
-      }
       throw error;
+    } finally {
+      if (parent) await parent.handle.close();
     }
   }
 
   private async writeSecretFile(file: SecretFileV1): Promise<void> {
     await this.ensureSecureDirectory();
-    await this.assertSecretPathSafe();
     const tempPath = `${this.secretPath}.tmp-${this.randomSuffix()}`;
-    await this.assertPathMissing(tempPath);
-    const serialized = `${JSON.stringify(file, null, 2)}\n`;
-
-    await this.assertSecureDirectory();
-    await this.fileSystem.writeFile(tempPath, serialized, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
-    if (this.isUnix()) await this.fileSystem.chmod(tempPath, 0o600);
-    await this.fileSystem.fsyncFile(tempPath);
-    await this.assertSecureDirectory();
-    await this.fileSystem.rename(tempPath, this.secretPath);
-    if (this.isUnix()) {
-      await this.fileSystem.chmod(this.secretPath, 0o600);
-      await this.fileSystem.chmod(this.secretDirectory, 0o700);
-      await this.fileSystem.fsyncDirectory(this.secretDirectory);
+    let temporaryMayExist = false;
+    let parent: SecureParentDirectory | undefined;
+    try {
+      parent = await this.openSecureParentDirectory();
+      await this.assertSecretPathSafe();
+      await this.assertPathMissing(tempPath);
+      await this.assertSameParentDirectory(parent);
+      const serialized = `${JSON.stringify(file, null, 2)}\n`;
+      temporaryMayExist = true;
+      const temporary = await this.fileSystem.openFile(
+        tempPath,
+        WRITE_SECRET_FLAGS,
+        0o600,
+      );
+      try {
+        await temporary.writeFile(serialized);
+        if (this.isUnix()) await this.fileSystem.chmod(tempPath, 0o600);
+        await temporary.sync();
+      } finally {
+        await temporary.close();
+      }
+      await this.assertSameParentDirectory(parent);
+      await this.fileSystem.rename(tempPath, this.secretPath);
+      temporaryMayExist = false;
+      await this.assertSameParentDirectory(parent);
+      if (this.isUnix()) {
+        await this.fileSystem.chmod(this.secretPath, 0o600);
+        await this.fileSystem.chmod(this.secretDirectory, 0o700);
+      }
+      await this.syncDirectoryIfSupported(parent.handle);
+    } finally {
+      if (temporaryMayExist) {
+        try {
+          await this.fileSystem.unlink(tempPath);
+        } catch {
+          // Preserve the original failure; an attacker-controlled path is never retried.
+        }
+      }
+      if (parent) await parent.handle.close();
     }
   }
 
@@ -219,6 +272,52 @@ export class DesktopSecretStore {
     }
   }
 
+  private async openSecureParentDirectory(): Promise<SecureParentDirectory> {
+    await this.assertSecureDirectory();
+    const handle = await this.fileSystem.openDirectory(
+      this.secretDirectory,
+      READ_DIRECTORY_FLAGS,
+    );
+    try {
+      const stats = await handle.stat();
+      if (stats.isSymbolicLink() || !stats.isDirectory()) {
+        throw new SecretStoreSecurityError("The external secret directory must be a regular directory.");
+      }
+      const realPath = await this.fileSystem.realpath(this.secretDirectory);
+      return { handle, dev: stats.dev, ino: stats.ino, realPath };
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
+  }
+
+  private async assertSameParentDirectory(parent: SecureParentDirectory): Promise<void> {
+    // Node exposes no openat-style API for a FileHandle. Path mutations below
+    // therefore re-check this pinned directory identity around every critical
+    // path operation; a hostile swap can still cause a failed operation, never
+    // a successful write we report as safe.
+    await this.assertSecureDirectory();
+    const stats = await this.fileSystem.lstat(this.secretDirectory);
+    const realPath = await this.fileSystem.realpath(this.secretDirectory);
+    if (
+      stats.isSymbolicLink() ||
+      !stats.isDirectory() ||
+      stats.dev !== parent.dev ||
+      stats.ino !== parent.ino ||
+      realPath !== parent.realPath
+    ) {
+      throw new SecretStoreSecurityError("The external secret directory changed during an operation.");
+    }
+  }
+
+  private async syncDirectoryIfSupported(handle: SecretDirectoryHandle): Promise<void> {
+    try {
+      await handle.sync();
+    } catch (error) {
+      if (!isUnsupportedDirectorySync(error)) throw error;
+    }
+  }
+
   private isUnix(): boolean {
     return this.platform !== "win32";
   }
@@ -227,27 +326,39 @@ export class DesktopSecretStore {
 const NODE_FILE_SYSTEM: DesktopSecretFileSystem = {
   lstat,
   mkdir,
-  readFile: async (path, encoding) => readFile(path, encoding),
-  writeFile: async (path, content, options) => writeFile(path, content, options),
   rename,
+  unlink,
   chmod,
-  fsyncFile: async (path) => {
-    const handle = await open(path, "r");
-    try {
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
+  realpath,
+  openFile: async (path, flags, mode) => {
+    const handle = await open(path, flags, mode);
+    return {
+      stat: () => handle.stat(),
+      readFile: async () => handle.readFile({ encoding: "utf8" }),
+      writeFile: async (content) => handle.writeFile(content, { encoding: "utf8" }),
+      sync: () => handle.sync(),
+      close: () => handle.close(),
+    };
   },
-  fsyncDirectory: async (path) => {
-    const handle = await open(path, "r");
-    try {
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
+  openDirectory: async (path, flags) => {
+    const handle = await open(path, flags);
+    return {
+      stat: () => handle.stat(),
+      sync: () => handle.sync(),
+      close: () => handle.close(),
+    };
   },
 };
+
+const NO_FOLLOW = fileSystemConstants.O_NOFOLLOW ?? 0;
+const DIRECTORY = fileSystemConstants.O_DIRECTORY ?? 0;
+const READ_SECRET_FLAGS = fileSystemConstants.O_RDONLY | NO_FOLLOW;
+const WRITE_SECRET_FLAGS =
+  fileSystemConstants.O_WRONLY |
+  fileSystemConstants.O_CREAT |
+  fileSystemConstants.O_EXCL |
+  NO_FOLLOW;
+const READ_DIRECTORY_FLAGS = fileSystemConstants.O_RDONLY | DIRECTORY | NO_FOLLOW;
 
 function parseSecretFile(raw: string): SecretFileV1 {
   let parsed: unknown;
@@ -261,15 +372,29 @@ function parseSecretFile(raw: string): SecretFileV1 {
 }
 
 function isSecretFileV1(value: unknown): value is SecretFileV1 {
-  if (!isRecord(value) || value.schemaVersion !== 1 || !isRecord(value.secrets)) return false;
+  if (!isPlainRecord(value) || !hasExactOwnKeys(value, ["schemaVersion", "secrets"]) || value.schemaVersion !== 1 || !isPlainRecord(value.secrets)) return false;
   return Object.entries(value.secrets).every(([connectionId, secret]) =>
     UUID_PATTERN.test(connectionId) &&
-    isRecord(secret) &&
+    isPlainRecord(secret) &&
+    hasExactOwnKeys(secret, ["apiKey", "updatedAt"]) &&
     typeof secret.apiKey === "string" &&
     secret.apiKey.length > 0 &&
     typeof secret.updatedAt === "string" &&
     Number.isFinite(Date.parse(secret.updatedAt)),
   );
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const prototype = Reflect.getPrototypeOf(value);
+  // JSON.parse produces Object.prototype records; null-prototype records are
+  // also safe because every lookup below is own-property based.
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasExactOwnKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.prototype.hasOwnProperty.call(value, key));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -284,6 +409,11 @@ function assertConnectionId(connectionId: string): void {
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error.code === "ENOENT";
+}
+
+function isUnsupportedDirectorySync(error: unknown): boolean {
+  if (!isRecord(error) || typeof error.code !== "string") return false;
+  return ["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EISDIR"].includes(error.code);
 }
 
 function defaultRandomSuffix(): string {

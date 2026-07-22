@@ -51,4 +51,24 @@ describe("resolveDesktopSecretPath", () => {
       }),
     ).toBe("C:\\Users\\alice\\AppData\\Roaming\\rss-dashboard-cn\\secrets.json");
   });
+
+  it("ignores a relative APPDATA value so secrets cannot land under the working directory", () => {
+    expect(
+      resolveDesktopSecretPath({
+        platform: "win32",
+        homeDir: "C:\\Users\\alice",
+        env: { APPDATA: "relative-app-data" },
+      }),
+    ).toBe("C:\\Users\\alice\\AppData\\Roaming\\rss-dashboard-cn\\secrets.json");
+  });
+
+  it("ignores a relative XDG_CONFIG_HOME value so secrets cannot land in a vault", () => {
+    expect(
+      resolveDesktopSecretPath({
+        platform: "linux",
+        homeDir: "/home/alice",
+        env: { XDG_CONFIG_HOME: ".vault-config/plugins" },
+      }),
+    ).toBe("/home/alice/.config/rss-dashboard-cn/secrets.json");
+  });
 });

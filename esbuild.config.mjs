@@ -1,6 +1,7 @@
 import esbuild from "esbuild";
 import process from "process";
 import { builtinModules as builtins } from "module";
+import { fileURLToPath } from "node:url";
 
 const banner =
 `/*
@@ -11,43 +12,59 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = (process.argv[2] === "production");
 
-const context = await esbuild.context({
-	banner: {
-		js: banner,
-	},
-	entryPoints: ["main.ts"],
-	bundle: true,
-	external: [
-		"obsidian",
-		"electron",
-		"moment",
-		"@codemirror/autocomplete",
-		"@codemirror/collab",
-		"@codemirror/commands",
-		"@codemirror/language",
-		"@codemirror/lint",
-		"@codemirror/search",
-		"@codemirror/state",
-		"@codemirror/view",
-		"@lezer/common",
-		"@lezer/highlight",
-		"@lezer/lr",
-		...builtins],
-	format: "cjs",
-	target: "es2018",
-	logLevel: "info",
-	sourcemap: prod ? false : "inline",
-	treeShaking: true,
-	define: {
-		__RSS_DASHBOARD_PRODUCTION__: prod ? "true" : "false",
-	},
-	outfile: "main.js",
-	minify: prod,
-	loader: {
-		".json": "json",
-		".wasm": "binary"
-	}
-});
+/** Keep both canonical and node:-prefixed builtins external in plugin bundles. */
+export const nodeBuiltinExternals = [...new Set(
+	builtins.flatMap((moduleName) => [moduleName, `node:${moduleName}`]),
+)];
+
+export function createPluginBuildOptions({
+	entryPoints = ["main.ts"],
+	outfile = "main.js",
+	production = prod,
+} = {}) {
+	return {
+		banner: {
+			js: banner,
+		},
+		entryPoints,
+		bundle: true,
+		external: [
+			"obsidian",
+			"electron",
+			"moment",
+			"@codemirror/autocomplete",
+			"@codemirror/collab",
+			"@codemirror/commands",
+			"@codemirror/language",
+			"@codemirror/lint",
+			"@codemirror/search",
+			"@codemirror/state",
+			"@codemirror/view",
+			"@lezer/common",
+			"@lezer/highlight",
+			"@lezer/lr",
+			...nodeBuiltinExternals],
+		format: "cjs",
+		target: "es2018",
+		logLevel: "info",
+		sourcemap: production ? false : "inline",
+		treeShaking: true,
+		define: {
+			__RSS_DASHBOARD_PRODUCTION__: production ? "true" : "false",
+		},
+		outfile,
+		minify: production,
+		loader: {
+			".json": "json",
+			".wasm": "binary"
+		}
+	};
+}
+
+const shouldRun = process.argv[1] === fileURLToPath(import.meta.url);
+
+if (shouldRun) {
+const context = await esbuild.context(createPluginBuildOptions());
 
 // CSS bundling: resolves @import in src/styles/index.css → styles.css
 const cssContext = await esbuild.context({
@@ -65,9 +82,10 @@ if (prod) {
 		process.exit(0);
 	} catch (err) {
 		console.error("Build failed:", err);
-		process.exit(1);
+	process.exit(1);
 	}
 } else {
 	await Promise.all([context.watch(), cssContext.watch()]);
 	console.log("Watch mode active: main.js and styles.css are being watched.");
+}
 }

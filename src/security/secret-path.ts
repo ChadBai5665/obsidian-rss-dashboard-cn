@@ -29,16 +29,24 @@ export function resolveDesktopSecretPath(options: DesktopSecretPathOptions): str
   }
 
   if (options.platform === "win32") {
-    const appData = nonBlank(options.env.APPDATA) ?? path.join(homeDir, "AppData", "Roaming");
+    const appData = absoluteEnvironmentPath(options.env.APPDATA, win32) ?? path.join(homeDir, "AppData", "Roaming");
     return path.join(appData, APPLICATION_DIRECTORY, SECRET_FILENAME);
   }
 
-  const configHome = nonBlank(options.env.XDG_CONFIG_HOME) ?? path.join(homeDir, ".config");
+  const configHome = absoluteEnvironmentPath(options.env.XDG_CONFIG_HOME, posix) ?? path.join(homeDir, ".config");
   return path.join(configHome, APPLICATION_DIRECTORY, SECRET_FILENAME);
 }
 
 function nonBlank(value: string | undefined): string | undefined {
   return value && value.trim() ? value : undefined;
+}
+
+function absoluteEnvironmentPath(
+  value: string | undefined,
+  path: Pick<typeof posix, "isAbsolute">,
+): string | undefined {
+  const candidate = nonBlank(value);
+  return candidate && path.isAbsolute(candidate) ? candidate : undefined;
 }
 
 function requireNonBlank(value: string, label: string): string {

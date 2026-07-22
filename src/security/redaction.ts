@@ -10,7 +10,14 @@ const SENSITIVE_NAMES = "authorization|proxy-authorization|x-api-key|api[-_]?key
 export function redactSensitiveText(input: string): string {
   const unfolded = input.replace(/\r?\n[ \t]+/g, " ");
   const withoutQueries = redactUrlQueries(unfolded);
-  const withoutBearerTokens = withoutQueries.replace(
+  const withoutJsonSecrets = withoutQueries.replace(
+    new RegExp(
+      `(["'](?:${SENSITIVE_NAMES})["']\\s*:\\s*)(?:"(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*'|[^,}\\]\r\\n]+)`,
+      "gi",
+    ),
+    '$1"[redacted]"',
+  );
+  const withoutBearerTokens = withoutJsonSecrets.replace(
     /\bBearer\s+[^\s,;)}\]]+/gi,
     "Bearer [redacted]",
   );
@@ -53,8 +60,12 @@ function redactUrlQueries(value: string): string {
 function redactUrl(rawUrl: string): string {
   const punctuation = /[),.;\]}]+$/.exec(rawUrl)?.[0] ?? "";
   const candidate = punctuation ? rawUrl.slice(0, -punctuation.length) : rawUrl;
-  const questionMark = candidate.indexOf("?");
-  return questionMark === -1 ? rawUrl : `${candidate.slice(0, questionMark)}${punctuation}`;
+  const sensitiveStart = [candidate.indexOf("?"), candidate.indexOf("#")]
+    .filter((index) => index !== -1)
+    .reduce((earliest, index) => Math.min(earliest, index), candidate.length);
+  return sensitiveStart === candidate.length
+    ? rawUrl
+    : `${candidate.slice(0, sensitiveStart)}${punctuation}`;
 }
 
 function extractStatus(error: unknown): number | undefined {
@@ -72,7 +83,7 @@ function extractMessage(error: unknown): string {
 }
 
 function stripResponseBody(message: string): string {
-  return message.replace(/\s+\b(?:response\s+body|response|body|data)\s*[:=][\s\S]*$/i, "");
+  return message.replace(/(?:^|\s+)(?:response\s+body|response|body|data)\s*[:=][\s\S]*$/i, "").trim();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -100,5 +111,10 @@ function ownString(value: Record<string, unknown>, key: string): string | undefi
 }
 
 function ownValue(value: Record<string, unknown>, key: string): unknown {
-  return Object.prototype.hasOwnProperty.call(value, key) ? value[key] : undefined;
+  if (!Object.prototype.hasOwnProperty.call(value, key)) return undefined;
+  try {
+    return value[key];
+  } catch {
+    return undefined;
+  }
 }
