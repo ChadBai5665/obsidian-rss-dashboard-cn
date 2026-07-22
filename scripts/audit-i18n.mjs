@@ -69,6 +69,22 @@ function isIdentifierPart(character) {
   return isIdentifierStart(character) || (character >= "0" && character <= "9");
 }
 
+function isDigit(character) {
+  return Boolean(character) && character >= "0" && character <= "9";
+}
+
+function canStartRegularExpression(previousToken) {
+  if (!previousToken) return true;
+  if (previousToken.type === "literal" || previousToken.type === "number") return false;
+  if (previousToken.type === "identifier") {
+    return new Set([
+      "return", "case", "throw", "typeof", "void", "delete", "new",
+      "in", "of", "yield", "await", "else", "do", "instanceof",
+    ]).has(previousToken.value);
+  }
+  return ![")", "]", "}", ".", "?."].includes(previousToken.value);
+}
+
 /**
  * A deliberately small TypeScript lexer. It recognizes only the token classes
  * the audit needs, but consumes comments and literal bodies as opaque values so
@@ -174,6 +190,30 @@ function tokenize(source) {
     }
     return { type: "literal", value: source.slice(start + 1), line: tokenLine, index: start };
   };
+  const skipRegularExpression = () => {
+    advance();
+    let inCharacterClass = false;
+    while (index < source.length) {
+      const character = source[index];
+      if (character === "\n" || character === "\r") return;
+      if (character === "\\") {
+        advance();
+        if (index < source.length && source[index] !== "\n" && source[index] !== "\r") advance();
+      } else if (inCharacterClass && character === "]") {
+        inCharacterClass = false;
+        advance();
+      } else if (!inCharacterClass && character === "[") {
+        inCharacterClass = true;
+        advance();
+      } else if (!inCharacterClass && character === "/") {
+        advance();
+        while (isIdentifierPart(source[index])) advance();
+        return;
+      } else {
+        advance();
+      }
+    }
+  };
 
   while (index < source.length) {
     const character = source[index];
@@ -185,6 +225,8 @@ function tokenize(source) {
       skipLineComment();
     } else if (character === "/" && source[index + 1] === "*") {
       skipBlockComment();
+    } else if (character === "/" && canStartRegularExpression(tokens.at(-1))) {
+      skipRegularExpression();
     } else if (character === "\"" || character === "'" || character === "`") {
       tokens.push(readLiteral(character));
     } else if (isIdentifierStart(character)) {
@@ -193,6 +235,12 @@ function tokenize(source) {
       advance();
       while (isIdentifierPart(source[index])) advance();
       tokens.push({ type: "identifier", value: source.slice(start, index), line: tokenLine, index: start });
+    } else if (isDigit(character)) {
+      const start = index;
+      const tokenLine = line;
+      advance();
+      while (isDigit(source[index]) || source[index] === "." || source[index] === "_") advance();
+      tokens.push({ type: "number", value: source.slice(start, index), line: tokenLine, index: start });
     } else {
       const tokenLine = line;
       const start = index;
@@ -258,8 +306,56 @@ function unwrapParentheses(tokens, start, end) {
 }
 
 function directLiteral(tokens, start, end) {
-  [start, end] = unwrapParentheses(tokens, start, end);
-  return start === end && tokens[start]?.type === "literal" ? tokens[start] : undefined;
+  const primary = directLiteralPrimary(tokens, start, end);
+  if (!primary) return undefined;
+  let index = primary.next;
+  while (index <= end) {
+    if (tokens[index]?.type !== "identifier" || !["as", "satisfies"].includes(tokens[index].value)) {
+      return undefined;
+    }
+    const typeEnd = consumeTypeWrapper(tokens, index + 1, end);
+    if (typeEnd < index + 1) return undefined;
+    index = typeEnd + 1;
+  }
+  return primary.literal;
+}
+
+function directLiteralPrimary(tokens, start, end) {
+  if (tokens[start]?.type === "literal") {
+    return { literal: tokens[start], next: start + 1 };
+  }
+  if (tokens[start]?.value !== "(") return undefined;
+  const close = findMatching(tokens, start);
+  if (close < 0 || close > end) return undefined;
+  const literal = directLiteral(tokens, start + 1, close - 1);
+  return literal ? { literal, next: close + 1 } : undefined;
+}
+
+function consumeTypeWrapper(tokens, start, end) {
+  let index = start;
+  let sawTypeToken = false;
+  const expectedClosers = [];
+  while (index <= end) {
+    const token = tokens[index];
+    if (expectedClosers.length === 0 && token.type === "identifier" && ["as", "satisfies"].includes(token.value)) {
+      break;
+    }
+    if (token.type === "identifier" || token.type === "literal" || token.value === ".") {
+      sawTypeToken = true;
+    } else if (token.value === "<") {
+      expectedClosers.push(">");
+    } else if (token.value === "[") {
+      expectedClosers.push("]");
+    } else if (token.value === ",") {
+      if (expectedClosers.length === 0) return -1;
+    } else if (token.value === expectedClosers.at(-1)) {
+      expectedClosers.pop();
+    } else {
+      return -1;
+    }
+    index += 1;
+  }
+  return sawTypeToken && expectedClosers.length === 0 ? index - 1 : -1;
 }
 
 function isNonUserFacingLiteral(value) {

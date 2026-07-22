@@ -167,4 +167,57 @@ describe("i18n literal audit", () => {
     );
     expect(result.stdout).not.toContain("Ignored");
   });
+
+  it("consumes regular-expression literals without hiding the next real command name", () => {
+    const root = createFixture({
+      "main.ts": [
+        "plugin.addCommand({",
+        "  callback: () => {",
+        '    const first = /button.setText("Ignored in regex")/;',
+        "    const closing = /[}]/;",
+        "    const symbols = /[/)]/;",
+        "    const escaped = /button\\/setText\\(\\\"Ignored escaped\\\"\\)/;",
+        "  },",
+        '  "name": "Real command",',
+        "});",
+      ].join("\n"),
+      "src/division.ts": [
+        "const ratio = completed / total;",
+        'const numericRatio = 10 / total; button.setText("Actual after division");',
+      ].join("\n"),
+    });
+
+    const result = runAudit(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('main.ts:8 addCommand name "Real command"');
+    expect(result.stdout).toContain('src/division.ts:2 setText "Actual after division"');
+    expect(result.stdout).not.toContain("Ignored");
+  });
+
+  it("accepts only TypeScript assertion wrappers around direct literals", () => {
+    const root = createFixture({
+      "main.ts": [
+        "plugin.addCommand({",
+        '  "name": (("Asserted command" as const) satisfies Command<string>),',
+        "  callback: () => undefined,",
+        "});",
+      ].join("\n"),
+      "src/wrappers.ts": [
+        'button.setText("Asserted text" as Namespace.Label<string>);',
+        'button.setDesc((`Template ${value}`) satisfies string);',
+        'button.setName("Not direct" + suffix);',
+        "button.setPlaceholder(getPlaceholder());",
+      ].join("\n"),
+    });
+
+    const result = runAudit(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('main.ts:2 addCommand name "Asserted command"');
+    expect(result.stdout).toContain('src/wrappers.ts:1 setText "Asserted text"');
+    expect(result.stdout).toContain('src/wrappers.ts:2 setDesc "Template ${value}"');
+    expect(result.stdout).not.toContain("Not direct");
+    expect(result.stdout).not.toContain("getPlaceholder");
+  });
 });
