@@ -87,6 +87,20 @@ function canStartRegularExpression(previousToken) {
   return ![")", "]", "}", ".", "?."].includes(previousToken.value);
 }
 
+function isControlKeyword(tokens, index) {
+  const token = tokens[index];
+  if (token?.type !== "identifier" || !CONTROL_PAREN_KEYWORDS.has(token.value)) return false;
+  return ![".", "?."].includes(tokens[index - 1]?.value);
+}
+
+function startsControlParenthesis(tokens) {
+  const lastIndex = tokens.length - 1;
+  if (tokens[lastIndex]?.type === "identifier" && tokens[lastIndex].value === "await" && tokens[lastIndex - 1]?.value === "for") {
+    return isControlKeyword(tokens, lastIndex - 1);
+  }
+  return isControlKeyword(tokens, lastIndex);
+}
+
 /**
  * A deliberately small TypeScript lexer. It recognizes only the token classes
  * the audit needs, but consumes comments and literal bodies as opaque values so
@@ -131,25 +145,77 @@ function tokenize(source) {
   };
   const skipTemplateExpression = () => {
     let depth = 1;
+    const expressionTokens = [];
+    const expressionParens = [];
     while (index < source.length && depth > 0) {
-      if (source[index] === "/" && source[index + 1] === "/") {
+      const character = source[index];
+      if (isWhitespace(character)) {
+        advance();
+      } else if (character === "/" && source[index + 1] === "/") {
         advance();
         advance();
         skipLineComment();
-      } else if (source[index] === "/" && source[index + 1] === "*") {
+      } else if (character === "/" && source[index + 1] === "*") {
         skipBlockComment();
-      } else if (source[index] === "\"" || source[index] === "'") {
-        skipQuoted(source[index]);
-      } else if (source[index] === "`") {
+      } else if (character === "/" && canStartRegularExpression(expressionTokens.at(-1))) {
+        expressionTokens.push(skipRegularExpression());
+      } else if (character === "\"" || character === "'") {
+        const tokenLine = line;
+        const tokenIndex = index;
+        skipQuoted(character);
+        expressionTokens.push({ type: "literal", value: "", line: tokenLine, index: tokenIndex });
+      } else if (character === "`") {
+        const tokenLine = line;
+        const tokenIndex = index;
         skipTemplate();
-      } else if (source[index] === "{") {
+        expressionTokens.push({ type: "literal", value: "", line: tokenLine, index: tokenIndex });
+      } else if (isIdentifierStart(character)) {
+        const start = index;
+        const tokenLine = line;
+        advance();
+        while (isIdentifierPart(source[index])) advance();
+        expressionTokens.push({ type: "identifier", value: source.slice(start, index), line: tokenLine, index: start });
+      } else if (isDigit(character)) {
+        const start = index;
+        const tokenLine = line;
+        advance();
+        while (isDigit(source[index]) || source[index] === "." || source[index] === "_") advance();
+        expressionTokens.push({ type: "number", value: source.slice(start, index), line: tokenLine, index: start });
+      } else if (character === "{") {
         depth += 1;
         advance();
-      } else if (source[index] === "}") {
+        expressionTokens.push({ type: "punct", value: "{", line, index: index - 1 });
+      } else if (character === "}") {
         depth -= 1;
         advance();
+        if (depth === 0) return;
+        expressionTokens.push({ type: "punct", value: "}", line, index: index - 1 });
       } else {
-        advance();
+        const tokenLine = line;
+        const tokenIndex = index;
+        if ((character === "+" && source[index + 1] === "+") || (character === "-" && source[index + 1] === "-")) {
+          const previous = expressionTokens.at(-1);
+          const postfix = previous && (previous.type === "literal" || previous.type === "number" || previous.type === "regex" || previous.type === "postfix" || previous.type === "control-close" || previous.type === "identifier" || [")", "]", "}"].includes(previous.value));
+          advance();
+          advance();
+          expressionTokens.push({ type: postfix ? "postfix" : "operator", value: `${character}${character}`, line: tokenLine, index: tokenIndex });
+        } else if (character === "(") {
+          const control = startsControlParenthesis(expressionTokens);
+          advance();
+          expressionParens.push(control);
+          expressionTokens.push({ type: control ? "control-open" : "punct", value: "(", line: tokenLine, index: tokenIndex });
+        } else if (character === ")") {
+          const control = expressionParens.pop() === true;
+          advance();
+          expressionTokens.push({ type: control ? "control-close" : "punct", value: ")", line: tokenLine, index: tokenIndex });
+        } else if (character === "?" && source[index + 1] === ".") {
+          advance();
+          advance();
+          expressionTokens.push({ type: "punct", value: "?.", line: tokenLine, index: tokenIndex });
+        } else {
+          advance();
+          expressionTokens.push({ type: "punct", value: character, line: tokenLine, index: tokenIndex });
+        }
       }
     }
   };
@@ -259,7 +325,7 @@ function tokenize(source) {
         advance();
         tokens.push({ type: postfix ? "postfix" : "operator", value: `${character}${character}`, line: tokenLine, index: start });
       } else if (character === "(") {
-        const control = tokens.at(-1)?.type === "identifier" && CONTROL_PAREN_KEYWORDS.has(tokens.at(-1).value);
+        const control = startsControlParenthesis(tokens);
         advance();
         parenContexts.push(control);
         tokens.push({ type: control ? "control-open" : "punct", value: "(", line: tokenLine, index: start });

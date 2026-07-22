@@ -262,4 +262,46 @@ describe("i18n literal audit", () => {
     expect(result.stdout).toContain('src/types.ts:2 setName "Intersection"');
     expect(result.stdout).not.toContain("Runtime chain");
   });
+
+  it("treats control words as keywords only when they are not property access and recognizes for await", () => {
+    const root = createFixture({
+      "src/control-context.ts": [
+        'promise.catch(handler) / total; button.setText("After promise catch");',
+        'source.if(enabled) / total; button.setName("After property if");',
+        'source.while(enabled) / total; button.setDesc("After property while");',
+        "for /* comment */ await",
+        "  (const item of stream)",
+        '  /button.setText("Ignored in for await regex")/.test(item); button.setText("After for await");',
+      ].join("\n"),
+    });
+
+    const result = runAudit(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('src/control-context.ts:1 setText "After promise catch"');
+    expect(result.stdout).toContain('src/control-context.ts:2 setName "After property if"');
+    expect(result.stdout).toContain('src/control-context.ts:3 setDesc "After property while"');
+    expect(result.stdout).toContain('src/control-context.ts:6 setText "After for await"');
+    expect(result.stdout).not.toContain("Ignored in for await regex");
+  });
+
+  it("uses expression-aware scanning inside template interpolation without leaking nested code", () => {
+    const root = createFixture({
+      "src/templates.ts": [
+        "button.setDesc(`Outer ${(() => {",
+        '  const matcher = /}/; const fake = /button.setText("Ignored regex")/;',
+        "  const nested = `Nested ${value / total}`;",
+        '  return matcher.test("}") ? nested : "";',
+        "})()}`);",
+        'button.setText("After template interpolation");',
+      ].join("\n"),
+    });
+
+    const result = runAudit(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("src/templates.ts:1 setDesc ");
+    expect(result.stdout).toContain('src/templates.ts:6 setText "After template interpolation"');
+    expect(result.stdout).not.toContain('setText "Ignored regex"');
+  });
 });
