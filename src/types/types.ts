@@ -441,6 +441,17 @@ export interface CollectionSettings {
   savedNoteFolder: string;
 }
 
+export interface TikHubSettings {
+  enabled: boolean;
+  connectionId: string;
+  // The explicit official origins document supported defaults; custom HTTPS origins remain allowed.
+  // eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
+  baseUrl: "https://api.tikhub.dev" | "https://api.tikhub.io" | string;
+  timeoutMs: number;
+  maxRequestsPerRun: number;
+  maxRequestsPerDay: number;
+}
+
 export interface RssDashboardSettings {
   feeds: Feed[];
   folders: Folder[];
@@ -450,6 +461,7 @@ export interface RssDashboardSettings {
   lastRefreshTimestamp: number;
   startupRefreshDelaySeconds: number;
   collection: CollectionSettings;
+  tikhub: TikHubSettings;
   maxItems: number;
   defaultAutoDeleteDuration: number;
   viewStyle: "list" | "card" | "feed";
@@ -610,6 +622,14 @@ export const DEFAULT_SETTINGS: RssDashboardSettings = {
     dataFolder: ".rss-dashboard-data",
     dailyIndexFolder: "信息收集/每日采集",
     savedNoteFolder: "信息收集/已保存",
+  },
+  tikhub: {
+    enabled: false,
+    connectionId: "",
+    baseUrl: "https://api.tikhub.dev",
+    timeoutMs: 20_000,
+    maxRequestsPerRun: 40,
+    maxRequestsPerDay: 100,
   },
   maxItems: 50,
   defaultAutoDeleteDuration: 30,

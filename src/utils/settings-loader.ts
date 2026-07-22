@@ -20,6 +20,7 @@ import {
   normalizeSourceConfig,
   sourceConfigUrl,
 } from "../sources/source-config";
+import { normalizeTikHubBaseUrl } from "../sources/tikhub/tikhub-types";
 
 const DEFAULT_FEED_KEYWORD_RULES = {
   overrideGlobalRules: false,
@@ -154,6 +155,8 @@ export function loadAndNormalizeSettings(
     settings.collection ?? {},
   );
 
+  settings.tikhub = normalizeTikHubSettings(settings.tikhub);
+
   settings.media = Object.assign(
     {},
     DEFAULT_SETTINGS.media,
@@ -253,6 +256,48 @@ export function loadAndNormalizeSettings(
   }
 
   return settings;
+}
+
+function normalizeTikHubSettings(value: unknown): RssDashboardSettings["tikhub"] {
+  if (!isRecord(value)) return { ...DEFAULT_SETTINGS.tikhub };
+  const baseUrl = normalizeTikHubBaseUrl(value.baseUrl);
+  if (!baseUrl) return { ...DEFAULT_SETTINGS.tikhub };
+
+  const connectionId =
+    typeof value.connectionId === "string" ? value.connectionId.trim() : "";
+  if (connectionId && !UUID_PATTERN.test(connectionId)) {
+    return { ...DEFAULT_SETTINGS.tikhub };
+  }
+
+  return {
+    enabled: value.enabled === true,
+    connectionId,
+    baseUrl,
+    timeoutMs: positiveIntegerOrDefault(
+      value.timeoutMs,
+      DEFAULT_SETTINGS.tikhub.timeoutMs,
+    ),
+    maxRequestsPerRun: positiveIntegerOrDefault(
+      value.maxRequestsPerRun,
+      DEFAULT_SETTINGS.tikhub.maxRequestsPerRun,
+    ),
+    maxRequestsPerDay: positiveIntegerOrDefault(
+      value.maxRequestsPerDay,
+      DEFAULT_SETTINGS.tikhub.maxRequestsPerDay,
+    ),
+  };
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function positiveIntegerOrDefault(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function migrateSettings(settings: RssDashboardSettings): boolean {
