@@ -60,7 +60,7 @@ export function canonicalExternalPageUrl(rawUrl: string): string | undefined {
   ) {
     return undefined;
   }
-  const hostname = parsed.hostname.toLowerCase();
+  const hostname = parsed.hostname.toLowerCase().replace(/\.+$/u, "");
   if (
     hostname === "t.co" ||
     hostname === "x.com" ||

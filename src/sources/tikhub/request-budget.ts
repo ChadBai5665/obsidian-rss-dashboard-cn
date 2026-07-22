@@ -83,28 +83,28 @@ export class TikHubRequestBudget implements TikHubRequestBudgetLike {
 }
 
 class BudgetReservation implements TikHubBudgetReservation {
+  readonly total: number;
+  remaining: number;
+
   constructor(
     private readonly budget: TikHubRequestBudget,
     private readonly ledgerReservation: TikHubLedgerReservation,
-  ) {}
-
-  get total(): number {
-    return this.ledgerReservation.total;
+  ) {
+    this.total = ledgerReservation.total;
+    this.remaining = ledgerReservation.remaining;
   }
 
-  get remaining(): number {
-    return this.ledgerReservation.remaining;
-  }
-
-  markAttempted(): void {
+  readonly markAttempted = (): void => {
     this.ledgerReservation.markAttempted();
-  }
+    this.remaining = this.ledgerReservation.remaining;
+  };
 
-  async releaseUnused(): Promise<number> {
+  readonly releaseUnused = async (): Promise<number> => {
     const released = await this.ledgerReservation.releaseUnused();
     await this.budget.releaseRunCount(released);
+    this.remaining = this.ledgerReservation.remaining;
     return released;
-  }
+  };
 }
 
 function assertPositiveInteger(value: number, label: string): void {

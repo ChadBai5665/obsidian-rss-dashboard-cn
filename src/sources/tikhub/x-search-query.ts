@@ -129,7 +129,7 @@ function normalizeTerms(values: string[], required: boolean): string[] {
   const result: string[] = [];
   const seen = new Set<string>();
   for (const value of values) {
-    if (hasControl(value)) throw new XSearchQueryError();
+    if (hasInvalidQueryScalar(value)) throw new XSearchQueryError();
     const normalized = value.normalize("NFC").replace(/\s+/gu, " ").trim();
     if (!normalized) continue;
     if (Array.from(normalized).length > 100) {
@@ -151,7 +151,7 @@ function normalizeAccounts(values: string[]): string[] {
   const result: string[] = [];
   const seen = new Set<string>();
   for (const value of values) {
-    if (hasControl(value)) throw new XSearchQueryError();
+    if (hasInvalidQueryScalar(value)) throw new XSearchQueryError();
     const handle = value.normalize("NFC").trim().toLowerCase();
     if (!X_HANDLE.test(handle)) throw new XSearchQueryError();
     if (!seen.has(handle)) {
@@ -172,29 +172,31 @@ function quotedLiteral(term: string): string {
   return `"${term.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
 }
 
-function hasControl(value: string): boolean {
+function hasInvalidQueryScalar(value: string): boolean {
   for (const character of value) {
     const codePoint = character.codePointAt(0) ?? 0;
-    if (codePoint <= 31 || codePoint === 127) return true;
+    if (
+      codePoint <= 31 ||
+      (codePoint >= 127 && codePoint <= 159) ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff)
+    ) return true;
   }
   return false;
 }
 
 function localSinceDate(now: Date, windowDays: number): string {
   let timestamp: number;
-  let year: number;
-  let month: number;
-  let date: number;
   try {
     timestamp = Date.prototype.getTime.call(now);
-    year = Date.prototype.getFullYear.call(now);
-    month = Date.prototype.getMonth.call(now);
-    date = Date.prototype.getDate.call(now);
   } catch {
     throw new XSearchQueryError();
   }
   if (!Number.isFinite(timestamp)) throw new XSearchQueryError();
-  return new Date(Date.UTC(year, month, date - windowDays))
+  const exactStart = new Date(timestamp - windowDays * 24 * 60 * 60 * 1_000);
+  const year = Date.prototype.getFullYear.call(exactStart);
+  const month = Date.prototype.getMonth.call(exactStart);
+  const date = Date.prototype.getDate.call(exactStart);
+  return new Date(Date.UTC(year, month, date))
     .toISOString()
     .slice(0, 10);
 }

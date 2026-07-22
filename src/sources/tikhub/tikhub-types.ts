@@ -23,7 +23,8 @@ export type TikHubClientErrorCode =
   | "network-failure"
   | "malformed-response"
   | "timeout"
-  | "aborted";
+  | "aborted"
+  | "invalid-batch";
 
 const SAFE_REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 

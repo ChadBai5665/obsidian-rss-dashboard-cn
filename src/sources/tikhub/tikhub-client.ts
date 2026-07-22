@@ -42,8 +42,6 @@ interface CommonRequestInput {
   apiKey: string;
   cursor?: string;
   signal?: AbortSignal;
-  /** A caller-owned whole-batch reservation; the caller releases its tail. */
-  reservation?: TikHubBudgetReservation;
 }
 
 export interface TikHubUserRequest extends CommonRequestInput {
@@ -53,7 +51,24 @@ export interface TikHubUserRequest extends CommonRequestInput {
 export interface TikHubSearchRequest extends CommonRequestInput {
   query: string;
   searchType: TikHubSearchType;
+  /** Opaque client-owned topic-search capability. */
+  batch?: TikHubBatchHandle;
 }
+
+declare const batchHandleType: unique symbol;
+export type TikHubBatchHandle = object & {
+  readonly [batchHandleType]: "TikHubBatchHandle";
+};
+
+interface TikHubBatchState {
+  budget: TikHubRequestBudgetLike;
+  reservation: TikHubBudgetReservation;
+  total: number;
+  markAttempted: () => void;
+  releaseUnused: () => Promise<number>;
+}
+
+const BATCH_BRAND = Symbol("tikhub-client-batch");
 
 export class TikHubClientError extends Error {
   constructor(
@@ -72,6 +87,9 @@ export class TikHubClient {
   private readonly timeoutMs: number;
   private readonly budget: TikHubRequestBudgetLike;
   private readonly transport: TikHubTransport;
+  private readonly batchBrand = Object.freeze({});
+  private readonly activeBatchHandles = new WeakSet<object>();
+  private readonly batchStates = new WeakMap<object, TikHubBatchState>();
 
   constructor(options: TikHubClientOptions) {
     const baseUrl = normalizeTikHubBaseUrl(options.baseUrl);
@@ -116,13 +134,56 @@ export class TikHubClient {
       "/api/v1/twitter/web/fetch_search_timeline",
       { keyword: query, search_type: input.searchType },
       input,
+      input.batch,
     );
+  }
+
+  /** Reserves an exact topic batch and returns a capability bound to this client. */
+  async reserveBatch(count: 2 | 3): Promise<TikHubBatchHandle> {
+    if (count !== 2 && count !== 3) throw invalidBatchError();
+    const candidate = await this.budget.reserve(count);
+    const state = snapshotBatchReservation(candidate, count, this.budget);
+    if (!state) {
+      await releaseMalformedReservation(candidate);
+      throw invalidBatchError();
+    }
+
+    const handle = Object.create(null) as object;
+    Object.defineProperty(handle, BATCH_BRAND, {
+      value: this.batchBrand,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+    Object.freeze(handle);
+    this.activeBatchHandles.add(handle);
+    this.batchStates.set(handle, state);
+    return handle as TikHubBatchHandle;
+  }
+
+  /** Releases only the unused tail and permanently invalidates the handle. */
+  async releaseBatch(handle: TikHubBatchHandle): Promise<number> {
+    const state = this.requireBatchState(handle);
+    this.activeBatchHandles.delete(handle);
+    this.batchStates.delete(handle);
+    try {
+      const released = await state.releaseUnused();
+      if (
+        !Number.isSafeInteger(released) ||
+        released < 0 ||
+        currentBatchRemaining(state) !== 0
+      ) throw invalidBatchError();
+      return released;
+    } catch {
+      throw invalidBatchError();
+    }
   }
 
   private async request<T>(
     endpoint: string,
     query: Record<string, string>,
     input: CommonRequestInput,
+    batch?: TikHubBatchHandle,
   ): Promise<TikHubResult<T>> {
     const apiKey = input.apiKey.trim();
     if (!apiKey) {
@@ -133,19 +194,21 @@ export class TikHubClient {
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
     if (input.cursor?.trim()) url.searchParams.set("cursor", input.cursor.trim());
 
-    const ownsReservation = input.reservation === undefined;
-    const reservation = input.reservation ?? await this.budget.reserve(1);
+    const batchState = batch === undefined
+      ? undefined
+      : this.requireBatchState(batch);
+    const ownsReservation = batchState === undefined;
+    const reservation = batchState?.reservation ?? await this.budget.reserve(1);
     try {
       if (input.signal?.aborted) throw abortedError();
-      if (reservation.remaining <= 0) {
-        throw new TikHubClientError(
-          "provider-rejected",
-          "TikHub request reservation is exhausted.",
-        );
-      }
+      if (batchState) this.assertActiveBatch(batch as TikHubBatchHandle, batchState);
+      else if (reservation.remaining <= 0) throw invalidBatchError();
 
       let pendingRequest: Promise<TikHubTransportResponse>;
       try {
+        if (batchState) {
+          this.assertActiveBatch(batch as TikHubBatchHandle, batchState);
+        }
         pendingRequest = this.transport({
           url: url.toString(),
           method: "GET",
@@ -154,7 +217,11 @@ export class TikHubClient {
       } catch (error) {
         throw errorForTransportFailure(error);
       }
-      reservation.markAttempted();
+      if (batchState) {
+        this.commitBatchAttempt(batch as TikHubBatchHandle, batchState);
+      } else {
+        reservation.markAttempted();
+      }
       let response: TikHubTransportResponse;
       try {
         response = await raceRequest(
@@ -218,6 +285,150 @@ export class TikHubClient {
       if (ownsReservation) await reservation.releaseUnused();
     }
   }
+
+  private requireBatchState(handle: TikHubBatchHandle): TikHubBatchState {
+    if (
+      (typeof handle !== "object" && typeof handle !== "function") ||
+      handle === null
+    ) throw invalidBatchError();
+    let brand: PropertyDescriptor | undefined;
+    try {
+      brand = Object.getOwnPropertyDescriptor(handle, BATCH_BRAND);
+    } catch {
+      throw invalidBatchError();
+    }
+    const state = this.batchStates.get(handle);
+    if (
+      !brand ||
+      !("value" in brand) ||
+      brand.value !== this.batchBrand ||
+      !this.activeBatchHandles.has(handle) ||
+      !state ||
+      state.budget !== this.budget
+    ) throw invalidBatchError();
+    return state;
+  }
+
+  private assertActiveBatch(
+    handle: TikHubBatchHandle,
+    state: TikHubBatchState,
+  ): void {
+    const remaining = currentBatchRemaining(state);
+    if (
+      this.requireBatchState(handle) !== state ||
+      !Number.isSafeInteger(remaining) ||
+      remaining <= 0
+    ) {
+      throw invalidBatchError();
+    }
+  }
+
+  private commitBatchAttempt(
+    handle: TikHubBatchHandle,
+    state: TikHubBatchState,
+  ): void {
+    this.assertActiveBatch(handle, state);
+    const before = currentBatchRemaining(state);
+    try {
+      state.markAttempted();
+    } catch {
+      throw invalidBatchError();
+    }
+    if (currentBatchRemaining(state) !== before - 1) throw invalidBatchError();
+  }
+}
+
+function snapshotBatchReservation(
+  value: unknown,
+  expected: number,
+  budget: TikHubRequestBudgetLike,
+): TikHubBatchState | undefined {
+  try {
+    if (typeof value !== "object" || value === null) return undefined;
+    const total = Object.getOwnPropertyDescriptor(value, "total");
+    const remaining = Object.getOwnPropertyDescriptor(value, "remaining");
+    const markAttempted = Object.getOwnPropertyDescriptor(value, "markAttempted");
+    const releaseUnused = Object.getOwnPropertyDescriptor(value, "releaseUnused");
+    const totalValue: unknown = total && "value" in total ? total.value : undefined;
+    const remainingValue: unknown = remaining && "value" in remaining
+      ? remaining.value
+      : undefined;
+    const markAttemptedValue: unknown =
+      markAttempted && "value" in markAttempted
+        ? markAttempted.value
+        : undefined;
+    const releaseUnusedValue: unknown =
+      releaseUnused && "value" in releaseUnused
+        ? releaseUnused.value
+        : undefined;
+    if (
+      totalValue !== expected ||
+      remainingValue !== expected ||
+      typeof markAttemptedValue !== "function" ||
+      typeof releaseUnusedValue !== "function"
+    ) return undefined;
+    return {
+      budget,
+      reservation: value as TikHubBudgetReservation,
+      total: expected,
+      markAttempted: () => {
+        Reflect.apply(markAttemptedValue, value, []);
+      },
+      releaseUnused: async () => {
+        const released: unknown = await Reflect.apply(
+          releaseUnusedValue,
+          value,
+          [],
+        );
+        return typeof released === "number" ? released : Number.NaN;
+      },
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function currentBatchRemaining(state: TikHubBatchState): number {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      state.reservation,
+      "remaining",
+    );
+    const remaining: unknown = descriptor && "value" in descriptor
+      ? descriptor.value
+      : undefined;
+    return typeof remaining === "number" &&
+      Number.isSafeInteger(remaining) &&
+      remaining >= 0 &&
+      remaining <= state.total
+      ? remaining
+      : Number.NaN;
+  } catch {
+    return Number.NaN;
+  }
+}
+
+async function releaseMalformedReservation(value: unknown): Promise<void> {
+  try {
+    if (typeof value !== "object" || value === null) return;
+    const descriptor = Object.getOwnPropertyDescriptor(value, "releaseUnused");
+    const releaseUnused: unknown = descriptor && "value" in descriptor
+      ? descriptor.value
+      : undefined;
+    if (typeof releaseUnused !== "function") {
+      return;
+    }
+    await Reflect.apply(releaseUnused, value, []);
+  } catch {
+    // A malformed budget result remains rejected with a static client error.
+  }
+}
+
+function invalidBatchError(): TikHubClientError {
+  return new TikHubClientError(
+    "invalid-batch",
+    "TikHub batch reservation is invalid or inactive.",
+  );
 }
 
 async function obsidianTransport(

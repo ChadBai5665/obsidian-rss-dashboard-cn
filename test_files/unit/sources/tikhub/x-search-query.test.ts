@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { env } from "node:process";
 import type { XTopicSourceConfig } from "../../../../src/sources/source-config";
 import {
   buildXTopicSearchPlan,
@@ -111,5 +112,41 @@ describe("buildXTopicSearchPlan", () => {
         NOW,
       ),
     ).toThrow(/500/);
+  });
+
+  it("rejects C1 controls and non-scalar surrogate input while preserving valid ZWJ text", () => {
+    for (const invalid of ["AI\u0080", "AI\u009f", "AI\ud800", "AI\udfff"]) {
+      expect(() =>
+        buildXTopicSearchPlan(topic({ includeKeywords: [invalid] }), NOW),
+      ).toThrow(XSearchQueryError);
+    }
+
+    expect(
+      buildXTopicSearchPlan(
+        topic({ includeKeywords: ["👩‍💻 AI"] }),
+        NOW,
+      ).requests[0]?.query,
+    ).toContain('("👩‍💻 AI")');
+  });
+
+  it("derives since from the exact elapsed start across local DST transitions", () => {
+    const originalTimeZone = env.TZ;
+    env.TZ = "America/New_York";
+    try {
+      const spring = buildXTopicSearchPlan(
+        topic({ windowDays: 1 }),
+        new Date("2026-03-09T00:30:00-04:00"),
+      );
+      const fall = buildXTopicSearchPlan(
+        topic({ windowDays: 1 }),
+        new Date("2026-11-02T00:30:00-05:00"),
+      );
+
+      expect(spring.requests[0]?.query).toContain("since:2026-03-07");
+      expect(fall.requests[0]?.query).toContain("since:2026-11-01");
+    } finally {
+      if (originalTimeZone === undefined) delete env.TZ;
+      else env.TZ = originalTimeZone;
+    }
   });
 });

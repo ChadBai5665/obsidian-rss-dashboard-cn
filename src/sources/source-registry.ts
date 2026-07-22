@@ -1,6 +1,7 @@
 import { createTranslator } from "../i18n";
 import type { TranslationKey, Translator } from "../i18n/types";
 import type {
+  LinkedPageGroupData,
   SourceAdapter,
   SourceRefreshContext,
   SourceRefreshOutput,
@@ -140,45 +141,111 @@ function isFeed(value: unknown): value is Record<string, unknown> {
   );
 }
 
-function isLinkedPageGroup(value: unknown): boolean {
+function snapshotLinkedPageGroups(
+  value: unknown,
+): LinkedPageGroupData[] | undefined {
+  return snapshotDenseOwnArray(value, snapshotLinkedPageGroup);
+}
+
+function snapshotLinkedPageGroup(
+  value: unknown,
+): LinkedPageGroupData | undefined {
+  const snapshot = exactOwnDataSnapshot(
+    value,
+    ["url", "postCount", "authors", "postIds"],
+  );
+  if (!snapshot) return undefined;
+  const { url, postCount, authors: rawAuthors, postIds: rawPostIds } = snapshot;
+  const authors = snapshotDenseStringArray(
+    rawAuthors,
+    (entry) => /^[A-Za-z0-9_]{1,15}$/u.test(entry),
+  );
+  const postIds = snapshotDenseStringArray(
+    rawPostIds,
+    (entry) => /^\d{1,30}$/u.test(entry),
+  );
   if (
-    !isRecord(value) ||
-    !hasExactOwnDataKeys(value, ["url", "postCount", "authors", "postIds"])
-  ) return false;
-  const url = ownDataValue(value, "url");
-  const postCount = ownDataValue(value, "postCount");
-  const authors = ownDataValue(value, "authors");
-  const postIds = ownDataValue(value, "postIds");
-  return (
-    typeof url === "string" &&
-    canonicalExternalPageUrl(url) === url &&
-    typeof postCount === "number" &&
-    Number.isSafeInteger(postCount) &&
-    postCount > 1 &&
-    isDenseOwnArray(authors, (entry) => typeof entry === "string") &&
-    isDenseOwnArray(
-      postIds,
-      (entry) => typeof entry === "string" && /^\d{1,30}$/u.test(entry),
-    ) &&
-    new Set(postIds as string[]).size === postCount
+    typeof url !== "string" ||
+    canonicalExternalPageUrl(url) !== url ||
+    typeof postCount !== "number" ||
+    !Number.isSafeInteger(postCount) ||
+    postCount <= 1 ||
+    !authors ||
+    !postIds ||
+    postIds.length !== postCount ||
+    new Set(postIds).size !== postIds.length ||
+    new Set(authors).size !== authors.length
+  ) return undefined;
+  return { url, postCount, authors, postIds };
+}
+
+function exactOwnDataSnapshot(
+  value: unknown,
+  expected: readonly string[],
+): Record<string, unknown> | undefined {
+  try {
+    if (!isRecord(value) || Array.isArray(value)) return undefined;
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== expected.length ||
+      !keys.every((key) => typeof key === "string" && expected.includes(key))
+    ) return undefined;
+    const snapshot: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
+    for (const key of expected) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) return undefined;
+      snapshot[key] = descriptor.value;
+    }
+    return snapshot;
+  } catch {
+    return undefined;
+  }
+}
+
+function snapshotDenseStringArray(
+  value: unknown,
+  predicate: (entry: string) => boolean,
+): string[] | undefined {
+  return snapshotDenseOwnArray(value, (entry) =>
+    typeof entry === "string" && predicate(entry) ? entry : undefined,
   );
 }
 
-function hasExactOwnDataKeys(
-  value: Record<string, unknown>,
-  expected: readonly string[],
-): boolean {
+function snapshotDenseOwnArray<T>(
+  value: unknown,
+  snapshotEntry: (entry: unknown) => T | undefined,
+): T[] | undefined {
   try {
+    if (!Array.isArray(value) || Reflect.getPrototypeOf(value) !== Array.prototype) {
+      return undefined;
+    }
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    const length: unknown =
+      lengthDescriptor && "value" in lengthDescriptor
+        ? lengthDescriptor.value
+        : undefined;
+    if (
+      typeof length !== "number" ||
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > 100_000
+    ) return undefined;
     const keys = Reflect.ownKeys(value);
-    return (
-      keys.length === expected.length &&
-      expected.every((key) => {
-        const descriptor = Object.getOwnPropertyDescriptor(value, key);
-        return descriptor !== undefined && "value" in descriptor;
-      })
-    );
+    if (keys.length !== length + 1 || !keys.includes("length")) return undefined;
+    const snapshot: T[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !("value" in descriptor)) return undefined;
+      const entry = snapshotEntry(descriptor.value);
+      if (entry === undefined) return undefined;
+      snapshot.push(entry);
+    }
+    return snapshot;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -194,6 +261,9 @@ function assertValidRefreshOutput(
   const providerRequestCount = ownDataValue(output, "providerRequestCount");
   const warnings = ownDataValue(output, "warnings");
   const linkedPageGroups = ownDataValue(output, "linkedPageGroups");
+  const linkedPageGroupSnapshot = linkedPageGroups === MISSING
+    ? undefined
+    : snapshotLinkedPageGroups(linkedPageGroups);
   if (!isFeed(feed)) throw new InvalidSourceOutputError();
   const outputConfig = normalizeSourceConfig(ownDataValue(feed, "sourceConfig"));
   if (
@@ -205,8 +275,7 @@ function assertValidRefreshOutput(
       warnings,
       (warning) => typeof warning === "string",
     ) ||
-    (linkedPageGroups !== MISSING &&
-      !isDenseOwnArray(linkedPageGroups, isLinkedPageGroup)) ||
+    (linkedPageGroups !== MISSING && !linkedPageGroupSnapshot) ||
     ownDataValue(feed, "sourceKind") !== config.kind ||
     !outputConfig ||
     sourceSignature(outputConfig) !== sourceSignature(config)
@@ -231,16 +300,7 @@ function assertValidRefreshOutput(
     warnings: [...(warnings as SourceRefreshOutput["warnings"])],
     ...(linkedPageGroups === MISSING
       ? {}
-      : {
-          linkedPageGroups: (linkedPageGroups as NonNullable<
-            SourceRefreshOutput["linkedPageGroups"]
-          >).map((group) => ({
-            url: group.url,
-            postCount: group.postCount,
-            authors: [...group.authors],
-            postIds: [...group.postIds],
-          })),
-        }),
+      : { linkedPageGroups: linkedPageGroupSnapshot }),
   };
 }
 

@@ -107,4 +107,18 @@ describe("groupLinkedPages", () => {
       },
     ]);
   });
+
+  it.each([
+    "https://x.com./outside",
+    "https://x.com../outside",
+    "https://sub.twitter.com./outside",
+    "https://t.co../outside",
+  ])("does not group an X-family FQDN with trailing dots: %s", (url) => {
+    expect(
+      groupLinkedPages([
+        post({ id: "301", externalUrls: [url] }),
+        post({ id: "302", authorHandle: "bob", externalUrls: [url] }),
+      ]),
+    ).toEqual([]);
+  });
 });

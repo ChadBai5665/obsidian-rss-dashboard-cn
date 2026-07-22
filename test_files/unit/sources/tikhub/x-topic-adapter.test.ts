@@ -2,12 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { normalizeFeedItem } from "../../../../src/collection/feed-normalizer";
 import type { XTopicSourceConfig } from "../../../../src/sources/source-config";
 import { SourceRegistry } from "../../../../src/sources/source-registry";
-import type {
-  TikHubBudgetReservation,
-  TikHubRequestBudgetLike,
-} from "../../../../src/sources/tikhub/request-budget";
 import { TikHubRequestBudgetError } from "../../../../src/sources/tikhub/request-budget";
-import type { TikHubSearchRequest } from "../../../../src/sources/tikhub/tikhub-client";
+import type {
+  TikHubBatchHandle,
+  TikHubSearchRequest,
+} from "../../../../src/sources/tikhub/tikhub-client";
 import type { TikHubTimelineParseResult } from "../../../../src/sources/tikhub/tikhub-parser";
 import type { XPost } from "../../../../src/sources/tikhub/x-post";
 import {
@@ -59,44 +58,41 @@ function harness(options: {
   parseTimeline?: (value: unknown) => TikHubTimelineParseResult;
 } = {}) {
   let remaining = 0;
+  const batchHandle = {} as TikHubBatchHandle;
   const markAttempted = vi.fn(() => {
     if (remaining <= 0) throw new Error("No reserved TikHub request remains");
     remaining -= 1;
   });
-  const releaseUnused = vi.fn(async () => {
+  const releaseBatch = vi.fn(async (handle: TikHubBatchHandle) => {
+    if (handle !== batchHandle) throw new Error("Invalid test batch handle");
     const released = remaining;
     remaining = 0;
     return released;
   });
-  const reservation: TikHubBudgetReservation = {
-    total: 3,
-    get remaining() {
-      return remaining;
-    },
-    markAttempted,
-    releaseUnused,
-  };
-  const reserve = vi.fn(async (count: number) => {
+  const reserveBatch = vi.fn(async (count: 2 | 3) => {
     if (options.reserveError) throw options.reserveError;
     remaining = count;
-    return reservation;
+    return batchHandle;
   });
-  const budget: TikHubRequestBudgetLike = { reserve };
   let callIndex = 0;
   const fetchSearchTimeline = vi.fn(
     async (request: TikHubSearchRequest) => {
       callIndex += 1;
       if (options.failCall === callIndex) throw new Error("provider failed");
-      request.reservation?.markAttempted();
+      if (request.batch !== batchHandle) throw new Error("Missing test batch handle");
+      markAttempted();
       return {
         data: { posts: options.responses?.[callIndex - 1] ?? [] },
       };
     },
   );
-  const client: XTopicTikHubClient = { fetchSearchTimeline };
+  const client: XTopicTikHubClient = {
+    reserveBatch,
+    releaseBatch,
+    fetchSearchTimeline,
+  };
   const adapter = new XTopicAdapter({
     client,
-    budget,
     secretStore: { get: vi.fn(async () => API_KEY) },
     connectionId: CONNECTION_ID,
     parseTimeline:
@@ -108,11 +104,10 @@ function harness(options: {
   });
   return {
     adapter,
-    budget,
     fetchSearchTimeline,
     markAttempted,
-    releaseUnused,
-    reserve,
+    releaseBatch,
+    reserveBatch,
   };
 }
 
@@ -122,17 +117,17 @@ describe("XTopicAdapter request planning and neutral observations", () => {
 
     const result = await test.adapter.refresh(topic(), { now: NOW });
 
-    expect(test.reserve).toHaveBeenCalledOnce();
-    expect(test.reserve).toHaveBeenCalledWith(2);
+    expect(test.reserveBatch).toHaveBeenCalledOnce();
+    expect(test.reserveBatch).toHaveBeenCalledWith(2);
     expect(test.fetchSearchTimeline).toHaveBeenCalledTimes(2);
     const calls = test.fetchSearchTimeline.mock.calls.map(([request]) => request);
     expect(calls.map(({ searchType }) => searchType)).toEqual(["Latest", "Top"]);
     expect(calls[0]?.query).toBe(calls[1]?.query);
     expect(calls.every(({ apiKey }) => apiKey === API_KEY)).toBe(true);
-    expect(calls[0]?.reservation).toBe(calls[1]?.reservation);
+    expect(calls[0]?.batch).toBe(calls[1]?.batch);
     expect(result.providerRequestCount).toBe(2);
     expect(test.markAttempted).toHaveBeenCalledTimes(2);
-    expect(test.releaseUnused).toHaveBeenCalledOnce();
+    expect(test.releaseBatch).toHaveBeenCalledOnce();
   });
 
   it("adds exactly one priority Latest request and merges duplicate observation tags", async () => {
@@ -160,7 +155,7 @@ describe("XTopicAdapter request planning and neutral observations", () => {
       { now: NOW },
     );
 
-    expect(test.reserve).toHaveBeenCalledWith(3);
+    expect(test.reserveBatch).toHaveBeenCalledWith(3);
     expect(test.fetchSearchTimeline).toHaveBeenCalledTimes(3);
     expect(test.fetchSearchTimeline.mock.calls.map(([request]) => request.searchType))
       .toEqual(["Latest", "Top", "Latest"]);
@@ -257,7 +252,7 @@ describe("XTopicAdapter request planning and neutral observations", () => {
 
     const result = await test.adapter.refresh(topic(), { now: NOW });
 
-    expect(test.reserve).toHaveBeenCalledWith(2);
+    expect(test.reserveBatch).toHaveBeenCalledWith(2);
     expect(test.fetchSearchTimeline).not.toHaveBeenCalled();
     expect(result.items).toEqual([]);
     expect(result.providerRequestCount).toBe(0);
@@ -272,7 +267,7 @@ describe("XTopicAdapter request planning and neutral observations", () => {
       "provider failed",
     );
     expect(failed.markAttempted).toHaveBeenCalledTimes(1);
-    expect(failed.releaseUnused).toHaveBeenCalledOnce();
+    expect(failed.releaseBatch).toHaveBeenCalledOnce();
 
     const controller = new AbortController();
     controller.abort();
@@ -281,7 +276,7 @@ describe("XTopicAdapter request planning and neutral observations", () => {
       aborted.adapter.refresh(topic(), { now: NOW, signal: controller.signal }),
     ).rejects.toMatchObject({ code: "aborted" });
     expect(aborted.fetchSearchTimeline).not.toHaveBeenCalled();
-    expect(aborted.releaseUnused).toHaveBeenCalledOnce();
+    expect(aborted.releaseBatch).toHaveBeenCalledOnce();
   });
 
   it("rejects a hostile parser seam and releases the unattempted tail", async () => {
@@ -299,7 +294,7 @@ describe("XTopicAdapter request planning and neutral observations", () => {
     });
     expect(test.fetchSearchTimeline).toHaveBeenCalledOnce();
     expect(test.markAttempted).toHaveBeenCalledOnce();
-    expect(test.releaseUnused).toHaveBeenCalledOnce();
+    expect(test.releaseBatch).toHaveBeenCalledOnce();
   });
 
   it("registers as x-topic and never falls through to a feed adapter", async () => {
@@ -330,6 +325,69 @@ describe("XTopicAdapter request planning and neutral observations", () => {
             authors: ["alice", "bob"],
             postIds: ["1", "2"],
             score: 99,
+          },
+        ],
+      }),
+    });
+
+    await expect(registry.refresh(topic(), { now: NOW })).rejects.toThrow(
+      "Invalid source refresh output",
+    );
+  });
+
+  it("snapshots linked-page proxy data without invoking any property getter", async () => {
+    const test = harness();
+    const output = await test.adapter.refresh(topic(), { now: NOW });
+    let getterCalls = 0;
+    const rejectGet = () => {
+      getterCalls += 1;
+      throw new Error("linked-page get trap must not run");
+    };
+    const authors = new Proxy(["alice", "bob"], { get: rejectGet });
+    const postIds = new Proxy(["1", "2"], { get: rejectGet });
+    const group = new Proxy(
+      {
+        url: "https://example.com/shared",
+        postCount: 2,
+        authors,
+        postIds,
+      },
+      { get: rejectGet },
+    );
+    const linkedPageGroups = new Proxy([group], { get: rejectGet });
+    const registry = new SourceRegistry();
+    registry.register({
+      kind: "x-topic",
+      refresh: vi.fn().mockResolvedValue({ ...output, linkedPageGroups }),
+    });
+
+    await expect(registry.refresh(topic(), { now: NOW })).resolves.toMatchObject({
+      linkedPageGroups: [
+        {
+          url: "https://example.com/shared",
+          postCount: 2,
+          authors: ["alice", "bob"],
+          postIds: ["1", "2"],
+        },
+      ],
+    });
+    expect(getterCalls).toBe(0);
+  });
+
+  it("rejects linked-page post IDs whose array length differs from objective count", async () => {
+    const test = harness();
+    const output = await test.adapter.refresh(topic(), { now: NOW });
+    const registry = new SourceRegistry();
+    registry.register({
+      kind: "x-topic",
+      refresh: vi.fn().mockResolvedValue({
+        ...output,
+        linkedPageGroups: [
+          {
+            url: "https://example.com/shared",
+            postCount: 2,
+            authors: ["alice", "bob"],
+            postIds: ["1", "1", "2"],
           },
         ],
       }),

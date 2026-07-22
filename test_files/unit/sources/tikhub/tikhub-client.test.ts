@@ -2,13 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   TikHubClient,
   TikHubClientError,
+  type TikHubBatchHandle,
   type TikHubTransport,
   type TikHubTransportRequest,
 } from "../../../../src/sources/tikhub/tikhub-client";
-import type {
-  TikHubBudgetReservation,
-  TikHubRequestBudgetLike,
-} from "../../../../src/sources/tikhub/request-budget";
+import type { TikHubRequestBudgetLike } from "../../../../src/sources/tikhub/request-budget";
 import { DEFAULT_SETTINGS } from "../../../../src/types/types";
 import { loadAndNormalizeSettings } from "../../../../src/utils/settings-loader";
 
@@ -26,14 +24,24 @@ function createHarness(
   response: Awaited<ReturnType<TikHubTransport>> = success(),
 ) {
   const markAttempted = vi.fn();
-  const releaseUnused = vi.fn(async () => undefined);
-  const reservation: TikHubBudgetReservation = {
-    total: 1,
-    remaining: 1,
-    markAttempted,
-    releaseUnused,
-  };
-  const reserve = vi.fn(async () => reservation);
+  const releaseUnused = vi.fn();
+  const reserve = vi.fn(async (count: number) => {
+    const reservation = {
+      total: count,
+      remaining: count,
+      markAttempted: () => {
+        markAttempted();
+        reservation.remaining -= 1;
+      },
+      releaseUnused: async () => {
+        releaseUnused();
+        const released = reservation.remaining;
+        reservation.remaining = 0;
+        return released;
+      },
+    };
+    return reservation;
+  });
   const budget: TikHubRequestBudgetLike = { reserve };
   const requests: TikHubTransportRequest[] = [];
   const transport = vi.fn<TikHubTransport>(async (request) => {
@@ -149,38 +157,128 @@ describe("TikHubClient exact request contract", () => {
     );
   });
 
-  it("uses a caller-owned batch reservation without reserving or releasing it twice", async () => {
+  it("creates and consumes one client-owned opaque batch without double accounting", async () => {
     const test = createHarness();
-    let remaining = 2;
-    const markAttempted = vi.fn(() => {
-      remaining -= 1;
-    });
-    const releaseUnused = vi.fn(async () => remaining);
-    const reservation: TikHubBudgetReservation = {
-      total: 2,
-      get remaining() {
-        return remaining;
-      },
-      markAttempted,
-      releaseUnused,
-    };
+    const batch = await test.client.reserveBatch(2);
 
     await test.client.fetchSearchTimeline({
       apiKey: API_KEY,
       query: "AI",
       searchType: "Latest",
-      reservation,
+      batch,
     });
     await test.client.fetchSearchTimeline({
       apiKey: API_KEY,
       query: "AI",
       searchType: "Top",
-      reservation,
+      batch,
+    });
+    await test.client.releaseBatch(batch);
+
+    expect(test.reserve).toHaveBeenCalledOnce();
+    expect(test.reserve).toHaveBeenCalledWith(2);
+    expect(test.markAttempted).toHaveBeenCalledTimes(2);
+    expect(test.releaseUnused).toHaveBeenCalledOnce();
+  });
+
+  it("rejects forged, cross-client, exhausted, and released batch handles before transport", async () => {
+    const owner = createHarness();
+    const other = createHarness();
+    const forged = {} as TikHubBatchHandle;
+
+    await expect(
+      owner.client.fetchSearchTimeline({
+        apiKey: API_KEY,
+        query: "AI",
+        searchType: "Latest",
+        batch: forged,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-batch" });
+    expect(owner.transport).not.toHaveBeenCalled();
+
+    const batch = await owner.client.reserveBatch(2);
+    await expect(
+      other.client.fetchSearchTimeline({
+        apiKey: API_KEY,
+        query: "AI",
+        searchType: "Latest",
+        batch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-batch" });
+    expect(other.transport).not.toHaveBeenCalled();
+    expect(other.reserve).not.toHaveBeenCalled();
+
+    for (const searchType of ["Latest", "Top"] as const) {
+      await owner.client.fetchSearchTimeline({
+        apiKey: API_KEY,
+        query: "AI",
+        searchType,
+        batch,
+      });
+    }
+    await expect(
+      owner.client.fetchSearchTimeline({
+        apiKey: API_KEY,
+        query: "AI",
+        searchType: "Latest",
+        batch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-batch" });
+    expect(owner.transport).toHaveBeenCalledTimes(2);
+
+    await owner.client.releaseBatch(batch);
+    await expect(owner.client.releaseBatch(batch)).rejects.toMatchObject({
+      code: "invalid-batch",
+    });
+    await expect(
+      owner.client.fetchSearchTimeline({
+        apiKey: API_KEY,
+        query: "AI",
+        searchType: "Latest",
+        batch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-batch" });
+    expect(owner.transport).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed and releases a malformed reserve-two result with total one", async () => {
+    const test = createHarness();
+    const releaseUnused = vi.fn(async () => 1);
+    test.reserve.mockResolvedValueOnce({
+      total: 1,
+      remaining: 1,
+      markAttempted: vi.fn(),
+      releaseUnused,
     });
 
-    expect(test.reserve).not.toHaveBeenCalled();
-    expect(markAttempted).toHaveBeenCalledTimes(2);
-    expect(releaseUnused).not.toHaveBeenCalled();
+    await expect(test.client.reserveBatch(2)).rejects.toMatchObject({
+      code: "invalid-batch",
+    });
+    expect(releaseUnused).toHaveBeenCalledOnce();
+    expect(test.transport).not.toHaveBeenCalled();
+  });
+
+  it("revalidates a batch remaining snapshot as a safe positive integer before transport", async () => {
+    const test = createHarness();
+    const reservation = {
+      total: 2,
+      remaining: 2,
+      markAttempted: vi.fn(),
+      releaseUnused: vi.fn(async () => 0),
+    };
+    test.reserve.mockResolvedValueOnce(reservation);
+    const batch = await test.client.reserveBatch(2);
+    reservation.remaining = Number.NaN;
+
+    await expect(
+      test.client.fetchSearchTimeline({
+        apiKey: API_KEY,
+        query: "AI",
+        searchType: "Latest",
+        batch,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-batch" });
+    expect(test.transport).not.toHaveBeenCalled();
   });
 
   it("sanitizes a hostile transport error whose status accessor throws secret data", async () => {

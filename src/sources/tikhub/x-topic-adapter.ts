@@ -4,12 +4,11 @@ import type { SourceAdapter, SourceRefreshOutput } from "../source-adapter";
 import type { XTopicSourceConfig } from "../source-config";
 import {
   TikHubRequestBudgetError,
-  type TikHubBudgetReservation,
-  type TikHubRequestBudgetLike,
 } from "./request-budget";
 import { TikHubRequestLedgerError } from "./request-ledger";
 import {
   TikHubClientError,
+  type TikHubBatchHandle,
   type TikHubSearchRequest,
 } from "./tikhub-client";
 import { parseTikHubTimeline } from "./tikhub-parser";
@@ -30,6 +29,8 @@ import {
 import { validateParsedXTimeline } from "./x-timeline-validator";
 
 export interface XTopicTikHubClient {
+  reserveBatch(count: 2 | 3): Promise<TikHubBatchHandle>;
+  releaseBatch(handle: TikHubBatchHandle): Promise<number>;
   fetchSearchTimeline(input: TikHubSearchRequest): Promise<TikHubResult<unknown>>;
 }
 
@@ -41,7 +42,6 @@ type TimelineParser = typeof parseTikHubTimeline;
 
 export interface XTopicAdapterOptions {
   client: XTopicTikHubClient;
-  budget: TikHubRequestBudgetLike;
   secretStore: XTopicSecretStore;
   connectionId: string;
   translate?: Translator;
@@ -75,7 +75,6 @@ const OBSERVATION_ORDER: XObservationTag[] = [
 export class XTopicAdapter implements SourceAdapter<XTopicSourceConfig> {
   readonly kind = "x-topic" as const;
   private readonly client: XTopicTikHubClient;
-  private readonly budget: TikHubRequestBudgetLike;
   private readonly secretStore: XTopicSecretStore;
   private readonly connectionId: string;
   private readonly translate: Translator;
@@ -83,7 +82,6 @@ export class XTopicAdapter implements SourceAdapter<XTopicSourceConfig> {
 
   constructor(options: XTopicAdapterOptions) {
     this.client = options.client;
-    this.budget = options.budget;
     this.secretStore = options.secretStore;
     this.connectionId = options.connectionId;
     this.translate = options.translate ?? createTranslator("zh-CN");
@@ -96,7 +94,7 @@ export class XTopicAdapter implements SourceAdapter<XTopicSourceConfig> {
   ): Promise<SourceRefreshOutput> => {
     const plan = buildXTopicSearchPlan(config, context.now);
     let apiKey: string | undefined;
-    let reservation: TikHubBudgetReservation | undefined;
+    let batch: TikHubBatchHandle | undefined;
     let payload: unknown;
     let parsed: ReturnType<TimelineParser> | undefined;
     let warnings: string[] = [];
@@ -108,7 +106,11 @@ export class XTopicAdapter implements SourceAdapter<XTopicSourceConfig> {
       if (!isLocallyValidApiKey(apiKey)) throw this.invalidKeyError();
 
       try {
-        reservation = await this.budget.reserve(plan.requestCount);
+        const requestCount = plan.requestCount;
+        if (requestCount !== 2 && requestCount !== 3) throw new Error(
+          "Invalid X topic request plan",
+        );
+        batch = await this.client.reserveBatch(requestCount);
       } catch (error) {
         if (!isInsufficientBudget(error)) throw error;
         const empty = mapXTopicPostsToFeed(config, [], context.now);
@@ -130,7 +132,7 @@ export class XTopicAdapter implements SourceAdapter<XTopicSourceConfig> {
             query: request.query,
             searchType: request.searchType,
             signal: context.signal,
-            reservation,
+            batch,
           }),
         )).data;
         providerRequestCount += 1;
@@ -159,9 +161,9 @@ export class XTopicAdapter implements SourceAdapter<XTopicSourceConfig> {
         linkedPageGroups,
       };
     } finally {
-      if (reservation) await reservation.releaseUnused();
+      if (batch) await this.client.releaseBatch(batch);
       apiKey = undefined;
-      reservation = undefined;
+      batch = undefined;
       payload = undefined;
       parsed = undefined;
       warnings = [];
