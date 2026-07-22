@@ -7,10 +7,22 @@ export interface AnalysisRepositoryOptions {
   randomSuffix?: () => string;
 }
 
+type BoundAnalysisAdapter = Required<Pick<
+  DataAdapter,
+  | "exists"
+  | "mkdir"
+  | "write"
+  | "read"
+  | "copy"
+  | "remove"
+  | "rename"
+  | "process"
+>> & { identity: object };
+
 const adapterQueues = new WeakMap<object, Map<string, Promise<void>>>();
+const CLAIM_SOURCE_CONTENT = "rss-dashboard-cn-analysis-claim-source-v1";
 const MAX_COLLISION_ATTEMPTS = 10_000;
 const MAX_TEMP_ATTEMPTS = 32;
-let tempSequence = 0;
 
 /** Stores only AI output artifacts below `{dataRoot}/analysis`. */
 export class AnalysisRepository {
@@ -32,37 +44,99 @@ export class AnalysisRepository {
     // Snapshot and render before checking or creating anything in the vault.
     const result = snapshotAiAnalysisResult(value);
     const markdown = renderAnalysisMarkdown(result);
+
+    // Bind every method once before transaction allocation, queuing, or I/O.
     const adapter = this.atomicAdapter();
     const transactionId = this.nextTransactionId();
-    return await this.withItemLock(result.itemId, async () => {
-      await this.ensureDirectory(this.dataRoot);
-      await this.ensureDirectory(this.analysisDirectory);
-      await this.ensureDirectory(this.itemDirectory(result.itemId));
-      return await this.saveExclusive(result, markdown, adapter, transactionId);
+    const ownershipNonce = defaultRandomSuffix();
+    const claimToken = `${ownershipNonce}:${transactionId}:${result.id}`;
+
+    return await this.withItemLock(adapter.identity, result.itemId, async () => {
+      await this.ensureDirectory(adapter, this.dataRoot);
+      await this.ensureDirectory(adapter, this.analysisDirectory);
+      await this.ensureDirectory(adapter, this.itemDirectory(result.itemId));
+      await this.ensureClaimSource(adapter);
+      return await this.saveExclusive(
+        result,
+        markdown,
+        adapter,
+        transactionId,
+        claimToken,
+      );
     });
   }
 
-  private atomicAdapter(): Required<Pick<DataAdapter, "copy" | "remove" | "rename">> {
-    const adapter = this.vault.adapter as Partial<DataAdapter>;
+  private atomicAdapter(): BoundAnalysisAdapter {
+    const identity = this.vault.adapter as object;
+    const adapter = identity as Partial<DataAdapter>;
+    const exists = adapter.exists;
+    const mkdir = adapter.mkdir;
+    const write = adapter.write;
+    const read = adapter.read;
+    const copy = adapter.copy;
+    const remove = adapter.remove;
+    const rename = adapter.rename;
+    const process = adapter.process;
     if (
-      typeof adapter.copy !== "function" ||
-      typeof adapter.remove !== "function" ||
-      typeof adapter.rename !== "function"
+      typeof exists !== "function" ||
+      typeof mkdir !== "function" ||
+      typeof write !== "function" ||
+      typeof read !== "function" ||
+      typeof copy !== "function" ||
+      typeof remove !== "function" ||
+      typeof rename !== "function" ||
+      typeof process !== "function"
     ) {
-      throw new Error("AI analysis writes require exclusive atomic storage support");
+      throw new Error("AI analysis writes require complete atomic storage support");
     }
     return {
-      copy: adapter.copy.bind(this.vault.adapter),
-      remove: adapter.remove.bind(this.vault.adapter),
-      rename: adapter.rename.bind(this.vault.adapter),
+      identity,
+      exists: exists.bind(identity),
+      mkdir: mkdir.bind(identity),
+      write: write.bind(identity),
+      read: read.bind(identity),
+      copy: copy.bind(identity),
+      remove: remove.bind(identity),
+      rename: rename.bind(identity),
+      process: process.bind(identity),
     };
+  }
+
+  private async ensureClaimSource(adapter: BoundAnalysisAdapter): Promise<void> {
+    if (await adapter.exists(this.claimSourcePath, true)) {
+      if (await this.fileEquals(adapter, this.claimSourcePath, CLAIM_SOURCE_CONTENT)) {
+        return;
+      }
+      throw new Error("AI analysis claim source conflicts with an existing file");
+    }
+
+    let conflict = false;
+    // DataAdapter.process cannot distinguish a missing file from an empty file
+    // created in the exists-to-process window. A constant bootstrap value makes
+    // cooperating repository races byte-identical; non-empty foreign data is
+    // preserved and rejected.
+    const processed = await adapter.process(this.claimSourcePath, (current) => {
+      if (current && current !== CLAIM_SOURCE_CONTENT) {
+        conflict = true;
+        return current;
+      }
+      return CLAIM_SOURCE_CONTENT;
+    });
+    if (
+      conflict ||
+      processed !== CLAIM_SOURCE_CONTENT ||
+      !(await this.fileEquals(adapter, this.claimSourcePath, CLAIM_SOURCE_CONTENT))
+    ) {
+      throw new Error("AI analysis claim source could not be initialized safely");
+    }
   }
 
   private async saveExclusive(
     result: ReturnType<typeof snapshotAiAnalysisResult>,
     markdown: string,
-    adapter: Required<Pick<DataAdapter, "copy" | "remove" | "rename">>,
+    adapter: BoundAnalysisAdapter,
     transactionId: string,
+    claimToken: string,
   ): Promise<string> {
     const stem = `${utcPathTimestamp(result.createdAt)}-${result.operation}`;
     for (let index = 1; index <= MAX_COLLISION_ATTEMPTS; index += 1) {
@@ -70,47 +144,49 @@ export class AnalysisRepository {
       const finalPath = normalizePath(
         `${this.itemDirectory(result.itemId)}/${stem}${suffix}.md`,
       );
-      if (await this.vault.adapter.exists(finalPath, true)) continue;
+      if (await adapter.exists(finalPath, true)) continue;
 
-      const stagingPath = await this.writeUniqueTemp(
+      const stagingPath = await this.writeClaimedTemp(
         finalPath,
         markdown,
         transactionId,
         "content",
+        adapter,
       );
-      const exclusiveTempPath = `${finalPath}.tmp-claim`;
-      const claimToken = `${transactionId}:rss-dashboard-cn-analysis-claim`;
-      let claimSourcePath: string;
+      let ownerSourcePath: string;
       try {
-        claimSourcePath = await this.writeUniqueTemp(
+        ownerSourcePath = await this.writeClaimedTemp(
           finalPath,
           claimToken,
           transactionId,
           "owner",
+          adapter,
         );
       } catch (error) {
-        await this.bestEffortRemove(stagingPath, adapter);
+        await this.removeIfExact(adapter, stagingPath, markdown);
         throw error;
       }
+
+      const exclusiveTempPath = `${finalPath}.tmp-claim`;
       try {
-        // DataAdapter.copy is the only adapter operation documented to fail
-        // when its target exists, so it acts as an inter-writer claim. The
-        // complete claimed sibling is then atomically renamed into place.
-        await adapter.copy(claimSourcePath, exclusiveTempPath);
+        // The transaction-specific owner source makes a successful copy an
+        // exclusive claim without ever copying partial Markdown to the final.
+        await adapter.copy(ownerSourcePath, exclusiveTempPath);
       } catch (error) {
-        const ownsClaim = await this.claimBelongsTo(
+        const ownsClaim = await this.fileEquals(
+          adapter,
           exclusiveTempPath,
           claimToken,
         );
-        await this.bestEffortRemove(claimSourcePath, adapter);
-        await this.bestEffortRemove(stagingPath, adapter);
+        await this.removeIfExact(adapter, ownerSourcePath, claimToken);
+        await this.removeIfExact(adapter, stagingPath, markdown);
         if (ownsClaim) {
-          await this.bestEffortRemove(exclusiveTempPath, adapter);
+          await this.removeIfExact(adapter, exclusiveTempPath, claimToken);
           throw error;
         }
         if (
-          await this.vault.adapter.exists(exclusiveTempPath, true) ||
-          await this.vault.adapter.exists(finalPath, true)
+          await adapter.exists(exclusiveTempPath, true) ||
+          await adapter.exists(finalPath, true)
         ) {
           // Another process/wrapper won this exact name after our check.
           continue;
@@ -118,94 +194,87 @@ export class AnalysisRepository {
         throw error;
       }
 
-      const ownsCompleteClaim = await this.claimBelongsTo(
+      const ownsCompleteClaim = await this.fileEquals(
+        adapter,
         exclusiveTempPath,
         claimToken,
       );
-      await this.bestEffortRemove(claimSourcePath, adapter);
+      await this.removeIfExact(adapter, ownerSourcePath, claimToken);
       if (!ownsCompleteClaim) {
-        if (await this.claimBelongsTo(exclusiveTempPath, claimToken)) {
-          await this.bestEffortRemove(exclusiveTempPath, adapter);
-        }
-        await this.bestEffortRemove(stagingPath, adapter);
+        await this.removeIfExact(adapter, stagingPath, markdown);
         throw new Error("AI analysis exclusive claim could not be verified");
       }
-      if (await this.vault.adapter.exists(finalPath, true)) {
-        await this.bestEffortRemove(exclusiveTempPath, adapter);
-        await this.bestEffortRemove(stagingPath, adapter);
+      if (await adapter.exists(finalPath, true)) {
+        await this.removeIfExact(adapter, exclusiveTempPath, claimToken);
+        await this.removeIfExact(adapter, stagingPath, markdown);
         continue;
       }
       try {
+        // DataAdapter exposes no no-replace rename. The claim coordinates every
+        // repository writer, but a non-cooperating external process could still
+        // create finalPath in the narrow exists-to-rename window.
         await adapter.rename(stagingPath, finalPath);
       } catch (error) {
-        const committed = await this.fileEquals(finalPath, markdown);
-        await this.bestEffortRemove(stagingPath, adapter);
-        await this.bestEffortRemove(exclusiveTempPath, adapter);
+        const committed = await this.fileEquals(adapter, finalPath, markdown);
+        await this.removeIfExact(adapter, stagingPath, markdown);
+        await this.removeIfExact(adapter, exclusiveTempPath, claimToken);
         if (committed) return finalPath;
         throw error;
       }
-      await this.bestEffortRemove(exclusiveTempPath, adapter);
+      await this.removeIfExact(adapter, exclusiveTempPath, claimToken);
       return finalPath;
     }
     throw new Error("AI analysis path collision limit reached");
   }
 
-  private async writeUniqueTemp(
+  private async writeClaimedTemp(
     finalPath: string,
     content: string,
     transactionId: string,
     purpose: "content" | "owner",
+    adapter: BoundAnalysisAdapter,
   ): Promise<string> {
     for (let attempt = 0; attempt < MAX_TEMP_ATTEMPTS; attempt += 1) {
       const tempPath = `${finalPath}.tmp-${transactionId}-${purpose}-${attempt}`;
-      if (await this.vault.adapter.exists(tempPath, true)) continue;
       try {
-        await this.vault.adapter.write(tempPath, content);
-        if (await this.vault.adapter.read(tempPath) !== content) {
-          throw new Error("AI analysis temporary file verification failed");
-        }
-        return tempPath;
+        await adapter.copy(this.claimSourcePath, tempPath);
       } catch (error) {
-        await this.bestEffortRemove(tempPath, this.atomicAdapter());
+        if (await adapter.exists(tempPath, true)) {
+          // Never write to or delete a candidate another writer may own.
+          continue;
+        }
         throw error;
       }
+
+      if (!(await this.fileEquals(adapter, tempPath, CLAIM_SOURCE_CONTENT))) {
+        throw new Error("AI analysis temporary ownership could not be verified");
+      }
+      try {
+        await adapter.write(tempPath, content);
+      } catch (error) {
+        await this.removeIfExact(adapter, tempPath, CLAIM_SOURCE_CONTENT);
+        throw error;
+      }
+      if (!(await this.fileEquals(adapter, tempPath, content))) {
+        // A non-exact value is ambiguous; leave the non-Markdown staging file
+        // rather than risk deleting a file changed by another process.
+        await this.removeIfExact(adapter, tempPath, CLAIM_SOURCE_CONTENT);
+        throw new Error("AI analysis temporary file verification failed");
+      }
+      return tempPath;
     }
     throw new Error("Could not allocate a unique AI analysis temporary file");
   }
 
-  private async claimBelongsTo(
+  private async ensureDirectory(
+    adapter: BoundAnalysisAdapter,
     path: string,
-    token: string,
-  ): Promise<boolean> {
+  ): Promise<void> {
+    if (await adapter.exists(path, true)) return;
     try {
-      if (!(await this.vault.adapter.exists(path, true))) return false;
-      const content = await this.vault.adapter.read(path);
-      return content === token;
-    } catch {
-      return false;
-    }
-  }
-
-  private async fileEquals(path: string, expected: string): Promise<boolean> {
-    try {
-      return await this.vault.adapter.read(path) === expected;
-    } catch {
-      return false;
-    }
-  }
-
-  private nextTransactionId(): string {
-    const random = this.randomSuffix();
-    assertSafeRandomSuffix(random);
-    return `${random}-${tempSequence++}`;
-  }
-
-  private async ensureDirectory(path: string): Promise<void> {
-    if (await this.vault.adapter.exists(path, true)) return;
-    try {
-      await this.vault.adapter.mkdir(path);
+      await adapter.mkdir(path);
     } catch (error) {
-      if (!(await this.vault.adapter.exists(path, true))) throw error;
+      if (!(await adapter.exists(path, true))) throw error;
     }
   }
 
@@ -213,16 +282,33 @@ export class AnalysisRepository {
     return normalizePath(`${this.dataRoot}/analysis`);
   }
 
+  private get claimSourcePath(): string {
+    return normalizePath(`${this.analysisDirectory}/.claim-source-v1`);
+  }
+
   private itemDirectory(itemId: string): string {
     return normalizePath(`${this.analysisDirectory}/${itemId}`);
   }
 
-  private async bestEffortRemove(
+  private async fileEquals(
+    adapter: BoundAnalysisAdapter,
     path: string,
-    adapter: Required<Pick<DataAdapter, "remove">>,
+    expected: string,
+  ): Promise<boolean> {
+    try {
+      return await adapter.read(path) === expected;
+    } catch {
+      return false;
+    }
+  }
+
+  private async removeIfExact(
+    adapter: BoundAnalysisAdapter,
+    path: string,
+    expected: string,
   ): Promise<void> {
     try {
-      if (await this.vault.adapter.exists(path, true)) {
+      if (await this.fileEquals(adapter, path, expected)) {
         await adapter.remove(path);
       }
     } catch {
@@ -230,11 +316,17 @@ export class AnalysisRepository {
     }
   }
 
+  private nextTransactionId(): string {
+    const random = this.randomSuffix();
+    assertSafeRandomSuffix(random);
+    return random;
+  }
+
   private async withItemLock<T>(
+    adapterIdentity: object,
     itemId: string,
     operation: () => Promise<T>,
   ): Promise<T> {
-    const adapterIdentity = this.vault.adapter as object;
     const queues = adapterQueues.get(adapterIdentity) ?? new Map<string, Promise<void>>();
     adapterQueues.set(adapterIdentity, queues);
     const key = `${this.dataRoot}\0${itemId}`;

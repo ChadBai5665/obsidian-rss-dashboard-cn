@@ -7,6 +7,7 @@ const DATA_ROOT = ".rss-dashboard-data";
 const ITEM_ID = "b".repeat(64);
 const RESULT_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const BASE_PATH = `${DATA_ROOT}/analysis/${ITEM_ID}/20260721T123456789-summary.md`;
+const CLAIM_SOURCE_PATH = `${DATA_ROOT}/analysis/.claim-source-v1`;
 
 interface Storage {
   files: Map<string, string>;
@@ -23,6 +24,10 @@ class InMemoryAdapter {
   failPartialCopyOnce = false;
   failRename = false;
   failRenameAfterMove = false;
+  injectForeignBeforeContentClaim = false;
+  injectForeignBeforeClaimSourceProcess = false;
+  replaceWriteOnFirstExists = false;
+  injectedForeignPath?: string;
   private copyBarrier?: () => Promise<void>;
 
   constructor(
@@ -33,6 +38,13 @@ class InMemoryAdapter {
   }
 
   async exists(path: string): Promise<boolean> {
+    this.operations.push(`exists:${path}`);
+    if (this.replaceWriteOnFirstExists) {
+      this.replaceWriteOnFirstExists = false;
+      this.write = async () => {
+        throw new Error("Late replacement must not be called");
+      };
+    }
     return this.files.has(path) || this.directories.has(path);
   }
 
@@ -53,7 +65,6 @@ class InMemoryAdapter {
     if (parent && !this.directories.has(parent)) {
       throw new Error(`Missing parent directory: ${parent}`);
     }
-    if (this.files.has(path)) throw new Error(`Refusing overwrite: ${path}`);
     if (this.corruptWriteOnce) {
       this.corruptWriteOnce = false;
       this.files.set(path, content.slice(0, Math.max(1, Math.floor(content.length / 2))));
@@ -63,6 +74,7 @@ class InMemoryAdapter {
   }
 
   async read(path: string): Promise<string> {
+    this.operations.push(`read:${path}`);
     const content = this.files.get(path);
     if (content === undefined) throw new Error(`Missing file: ${path}`);
     return content;
@@ -74,10 +86,18 @@ class InMemoryAdapter {
     await this.copyBarrier?.();
     const content = this.files.get(from);
     if (content === undefined) throw new Error(`Missing source: ${from}`);
+    if (
+      this.injectForeignBeforeContentClaim &&
+      to.includes("-content-")
+    ) {
+      this.injectForeignBeforeContentClaim = false;
+      this.injectedForeignPath = to;
+      this.files.set(to, "foreign bytes that must survive");
+    }
     if (this.files.has(to) || this.directories.has(to)) {
       throw new Error(`Destination exists: ${to}`);
     }
-    if (this.failPartialCopyOnce) {
+    if (this.failPartialCopyOnce && to.endsWith(".tmp-claim")) {
       this.failPartialCopyOnce = false;
       this.files.set(to, content.slice(0, Math.max(1, Math.floor(content.length / 2))));
       throw new Error("Injected partial claim copy failure");
@@ -103,6 +123,25 @@ class InMemoryAdapter {
   async remove(path: string): Promise<void> {
     this.operations.push(`remove:${path}`);
     this.files.delete(path);
+  }
+
+  async process(
+    path: string,
+    update: (content: string) => string,
+  ): Promise<string> {
+    this.operations.push(`process:${path}`);
+    const parent = parentPath(path);
+    if (parent && !this.directories.has(parent)) {
+      throw new Error(`Missing parent directory: ${parent}`);
+    }
+    if (this.injectForeignBeforeClaimSourceProcess) {
+      this.injectForeignBeforeClaimSourceProcess = false;
+      this.files.set(path, "foreign process-race bytes");
+    }
+    const current = this.files.get(path) ?? "";
+    const next = update(current);
+    this.files.set(path, next);
+    return next;
   }
 
   async list(path: string): Promise<{ files: string[]; folders: string[] }> {
@@ -181,6 +220,15 @@ describe("AnalysisRepository", () => {
     expect(temporaryFiles(adapter)).toEqual([]);
     expect(adapter.operations.some((operation) => operation.startsWith("copy:"))).toBe(true);
     expect(adapter.operations.some((operation) => operation.startsWith("rename:"))).toBe(true);
+    for (const operation of adapter.operations.filter((entry) => entry.startsWith("write:"))) {
+      const path = operation.slice("write:".length);
+      const writeIndex = adapter.operations.indexOf(operation);
+      expect(
+        adapter.operations
+          .slice(0, writeIndex)
+          .some((entry) => entry.startsWith("copy:") && entry.endsWith(`:${path}`)),
+      ).toBe(true);
+    }
   });
 
   it("appends numeric collision suffixes without overwriting existing artifacts", async () => {
@@ -213,6 +261,9 @@ describe("AnalysisRepository", () => {
     ]);
 
     expect(new Set(paths).size).toBe(2);
+    expect(adapter.files.get(CLAIM_SOURCE_PATH)).toBe(
+      "rss-dashboard-cn-analysis-claim-source-v1",
+    );
     expect(finalFiles(adapter).sort()).toEqual(paths.sort());
     expect(temporaryFiles(adapter)).toEqual([]);
   });
@@ -241,6 +292,60 @@ describe("AnalysisRepository", () => {
     expect(temporaryFiles(firstAdapter)).toEqual([]);
   });
 
+  it("claims each staging path before writing and preserves a foreign race winner", async () => {
+    const adapter = new InMemoryAdapter();
+    adapter.injectForeignBeforeContentClaim = true;
+
+    await expect(repository(adapter).save(analysis())).resolves.toBe(BASE_PATH);
+
+    expect(adapter.injectedForeignPath).toBeTruthy();
+    expect(adapter.files.get(adapter.injectedForeignPath ?? "")).toBe(
+      "foreign bytes that must survive",
+    );
+    expect(adapter.files.get(BASE_PATH)).toContain("摘要正文");
+  });
+
+  it("keeps different outputs isolated when wrappers choose the same transaction paths", async () => {
+    const storage: Storage = { files: new Map(), directories: new Set() };
+    const firstAdapter = new InMemoryAdapter(storage);
+    const secondAdapter = new InMemoryAdapter(storage);
+    const fixedSuffix = "same-transaction-abcdefghijkl";
+    const first = new AnalysisRepository(
+      { adapter: firstAdapter } as unknown as Vault,
+      DATA_ROOT,
+      { randomSuffix: () => fixedSuffix },
+    );
+    const second = new AnalysisRepository(
+      { adapter: secondAdapter } as unknown as Vault,
+      DATA_ROOT,
+      { randomSuffix: () => fixedSuffix },
+    );
+
+    const paths = await Promise.all([
+      first.save(analysis({ text: "正文甲" })),
+      second.save(analysis({
+        id: "69a10bdf-6d36-4388-bbe4-219da9c3ea46",
+        text: "正文乙",
+      })),
+    ]);
+
+    const firstContentClaimTargets = firstAdapter.operations
+      .filter((operation) => operation.startsWith("copy:") && operation.includes("-content-"))
+      .map((operation) => operation.slice(operation.lastIndexOf(":") + 1));
+    const secondContentClaimTargets = secondAdapter.operations
+      .filter((operation) => operation.startsWith("copy:") && operation.includes("-content-"))
+      .map((operation) => operation.slice(operation.lastIndexOf(":") + 1));
+    expect(firstContentClaimTargets.some((path) => secondContentClaimTargets.includes(path))).toBe(
+      true,
+    );
+    expect(new Set(paths).size).toBe(2);
+    expect(storage.files.get(CLAIM_SOURCE_PATH)).toBe(
+      "rss-dashboard-cn-analysis-claim-source-v1",
+    );
+    expect(paths.map((path) => storage.files.get(path)).join("\n")).toContain("正文甲");
+    expect(paths.map((path) => storage.files.get(path)).join("\n")).toContain("正文乙");
+  });
+
   it("does not overwrite a pre-existing user file", async () => {
     const adapter = new InMemoryAdapter();
     adapter.directories.add(DATA_ROOT);
@@ -266,6 +371,38 @@ describe("AnalysisRepository", () => {
 
     expect(path).toBe(BASE_PATH.replace(".md", "-2.md"));
     expect(adapter.files.get(foreignClaim)).toBe("another-process-ownership-token");
+  });
+
+  it("never overwrites a conflicting bootstrap claim source", async () => {
+    const adapter = new InMemoryAdapter();
+    adapter.directories.add(DATA_ROOT);
+    adapter.directories.add(`${DATA_ROOT}/analysis`);
+    adapter.files.set(CLAIM_SOURCE_PATH, "foreign bootstrap bytes");
+
+    await expect(repository(adapter).save(analysis())).rejects.toThrow(
+      "claim source",
+    );
+    expect(adapter.files.get(CLAIM_SOURCE_PATH)).toBe("foreign bootstrap bytes");
+    expect(finalFiles(adapter)).toEqual([]);
+  });
+
+  it("preserves foreign bytes that win the absent-to-process bootstrap race", async () => {
+    const adapter = new InMemoryAdapter();
+    adapter.injectForeignBeforeClaimSourceProcess = true;
+
+    await expect(repository(adapter).save(analysis())).rejects.toThrow(
+      "claim source",
+    );
+    expect(adapter.files.get(CLAIM_SOURCE_PATH)).toBe("foreign process-race bytes");
+    expect(finalFiles(adapter)).toEqual([]);
+  });
+
+  it("uses the bound adapter snapshot if a live method is replaced after validation", async () => {
+    const adapter = new InMemoryAdapter();
+    adapter.replaceWriteOnFirstExists = true;
+
+    await expect(repository(adapter).save(analysis())).resolves.toBe(BASE_PATH);
+    expect(adapter.files.get(BASE_PATH)).toContain("摘要正文");
   });
 
   it("rejects empty output before any storage operation", async () => {
@@ -316,7 +453,10 @@ describe("AnalysisRepository", () => {
       "temporary file verification failed",
     );
     expect(finalFiles(adapter)).toEqual([]);
-    expect(temporaryFiles(adapter)).toEqual([]);
+    expect(temporaryFiles(adapter)).toHaveLength(1);
+    expect(adapter.files.get(temporaryFiles(adapter)[0])).not.toBe(
+      "rss-dashboard-cn-analysis-claim-source-v1",
+    );
   });
 
   it("cleans the temporary sibling and creates no final file after promotion failure", async () => {
@@ -374,10 +514,26 @@ describe("AnalysisRepository", () => {
     const vault = { adapter: incompatible } as unknown as Vault;
 
     await expect(repository(adapter, vault).save(analysis())).rejects.toThrow(
-      "exclusive atomic storage",
+      "complete atomic storage",
     );
     expect(adapter.operations).toEqual([]);
   });
+
+  it.each(["exists", "mkdir", "write", "read", "copy", "remove", "rename", "process"])(
+    "validates and binds adapter.%s before any storage operation",
+    async (method) => {
+      const adapter = new InMemoryAdapter();
+      Object.defineProperty(adapter, method, { value: undefined });
+      const vault = { adapter } as unknown as Vault;
+
+      await expect(repository(adapter, vault).save(analysis())).rejects.toThrow(
+        "complete atomic storage support",
+      );
+      expect(adapter.operations).toEqual([]);
+      expect(adapter.directories.size).toBe(0);
+      expect(adapter.files.size).toBe(0);
+    },
+  );
 
   it("rejects an unsafe temporary suffix before any storage operation", async () => {
     const adapter = new InMemoryAdapter();
