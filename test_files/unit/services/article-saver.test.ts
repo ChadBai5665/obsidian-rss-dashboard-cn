@@ -13,6 +13,7 @@ import {
 } from "../../../src/services/article-saver";
 import * as fetchHelpers from "../../../src/utils/fetch-helpers";
 import { RESTRICTED_ARTICLE_REASON } from "../../../src/utils/full-article-fetch";
+import type { Locale } from "../../../src/i18n";
 import { CollectionRepository } from "../../../src/collection/collection-repository";
 import { normalizeFeedItem } from "../../../src/collection/feed-normalizer";
 
@@ -1877,6 +1878,40 @@ describe("ArticleSaver.saveArticleWithFullContent", () => {
       expect.stringContaining("Network error:"),
     );
     expect(item.restrictedReason).toBe(RESTRICTED_ARTICLE_REASON);
+  });
+
+  it("reads the locale provider for each restricted-content notice while keeping the reason stable", async () => {
+    const app = App.createMock();
+    const settings = createSettings({ defaultTemplate: "{{content}}" });
+    let locale: Locale = "zh-CN";
+    const saver = new ArticleSaver(
+      app,
+      settings,
+      "https://proxy/?url=",
+      undefined,
+      undefined,
+      () => locale,
+    );
+    const fetchSpy = vi.spyOn(fetchHelpers, "fetchWithProxyFallbackDetailed");
+    fetchSpy.mockResolvedValue({ content: "", failureType: "restricted" });
+    const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+    const chineseItem = createItem({ guid: "restricted-zh" });
+    await saver.saveArticleWithFullContent(chineseItem);
+    locale = "en";
+    const englishItem = createItem({ guid: "restricted-en" });
+    await saver.saveArticleWithFullContent(englishItem);
+
+    expect(noticeSpy).toHaveBeenCalledWith(
+      "[Stub Notice]",
+      "全文受限，正在显示订阅源中可用的摘要。",
+    );
+    expect(noticeSpy).toHaveBeenCalledWith(
+      "[Stub Notice]",
+      "Full article is restricted. Showing available feed excerpt.",
+    );
+    expect(chineseItem.restrictedReason).toBe(RESTRICTED_ARTICLE_REASON);
+    expect(englishItem.restrictedReason).toBe(RESTRICTED_ARTICLE_REASON);
   });
 });
 

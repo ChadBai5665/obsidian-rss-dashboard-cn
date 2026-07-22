@@ -2,6 +2,7 @@ import { App, type TFile } from "obsidian";
 import { vi } from "vitest";
 import { WebViewerIntegration } from "../../../src/services/web-viewer-integration";
 import type { ArticleSavingSettings, FeedItem } from "../../../src/types/types";
+import type { Locale } from "../../../src/i18n";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 
 export interface WebViewerPluginStub {
@@ -15,6 +16,7 @@ export interface WebViewerIntegrationHarnessOverrides {
   settings?: Partial<ArticleSavingSettings>;
   webViewerPlugin?: WebViewerPluginStub | null;
   webpageContainer?: HTMLElement | null;
+  getLocale?: () => Locale;
 }
 
 export type TestWebViewerIntegration = WebViewerIntegration & {
@@ -112,7 +114,11 @@ export function createWebViewerIntegrationHarness(
     Object.assign(settings, overrides.settings);
   }
 
-  const integration = new WebViewerIntegration(app, settings);
+  const integration = new WebViewerIntegration(
+    app,
+    settings,
+    overrides.getLocale,
+  );
 
   const createdContainer = overrides.webpageContainer === undefined;
   const webpageContainer =

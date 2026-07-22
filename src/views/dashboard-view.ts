@@ -188,7 +188,7 @@ export class RssDashboardView extends ItemView {
       this.settings.corsProxyEnabled ? this.settings.corsProxyUrl : undefined,
       this.settings.collection,
       undefined,
-      this.settings.locale,
+      () => this.settings.locale,
     );
 
     // Always open the dashboard in All Feeds view. Any startup filtering is

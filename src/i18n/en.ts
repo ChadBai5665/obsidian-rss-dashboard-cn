@@ -1394,6 +1394,7 @@ export const en = {
   "service.article.saveFailed": "Error saving article: {error}",
   "service.article.saved": "Article saved. Click/tap the icon again to open the article in your vault.",
   "service.article.metadataRepair": "Saved note metadata could not be updated. The note remains saved and will be repaired later.",
+  "articleSaver.restrictedNotice": "Full article is restricted. Showing available feed excerpt.",
   "service.background.completed": "Background import completed. Processed {count} feeds.",
   "service.background.importingOpml": "Importing OPML feeds",
   "service.background.minimize": "Minimize",

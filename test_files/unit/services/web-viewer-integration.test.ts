@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import { sanitizeFilename } from "../../../src/services/article-saver";
 import type { FeedItem } from "../../../src/types/types";
+import type { Locale } from "../../../src/i18n";
 import {
   buildFeedItem,
   createWebViewerIntegrationHarness,
@@ -91,6 +92,33 @@ describe("Phase 8 - WebViewerIntegration", () => {
         expect.stringContaining("Error opening URL in web viewer: boom"),
       );
 
+      h.cleanup();
+    });
+
+    it("reads the locale provider for each failure notice", async () => {
+      const logSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      let locale: Locale = "zh-CN";
+      const h = createWebViewerIntegrationHarness({
+        getLocale: () => locale,
+        webViewerPlugin: {
+          openWebpage: vi.fn(async () => {
+            throw new Error("boom");
+          }),
+        },
+      });
+
+      await h.integration.openInWebViewer("https://example.com", "Title");
+      locale = "en";
+      await h.integration.openInWebViewer("https://example.com", "Title");
+
+      expect(logSpy).toHaveBeenCalledWith(
+        "[Stub Notice]",
+        "在网页阅读器中打开 URL 失败：boom",
+      );
+      expect(logSpy).toHaveBeenCalledWith(
+        "[Stub Notice]",
+        "Error opening URL in web viewer: boom",
+      );
       h.cleanup();
     });
   });

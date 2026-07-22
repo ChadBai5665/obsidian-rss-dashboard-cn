@@ -25,16 +25,24 @@ interface ObsidianApp extends App {
 export class WebViewerIntegration {
   private app: ObsidianApp;
   private settings: ArticleSavingSettings;
-  private readonly t: Translator;
+  private readonly getLocale: () => Locale;
 
   constructor(
     app: ObsidianApp,
     settings: ArticleSavingSettings,
-    locale: Locale = "en",
+    locale: Locale | (() => Locale) = "en",
   ) {
     this.app = app;
     this.settings = settings;
-    this.t = createTranslator(locale);
+    this.getLocale =
+      typeof locale === "function" ? locale : () => locale;
+  }
+
+  private t(
+    key: Parameters<Translator>[0],
+    params?: Parameters<Translator>[1],
+  ): string {
+    return createTranslator(this.getLocale())(key, params);
   }
 
   async openInWebViewer(url: string, title: string): Promise<boolean> {

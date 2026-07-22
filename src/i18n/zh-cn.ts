@@ -1348,6 +1348,7 @@ export const zhCN = {
   "service.article.saveFailed": "保存文章失败：{error}",
   "service.article.saved": "文章已保存。再次点击或轻点图标即可在知识库中打开。",
   "service.article.metadataRepair": "已保存笔记的元数据暂未更新。笔记仍已保存，稍后会自动修复。",
+  "articleSaver.restrictedNotice": "全文受限，正在显示订阅源中可用的摘要。",
   "service.background.completed": "后台导入完成，已处理 {count} 个订阅源。",
   "service.background.importingOpml": "正在导入 OPML 订阅源",
   "service.background.minimize": "最小化",

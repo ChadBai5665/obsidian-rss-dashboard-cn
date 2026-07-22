@@ -753,7 +753,7 @@ export default class RssDashboardPlugin extends Plugin {
       undefined,
       this.settings.collection,
       undefined,
-      this.settings.locale,
+      () => this.settings.locale,
     );
     this.importExportService = new ImportExportService({
       settings: this.settings,
@@ -761,7 +761,7 @@ export default class RssDashboardPlugin extends Plugin {
       getPortableDataBundle: () => this.getPortableDataBundle(),
       importPortableDataBundle: (bundle) =>
         this.applyPortableDataBundleImport(bundle),
-      locale: this.settings.locale,
+      getLocale: () => this.settings.locale,
     });
     this.backupService = new BackupService({
       settings: this.settings,

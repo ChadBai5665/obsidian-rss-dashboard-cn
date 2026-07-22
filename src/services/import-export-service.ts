@@ -17,20 +17,29 @@ export class ImportExportService {
   private isMobile: boolean;
   private getPortableDataBundle?: () => PortableDataBundle;
   private importPortableDataBundle?: (bundle: unknown) => Promise<void>;
-  private readonly t: Translator;
+  private readonly getLocale: () => Locale;
 
   constructor(options: {
     settings: RssDashboardSettings;
     isMobile: boolean;
     getPortableDataBundle?: () => PortableDataBundle;
     importPortableDataBundle?: (bundle: unknown) => Promise<void>;
+    getLocale?: () => Locale;
+    /** Legacy fixed-locale option retained for direct integration compatibility. */
     locale?: Locale;
   }) {
     this.settings = options.settings;
     this.isMobile = options.isMobile;
     this.getPortableDataBundle = options.getPortableDataBundle;
     this.importPortableDataBundle = options.importPortableDataBundle;
-    this.t = createTranslator(options.locale ?? "en");
+    this.getLocale = options.getLocale ?? (() => options.locale ?? "en");
+  }
+
+  private t(
+    key: Parameters<Translator>[0],
+    params?: Parameters<Translator>[1],
+  ): string {
+    return createTranslator(this.getLocale())(key, params);
   }
 
   getUserSettingsJson(): string {

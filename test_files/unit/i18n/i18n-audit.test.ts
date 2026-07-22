@@ -110,4 +110,61 @@ describe("i18n literal audit", () => {
     expect(invalid.stderr).toContain("duplicate allowlist pattern");
     expect(invalid.stderr).toContain("stale allowlist entry");
   });
+
+  it("finds real calls through comments, optional chaining, grouping, multiline layout, and nested commands", () => {
+    const root = createFixture({
+      "main.ts": [
+        "plugin.addCommand({",
+        '  "name": "Top-level command",',
+        "  callback: () => {",
+        "    setup(() => { cleanup(); });",
+        "  },",
+        "});",
+        "plugin.addCommand({ name });",
+        "new /* constructor gap */ Notice((\"Parenthesized notice\"));",
+      ].join("\n"),
+      "src/controls.ts": [
+        "button.setText /* gap */ (\"Comment gap\");",
+        "button.setText?.((\"Optional grouped\"));",
+        "setting",
+        "  .setDesc(",
+        "    `Multiline ${value}`",
+        "  );",
+        "Notice(\"Direct call\");",
+        "new Notice(`Escaped \\` quote ${value}`);",
+      ].join("\n"),
+    });
+
+    const result = runAudit(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('main.ts:2 addCommand name "Top-level command"');
+    expect(result.stdout).toContain('main.ts:8 Notice "Parenthesized notice"');
+    expect(result.stdout).toContain('src/controls.ts:1 setText "Comment gap"');
+    expect(result.stdout).toContain('src/controls.ts:2 setText "Optional grouped"');
+    expect(result.stdout).toContain('src/controls.ts:5 setDesc "Multiline ${value}"');
+    expect(result.stdout).toContain('src/controls.ts:7 Notice "Direct call"');
+    expect(result.stdout).toContain('src/controls.ts:8 Notice "Escaped \\\\` quote ${value}"');
+    expect(result.stdout).not.toContain("main.ts:7 addCommand name");
+  });
+
+  it("does not execute audit patterns inside comments or ordinary string tokens and orders findings by code point", () => {
+    const root = createFixture({
+      "src/z.ts": [
+        '// button.setText("Ignored comment");',
+        'const source = "setting.setName(\\"Ignored string\\")";',
+        '/* new Notice("Ignored block comment"); */',
+        'button.setText("Zulu");',
+      ].join("\n"),
+      "src/a.ts": 'button.setText("Alpha");\n',
+    });
+
+    const result = runAudit(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe(
+      'src/a.ts:1 setText "Alpha"\nsrc/z.ts:4 setText "Zulu"\n',
+    );
+    expect(result.stdout).not.toContain("Ignored");
+  });
 });

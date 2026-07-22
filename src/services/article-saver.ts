@@ -32,7 +32,6 @@ import {
 import { type FullArticleFetchResult } from "../utils/fetch-helpers";
 import {
   fetchFullArticleContentWithOutcome,
-  RESTRICTED_ARTICLE_NOTICE,
   RESTRICTED_ARTICLE_REASON,
 } from "../utils/full-article-fetch";
 import { ensureUtf8Meta } from "../utils/platform-utils";
@@ -95,7 +94,7 @@ export class ArticleSaver {
   private collectionSyncCallbacks:
     | { onMetadataSyncFailed?: () => void; onMetadataSyncSucceeded?: () => void }
     | undefined;
-  private readonly t: Translator;
+  private readonly getLocale: () => Locale;
 
   constructor(
     app: App,
@@ -106,14 +105,15 @@ export class ArticleSaver {
       onMetadataSyncFailed?: () => void;
       onMetadataSyncSucceeded?: () => void;
     },
-    locale: Locale = "en",
+    locale: Locale | (() => Locale) = "en",
   ) {
     this.app = app;
     this.settings = settings;
     this.corsProxyUrl = corsProxyUrl;
     this.collectionSettings = collectionSettings;
     this.collectionSyncCallbacks = collectionSyncCallbacks;
-    this.t = createTranslator(locale);
+    this.getLocale =
+      typeof locale === "function" ? locale : () => locale;
     this.turndownService = new TurndownService();
 
     this.turndownService.addRule("math", {
@@ -122,6 +122,13 @@ export class ArticleSaver {
         (node as Element).classList.contains("math"),
       replacement: (_content: string, node: Node) => node.textContent || "",
     });
+  }
+
+  private t(
+    key: Parameters<Translator>[0],
+    params?: Parameters<Translator>[1],
+  ): string {
+    return createTranslator(this.getLocale())(key, params);
   }
 
   private cleanHtml(html: string): string {
@@ -913,7 +920,7 @@ guid: "{{guid}}"
 
         if (!fetchResult.content) {
           if (fetchResult.failureType === "restricted") {
-            new Notice(RESTRICTED_ARTICLE_NOTICE);
+            new Notice(this.t("articleSaver.restrictedNotice"));
             item.restrictedReason = RESTRICTED_ARTICLE_REASON;
           } else {
             new Notice(

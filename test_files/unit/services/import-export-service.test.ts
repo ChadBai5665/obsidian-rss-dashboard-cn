@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, vi, beforeEach, type MockInstance } from "vitest";
 import type { RssDashboardSettings, PortableDataBundle } from "../../../src/types/types";
+import type { Locale } from "../../../src/i18n";
 
 vi.mock("../../../src/utils/export-utils", () => ({
   exportBlob: vi.fn().mockResolvedValue("downloaded"),
@@ -72,6 +73,22 @@ describe("ImportExportService", () => {
   });
 
   describe("showExportNotice", () => {
+    it("reads the locale provider again for each notice", () => {
+      let locale: Locale = "zh-CN";
+      const svc = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        getLocale: () => locale,
+      });
+
+      svc.showExportNotice("downloaded", "data.json");
+      locale = "en";
+      svc.showExportNotice("downloaded", "data.json");
+
+      expect(getNoticeMessages(consoleLogSpy)).toContain("正在下载 data.json");
+      expect(getNoticeMessages(consoleLogSpy)).toContain("Downloading data.json");
+    });
+
     it('fires "Downloading <filename>" for "downloaded"', () => {
       const svc = new ImportExportService({
         settings: makeSettings(),

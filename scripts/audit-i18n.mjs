@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { resolve, relative, join, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 
 const UI_APIS = [
   "setText",
@@ -12,23 +12,16 @@ const UI_APIS = [
 ];
 const ALL_APIS = [...UI_APIS, "Notice", "addCommand name"];
 const DOM_TAGS = new Set([
-  "a",
-  "article",
-  "button",
-  "div",
-  "footer",
-  "header",
-  "input",
-  "label",
-  "li",
-  "main",
-  "option",
-  "p",
-  "section",
-  "select",
-  "span",
-  "ul",
+  "a", "article", "button", "div", "footer", "header", "input", "label",
+  "li", "main", "option", "p", "section", "select", "span", "ul",
 ]);
+const MIME_PREFIXES = ["application/", "audio/", "font/", "image/", "text/", "video/"];
+const OPENERS = new Map([["(", ")"], ["{", "}"], ["[", "]"]]);
+const CLOSERS = new Set([")", "}", "]"]);
+
+function compareCodePoints(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
 
 function usage(message) {
   process.stderr.write(`i18n audit: ${message}\n`);
@@ -36,193 +29,349 @@ function usage(message) {
 
 function parseArguments(argv) {
   let root = process.cwd();
-
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === "--root" && argv[index + 1]) {
       root = resolve(argv[index + 1]);
       index += 1;
       continue;
     }
-
     usage(`unknown argument ${argv[index]}`);
     process.exit(2);
   }
-
   return root;
 }
 
 function collectTypeScriptFiles(directory) {
-  if (!existsSync(directory)) {
-    return [];
-  }
-
+  if (!existsSync(directory)) return [];
   return readdirSync(directory, { withFileTypes: true })
-    .sort((left, right) => left.name.localeCompare(right.name))
+    .sort((left, right) => compareCodePoints(left.name, right.name))
     .flatMap((entry) => {
       const target = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        return collectTypeScriptFiles(target);
-      }
-
+      if (entry.isDirectory()) return collectTypeScriptFiles(target);
       return entry.isFile() && entry.name.endsWith(".ts") ? [target] : [];
     });
 }
 
 function isIgnoredPath(root, file) {
   const normalized = relative(root, file).split(sep).join("/");
-  return (
-    normalized.startsWith("src/i18n/") ||
-    normalized.includes("/test_files/") ||
-    normalized.endsWith(".test.ts") ||
-    normalized.endsWith(".spec.ts")
-  );
+  return normalized.startsWith("src/i18n/") || normalized.endsWith(".test.ts") || normalized.endsWith(".spec.ts");
 }
 
-function lineAt(source, index) {
-  return source.slice(0, index).split("\n").length;
+function isWhitespace(character) {
+  return character === " " || character === "\t" || character === "\r" || character === "\n" || character === "\f";
 }
 
-function readLiteral(source, start) {
-  const quote = source[start];
-  if (quote !== "\"" && quote !== "'" && quote !== "`") {
-    return undefined;
-  }
-
-  let escaped = false;
-  for (let index = start + 1; index < source.length; index += 1) {
-    const character = source[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (character === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (character === quote) {
-      return {
-        value: source.slice(start + 1, index),
-        end: index + 1,
-      };
-    }
-  }
-
-  return undefined;
+function isIdentifierStart(character) {
+  return Boolean(character) && ((character >= "A" && character <= "Z") || (character >= "a" && character <= "z") || character === "_" || character === "$");
 }
 
-function skipWhitespace(source, index) {
-  while (index < source.length && /\s/.test(source[index])) {
+function isIdentifierPart(character) {
+  return isIdentifierStart(character) || (character >= "0" && character <= "9");
+}
+
+/**
+ * A deliberately small TypeScript lexer. It recognizes only the token classes
+ * the audit needs, but consumes comments and literal bodies as opaque values so
+ * API-shaped text cannot escape from comments or strings into the code stream.
+ */
+function tokenize(source) {
+  const tokens = [];
+  let index = 0;
+  let line = 1;
+
+  const advance = () => {
+    if (source[index] === "\n") line += 1;
     index += 1;
+  };
+  const skipLineComment = () => {
+    while (index < source.length && source[index] !== "\n") advance();
+  };
+  const skipBlockComment = () => {
+    advance();
+    advance();
+    while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) advance();
+    if (index < source.length) {
+      advance();
+      advance();
+    }
+  };
+  const skipQuoted = (quote) => {
+    advance();
+    while (index < source.length) {
+      if (source[index] === "\\") {
+        advance();
+        if (index < source.length) advance();
+        continue;
+      }
+      if (source[index] === quote) {
+        advance();
+        return;
+      }
+      advance();
+    }
+  };
+  const skipTemplateExpression = () => {
+    let depth = 1;
+    while (index < source.length && depth > 0) {
+      if (source[index] === "/" && source[index + 1] === "/") {
+        advance();
+        advance();
+        skipLineComment();
+      } else if (source[index] === "/" && source[index + 1] === "*") {
+        skipBlockComment();
+      } else if (source[index] === "\"" || source[index] === "'") {
+        skipQuoted(source[index]);
+      } else if (source[index] === "`") {
+        skipTemplate();
+      } else if (source[index] === "{") {
+        depth += 1;
+        advance();
+      } else if (source[index] === "}") {
+        depth -= 1;
+        advance();
+      } else {
+        advance();
+      }
+    }
+  };
+  const skipTemplate = () => {
+    advance();
+    while (index < source.length) {
+      if (source[index] === "\\") {
+        advance();
+        if (index < source.length) advance();
+      } else if (source[index] === "`") {
+        advance();
+        return;
+      } else if (source[index] === "$" && source[index + 1] === "{") {
+        advance();
+        advance();
+        skipTemplateExpression();
+      } else {
+        advance();
+      }
+    }
+  };
+  const readLiteral = (quote) => {
+    const start = index;
+    const tokenLine = line;
+    advance();
+    while (index < source.length) {
+      if (source[index] === "\\") {
+        advance();
+        if (index < source.length) advance();
+      } else if (source[index] === quote) {
+        const value = source.slice(start + 1, index);
+        advance();
+        return { type: "literal", value, line: tokenLine, index: start };
+      } else if (quote === "`" && source[index] === "$" && source[index + 1] === "{") {
+        advance();
+        advance();
+        skipTemplateExpression();
+      } else {
+        advance();
+      }
+    }
+    return { type: "literal", value: source.slice(start + 1), line: tokenLine, index: start };
+  };
+
+  while (index < source.length) {
+    const character = source[index];
+    if (isWhitespace(character)) {
+      advance();
+    } else if (character === "/" && source[index + 1] === "/") {
+      advance();
+      advance();
+      skipLineComment();
+    } else if (character === "/" && source[index + 1] === "*") {
+      skipBlockComment();
+    } else if (character === "\"" || character === "'" || character === "`") {
+      tokens.push(readLiteral(character));
+    } else if (isIdentifierStart(character)) {
+      const start = index;
+      const tokenLine = line;
+      advance();
+      while (isIdentifierPart(source[index])) advance();
+      tokens.push({ type: "identifier", value: source.slice(start, index), line: tokenLine, index: start });
+    } else {
+      const tokenLine = line;
+      const start = index;
+      if (character === "?" && source[index + 1] === ".") {
+        advance();
+        advance();
+        tokens.push({ type: "punct", value: "?.", line: tokenLine, index: start });
+      } else {
+        advance();
+        tokens.push({ type: "punct", value: character, line: tokenLine, index: start });
+      }
+    }
   }
-  return index;
+  return tokens;
+}
+
+function findMatching(tokens, start) {
+  const expected = OPENERS.get(tokens[start]?.value);
+  if (!expected) return -1;
+  const stack = [expected];
+  for (let index = start + 1; index < tokens.length; index += 1) {
+    const token = tokens[index].value;
+    if (OPENERS.has(token)) stack.push(OPENERS.get(token));
+    else if (CLOSERS.has(token)) {
+      if (token !== stack.at(-1)) return -1;
+      stack.pop();
+      if (stack.length === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function findCallOpen(tokens, identifierIndex) {
+  let index = identifierIndex + 1;
+  if (tokens[index]?.value === "?.") index += 1;
+  return tokens[index]?.value === "(" ? index : -1;
+}
+
+function firstArgumentRange(tokens, callOpen, callClose) {
+  let start = callOpen + 1;
+  let end = callClose - 1;
+  const stack = [];
+  for (let index = start; index <= end; index += 1) {
+    const value = tokens[index].value;
+    if (OPENERS.has(value)) stack.push(OPENERS.get(value));
+    else if (CLOSERS.has(value)) stack.pop();
+    else if (value === "," && stack.length === 0) {
+      end = index - 1;
+      break;
+    }
+  }
+  return [start, end];
+}
+
+function unwrapParentheses(tokens, start, end) {
+  while (tokens[start]?.value === "(") {
+    const close = findMatching(tokens, start);
+    if (close !== end) break;
+    start += 1;
+    end -= 1;
+  }
+  return [start, end];
+}
+
+function directLiteral(tokens, start, end) {
+  [start, end] = unwrapParentheses(tokens, start, end);
+  return start === end && tokens[start]?.type === "literal" ? tokens[start] : undefined;
 }
 
 function isNonUserFacingLiteral(value) {
-  return (
-    value.length === 0 ||
-    value.startsWith("http://") ||
-    value.startsWith("https://") ||
-    value.startsWith("mailto:") ||
-    /^(application|audio|font|image|text|video)\//.test(value) ||
-    value.startsWith("icon-") ||
-    DOM_TAGS.has(value)
-  );
+  return value.length === 0 || value.startsWith("http://") || value.startsWith("https://") || value.startsWith("mailto:") || value.startsWith("icon-") || DOM_TAGS.has(value) || MIME_PREFIXES.some((prefix) => value.startsWith(prefix));
 }
 
-function formatLiteral(value) {
-  return JSON.stringify(value);
-}
-
-function findingFor(root, file, source, index, api, literal) {
+function findingFor(root, file, token, api) {
   const path = relative(root, file).split(sep).join("/");
-  const line = lineAt(source, index);
   return {
     path,
-    line,
+    line: token.line,
     api,
-    literal,
-    identity: `${path}:${line}:${api}:${literal}`,
+    literal: token.value,
+    identity: `${path}:${token.line}:${api}:${token.value}`,
   };
 }
 
-function scanCallLiterals(root, file, source) {
+function scanAddCommand(root, file, tokens, identifierIndex) {
+  const callOpen = findCallOpen(tokens, identifierIndex);
+  const callClose = callOpen < 0 ? -1 : findMatching(tokens, callOpen);
+  if (callClose < 0) return [];
+  let [start, end] = firstArgumentRange(tokens, callOpen, callClose);
+  [start, end] = unwrapParentheses(tokens, start, end);
+  if (tokens[start]?.value !== "{") return [];
+  const objectClose = findMatching(tokens, start);
+  if (objectClose < 0 || objectClose !== end) return [];
+
   const findings = [];
-  const apiPattern = new RegExp(`\\b(${UI_APIS.join("|")})\\s*\\(`, "g");
-  let match;
-
-  while ((match = apiPattern.exec(source))) {
-    const literalStart = skipWhitespace(source, apiPattern.lastIndex);
-    const literal = readLiteral(source, literalStart);
-    if (literal && !isNonUserFacingLiteral(literal.value)) {
-      findings.push(findingFor(root, file, source, match.index, match[1], literal.value));
-    }
-  }
-
-  const noticePattern = /\bnew\s+Notice\s*\(/g;
-  while ((match = noticePattern.exec(source))) {
-    const literalStart = skipWhitespace(source, noticePattern.lastIndex);
-    const literal = readLiteral(source, literalStart);
-    if (literal && !isNonUserFacingLiteral(literal.value)) {
-      findings.push(findingFor(root, file, source, match.index, "Notice", literal.value));
-    }
-  }
-
-  const commandPattern = /\baddCommand\s*\(\s*\{/g;
-  while ((match = commandPattern.exec(source))) {
-    const commandEnd = source.indexOf("});", commandPattern.lastIndex);
-    const commandSource = source.slice(commandPattern.lastIndex, commandEnd < 0 ? source.length : commandEnd);
-    const nameMatch = /\bname\s*:\s*/.exec(commandSource);
-    if (!nameMatch) {
+  const stack = [];
+  for (let index = start + 1; index < objectClose; index += 1) {
+    const value = tokens[index].value;
+    if (OPENERS.has(value)) {
+      stack.push(OPENERS.get(value));
       continue;
     }
-    const literalStart = skipWhitespace(
-      commandSource,
-      nameMatch.index + nameMatch[0].length,
-    );
-    const literal = readLiteral(commandSource, literalStart);
-    if (literal && !isNonUserFacingLiteral(literal.value)) {
-      const sourceIndex = commandPattern.lastIndex + nameMatch.index;
-      findings.push(
-        findingFor(root, file, source, sourceIndex, "addCommand name", literal.value),
-      );
+    if (CLOSERS.has(value)) {
+      stack.pop();
+      continue;
     }
-  }
+    if (stack.length !== 0 || (tokens[index].type !== "identifier" && tokens[index].type !== "literal") || tokens[index].value !== "name" || tokens[index + 1]?.value !== ":") continue;
 
+    let propertyEnd = objectClose - 1;
+    const propertyStack = [];
+    for (let cursor = index + 2; cursor < objectClose; cursor += 1) {
+      const cursorValue = tokens[cursor].value;
+      if (OPENERS.has(cursorValue)) propertyStack.push(OPENERS.get(cursorValue));
+      else if (CLOSERS.has(cursorValue)) propertyStack.pop();
+      else if (cursorValue === "," && propertyStack.length === 0) {
+        propertyEnd = cursor - 1;
+        break;
+      }
+    }
+    const literal = directLiteral(tokens, index + 2, propertyEnd);
+    if (literal && !isNonUserFacingLiteral(literal.value)) findings.push(findingFor(root, file, literal, "addCommand name"));
+  }
   return findings;
+}
+
+function scanCallLiterals(root, file, source) {
+  const tokens = tokenize(source);
+  const findings = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type !== "identifier") continue;
+
+    if (UI_APIS.includes(token.value) || token.value === "Notice") {
+      const callOpen = findCallOpen(tokens, index);
+      const callClose = callOpen < 0 ? -1 : findMatching(tokens, callOpen);
+      if (callClose >= 0) {
+        const [start, end] = firstArgumentRange(tokens, callOpen, callClose);
+        const literal = directLiteral(tokens, start, end);
+        if (literal && !isNonUserFacingLiteral(literal.value)) {
+          findings.push(findingFor(root, file, literal, token.value));
+        }
+      }
+    }
+    if (token.value === "addCommand") findings.push(...scanAddCommand(root, file, tokens, index));
+  }
+  return findings;
+}
+
+function parseAllowlistPattern(pattern) {
+  const parts = pattern.split(":");
+  if (parts.length < 4) return undefined;
+  const [path, line, api, ...literalParts] = parts;
+  const literal = literalParts.join(":");
+  if (!path || !line || !api || !literal || [path, line, api].some((part) => part.includes("*") || part.includes("?") || part.includes("[") || part.includes("]"))) return undefined;
+  if (![...line].every((character) => character >= "0" && character <= "9") || Number(line) < 1 || !ALL_APIS.includes(api)) return undefined;
+  return { path, line, api, literal };
 }
 
 function loadAllowlist(root) {
   const allowlistPath = join(root, "scripts", "i18n-literal-allowlist.json");
-  if (!existsSync(allowlistPath)) {
-    return { entries: [], errors: [] };
-  }
-
+  if (!existsSync(allowlistPath)) return { entries: [], errors: [] };
   let parsed;
   try {
     parsed = JSON.parse(readFileSync(allowlistPath, "utf8"));
   } catch (error) {
     return { entries: [], errors: [`invalid allowlist JSON: ${error.message}`] };
   }
-
-  if (!Array.isArray(parsed)) {
-    return { entries: [], errors: ["allowlist must be an array"] };
-  }
+  if (!Array.isArray(parsed)) return { entries: [], errors: ["allowlist must be an array"] };
 
   const errors = [];
   const entries = [];
   const patterns = new Set();
-  const patternFormat = new RegExp(
-    `^[^:*?[\\]\\\\]+:\\d+:(${ALL_APIS.map((api) => api.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")}):.+$`,
-  );
-
   for (const [index, entry] of parsed.entries()) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       errors.push(`invalid allowlist entry at index ${index}`);
       continue;
     }
-
     const { pattern, reason } = entry;
-    if (typeof pattern !== "string" || !patternFormat.test(pattern)) {
+    if (typeof pattern !== "string" || !parseAllowlistPattern(pattern)) {
       errors.push(`invalid allowlist pattern at index ${index}`);
       continue;
     }
@@ -234,49 +383,34 @@ function loadAllowlist(root) {
       errors.push(`duplicate allowlist pattern: ${pattern}`);
       continue;
     }
-
     patterns.add(pattern);
     entries.push({ pattern, reason });
   }
-
   return { entries, errors };
 }
 
 function main() {
   const root = parseArguments(process.argv.slice(2));
-  const files = [
-    ...collectTypeScriptFiles(join(root, "src")),
-    ...(existsSync(join(root, "main.ts")) ? [join(root, "main.ts")] : []),
-  ].filter((file) => !isIgnoredPath(root, file));
+  const files = [...collectTypeScriptFiles(join(root, "src")), ...(existsSync(join(root, "main.ts")) ? [join(root, "main.ts")] : [])]
+    .filter((file) => !isIgnoredPath(root, file));
   const findings = files
     .flatMap((file) => scanCallLiterals(root, file, readFileSync(file, "utf8")))
-    .sort((left, right) => left.identity.localeCompare(right.identity));
+    .sort((left, right) => compareCodePoints(left.identity, right.identity));
   const { entries, errors } = loadAllowlist(root);
   const findingIds = new Set(findings.map((finding) => finding.identity));
-
   for (const entry of entries) {
-    if (!findingIds.has(entry.pattern)) {
-      errors.push(`stale allowlist entry: ${entry.pattern}`);
-    }
+    if (!findingIds.has(entry.pattern)) errors.push(`stale allowlist entry: ${entry.pattern}`);
   }
-
   if (errors.length > 0) {
-    for (const error of errors) {
-      usage(error);
-    }
+    for (const error of errors) usage(error);
     process.exitCode = 2;
     return;
   }
-
   const allowed = new Set(entries.map((entry) => entry.pattern));
-  const violations = findings.filter((finding) => !allowed.has(finding.identity));
-  for (const violation of violations) {
-    process.stdout.write(
-      `${violation.path}:${violation.line} ${violation.api} ${formatLiteral(violation.literal)}\n`,
-    );
+  for (const violation of findings.filter((finding) => !allowed.has(finding.identity))) {
+    process.stdout.write(`${violation.path}:${violation.line} ${violation.api} ${JSON.stringify(violation.literal)}\n`);
   }
-
-  process.exitCode = violations.length > 0 ? 1 : 0;
+  process.exitCode = findings.some((finding) => !allowed.has(finding.identity)) ? 1 : 0;
 }
 
 main();
