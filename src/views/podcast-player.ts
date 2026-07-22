@@ -3,7 +3,11 @@ import { App, setIcon, Menu, Notice } from "obsidian";
 import { MediaService } from "../services/media-service";
 import { sanitizeAndAppendHtml } from "../utils/safe-html";
 import { windowInstanceOf } from "../utils/platform-utils";
-import { createTranslator, type Locale } from "../i18n";
+import {
+  createTranslator,
+  type Locale,
+  type TranslationKey,
+} from "../i18n";
 
 export class PodcastPlayer {
   private container: HTMLElement;
@@ -142,7 +146,27 @@ export class PodcastPlayer {
     this.container
       .querySelector<HTMLElement>(".playlist-empty")
       ?.setText(this.t("media.noEpisodes"));
+    this.refreshLocalizedEpisodeDetails();
     this.updateSleepTimerDisplay();
+  }
+
+  private bindLocalizedEpisodeDetail(
+    element: HTMLElement,
+    key: TranslationKey,
+  ): void {
+    element.dataset.podcastI18nKey = key;
+    element.setText(this.t(key));
+  }
+
+  private refreshLocalizedEpisodeDetails(): void {
+    this.container
+      .querySelectorAll<HTMLElement>("[data-podcast-i18n-key]")
+      .forEach((element) => {
+        const key = element.dataset.podcastI18nKey as
+          | TranslationKey
+          | undefined;
+        if (key) element.setText(this.t(key));
+      });
   }
 
   setPlaylist(playlist: FeedItem[]) {
@@ -936,46 +960,71 @@ export class PodcastPlayer {
     const item = this.currentItem;
     const notesHtml = this.selectEpisodeNotesHtml(item);
 
-    const entries: Array<{ label: string; value: string; href?: string }> = [];
+    const entries: Array<{
+      labelKey: TranslationKey;
+      value: string;
+      valueKey?: TranslationKey;
+      href?: string;
+    }> = [];
 
     if (item.pubDate) {
       const d = new Date(item.pubDate);
       entries.push({
-        label: this.t("podcast.published"),
+        labelKey: "podcast.published",
         value: Number.isNaN(d.getTime()) ? item.pubDate : d.toLocaleString(),
       });
     }
 
     const duration = (item.duration || item.itunes?.duration || "").trim();
-    if (duration) entries.push({ label: this.t("podcast.duration"), value: duration });
+    if (duration) {
+      entries.push({ labelKey: "podcast.duration", value: duration });
+    }
 
     const author = (item.author || "").trim();
-    if (author) entries.push({ label: this.t("podcast.author"), value: author });
+    if (author) entries.push({ labelKey: "podcast.author", value: author });
 
     if (typeof item.explicit === "boolean") {
-      entries.push({ label: this.t("podcast.explicit"), value: item.explicit ? this.t("podcast.yes") : this.t("podcast.no") });
+      const valueKey = item.explicit ? "podcast.yes" : "podcast.no";
+      entries.push({
+        labelKey: "podcast.explicit",
+        value: this.t(valueKey),
+        valueKey,
+      });
     }
 
     if (typeof item.season === "number")
-      entries.push({ label: this.t("podcast.season"), value: String(item.season) });
+      entries.push({ labelKey: "podcast.season", value: String(item.season) });
     if (typeof item.episode === "number")
-      entries.push({ label: this.t("podcast.episode"), value: String(item.episode) });
+      entries.push({ labelKey: "podcast.episode", value: String(item.episode) });
 
     const episodeType = (item.episodeType || "").trim();
-    if (episodeType) entries.push({ label: this.t("podcast.type"), value: episodeType });
+    if (episodeType) {
+      entries.push({ labelKey: "podcast.type", value: episodeType });
+    }
 
     const category = (item.category || "").trim();
-    if (category) entries.push({ label: this.t("podcast.category"), value: category });
+    if (category) {
+      entries.push({ labelKey: "podcast.category", value: category });
+    }
 
     const link = (item.link || "").trim();
-    if (link)
-      entries.push({ label: this.t("podcast.link"), value: this.t("podcast.openEpisode"), href: link });
+    if (link) {
+      entries.push({
+        labelKey: "podcast.link",
+        value: this.t("podcast.openEpisode"),
+        valueKey: "podcast.openEpisode",
+        href: link,
+      });
+    }
 
     const enclosureLen = (item.enclosure?.length || "").trim();
     if (enclosureLen) {
       const n = Number(enclosureLen);
       const formatted = Number.isFinite(n) ? this.formatBytes(n) : "";
-      entries.push({ label: this.t("podcast.size"), value: formatted || enclosureLen });
+      entries.push({
+        labelKey: "podcast.size",
+        value: formatted || enclosureLen,
+      });
     }
 
     const hasNotes = Boolean(notesHtml && notesHtml.trim());
@@ -987,24 +1036,30 @@ export class PodcastPlayer {
     });
     details.setAttribute("data-podcast-theme", this.theme);
 
-    details.createEl("summary", { text: this.t("podcast.details") });
+    const summary = details.createEl("summary");
+    this.bindLocalizedEpisodeDetail(summary, "podcast.details");
     const body = details.createDiv({ cls: "podcast-episode-details-body" });
 
     if (hasMeta) {
       const grid = body.createDiv({ cls: "podcast-episode-meta-grid" });
       entries.forEach((entry) => {
-        grid.createDiv({
+        const label = grid.createDiv({
           cls: "podcast-episode-meta-label",
-          text: entry.label,
         });
+        this.bindLocalizedEpisodeDetail(label, entry.labelKey);
         const valueEl = grid.createDiv({ cls: "podcast-episode-meta-value" });
         if (entry.href) {
           const a = valueEl.createEl("a", {
             text: entry.value,
             attr: { href: entry.href },
           });
+          if (entry.valueKey) {
+            this.bindLocalizedEpisodeDetail(a, entry.valueKey);
+          }
           a.target = "_blank";
           a.rel = "noopener noreferrer";
+        } else if (entry.valueKey) {
+          this.bindLocalizedEpisodeDetail(valueEl, entry.valueKey);
         } else {
           valueEl.textContent = entry.value;
         }
@@ -1013,10 +1068,10 @@ export class PodcastPlayer {
 
     if (hasNotes) {
       const notes = body.createDiv({ cls: "podcast-episode-notes" });
-      notes.createDiv({
+      const notesTitle = notes.createDiv({
         cls: "podcast-episode-notes-title",
-        text: this.t("podcast.showNotes"),
       });
+      this.bindLocalizedEpisodeDetail(notesTitle, "podcast.showNotes");
       const notesBody = notes.createDiv({ cls: "podcast-episode-notes-body" });
       sanitizeAndAppendHtml(notesBody, notesHtml);
     }

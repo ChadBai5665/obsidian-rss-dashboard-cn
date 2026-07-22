@@ -56,7 +56,7 @@ import { ExplicitContentCoordinator } from "../collection/explicit-content-coord
 import { getContentBasisLabel } from "../collection/content-basis-display";
 import type { ContentBasis } from "../collection/collected-item";
 import { isYouTubeItem } from "../utils/youtube-detection";
-import { createTranslator } from "../i18n";
+import { createTranslator, type TranslationKey } from "../i18n";
 
 export const RSS_READER_VIEW_TYPE = "rss-reader-view";
 
@@ -1065,9 +1065,45 @@ export class ReaderView extends ItemView {
       );
     }
 
+    this.refreshLocalizedReadingDom();
     this.podcastPlayer?.refreshLocalization(this.settings.locale ?? "zh-CN");
     this.videoPlayer?.refreshLocalization(this.settings.locale ?? "zh-CN");
     this.updateToggleButtons();
+  }
+
+  private bindLocalizedReadingText(
+    element: HTMLElement,
+    key: TranslationKey,
+  ): void {
+    element.dataset.rssReaderI18nKey = key;
+    element.setText(this.t(key));
+  }
+
+  private bindLocalizedReadingAttribute(
+    element: HTMLElement,
+    attribute: string,
+    key: TranslationKey,
+  ): void {
+    element.dataset.rssReaderI18nKey = key;
+    element.dataset.rssReaderI18nAttribute = attribute;
+    element.setAttribute(attribute, this.t(key));
+  }
+
+  private refreshLocalizedReadingDom(): void {
+    this.readingContainer
+      ?.querySelectorAll<HTMLElement>("[data-rss-reader-i18n-key]")
+      .forEach((element) => {
+        const key = element.dataset.rssReaderI18nKey as
+          | TranslationKey
+          | undefined;
+        if (!key) return;
+        const attribute = element.dataset.rssReaderI18nAttribute;
+        if (attribute) {
+          element.setAttribute(attribute, this.t(key));
+        } else {
+          element.setText(this.t(key));
+        }
+      });
   }
 
   async onClose(): Promise<void> {
@@ -1509,16 +1545,15 @@ export class ReaderView extends ItemView {
         this.videoPlayer.setRelatedVideos(this.relatedItems);
       }
     } else {
-      const errorContainer = container.createDiv({
-        cls: "rss-reader-error",
-        text: this.t("reader.videoMissing"),
-      });
+      const errorContainer = container.createDiv({ cls: "rss-reader-error" });
+      const errorText = errorContainer.createSpan();
+      this.bindLocalizedReadingText(errorText, "reader.videoMissing");
       if (item.link) {
         const watchLink = errorContainer.createEl("a", {
           cls: "rss-reader-error-link",
-          text: this.t("reader.watchYoutube"),
           href: item.link,
         });
+        this.bindLocalizedReadingText(watchLink, "reader.watchYoutube");
         watchLink.target = "_blank";
         watchLink.rel = "noopener noreferrer";
       }
@@ -1597,10 +1632,11 @@ export class ReaderView extends ItemView {
         );
         this.podcastPlayer.loadEpisode(podcastItem, fullFeedEpisodes);
       } else {
-        container.createDiv({
+        const errorContainer = container.createDiv({
           cls: "rss-reader-error",
-          text: this.t("reader.audioMissing"),
         });
+        const errorText = errorContainer.createSpan();
+        this.bindLocalizedReadingText(errorText, "reader.audioMissing");
         await this.displayArticle(item, undefined, displayRequest);
       }
     }
@@ -1854,9 +1890,11 @@ export class ReaderView extends ItemView {
         cls: "rss-reader-description-callout",
       });
       descriptionCallout.open = true;
-      descriptionCallout.createEl("summary", {
-        text: this.t("reader.feedDescription"),
-      });
+      const descriptionSummary = descriptionCallout.createEl("summary");
+      this.bindLocalizedReadingText(
+        descriptionSummary,
+        "reader.feedDescription",
+      );
       const descriptionBody = descriptionCallout.createDiv({
         cls: "rss-reader-description rss-reader-description-body",
       });
@@ -1873,7 +1911,10 @@ export class ReaderView extends ItemView {
           undefined,
         );
       } else {
-        descriptionBody.setText(this.t("reader.noFeedDescription"));
+        this.bindLocalizedReadingText(
+          descriptionBody,
+          "reader.noFeedDescription",
+        );
       }
     }
 
@@ -1916,11 +1957,13 @@ export class ReaderView extends ItemView {
     const message = banner.createDiv({
       cls: "rss-reader-paywall-banner-text",
     });
-    message.setText(
-      item.restrictedReason === RESTRICTED_ARTICLE_REASON
-        ? this.t("reader.restrictedBanner")
-        : (item.restrictedReason ?? this.t("reader.restrictedBanner")),
-    );
+    if (item.restrictedReason === RESTRICTED_ARTICLE_REASON) {
+      this.bindLocalizedReadingText(message, "reader.restrictedBanner");
+    } else {
+      message.setText(
+        item.restrictedReason ?? this.t("reader.restrictedBanner"),
+      );
+    }
 
     if (!item.link) {
       return;
@@ -1928,9 +1971,9 @@ export class ReaderView extends ItemView {
 
     const link = banner.createEl("a", {
       cls: "rss-reader-paywall-banner-link",
-      text: this.t("reader.restrictedLink"),
       href: item.link,
     });
+    this.bindLocalizedReadingText(link, "reader.restrictedLink");
     link.target = "_blank";
     link.rel = "noopener noreferrer";
   }
@@ -1945,8 +1988,8 @@ export class ReaderView extends ItemView {
     });
     const message = banner.createDiv({
       cls: "rss-reader-video-banner-text",
-      text: this.t("reader.videoSource"),
     });
+    this.bindLocalizedReadingText(message, "reader.videoSource");
     message.setAttr("role", "note");
 
     if (!item.link) {
@@ -1955,9 +1998,9 @@ export class ReaderView extends ItemView {
 
     const link = banner.createEl("a", {
       cls: "rss-reader-video-banner-link",
-      text: this.t("reader.openVideoSource"),
       href: item.link,
     });
+    this.bindLocalizedReadingText(link, "reader.openVideoSource");
     link.target = "_blank";
     link.rel = "noopener noreferrer";
   }
@@ -2052,13 +2095,20 @@ export class ReaderView extends ItemView {
           }
 
           if (heroUrl) {
-            heroSlot.createEl("img", {
+            const heroImage = heroSlot.createEl("img", {
               cls: "rss-reader-fallback-hero",
               attr: {
                 src: heroUrl,
                 alt: title || this.t("reader.heroImage"),
               },
             });
+            if (!title) {
+              this.bindLocalizedReadingAttribute(
+                heroImage,
+                "alt",
+                "reader.heroImage",
+              );
+            }
 
             // Remove the first image from the body if it's the hero image to avoid duplication
             if (
@@ -3687,7 +3737,13 @@ export class ReaderView extends ItemView {
           type: "video/mp4",
         },
       });
-      video.appendText(this.t("reader.videoUnsupported"));
+      const unsupportedText = video.createSpan({
+        cls: "rss-reader-video-unsupported",
+      });
+      this.bindLocalizedReadingText(
+        unsupportedText,
+        "reader.videoUnsupported",
+      );
 
       const progressEnabled = this.settings.media.rememberPlaybackProgress;
 
@@ -3725,17 +3781,16 @@ export class ReaderView extends ItemView {
       video.addEventListener("pause", () => reportProgress(true));
       video.addEventListener("ended", () => reportProgress(true));
     } else {
-      const errorContainer = container.createDiv({
-        cls: "rss-reader-error",
-        text: this.t("reader.videoUrlMissing"),
-      });
+      const errorContainer = container.createDiv({ cls: "rss-reader-error" });
+      const errorText = errorContainer.createSpan();
+      this.bindLocalizedReadingText(errorText, "reader.videoUrlMissing");
       const sourceUrl = resolveItemExternalUrl(item);
       if (sourceUrl) {
         const sourceLink = errorContainer.createEl("a", {
           cls: "rss-reader-error-link",
-          text: this.t("reader.openVideoSource"),
           href: sourceUrl,
         });
+        this.bindLocalizedReadingText(sourceLink, "reader.openVideoSource");
         sourceLink.target = "_blank";
         sourceLink.rel = "noopener noreferrer";
       }
@@ -3757,7 +3812,8 @@ export class ReaderView extends ItemView {
     const relatedContainer = container.createDiv({
       cls: "rss-video-related",
     });
-    relatedContainer.createEl("h4", { text: this.t("reader.sameChannel") });
+    const relatedHeading = relatedContainer.createEl("h4");
+    this.bindLocalizedReadingText(relatedHeading, "reader.sameChannel");
 
     const relatedVideos = (
       this.settings.feeds.find((f) => f.url === item.feedUrl)?.items || []
@@ -3800,10 +3856,13 @@ export class ReaderView extends ItemView {
         });
       });
     } else {
-      relatedContainer.createDiv({
+      const emptyRelated = relatedContainer.createDiv({
         cls: "rss-video-related-empty",
-        text: this.t("reader.noRelatedVideos"),
       });
+      this.bindLocalizedReadingText(
+        emptyRelated,
+        "reader.noRelatedVideos",
+      );
     }
   }
 }

@@ -50,6 +50,75 @@ describe("PodcastPlayer", () => {
     expect(container.querySelector(".rss-sleep-timer-btn")?.getAttribute("title")).toBe("Sleep Timer");
   });
 
+  it("refreshes current episode detail labels zh-en-zh without replacing audio or source values", () => {
+    const container = document.body.createDiv();
+    const player = new PodcastPlayer(container, new App(), "obsidian");
+    const episode = baseEpisode();
+    episode.author = "External Author";
+    episode.description = "<p>External show notes</p>";
+    episode.content = "";
+    episode.explicit = true;
+    episode.duration = "1:23";
+    episode.season = 2;
+    episode.episode = 7;
+    episode.episodeType = "External Type";
+    episode.category = "External Category";
+    episode.enclosure = {
+      url: episode.audioUrl!,
+      type: "audio/mpeg",
+      length: "1048576",
+    };
+    player.loadEpisode(episode);
+    const audio = container.querySelector("audio")!;
+    const notesBody = container.querySelector(".podcast-episode-notes-body");
+    const link = container.querySelector<HTMLAnchorElement>(
+      ".podcast-episode-meta-value a",
+    );
+    audio.currentTime = 51;
+    Object.defineProperty(audio, "paused", { configurable: true, value: false });
+    expect(container.querySelector(".podcast-episode-details summary")?.textContent).toBe("节目详情");
+    expect(container.querySelector(".podcast-episode-notes-title")?.textContent).toBe("节目说明");
+
+    player.refreshLocalization("en");
+
+    const labels = Array.from(
+      container.querySelectorAll<HTMLElement>(".podcast-episode-meta-label"),
+      (element) => element.textContent,
+    );
+    expect(labels).toEqual(
+      expect.arrayContaining([
+        "Published",
+        "Duration",
+        "Author",
+        "Explicit",
+        "Season",
+        "Episode",
+        "Type",
+        "Category",
+        "Link",
+        "Size",
+      ]),
+    );
+    expect(container.querySelector(".podcast-episode-details summary")?.textContent).toBe("Episode details");
+    expect(container.querySelector(".podcast-episode-notes-title")?.textContent).toBe("Show notes");
+    expect(container.textContent).toContain("External Author");
+    expect(container.textContent).toContain("External Type");
+    expect(container.textContent).toContain("External Category");
+    expect(container.textContent).toContain("Yes");
+    expect(notesBody?.textContent).toContain("External show notes");
+    expect(link?.textContent).toBe("Open episode");
+    expect(link?.href).toBe(episode.link);
+    expect(container.querySelector("audio")).toBe(audio);
+    expect(audio.currentTime).toBe(51);
+    expect(audio.paused).toBe(false);
+
+    player.refreshLocalization("zh-CN");
+    expect(container.querySelector(".podcast-episode-details summary")?.textContent).toBe("节目详情");
+    expect(container.querySelector(".podcast-episode-notes-title")?.textContent).toBe("节目说明");
+    expect(container.textContent).toContain("是");
+    expect(container.querySelector("audio")).toBe(audio);
+  });
+
   it("localizes every stable 5-120 minute sleep option in both locales", () => {
     const titles: string[] = [];
     vi.spyOn(Menu.prototype, "addItem").mockImplementation(function addItem(callback) {

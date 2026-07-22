@@ -115,7 +115,6 @@ interface TestPlugin {
 interface TestView {
   feeds: FeedMetadata[];
   filters: DiscoverFilters;
-  categoryMap: { categories: Record<string, unknown> };
   filteredFeeds: FeedMetadata[];
   pageSize: number;
   currentPage: number;
@@ -224,7 +223,7 @@ describe("DiscoverView (P1-3)", () => {
     expect(view.containerEl.textContent).toContain(expected);
   });
 
-  it("loadData() loads feeds, generates category map, and restores saved filters", async () => {
+  it("loadData() loads feeds and restores saved filters without legacy category state", async () => {
     const saved: Partial<DiscoverFilters> = {
       query: "technology",
       selectedTypes: ["Blog"],
@@ -240,11 +239,7 @@ describe("DiscoverView (P1-3)", () => {
     expect(view.filters.selectedTypes).toEqual(["Blog"]);
     expect(view.filters.selectedTags).toEqual(["ai"]);
 
-    const categoryMap = view.categoryMap;
-    expect(categoryMap).toBeTruthy();
-    expect(Object.keys(categoryMap.categories)).toEqual(
-      expect.arrayContaining(["Technology", "World"]),
-    );
+    expect(view).not.toHaveProperty("categoryMap");
 
     const filtered = view.filteredFeeds;
     expect(filtered).toHaveLength(1);

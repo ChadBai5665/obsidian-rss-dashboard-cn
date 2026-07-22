@@ -2,9 +2,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const files = [
+  "src/views/reader-view.ts",
   "src/views/discover-view.ts",
   "src/views/kagi-smallweb-view.ts",
   "src/views/podcast-player.ts",
+  "src/views/video-player.ts",
   "src/settings/tabs/highlights-settings-tab.ts",
   "src/settings/tabs/import-export-settings-tab.ts",
   "src/settings/tabs/tags-settings-tab.ts",
@@ -25,8 +27,28 @@ describe("Task 5 visible-string audit", () => {
       " Add to...",
       'setButtonText("Case")',
       'name: "Default Twitter tag"',
+      'text: "Feed description"',
+      'text: "No feed description available."',
+      'text: "Open video at source"',
+      'text: "No related videos found"',
+      'text: "Episode details"',
+      'text: "Show notes"',
     ];
 
     expect(forbidden.filter((literal) => source.includes(literal))).toEqual([]);
+  });
+
+  it("keeps removed Discover renderers out of the live view", () => {
+    const source = readFileSync("src/views/discover-view.ts", "utf8");
+    const removedMethods = [
+      "renderSidebarHeader(",
+      "renderNavTabs(",
+      "renderSearch(",
+      "renderTypeFilter(",
+      "renderCategoryTree(",
+      "renderCategoryNode(",
+    ];
+
+    expect(removedMethods.filter((method) => source.includes(method))).toEqual([]);
   });
 });

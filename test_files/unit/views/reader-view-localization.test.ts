@@ -3,16 +3,19 @@ import { ReaderView } from "../../../src/views/reader-view";
 import { DEFAULT_SETTINGS } from "../../../src/types/types";
 import type { FeedItem } from "../../../src/types/types";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
+import { RESTRICTED_ARTICLE_REASON } from "../../../src/utils/full-article-fetch";
 
 type ReaderInternals = {
   contentEl: HTMLElement;
   readingContainer: HTMLElement;
   currentItem: FeedItem | null;
+  displayRequestSequence: number;
   readOrFetchExplicitArticleContent(item: FeedItem): Promise<{
     content: string;
     failureType: "none";
   }>;
-  displayVideo(item: FeedItem): Promise<void>;
+  displayVideo(item: FeedItem, displayRequest: number): Promise<void>;
+  displayPodcast(item: FeedItem, displayRequest: number): Promise<void>;
   prependFallbackHeroForSavedMarkdown(item: FeedItem, html: string): string;
   webViewerIntegration: {
     openInWebViewer(url: string, title: string): Promise<boolean>;
@@ -95,7 +98,10 @@ describe("Reader Chinese localization", () => {
     const media = internal.readingContainer.createEl("audio");
     media.currentTime = 42;
     Object.defineProperty(media, "paused", { configurable: true, value: false });
-    const originalHtml = internal.readingContainer.querySelector(".rss-reader-article")?.innerHTML;
+    const articleHeader = internal.readingContainer.querySelector(".rss-reader-article-header");
+    const articleContent = internal.readingContainer.querySelector(".rss-reader-article-content");
+    const originalHeaderHtml = articleHeader?.innerHTML;
+    const originalContentHtml = articleContent?.innerHTML;
 
     (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "en";
     view.refreshLocalization();
@@ -107,7 +113,115 @@ describe("Reader Chinese localization", () => {
     expect(media.currentTime).toBe(42);
     expect(media.paused).toBe(false);
     expect(internal.readingContainer.querySelector(".rss-reader-content-basis")?.textContent).toBe("Feed content");
-    expect(internal.readingContainer.querySelector(".rss-reader-article")?.innerHTML).toBe(originalHtml);
+    expect(internal.readingContainer.querySelector(".rss-reader-article-header")).toBe(articleHeader);
+    expect(internal.readingContainer.querySelector(".rss-reader-article-content")).toBe(articleContent);
+    expect(articleHeader?.innerHTML).toBe(originalHeaderHtml);
+    expect(articleContent?.innerHTML).toBe(originalContentHtml);
+  });
+
+  it("refreshes every rendered article-owned label zh-en-zh without changing source content or nodes", async () => {
+    const view = makeReader("zh-CN");
+    const internal = view as unknown as ReaderInternals;
+    await view.onOpen();
+    vi.spyOn(internal, "readOrFetchExplicitArticleContent").mockResolvedValue({
+      content: "",
+      failureType: "none",
+    });
+    const item = makeArticle({
+      guid: "live-article-labels",
+      title: "External immutable title",
+      description: "",
+      content: "<p>External immutable body</p>",
+      restrictedReason: RESTRICTED_ARTICLE_REASON,
+    });
+
+    await view.displayItem(item, [], { contentBasis: "feed" });
+
+    const header = internal.readingContainer.querySelector(".rss-reader-article-header");
+    const content = internal.readingContainer.querySelector(".rss-reader-article-content");
+    const sourceLink = internal.readingContainer.querySelector<HTMLAnchorElement>(
+      ".rss-reader-paywall-banner-link",
+    );
+    expect(internal.readingContainer.querySelector(".rss-reader-description-callout summary")?.textContent).toBe("订阅源简介");
+    expect(internal.readingContainer.querySelector(".rss-reader-description-body")?.textContent).toBe("暂无订阅源简介。");
+    expect(internal.readingContainer.querySelector(".rss-reader-paywall-banner-text")?.textContent).toBe("全文可能被截断、受限或需付费访问。");
+    expect(sourceLink?.textContent).toBe("前往来源页面核对。");
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "en";
+    view.refreshLocalization();
+
+    expect(internal.readingContainer.querySelector(".rss-reader-description-callout summary")?.textContent).toBe("Feed description");
+    expect(internal.readingContainer.querySelector(".rss-reader-description-body")?.textContent).toBe("No feed description available.");
+    expect(internal.readingContainer.querySelector(".rss-reader-paywall-banner-text")?.textContent).toBe("Full article text appears to be truncated, restricted or paywalled.");
+    expect(sourceLink?.textContent).toBe("Click here to double check.");
+    expect(sourceLink?.href).toBe(item.link);
+    expect(internal.readingContainer.querySelector(".rss-reader-article-header")).toBe(header);
+    expect(internal.readingContainer.querySelector(".rss-reader-article-content")).toBe(content);
+    expect(header?.textContent).toContain("External immutable title");
+    expect(content?.textContent).toContain("External immutable body");
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "zh-CN";
+    view.refreshLocalization();
+    expect(internal.readingContainer.querySelector(".rss-reader-description-callout summary")?.textContent).toBe("订阅源简介");
+    expect(internal.readingContainer.querySelector(".rss-reader-paywall-banner-text")?.textContent).toBe("全文可能被截断、受限或需付费访问。");
+  });
+
+  it("refreshes the video source banner zh-en-zh while preserving its external URL", async () => {
+    const view = makeReader("zh-CN");
+    const internal = view as unknown as ReaderInternals;
+    await view.onOpen();
+    const item = makeArticle({
+      guid: "video-source-live",
+      mediaType: "video",
+      link: "https://example.com/external-video-source",
+    });
+
+    await view.displayItem(item);
+    const link = internal.readingContainer.querySelector<HTMLAnchorElement>(
+      ".rss-reader-video-banner-link",
+    );
+    expect(internal.readingContainer.querySelector(".rss-reader-video-banner-text")?.textContent).toBe("此内容似乎是视频，请前往来源页面观看。");
+    expect(link?.textContent).toBe("在来源处打开视频");
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "en";
+    view.refreshLocalization();
+    expect(internal.readingContainer.querySelector(".rss-reader-video-banner-text")?.textContent).toBe("This item appears to be a video. Open the source page to watch.");
+    expect(link?.textContent).toBe("Open video at source");
+    expect(link?.href).toBe(item.link);
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "zh-CN";
+    view.refreshLocalization();
+    expect(link?.textContent).toBe("在来源处打开视频");
+  });
+
+  it.each([
+    ["video", "displayVideo", "未找到视频 ID，无法播放此视频。", "Video id not found. Cannot play this video."],
+    ["podcast", "displayPodcast", "未找到音频链接，无法播放此播客。", "Audio url not found. Cannot play this podcast."],
+  ] as const)("refreshes the rendered missing-%s path zh-en-zh", async (mediaType, method, zh, en) => {
+    const view = makeReader("zh-CN");
+    const internal = view as unknown as ReaderInternals;
+    await view.onOpen();
+    const item = makeArticle({
+      guid: `missing-${mediaType}-live`,
+      mediaType,
+      description: "",
+      content: "<p>External fallback body</p>",
+    });
+    internal.currentItem = item;
+    internal.displayRequestSequence = 1;
+
+    await internal[method](item, 1);
+    const error = internal.readingContainer.querySelector(".rss-reader-error");
+    expect(error?.textContent).toContain(zh);
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "en";
+    view.refreshLocalization();
+    expect(error?.textContent).toContain(en);
+    expect(internal.readingContainer.textContent).toContain("External fallback body");
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "zh-CN";
+    view.refreshLocalization();
+    expect(error?.textContent).toContain(zh);
   });
 
   it("localizes the real video fallback and feed-description surfaces", async () => {
@@ -302,7 +416,7 @@ describe("Reader Chinese localization", () => {
     expect(item).not.toHaveProperty("contentBasis");
   });
 
-  it("localizes video-podcast fallback, related heading, and empty state", async () => {
+  it("refreshes native video and related labels zh-en-zh without replacing playback", async () => {
     const app = { workspace: { getLeavesOfType: vi.fn(() => []) }, vault: {} };
     const view = new ReaderView(
       { app } as never,
@@ -322,9 +436,26 @@ describe("Reader Chinese localization", () => {
     await view.displayItem(item, [], { contentBasis: "title-description" });
 
     const root = (view as unknown as ReaderInternals).readingContainer;
+    const video = root.querySelector("video")!;
+    video.currentTime = 23;
+    Object.defineProperty(video, "paused", { configurable: true, value: false });
     expect(root.querySelector("video")?.textContent).toContain("您的浏览器不支持视频播放。");
     expect(root.querySelector("h4")?.textContent).toBe("来自同一频道");
     expect(root.querySelector(".rss-video-related-empty")?.textContent).toBe("未找到相关视频");
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "en";
+    view.refreshLocalization();
+    expect(root.querySelector("video")).toBe(video);
+    expect(video.currentTime).toBe(23);
+    expect(video.paused).toBe(false);
+    expect(video.textContent).toContain("Your browser does not support the video tag.");
+    expect(root.querySelector("h4")?.textContent).toBe("From the same channel");
+    expect(root.querySelector(".rss-video-related-empty")?.textContent).toBe("No related videos found");
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "zh-CN";
+    view.refreshLocalization();
+    expect(root.querySelector("video")).toBe(video);
+    expect(root.querySelector("h4")?.textContent).toBe("来自同一频道");
   });
 
   it.each([
@@ -370,6 +501,16 @@ describe("Reader Chinese localization", () => {
     expect(internal.readingContainer.querySelector<HTMLAnchorElement>(".rss-reader-error-link")?.href).toBe(item.link);
     expect(openInWebViewer).not.toHaveBeenCalled();
     expect(open).not.toHaveBeenCalled();
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "en";
+    view.refreshLocalization();
+    expect(internal.readingContainer.querySelector(".rss-reader-error")?.textContent).toContain("Video URL not found");
+    expect(internal.readingContainer.querySelector(".rss-reader-error-link")?.textContent).toBe("Open video at source");
+    expect(internal.readingContainer.querySelector<HTMLAnchorElement>(".rss-reader-error-link")?.href).toBe(item.link);
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "zh-CN";
+    view.refreshLocalization();
+    expect(internal.readingContainer.querySelector(".rss-reader-error-link")?.textContent).toBe("在来源处打开视频");
     open.mockRestore();
   });
 
@@ -396,6 +537,16 @@ describe("Reader Chinese localization", () => {
     await view.onOpen();
     vi.spyOn(internal, "readOrFetchExplicitArticleContent").mockResolvedValue({ content: "", failureType: "none" });
     await view.displayItem(item, [], { contentBasis: "feed" });
-    expect(internal.readingContainer.querySelector(".rss-reader-fallback-hero")?.getAttribute("alt")).toBe("主图");
+    const hero = internal.readingContainer.querySelector(".rss-reader-fallback-hero");
+    expect(hero?.getAttribute("alt")).toBe("主图");
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "en";
+    view.refreshLocalization();
+    expect(internal.readingContainer.querySelector(".rss-reader-fallback-hero")).toBe(hero);
+    expect(hero?.getAttribute("alt")).toBe("Hero image");
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "zh-CN";
+    view.refreshLocalization();
+    expect(hero?.getAttribute("alt")).toBe("主图");
   });
 });
