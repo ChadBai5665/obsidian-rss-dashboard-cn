@@ -155,13 +155,22 @@ describe("VideoPlayer", () => {
 
   it("renders related videos empty state initially (findRelatedVideos returns [])", () => {
     const container = createContainer();
-    const player = new VideoPlayer(container);
+    const player = new VideoPlayer(container, undefined, undefined, true, "en");
 
     player.loadVideo(baseItem());
 
     expect(
       container.querySelector(".rss-video-related-empty")?.textContent,
     ).toContain("No related videos found");
+  });
+
+  it("defaults to Chinese chrome and keeps source-authored video metadata", () => {
+    const container = createContainer();
+    const player = new VideoPlayer(container);
+    player.loadVideo(baseItem({ title: "External video title" }));
+
+    expect(container.textContent).toContain("在 YouTube 中观看");
+    expect(container.textContent).toContain("External video title");
   });
 
   it("setRelatedVideos filters, excludes current, and caps at 5", () => {
@@ -438,12 +447,13 @@ describe("VideoPlayer", () => {
     });
 
     const logSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
 
     player.loadVideo(baseItem());
 
     expect(logSpy).toHaveBeenCalledWith(
       "[Stub Notice]",
-      "Error loading video: boom",
+      "无法加载此视频。",
     );
   });
 });

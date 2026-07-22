@@ -82,6 +82,36 @@ beforeEach(() => {
 });
 
 describe("renderTagsSettingsTab()", () => {
+  it("localizes all seven auto-tag groups in Chinese while preserving stored tag names", () => {
+    const containerEl = document.body.createDiv();
+    const settings = cloneSettings();
+    settings.locale = "zh-CN";
+    settings.availableTags = [{ name: "ExternalTag", color: "#d04747" }];
+    settings.media.defaultVideoTags = ["ExternalTag"];
+    const plugin = {
+      app: obsidian.App.createMock(),
+      settings,
+      saveSettings: vi.fn(async () => {}),
+      refreshOpenTagColorViews: vi.fn(async () => {}),
+    } as unknown as RssDashboardPlugin;
+
+    renderTagsSettingsTab(containerEl, plugin, vi.fn());
+
+    const names = Array.from(
+      containerEl.querySelectorAll(".setting-item-name"),
+    ).map((el) => el.textContent?.trim());
+    expect(names.slice(1, 8)).toEqual([
+      "视频文章默认标签",
+      "Twitter/X 默认标签",
+      "Mastodon 默认标签",
+      "YouTube 默认标签",
+      "播客默认标签",
+      "RSS 默认标签",
+      "Smallweb 默认标签",
+    ]);
+    expect(containerEl.textContent).toContain("ExternalTag");
+  });
+
   it("renders Auto Tagging before the tag list and add-tag section", () => {
     const containerEl = document.body.appendChild(
       document.createElement("div"),

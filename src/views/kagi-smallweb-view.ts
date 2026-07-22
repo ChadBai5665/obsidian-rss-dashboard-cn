@@ -93,6 +93,10 @@ export class KagiSmallwebView extends ItemView {
     this.renderSmallwebFooter(container);
   }
 
+  public refreshLocalization(): void {
+    this.render();
+  }
+
   private async fetchSmallwebFeed(forceRefresh = false): Promise<void> {
     const CACHE_DURATION_MS = 5 * 60 * 1000;
     if (
@@ -233,7 +237,7 @@ export class KagiSmallwebView extends ItemView {
   private renderSmallwebLoading(container: HTMLElement): void {
     const loadingEl = container.createDiv({ cls: "rss-discover-loading" });
     setIcon(loadingEl, "loader-2");
-    loadingEl.appendText(" Loading Kagi Smallweb feed...");
+    loadingEl.appendText(` ${this.t("smallweb.loading")}`);
 
     const skeletonGrid = container.createDiv({ cls: "rss-discover-grid" });
     for (let i = 0; i < 6; i++) {
@@ -267,9 +271,7 @@ export class KagiSmallwebView extends ItemView {
   private renderSmallwebError(container: HTMLElement): void {
     const errorEl = container.createDiv({ cls: "rss-discover-error" });
     setIcon(errorEl, "alert-triangle");
-    errorEl.appendText(
-      " Could not load Kagi Smallweb feed. Check your internet connection.",
-    );
+    errorEl.appendText(` ${this.t("smallweb.loadFailed")}`);
 
     const retryBtn = errorEl.createEl("button", { cls: "mod-cta" });
     retryBtn.textContent = this.t("common.retry");
@@ -285,7 +287,7 @@ export class KagiSmallwebView extends ItemView {
     const backBtn = header.createDiv({
       cls: "rss-dashboard-nav-button",
     });
-    backBtn.appendText("← Discover");
+    backBtn.appendText(`← ${this.t("smallweb.back")}`);
     backBtn.addEventListener("click", () => {
       void this.plugin.activateDiscoverView();
     });
@@ -330,7 +332,7 @@ export class KagiSmallwebView extends ItemView {
     });
     setIcon(warningEl, "alert-triangle");
     warningEl.createSpan({
-      text: " Warning: Not all feeds have a direct RSS link. You may have to find the RSS link manually for some feeds or use a third-party service to convert the feed to RSS.",
+      text: ` ${this.t("smallweb.warning")}`,
     });
 
     // Last update time with link to API
@@ -447,7 +449,7 @@ export class KagiSmallwebView extends ItemView {
     if (this.smallwebFilteredEntries.length === 0) {
       const emptyState = grid.createDiv({ cls: "rss-discover-empty" });
       setIcon(emptyState, "search");
-      emptyState.appendText(" No posts found");
+      emptyState.appendText(` ${this.t("smallweb.noPosts")}`);
       return;
     }
 
@@ -520,7 +522,7 @@ export class KagiSmallwebView extends ItemView {
       cls: "rss-discover-card-preview-btn",
     });
     setIcon(previewBtn, "globe");
-    previewBtn.createSpan({ text: " View Blog" });
+    previewBtn.createSpan({ text: ` ${this.t("smallweb.viewBlog")}` });
     previewBtn.addEventListener("click", () => {
       if (this.plugin.settings.useWebViewer) {
         // Open in sidebar using internal browser
@@ -543,20 +545,20 @@ export class KagiSmallwebView extends ItemView {
         cls: "rss-smallweb-following-btn",
       });
       setIcon(followingBtn, "check");
-      followingBtn.createSpan({ text: " Following" });
+      followingBtn.createSpan({ text: ` ${this.t("discover.following")}` });
 
       // Add hover effect for unfollow
       followingBtn.addEventListener("mouseenter", () => {
         followingBtn.empty();
         setIcon(followingBtn, "x");
-        followingBtn.createSpan({ text: " Unfollow" });
+        followingBtn.createSpan({ text: ` ${this.t("smallweb.unfollow")}` });
         followingBtn.addClass("rss-smallweb-unfollow-hover");
       });
 
       followingBtn.addEventListener("mouseleave", () => {
         followingBtn.empty();
         setIcon(followingBtn, "check");
-        followingBtn.createSpan({ text: " Following" });
+        followingBtn.createSpan({ text: ` ${this.t("discover.following")}` });
         followingBtn.removeClass("rss-smallweb-unfollow-hover");
       });
 
@@ -568,7 +570,7 @@ export class KagiSmallwebView extends ItemView {
         cls: "rss-discover-card-add-btn",
       });
       setIcon(followBtn, "plus");
-      followBtn.createSpan({ text: " Add to..." });
+      followBtn.createSpan({ text: ` ${this.t("discover.addTo")}` });
 
       // Get default folder from settings
       const defaultFolder =

@@ -451,13 +451,13 @@ describe("onload() initialization", () => {
     ).toBeGreaterThanOrEqual(7);
   });
 
-  it("rerenders every open localized view without changing command registrations", async () => {
-    const renders = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
-    const leavesByType = new Map<string, Array<{ view: { render: ReturnType<typeof vi.fn> } }>>([
-      ["rss-dashboard-view", [{ view: { render: renders[0] } }]],
-      ["rss-discover-view", [{ view: { render: renders[1] } }]],
-      ["rss-reader-view", [{ view: { render: renders[2] } }]],
-      ["rss-smallweb-view", [{ view: { render: renders[3] } }]],
+  it("refreshes localization exactly once in every open view without changing command registrations", async () => {
+    const refreshes = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+    const leavesByType = new Map<string, Array<{ view: { refreshLocalization: ReturnType<typeof vi.fn> } }>>([
+      ["rss-dashboard-view", [{ view: { refreshLocalization: refreshes[0] } }]],
+      ["rss-discover-view", [{ view: { refreshLocalization: refreshes[1] } }]],
+      ["rss-reader-view", [{ view: { refreshLocalization: refreshes[2] } }]],
+      ["rss-smallweb-view", [{ view: { refreshLocalization: refreshes[3] } }]],
     ]);
     plugin.app.workspace.getLeavesOfType = vi.fn((type: string) =>
       leavesByType.get(type) ?? [],
@@ -466,7 +466,7 @@ describe("onload() initialization", () => {
 
     plugin.refreshLocalizedViews();
 
-    for (const render of renders) expect(render).toHaveBeenCalledTimes(1);
+    for (const refresh of refreshes) expect(refresh).toHaveBeenCalledTimes(1);
     expect(commandSpy).not.toHaveBeenCalled();
   });
 
@@ -1333,7 +1333,7 @@ describe("URI add-feed handling", () => {
 
     expect(noticeSpy).toHaveBeenCalledWith(
       "[Stub Notice]",
-      "Unsupported RSS Dashboard URI action: unknown",
+      "不支持的 RSS Dashboard URI 操作：unknown",
     );
   });
 
@@ -1352,7 +1352,24 @@ describe("URI add-feed handling", () => {
     expect(addFeedSpy).not.toHaveBeenCalled();
     expect(noticeSpy).toHaveBeenCalledWith(
       "[Stub Notice]",
-      "Missing required URL parameter for add-feed.",
+      "add-feed 操作需要提供地址。",
+    );
+  });
+
+  it("uses the selected English locale for URI notices", async () => {
+    const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    await plugin.onload();
+    plugin.settings.locale = "en";
+    const handler = (
+      plugin.registerObsidianProtocolHandler as ReturnType<typeof vi.fn>
+    ).mock.calls[0][1] as (params: Record<string, string>) => void;
+
+    handler({ action: "add-feed" });
+    await flushPromises();
+
+    expect(noticeSpy).toHaveBeenCalledWith(
+      "[Stub Notice]",
+      "The add-feed action requires a URL.",
     );
   });
 
@@ -1371,7 +1388,7 @@ describe("URI add-feed handling", () => {
     expect(addFeedSpy).not.toHaveBeenCalled();
     expect(noticeSpy).toHaveBeenCalledWith(
       "[Stub Notice]",
-      "URL must start with http:// or https://",
+      "请输入有效的 HTTP 或 HTTPS 订阅地址。",
     );
   });
 

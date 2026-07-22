@@ -811,7 +811,13 @@ export class ReaderView extends ItemView {
 
     const header = this.contentEl.createDiv({ cls: "rss-reader-header" });
 
-    const backButton = header.createDiv({ cls: "rss-reader-back-button" });
+    const backButton = header.createDiv({
+      cls: "rss-reader-back-button",
+      attr: {
+        title: this.t("dashboard.backToDashboard"),
+        "aria-label": this.t("dashboard.backToDashboard"),
+      },
+    });
     setIcon(backButton, "arrow-left");
 
     const handleBackClick = () => {
@@ -831,7 +837,7 @@ export class ReaderView extends ItemView {
 
     // Save button
     this.saveButton = actions.createDiv({
-      cls: "rss-reader-action-button",
+      cls: "rss-reader-action-button rss-reader-save-button",
       attr: {
         title: this.t("reader.save"),
         "aria-label": this.t("reader.save"),
@@ -941,7 +947,7 @@ export class ReaderView extends ItemView {
 
     // Open in browser button
     const browserButton = actions.createDiv({
-      cls: "rss-reader-action-button",
+      cls: "rss-reader-action-button rss-reader-browser-button",
       attr: {
         title: this.t("reader.openBrowser"),
         "aria-label": this.t("reader.openBrowser"),
@@ -1023,6 +1029,45 @@ export class ReaderView extends ItemView {
 
     this.applyReaderFormat();
     return Promise.resolve();
+  }
+
+  /**
+   * Updates the already-open reader's plugin-owned chrome in place. In
+   * particular this must not call onOpen/displayItem: doing so would discard
+   * the active article and recreate podcast/video elements.
+   */
+  public refreshLocalization(): void {
+    const setAccessibleLabel = (selector: string, label: string): void => {
+      const element = this.contentEl.querySelector<HTMLElement>(selector);
+      if (!element) return;
+      element.setAttribute("title", label);
+      element.setAttribute("aria-label", label);
+    };
+
+    this.syncReaderTitle();
+    setAccessibleLabel(".rss-reader-back-button", this.t("dashboard.backToDashboard"));
+    setAccessibleLabel(".rss-reader-save-button", this.t("reader.save"));
+    setAccessibleLabel(".rss-reader-read-toggle", this.t("reader.toggleRead"));
+    setAccessibleLabel(".rss-reader-star-toggle", this.t("reader.toggleStar"));
+    setAccessibleLabel(".rss-dashboard-tags-toggle", this.t("article.manageTags"));
+    setAccessibleLabel(".rss-reader-format-button", this.t("reader.format"));
+    setAccessibleLabel(".rss-reader-browser-button", this.t("reader.openBrowser"));
+
+    const basis = this.readingContainer?.querySelector<HTMLElement>(
+      ".rss-reader-content-basis",
+    );
+    if (basis && this.actualContentBasis) {
+      basis.setText(
+        getContentBasisLabel(
+          this.actualContentBasis,
+          this.settings.locale ?? "zh-CN",
+        ),
+      );
+    }
+
+    this.podcastPlayer?.refreshLocalization(this.settings.locale ?? "zh-CN");
+    this.videoPlayer?.refreshLocalization(this.settings.locale ?? "zh-CN");
+    this.updateToggleButtons();
   }
 
   async onClose(): Promise<void> {

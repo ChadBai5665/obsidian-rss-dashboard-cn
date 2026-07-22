@@ -1097,6 +1097,11 @@ export class RssDashboardView extends ItemView {
     }
   }
 
+  /** Refresh localized chrome while preserving the dashboard's stable filters. */
+  public refreshLocalization(): void {
+    this.render();
+  }
+
   private scheduleRender(): void {
     if (this.scheduledRenderTimeout !== null) {
       return;

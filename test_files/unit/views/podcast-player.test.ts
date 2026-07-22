@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App } from "obsidian";
+import { App, Menu } from "obsidian";
 import { PodcastPlayer } from "../../../src/views/podcast-player";
 import {
   installMediaElementPolyfills,
@@ -31,6 +31,55 @@ describe("PodcastPlayer", () => {
       audioUrl: "https://example.com/ep1.mp3",
     };
   }
+
+  it("switches player chrome in place without replacing playback or source metadata", () => {
+    const container = document.body.createDiv();
+    const player = new PodcastPlayer(container, new App(), "obsidian");
+    const episode = baseEpisode();
+    player.loadEpisode(episode);
+    const audio = container.querySelector("audio")!;
+    audio.currentTime = 37;
+    Object.defineProperty(audio, "paused", { configurable: true, value: false });
+
+    player.refreshLocalization("en");
+
+    expect(container.querySelector("audio")).toBe(audio);
+    expect(audio.currentTime).toBe(37);
+    expect(audio.paused).toBe(false);
+    expect(container.querySelector(".podcast-title-display")?.textContent).toBe("Ep 1");
+    expect(container.querySelector(".rss-sleep-timer-btn")?.getAttribute("title")).toBe("Sleep Timer");
+  });
+
+  it("localizes every stable 5-120 minute sleep option in both locales", () => {
+    const titles: string[] = [];
+    vi.spyOn(Menu.prototype, "addItem").mockImplementation(function addItem(callback) {
+      const item = {
+        setTitle(title: string) {
+          titles.push(title);
+          return this;
+        },
+        onClick() {
+          return this;
+        },
+        setChecked() {
+          return this;
+        },
+      };
+      callback(item as never);
+      return this;
+    });
+    const player = new PodcastPlayer(document.body.createDiv(), new App());
+    const openMenu = (player as unknown as { showSleepTimerMenu(event: MouseEvent): void })
+      .showSleepTimerMenu.bind(player);
+
+    openMenu(new MouseEvent("click"));
+    expect(titles).toEqual(expect.arrayContaining(["5 分钟", "120 分钟", "关闭", "节目结束时"]));
+
+    titles.length = 0;
+    player.refreshLocalization("en");
+    openMenu(new MouseEvent("click"));
+    expect(titles).toEqual(expect.arrayContaining(["5 minutes", "120 minutes", "Off", "End of episode"]));
+  });
 
   describe("sorting", () => {
     it("does not recreate the audio element when sorting the playlist", () => {

@@ -97,6 +97,54 @@ export class PodcastPlayer {
     return createTranslator(this.locale)(key, params);
   }
 
+  /** Update localized player chrome without replacing the active audio node. */
+  public refreshLocalization(locale: Locale): void {
+    this.locale = locale;
+    const label = (
+      selector: string,
+      key: Parameters<ReturnType<typeof createTranslator>>[0],
+    ): void => {
+      const element = this.container.querySelector<HTMLElement>(selector);
+      if (!element) return;
+      const value = this.t(key);
+      element.setAttribute("title", value);
+      element.setAttribute("aria-label", value);
+    };
+    label(".rss-shuffle-btn", "media.shuffle");
+    label(".rss-rewind", "media.rewind");
+    label(".rss-play-pause", "media.playPause");
+    label(".rss-forward", "media.forward");
+    label(".rss-repeat-btn", "media.repeat");
+    label(".rss-sleep-timer-btn", "media.sleep");
+    label(".rss-volume", "media.volume");
+    if (this.sleepTimerRestartBtn) {
+      this.sleepTimerRestartBtn.setAttribute(
+        "title",
+        this.t("podcast.restartSleep"),
+      );
+    }
+    const playlistTitle =
+      this.container.querySelector<HTMLElement>(".playlist-title");
+    playlistTitle?.setText(
+      this.t("media.playlist", { count: this.playlist.length }),
+    );
+    const autoplay = this.container.querySelector<HTMLElement>(
+      ".playlist-autoplay-container",
+    );
+    if (autoplay) {
+      autoplay.setAttribute("title", this.t("podcast.continuous"));
+      autoplay.querySelector("span")?.setText(this.t("media.autoplay"));
+    }
+    const sorts =
+      this.container.querySelectorAll<HTMLElement>(".playlist-sort-btn");
+    sorts[0]?.setText(this.t("media.recent"));
+    sorts[1]?.setText(this.t("media.oldest"));
+    this.container
+      .querySelector<HTMLElement>(".playlist-empty")
+      ?.setText(this.t("media.noEpisodes"));
+    this.updateSleepTimerDisplay();
+  }
+
   setPlaylist(playlist: FeedItem[]) {
     this.playlist = playlist;
     this.originalPlaylist = [...playlist];
@@ -1312,16 +1360,19 @@ export class PodcastPlayer {
   private showSleepTimerMenu(event: MouseEvent): void {
     const menu = new Menu();
 
-    const options = [
+    const options: Array<{
+      label: string;
+      minutes?: number;
+      action?: () => void;
+    }> = [
       { label: this.t("podcast.off"), action: () => this.clearSleepTimer() },
-      { label: "5 minutes", minutes: 5 },
-      { label: "10 minutes", minutes: 10 },
-      { label: "15 minutes", minutes: 15 },
-      { label: "30 minutes", minutes: 30 },
-      { label: "45 minutes", minutes: 45 },
-      { label: "60 minutes", minutes: 60 },
-      { label: "90 minutes", minutes: 90 },
-      { label: "120 minutes", minutes: 120 },
+      ...[5, 10, 15, 30, 45, 60, 90, 120].map((minutes) => ({
+        label: this.t(
+          minutes === 1 ? "podcast.sleepMinute" : "podcast.sleepMinutes",
+          { count: minutes },
+        ),
+        minutes,
+      })),
       { label: this.t("podcast.end"), action: () => this.setSleepTimer("end") },
     ];
 

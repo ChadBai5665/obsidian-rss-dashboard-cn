@@ -38,6 +38,26 @@ beforeEach(() => {
 });
 
 describe("renderMediaSettingsTab()", () => {
+  it("defaults missing locale to Chinese while keeping stored theme values stable", () => {
+    const containerEl = document.body.createDiv();
+    const settings = cloneSettings();
+    delete (settings as { locale?: unknown }).locale;
+    const plugin = {
+      app: obsidian.App.createMock(),
+      settings,
+      saveSettings: vi.fn(async () => {}),
+      clearPlaybackProgress: vi.fn(async () => 0),
+      getActiveReaderView: vi.fn(async () => null),
+    } as unknown as RssDashboardPlugin;
+
+    renderMediaSettingsTab(containerEl, plugin);
+
+    expect(containerEl.textContent).toContain("播放进度");
+    const theme = getSettingByName(containerEl, "播放器主题").querySelector("select")!;
+    expect(Array.from(theme.options).find((option) => option.value === "obsidian")?.text).toBe("默认");
+    expect(theme.value).toBe(settings.media.podcastTheme);
+  });
+
   it("renders playback settings first and does not show folder defaults", async () => {
     const containerEl = document.body.appendChild(
       document.createElement("div"),

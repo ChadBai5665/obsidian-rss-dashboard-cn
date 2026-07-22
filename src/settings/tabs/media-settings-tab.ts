@@ -29,7 +29,7 @@ export function renderMediaSettingsTab(
   containerEl: HTMLElement,
   plugin: MediaSettingsPlugin,
 ): void {
-  const t = createTranslator(plugin.settings.locale ?? "en");
+  const t = createTranslator(plugin.settings.locale ?? "zh-CN");
   new Setting(containerEl).setName(t("settings.media.playback")).setHeading();
 
   new Setting(containerEl)
@@ -89,16 +89,16 @@ export function renderMediaSettingsTab(
     .setDesc(t("settings.media.themeDesc"))
     .addDropdown((dropdown) =>
       dropdown
-        .addOption("obsidian", "Default")
-        .addOption("minimal", "Minimal")
-        .addOption("gradient", "Gradient")
+        .addOption("obsidian", t("settings.media.themeDefault"))
+        .addOption("minimal", t("settings.media.themeMinimal"))
+        .addOption("gradient", t("settings.media.themeGradient"))
         .addOption("spotify", "Spotify")
         .addOption("nord", "Nord")
         .addOption("dracula", "Dracula")
-        .addOption("solarized", "Solarized dark")
+        .addOption("solarized", t("settings.media.themeSolarizedDark"))
         .addOption("catppuccin", "Catppuccin mocha")
         .addOption("gruvbox", "Gruvbox")
-        .addOption("tokyonight", "Tokyo night")
+        .addOption("tokyonight", t("settings.media.themeTokyoNight"))
         .setValue(plugin.settings.media.podcastTheme)
         .onChange(async (value) => {
           const theme = value as PodcastTheme;

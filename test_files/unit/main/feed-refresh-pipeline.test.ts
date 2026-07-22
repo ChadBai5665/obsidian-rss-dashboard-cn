@@ -680,8 +680,8 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.feedParser.refreshAllFeeds).not.toHaveBeenCalled();
 
     const notices = getNoticeMessages(consoleLogSpy);
-    expect(notices[0]).toBe("Refreshing 5 feeds...");
-    expect(notices).toContain("Feeds refreshed: 5 feeds");
+    expect(notices[0]).toBe("正在刷新 5 个订阅…");
+    expect(notices).toContain("已刷新：5 个订阅");
   });
 
   it("refreshes a single feed via the direct path and does not require an active dashboard view", async () => {
@@ -722,8 +722,8 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(refreshAllDashboards).toHaveBeenCalledTimes(1);
 
     const notices = getNoticeMessages(consoleLogSpy);
-    expect(notices[0]).toBe("Refreshing Feed B...");
-    expect(notices).toContain("Feeds refreshed: Feed B");
+    expect(notices[0]).toBe("正在刷新 Feed B…");
+    expect(notices).toContain("已刷新：Feed B");
   });
 
   it("times out a stalled feed without blocking the rest of a multi-feed refresh", async () => {
@@ -774,8 +774,8 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.activeRefreshState.size).toBe(0);
 
     const notices = getNoticeMessages(consoleLogSpy);
-    expect(notices[0]).toBe("Refreshing 2 feeds...");
-    expect(notices).toContain("Feeds refreshed: 2 feeds (1 timed out)");
+    expect(notices[0]).toBe("正在刷新 2 个订阅…");
+    expect(notices).toContain("已刷新：2 个订阅（1 个超时）");
   });
 
   it("swallows direct refresh errors and shows an error Notice", async () => {
@@ -789,7 +789,7 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.saveData).not.toHaveBeenCalled();
 
     const notices = getNoticeMessages(consoleLogSpy);
-    expect(notices[0]).toBe("Refreshing Feed A...");
+    expect(notices[0]).toBe("正在刷新 Feed A…");
     expect(notices).toContain(
       "来源刷新失败，请查看来源状态了解详情。",
     );
@@ -1675,7 +1675,7 @@ describe("refreshFeeds() pipeline behavior", () => {
 
     const notices = getNoticeMessages(consoleLogSpy);
     expect(notices).toContain(
-      "Could not refresh failed sources. Check source status and try again.",
+      "无法刷新失败来源，请检查来源状态后重试。",
     );
     expect(notices.join(" ")).not.toContain("secret");
     expect(notices.join(" ")).not.toContain("example.com");

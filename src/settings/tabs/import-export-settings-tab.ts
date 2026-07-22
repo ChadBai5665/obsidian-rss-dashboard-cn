@@ -145,9 +145,8 @@ export function renderImportExportSettingsTab(
                   plugin.settings.locale,
                 ).open();
               } catch (e) {
-                new Notice(
-                  `Shard data import failed: ${e instanceof Error ? e.message : "invalid file"}`,
-                );
+                console.error("[RSS Dashboard] Shard data import failed:", e);
+                new Notice(t("settings.import.shardsFailed"));
               }
             })();
           };
@@ -193,9 +192,8 @@ export function renderImportExportSettingsTab(
                   plugin.settings.locale,
                 ).open();
               } catch (e) {
-                new Notice(
-                  `Import failed: ${e instanceof Error ? e.message : "invalid file"}`,
-                );
+                console.error("[RSS Dashboard] Preferences import failed:", e);
+                new Notice(t("settings.import.preferencesFailed"));
               }
             })();
           };

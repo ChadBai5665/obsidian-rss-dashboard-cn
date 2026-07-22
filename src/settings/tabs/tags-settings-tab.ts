@@ -31,28 +31,27 @@ export function renderTagsSettingsTab(
 
   const autoTagSettings: AutoTagSettingConfig[] = [
     {
-      name: "Tag for video articles",
-      description:
-        "Default tag for RSS articles with detected video content (YouTube feeds use the dedicated tag below)",
-      menuTitle: "Select default video tags",
+      name: t("settings.tags.video.name"),
+      description: t("settings.tags.video.desc"),
+      menuTitle: t("settings.tags.video.menu"),
       getSelectedTagNames: () => plugin.settings.media.defaultVideoTags ?? [],
       setSelectedTagNames: (selected) => {
         plugin.settings.media.defaultVideoTags = selected;
       },
     },
     {
-      name: "Default Twitter tag",
-      description: "Default tag for Twitter/X/Nitter feeds",
-      menuTitle: "Select default Twitter tags",
+      name: t("settings.tags.twitter.name"),
+      description: t("settings.tags.twitter.desc"),
+      menuTitle: t("settings.tags.twitter.menu"),
       getSelectedTagNames: () => plugin.settings.media.defaultTwitterTags ?? [],
       setSelectedTagNames: (selected) => {
         plugin.settings.media.defaultTwitterTags = selected;
       },
     },
     {
-      name: "Default Mastodon tag",
-      description: "Default tag for Mastodon feeds",
-      menuTitle: "Select default Mastodon tags",
+      name: t("settings.tags.mastodon.name"),
+      description: t("settings.tags.mastodon.desc"),
+      menuTitle: t("settings.tags.mastodon.menu"),
       getSelectedTagNames: () =>
         plugin.settings.media.defaultMastodonTags ?? [],
       setSelectedTagNames: (selected) => {
@@ -60,36 +59,36 @@ export function renderTagsSettingsTab(
       },
     },
     {
-      name: "Default YouTube tag",
-      description: "Tag used for auto-tagged YouTube content",
-      menuTitle: "Select default YouTube tags",
+      name: t("settings.tags.youtube.name"),
+      description: t("settings.tags.youtube.desc"),
+      menuTitle: t("settings.tags.youtube.menu"),
       getSelectedTagNames: () => plugin.settings.media.defaultYouTubeTags ?? [],
       setSelectedTagNames: (selected) => {
         plugin.settings.media.defaultYouTubeTags = selected;
       },
     },
     {
-      name: "Default podcast tag",
-      description: "Default tag for podcast episodes",
-      menuTitle: "Select default podcast tags",
+      name: t("settings.tags.podcast.name"),
+      description: t("settings.tags.podcast.desc"),
+      menuTitle: t("settings.tags.podcast.menu"),
       getSelectedTagNames: () => plugin.settings.media.defaultPodcastTags ?? [],
       setSelectedTagNames: (selected) => {
         plugin.settings.media.defaultPodcastTags = selected;
       },
     },
     {
-      name: "Default RSS tag",
-      description: "Default tag for RSS articles",
-      menuTitle: "Select default RSS tags",
+      name: t("settings.tags.rss.name"),
+      description: t("settings.tags.rss.desc"),
+      menuTitle: t("settings.tags.rss.menu"),
       getSelectedTagNames: () => plugin.settings.media.defaultRssTags ?? [],
       setSelectedTagNames: (selected) => {
         plugin.settings.media.defaultRssTags = selected;
       },
     },
     {
-      name: "Default smallweb tag",
-      description: "Default tag for smallweb articles",
-      menuTitle: "Select default smallweb tags",
+      name: t("settings.tags.smallweb.name"),
+      description: t("settings.tags.smallweb.desc"),
+      menuTitle: t("settings.tags.smallweb.menu"),
       getSelectedTagNames: () =>
         plugin.settings.media.defaultSmallwebTags ?? [],
       setSelectedTagNames: (selected) => {

@@ -210,6 +210,20 @@ describe("DiscoverView (P1-3)", () => {
     expect(view.containerEl.textContent).toContain("Alpha Tech Blog");
   });
 
+  it.each([
+    ["zh-CN", "没有符合当前筛选条件的订阅"],
+    ["en", "No feeds match your filters"],
+  ] as const)("localizes the empty filtered state in %s", async (locale, expected) => {
+    const { plugin, view } = await createView();
+    plugin.settings.locale = locale;
+    view.loadData();
+    view.filters.query = "no-source-can-match-this";
+    view.filterFeeds();
+    view.render();
+
+    expect(view.containerEl.textContent).toContain(expected);
+  });
+
   it("loadData() loads feeds, generates category map, and restores saved filters", async () => {
     const saved: Partial<DiscoverFilters> = {
       query: "technology",

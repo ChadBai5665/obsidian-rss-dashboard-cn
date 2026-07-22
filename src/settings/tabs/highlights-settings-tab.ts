@@ -203,10 +203,16 @@ export function renderHighlightsSettingsTab(
     });
   } else {
     words.forEach((word, index) => {
-      const matchMode = word.wholeWord ? "Whole word" : "Partial match";
-      const enabledState = word.enabled ? "Enabled" : "Disabled";
+      const matchMode = word.wholeWord
+        ? t("settings.highlight.statusWhole")
+        : t("settings.highlight.statusPartial");
+      const enabledState = word.enabled
+        ? t("settings.highlight.statusEnabled")
+        : t("settings.highlight.statusDisabled");
       const statusParts = [matchMode, enabledState];
-      if (word.caseSensitive) statusParts.push("Case sensitive");
+      if (word.caseSensitive) {
+        statusParts.push(t("settings.highlight.statusCaseSensitive"));
+      }
 
       const openEditModal = () => {
         void (async () => {
@@ -240,7 +246,7 @@ export function renderHighlightsSettingsTab(
       const wordSetting = new Setting(wordsContainer)
         .setName(word.text)
         .setClass("rss-dashboard-highlight-word-setting")
-        .setDesc(statusParts.join(" | "))
+        .setDesc(statusParts.join(t("settings.highlight.statusSeparator")))
         .addColorPicker((colorPicker) =>
           colorPicker
             .setValue(
@@ -278,7 +284,7 @@ export function renderHighlightsSettingsTab(
         )
         .addButton((button) => {
           button
-            .setButtonText("Case")
+            .setButtonText(t("settings.highlight.caseButton"))
             .setTooltip(t("settings.highlight.toggleCase"));
           if (word.caseSensitive) button.setCta();
           return button.onClick(async () => {

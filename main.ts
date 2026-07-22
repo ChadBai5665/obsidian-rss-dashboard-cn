@@ -41,7 +41,6 @@ import { ReaderView, RSS_READER_VIEW_TYPE } from "./src/views/reader-view";
 import {
   FeedParser,
   applyFeedRetentionLimits,
-  formatFeedParseNoticeMessage,
 } from "./src/services/feed-parser";
 import { ArticleSaver } from "./src/services/article-saver";
 import { BackupService } from "./src/services/backup-service";
@@ -90,6 +89,7 @@ import {
 } from "./src/collection/item-identity";
 import type { CollectedItem } from "./src/collection/collected-item";
 import { createTranslator, type Translator } from "./src/i18n";
+import { isLocalizedView } from "./src/views/localized-view";
 
 export interface FeedRefreshResult {
   feed: Feed;
@@ -662,6 +662,15 @@ export default class RssDashboardPlugin extends Plugin {
     return createTranslator(this.settings?.locale ?? "zh-CN")(key, params);
   }
 
+  /** The only path for plugin-owned user notices. */
+  private notify(
+    key: Parameters<Translator>[0],
+    params?: Parameters<Translator>[1],
+    duration?: number,
+  ): Notice {
+    return new Notice(this.t(key, params), duration);
+  }
+
   constructor(app: App, manifest: ConstructorParameters<typeof Plugin>[1]) {
     super(app, manifest);
     this.feedStorageRepository = new FeedStorageRepository(app, {
@@ -1055,8 +1064,9 @@ export default class RssDashboardPlugin extends Plugin {
     ] as const;
     for (const viewType of viewTypes) {
       for (const leaf of this.app.workspace.getLeavesOfType(viewType)) {
-        const render = (leaf.view as unknown as { render?: () => void }).render;
-        render?.call(leaf.view);
+        if (isLocalizedView(leaf.view)) {
+          leaf.view.refreshLocalization();
+        }
       }
     }
   }
@@ -1175,7 +1185,7 @@ export default class RssDashboardPlugin extends Plugin {
       this.settingTab.display();
     }
 
-    new Notice(this.t("plugin.factoryReset"));
+    this.notify("plugin.factoryReset");
   }
 
   /**
@@ -1423,7 +1433,7 @@ export default class RssDashboardPlugin extends Plugin {
           String(err),
         );
       }
-      new Notice(this.t("plugin.initializationFailed"));
+      this.notify("plugin.initializationFailed");
     }
   }
 
@@ -1431,9 +1441,7 @@ export default class RssDashboardPlugin extends Plugin {
     const action = this.resolveRequestedUriAction(params);
 
     if (!action) {
-      new Notice(
-        "Missing URI action. Use action=add-feed with a URL parameter.",
-      );
+      this.notify("plugin.uri.missingAction");
       return;
     }
 
@@ -1443,13 +1451,11 @@ export default class RssDashboardPlugin extends Plugin {
           await this.handleAddFeedUriAction(params);
           return;
         default:
-          new Notice(`Unsupported RSS Dashboard URI action: ${action}`);
+          this.notify("plugin.uri.unsupported", { action });
       }
     } catch (error) {
       console.error("[RSS Dashboard] URI action failed:", error);
-      new Notice(
-        `RSS Dashboard URI action failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-      );
+      this.notify("plugin.uri.failed");
     }
   }
 
@@ -1516,14 +1522,15 @@ export default class RssDashboardPlugin extends Plugin {
   ): Promise<void> {
     const rawUrl = typeof params.url === "string" ? params.url : "";
     if (!rawUrl.trim()) {
-      new Notice("Missing required URL parameter for add-feed.");
+      this.notify("plugin.uri.missingUrl");
       return;
     }
 
     const decodedUrl = this.decodeUriFeedUrl(rawUrl);
     const urlValidation = isValidUrl(decodedUrl);
     if (!urlValidation.valid) {
-      new Notice(urlValidation.error ?? "Invalid feed URL.");
+      console.error("[RSS Dashboard] Invalid URI feed URL:", urlValidation.error);
+      this.notify("plugin.uri.invalidUrl");
       return;
     }
 
@@ -1605,7 +1612,7 @@ export default class RssDashboardPlugin extends Plugin {
         void workspace.revealLeaf(leaf);
       }
     } catch {
-      new Notice(this.t("plugin.openDashboardFailed"));
+      this.notify("plugin.openDashboardFailed");
     }
   }
 
@@ -1630,7 +1637,7 @@ export default class RssDashboardPlugin extends Plugin {
         void workspace.revealLeaf(leaf);
       }
     } catch {
-      new Notice(this.t("plugin.openDiscoverFailed"));
+      this.notify("plugin.openDiscoverFailed");
     }
   }
 
@@ -1655,7 +1662,7 @@ export default class RssDashboardPlugin extends Plugin {
         void workspace.revealLeaf(leaf);
       }
     } catch {
-      new Notice(this.t("plugin.openSmallwebFailed"));
+      this.notify("plugin.openSmallwebFailed");
     }
   }
 
@@ -1796,10 +1803,10 @@ export default class RssDashboardPlugin extends Plugin {
 
       const feedsToRefresh = this.getRefreshableFeeds(candidateFeeds);
       if (feedsToRefresh.length === 0) {
-        new Notice(
+        this.notify(
           selectedFeeds
-            ? "All selected feeds are excluded from refresh."
-            : "All feeds are excluded from refresh.",
+            ? "plugin.refresh.allSelectedExcluded"
+            : "plugin.refresh.allExcluded",
         );
         return;
       }
@@ -1815,10 +1822,12 @@ export default class RssDashboardPlugin extends Plugin {
       if (feedsToRefresh.length === 1) {
         feedNoticeText = feedsToRefresh[0].title;
       } else {
-        feedNoticeText = `${feedsToRefresh.length} feeds`;
+        feedNoticeText = this.t("plugin.feedCount", {
+          count: feedsToRefresh.length,
+        });
       }
 
-      new Notice(`Refreshing ${feedNoticeText}...`);
+      this.notify("plugin.refreshing", { source: feedNoticeText });
       if (feedsToRefresh.length === 1) {
         await this.refreshSingleFeed(feedsToRefresh[0], feedNoticeText);
         return;
@@ -1827,7 +1836,7 @@ export default class RssDashboardPlugin extends Plugin {
       await this.refreshFeedBatch(feedsToRefresh, feedNoticeText);
     } catch {
       console.error("[RSS dashboard] Refresh request failed.");
-      new Notice(this.t("plugin.refreshFailed"));
+      this.notify("plugin.refreshFailed");
     }
   }
 
@@ -1844,7 +1853,7 @@ export default class RssDashboardPlugin extends Plugin {
       }
     } catch {
       console.error("[RSS dashboard] Failed-source refresh request failed.");
-      new Notice("Could not refresh failed sources. Check source status and try again.");
+      this.notify("plugin.refresh.failedSourcesFailed");
     }
   }
 
@@ -1875,7 +1884,7 @@ export default class RssDashboardPlugin extends Plugin {
       (candidate) => (candidate.feedId ?? candidate.url) === sourceId,
     );
     if (!feed) {
-      new Notice("This source is no longer subscribed.");
+      this.notify("plugin.refresh.sourceGone");
       return;
     }
     await this.refreshSelectedFeed(feed);
@@ -1903,14 +1912,13 @@ export default class RssDashboardPlugin extends Plugin {
       await this.refreshDashboardViews();
 
       if (updatedCount > 0) {
-        new Notice(`Applied limits to ${updatedCount} feeds`);
+        this.notify("plugin.limits.applied", { count: updatedCount });
       } else {
-        new Notice("No feeds needed limit adjustments");
+        this.notify("plugin.limits.noChanges");
       }
     } catch (error) {
-      new Notice(
-        `Error applying feed limits: ${error instanceof Error ? error.message : "Unknown error"}`,
-      );
+      console.error("[RSS Dashboard] Applying feed limits failed:", error);
+      this.notify("plugin.limits.failed");
     }
   }
 
@@ -1924,11 +1932,11 @@ export default class RssDashboardPlugin extends Plugin {
         return;
       }
 
-      new Notice(this.t("plugin.refreshing", { source: feed.title }));
+      this.notify("plugin.refreshing", { source: feed.title });
       await this.refreshSingleFeed(feed, feed.title);
     } catch {
       console.error("[RSS dashboard] Refresh request failed.");
-      new Notice(this.t("plugin.refreshFailed"));
+      this.notify("plugin.refreshFailed");
     }
   }
 
@@ -1944,7 +1952,7 @@ export default class RssDashboardPlugin extends Plugin {
     if (feedsInFolder.length > 0) {
       await this.refreshFeeds(feedsInFolder);
     } else {
-      new Notice("No feeds found in the selected folder");
+      this.notify("plugin.refresh.folderEmpty");
     }
   }
 
@@ -2094,7 +2102,7 @@ export default class RssDashboardPlugin extends Plugin {
           try {
             item = await repository.findById(article.rssDashboardId!);
           } catch {
-            new Notice("Collection status could not be saved. Please try again.");
+            this.notify("plugin.state.collectionSaveFailed");
             return false;
           }
           if (item) {
@@ -2143,7 +2151,7 @@ export default class RssDashboardPlugin extends Plugin {
           }
         }
         await this.replayStatusRepairJournalIfNeeded();
-        new Notice("Article status could not be saved. Please try again.");
+        this.notify("plugin.state.articleSaveFailed");
         return false;
       }
     });
@@ -2168,7 +2176,7 @@ export default class RssDashboardPlugin extends Plugin {
     } catch {
       restoreArticleMutationSnapshot(article, snapshot);
       await this.replayStatusRepairJournalIfNeeded();
-      new Notice("Article status could not be saved. Please try again.");
+      this.notify("plugin.state.articleSaveFailed");
       return false;
     }
   }
@@ -2195,7 +2203,7 @@ export default class RssDashboardPlugin extends Plugin {
     try {
       previous = await repository.findById(itemId);
     } catch {
-      new Notice("Collection status could not be saved. Please try again.");
+      this.notify("plugin.state.collectionSaveFailed");
       return "failed";
     }
     if (!previous) {
@@ -2227,7 +2235,7 @@ export default class RssDashboardPlugin extends Plugin {
       await this.updateStatusJournalPhase(journal, "collection-written");
     } catch {
       await this.replayStatusRepairJournalIfNeeded();
-      new Notice("Collection status could not be saved. Please try again.");
+      this.notify("plugin.state.collectionSaveFailed");
       return "failed";
     }
 
@@ -2243,11 +2251,11 @@ export default class RssDashboardPlugin extends Plugin {
       try {
         await repository.updateFlags(itemId, previousCollectionState);
       } catch {
-        new Notice("Collection status repair is required. Please try again.");
+        this.notify("plugin.state.collectionRepairRequired");
         return "failed";
       }
       await this.replayStatusRepairJournalIfNeeded();
-      new Notice("Article status could not be saved. Please try again.");
+      this.notify("plugin.state.articleSaveFailed");
       return "failed";
     }
   }
@@ -2309,14 +2317,14 @@ export default class RssDashboardPlugin extends Plugin {
     desired?: CollectionFlagState;
   }>): Promise<StatusRepairJournal | null> {
     if (!(await this.reconcileExistingStatusJournalBeforeMutation())) {
-      new Notice("Article status repair is required. Please try again.");
+      this.notify("plugin.state.articleRepairRequired");
       return null;
     }
     const items: StatusJournalItem[] = [];
     for (const entry of entries) {
       const locator = this.getStatusJournalItemLocator(entry.article);
       if (!locator) {
-        new Notice("Article status could not be saved. Please try again.");
+        this.notify("plugin.state.articleSaveFailed");
         return null;
       }
       items.push({
@@ -2336,7 +2344,7 @@ export default class RssDashboardPlugin extends Plugin {
       await this.writeStatusJournal(journal);
       return journal;
     } catch {
-      new Notice("Article status could not be saved. Please try again.");
+      this.notify("plugin.state.articleSaveFailed");
       return null;
     }
   }
@@ -2436,20 +2444,17 @@ export default class RssDashboardPlugin extends Plugin {
           );
 
           if (result.addedCount === 0) {
-            new Notice("No new feeds found in the file.");
+            this.notify("plugin.opml.noNewFeeds");
             return;
           }
 
-          new Notice(
-            `Imported ${result.addedCount} feeds. Articles will be fetched in the background.`,
-          );
+          this.notify("plugin.opml.imported", { count: result.addedCount });
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          new Notice(message);
+          console.error("[RSS Dashboard] OPML import failed:", error);
+          this.notify("plugin.opml.importFailed");
         }
       } else {
-        new Notice("Please select a valid OPML or XML file.");
+        this.notify("plugin.opml.invalidFile");
       }
     };
 
@@ -2575,7 +2580,7 @@ export default class RssDashboardPlugin extends Plugin {
         const discoverView = await this.getActiveDiscoverView();
         discoverView?.render();
 
-        new Notice("Imported JSON with feeds and settings");
+        this.notify("plugin.settings.dataImported");
         return;
       }
 
@@ -2609,11 +2614,10 @@ export default class RssDashboardPlugin extends Plugin {
       const discoverView = await this.getActiveDiscoverView();
       discoverView?.render();
 
-      new Notice("Imported usersettings.json");
+      this.notify("plugin.settings.preferencesImported");
     } catch (error) {
-      new Notice(
-        `Invalid usersettings.json file${error instanceof Error ? `: ${error.message}` : ""}`,
-      );
+      console.error("[RSS Dashboard] usersettings.json import failed:", error);
+      this.notify("plugin.settings.preferencesInvalid");
     }
   }
 
@@ -2822,7 +2826,7 @@ export default class RssDashboardPlugin extends Plugin {
       await this.backupService.performAutoBackups();
     } catch (e) {
       storageError("Backup failed before migration", e);
-      new Notice("Backup failed, proceeding with migration...");
+      this.notify("plugin.storage.backupFailedProceeding");
     }
 
     this.settings.storageMigrationDismissedPermanently = true;
@@ -2994,7 +2998,7 @@ export default class RssDashboardPlugin extends Plugin {
     try {
       if (this.settings.feeds.some((f) => f.url === url)) {
         if (showNotice) {
-          new Notice("This feed URL already exists");
+          this.notify("plugin.feedDuplicate");
         }
         return false;
       }
@@ -3087,18 +3091,20 @@ export default class RssDashboardPlugin extends Plugin {
           void view.refresh();
         }
         if (showNotice) {
-      new Notice(this.t("plugin.feedAdded", { feed: title }));
+          this.notify("plugin.feedAdded", { feed: title });
         }
         return true;
       } catch (error) {
         if (showNotice) {
-          new Notice(formatFeedParseNoticeMessage(error));
+          console.error("[RSS Dashboard] Feed parse failed:", error);
+          this.notify("plugin.feedAddFailed");
         }
         return false;
       }
     } catch (error) {
       if (showNotice) {
-        new Notice(formatFeedParseNoticeMessage(error, "Unable to add feed"));
+        console.error("[RSS Dashboard] Feed add failed:", error);
+        this.notify("plugin.feedAddFailed");
       }
       return false;
     }
@@ -3109,12 +3115,12 @@ export default class RssDashboardPlugin extends Plugin {
       const feedUrl = await MediaService.getYouTubeRssFeed(input);
 
       if (!feedUrl) {
-        new Notice("Unable to determine YouTube feed URL from input");
+        this.notify("plugin.youtube.unresolved");
         return;
       }
 
       if (this.settings.feeds.some((f) => f.url === feedUrl)) {
-        new Notice("This YouTube feed already exists");
+        this.notify("plugin.youtube.duplicate");
         return;
       }
 
@@ -3125,7 +3131,7 @@ export default class RssDashboardPlugin extends Plugin {
         this.settings.media.defaultYouTubeFolder,
       );
     } catch {
-      new Notice("Unable to add YouTube feed.");
+      this.notify("plugin.youtube.addFailed");
     }
   }
 
@@ -3146,14 +3152,16 @@ export default class RssDashboardPlugin extends Plugin {
         const view = await this.getActiveDashboardView();
         if (view) {
           void view.refresh();
-          new Notice(
-            `Subfolder "${subfolderName}" created under "${parentFolderName}"`,
-          );
+          this.notify("plugin.folder.created", {
+            folder: subfolderName,
+            parent: parentFolderName,
+          });
         }
       } else {
-        new Notice(
-          `Subfolder "${subfolderName}" already exists in "${parentFolderName}"`,
-        );
+        this.notify("plugin.folder.exists", {
+          folder: subfolderName,
+          parent: parentFolderName,
+        });
       }
     }
   }
@@ -3188,7 +3196,7 @@ export default class RssDashboardPlugin extends Plugin {
     const view = await this.getActiveDashboardView();
     if (view) {
       void view.refresh();
-      new Notice(this.t("plugin.feedUpdated", { feed: newTitle }));
+      this.notify("plugin.feedUpdated", { feed: newTitle });
     }
   }
 
@@ -3262,11 +3270,7 @@ export default class RssDashboardPlugin extends Plugin {
       }
     } catch (error) {
       storageError("Error loading plugin settings", error);
-      new Notice(
-        `Error loading settings: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`,
-      );
+      this.notify("plugin.settings.loadFailed");
       this.settings = DEFAULT_SETTINGS;
     }
   }
@@ -3359,13 +3363,13 @@ export default class RssDashboardPlugin extends Plugin {
       for (const entry of journal.items) {
         const item = this.resolveStatusJournalItem(entry);
         if (!item) {
-          new Notice("Article status repair is required. Please try again.");
+          this.notify("plugin.state.articleRepairRequired");
           return false;
         }
         if (entry.previousCollection) {
           const existing = await repository.findById(entry.stableId);
           if (!existing) {
-            new Notice("Article status repair is required. Please try again.");
+            this.notify("plugin.state.articleRepairRequired");
             return false;
           }
         }
@@ -3408,7 +3412,7 @@ export default class RssDashboardPlugin extends Plugin {
     } catch {
       // Keep the journal for an idempotent later retry. Deliberately fixed,
       // content-free feedback prevents a broken record from leaking source data.
-      new Notice("Article status repair is required. Please try again.");
+      this.notify("plugin.state.articleRepairRequired");
       return false;
     }
   }
@@ -3736,7 +3740,7 @@ export default class RssDashboardPlugin extends Plugin {
    */
   async migrateMetadataToVaultLocation(): Promise<void> {
     if (this.settings.metadataStorageMode === "vault-location") {
-      new Notice("Already using vault location for metadata storage");
+      this.notify("plugin.metadata.alreadyVault");
       return;
     }
 
@@ -3763,14 +3767,12 @@ export default class RssDashboardPlugin extends Plugin {
       this.settings.metadataStorageMode = "vault-location";
       await this.saveSettings();
 
-      new Notice(`Metadata migrated to vault location: ${metadataPath}`);
+      this.notify("plugin.metadata.migrated", { path: metadataPath });
     } catch (error) {
       storageError("Metadata migration failed", error);
       // Revert mode on error (no partial state)
       this.settings.metadataStorageMode = "plugin-default";
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      new Notice(`Vault migration failed: ${errorMessage}`);
+      this.notify("plugin.metadata.migrationFailed");
       throw error;
     }
   }
@@ -3785,7 +3787,7 @@ export default class RssDashboardPlugin extends Plugin {
    */
   async revertMetadataToPluginDefault(): Promise<void> {
     if (this.settings.metadataStorageMode === "plugin-default") {
-      new Notice("Already using plugin default for metadata storage");
+      this.notify("plugin.metadata.alreadyDefault");
       return;
     }
 
@@ -3817,14 +3819,12 @@ export default class RssDashboardPlugin extends Plugin {
       }
 
       await this.saveSettings();
-      new Notice("Metadata reverted to plugin default location");
+      this.notify("plugin.metadata.reverted");
     } catch (error) {
       storageError("Metadata revert failed", error);
       // Restore mode on error (no partial state)
       this.settings.metadataStorageMode = "vault-location";
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      new Notice(`Revert failed: ${errorMessage}`);
+      this.notify("plugin.metadata.revertFailed");
       throw error;
     }
   }
@@ -3862,7 +3862,7 @@ export default class RssDashboardPlugin extends Plugin {
     this.settings.lastRefreshTimestamp = Date.now();
     await this.saveSettings();
     await this.refreshDashboardViews();
-    new Notice(`Feeds refreshed: ${feedNoticeText}`);
+    this.notify("plugin.refreshed", { source: feedNoticeText });
   }
 
   private async refreshFeedBatch(
@@ -3870,7 +3870,7 @@ export default class RssDashboardPlugin extends Plugin {
     feedNoticeText: string,
   ): Promise<void> {
     if (this.isMultiFeedRefreshRunning) {
-      new Notice(this.t("plugin.multiRefresh"));
+      this.notify("plugin.multiRefresh");
       return;
     }
 
@@ -3962,7 +3962,14 @@ export default class RssDashboardPlugin extends Plugin {
       await this.refreshDashboardViews();
 
       const failureSuffix = this.buildRefreshFailureSummary(refreshSummary);
-      new Notice(`Feeds refreshed: ${feedNoticeText}${failureSuffix}`);
+      this.notify(
+        failureSuffix
+          ? "plugin.refreshedWithFailures"
+          : "plugin.refreshed",
+        failureSuffix
+          ? { source: feedNoticeText, failures: failureSuffix }
+          : { source: feedNoticeText },
+      );
     } finally {
       this.activeRefreshState.clear();
       this.isMultiFeedRefreshRunning = false;
@@ -3975,17 +3982,17 @@ export default class RssDashboardPlugin extends Plugin {
   }): string {
     const parts: string[] = [];
     if (summary.timedOut > 0) {
-      parts.push(`${summary.timedOut} timed out`);
+      parts.push(this.t("plugin.refresh.timedOut", { count: summary.timedOut }));
     }
     if (summary.failed > 0) {
-      parts.push(`${summary.failed} failed`);
+      parts.push(this.t("plugin.refresh.failedCount", { count: summary.failed }));
     }
 
     if (parts.length === 0) {
       return "";
     }
 
-    return ` (${parts.join(", ")})`;
+    return parts.join(this.t("plugin.refresh.failureSeparator"));
   }
 
   private async processRefreshBatchFeed(

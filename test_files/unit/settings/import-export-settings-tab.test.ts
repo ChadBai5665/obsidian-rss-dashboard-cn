@@ -159,6 +159,42 @@ describe("Auto Backup Helpers", () => {
 
   describe("renderImportExportSettingsTab() factory reset section", () => {
     it.each([
+      ["导入分片数据", "importPortableDataBundleFromFile", "无法导入分片数据"],
+      ["导入 usersettings.json", "importUserSettingsJsonFromFile", "无法导入用户偏好"],
+    ] as const)("shows a safe localized error for %s", async (buttonLabel, method, expected) => {
+      const containerEl = createContainerEl();
+      const plugin = createPlugin();
+      plugin.settings.locale = "zh-CN";
+      plugin[method].mockRejectedValue(new Error("secret-token-from-file"));
+      const noticeSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+      );
+
+      const button = Array.from(containerEl.querySelectorAll("button")).find(
+        (candidate) => candidate.textContent === buttonLabel,
+      ) as HTMLButtonElement;
+      button.click();
+      const input = Array.from(
+        document.body.querySelectorAll<HTMLInputElement>('input[type="file"]'),
+      ).at(-1)!;
+      Object.defineProperty(input, "files", {
+        configurable: true,
+        value: [new File(["{}"], "input.json", { type: "application/json" })],
+      });
+      input.dispatchEvent(new Event("change"));
+      await flushPromises();
+
+      const notices = noticeSpy.mock.calls
+        .filter(([prefix]) => prefix === "[Stub Notice]")
+        .map(([, message]) => String(message));
+      expect(notices.join(" ")).toContain(expected);
+      expect(notices.join(" ")).not.toContain("secret-token-from-file");
+    });
+
+    it.each([
       [
         "zh-CN",
         "en",

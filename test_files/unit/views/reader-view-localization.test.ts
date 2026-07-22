@@ -7,6 +7,7 @@ import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 type ReaderInternals = {
   contentEl: HTMLElement;
   readingContainer: HTMLElement;
+  currentItem: FeedItem | null;
   readOrFetchExplicitArticleContent(item: FeedItem): Promise<{
     content: string;
     failureType: "none";
@@ -77,6 +78,36 @@ describe("Reader Chinese localization", () => {
     expect(document.body.querySelector(".rss-reader-title")?.textContent).toBe(
       "RSS reader",
     );
+  });
+
+  it("updates open reader chrome in place without losing article, scroll, media, or content context", async () => {
+    const view = makeReader("zh-CN");
+    const internal = view as unknown as ReaderInternals;
+    await view.onOpen();
+    const item = makeArticle({ guid: "locale-live", title: "Source title" });
+    vi.spyOn(internal, "readOrFetchExplicitArticleContent").mockResolvedValue({
+      content: "",
+      failureType: "none",
+    });
+    await view.displayItem(item, [], { contentBasis: "feed" });
+
+    internal.readingContainer.scrollTop = 137;
+    const media = internal.readingContainer.createEl("audio");
+    media.currentTime = 42;
+    Object.defineProperty(media, "paused", { configurable: true, value: false });
+    const originalHtml = internal.readingContainer.querySelector(".rss-reader-article")?.innerHTML;
+
+    (view as unknown as { settings: { locale: "zh-CN" | "en" } }).settings.locale = "en";
+    view.refreshLocalization();
+
+    expect(view.getDisplayText()).toBe("Source title");
+    expect(internal.contentEl.querySelector(".rss-reader-action-button")?.getAttribute("title")).toBe("Save article");
+    expect(internal.currentItem).toBe(item);
+    expect(internal.readingContainer.scrollTop).toBe(137);
+    expect(media.currentTime).toBe(42);
+    expect(media.paused).toBe(false);
+    expect(internal.readingContainer.querySelector(".rss-reader-content-basis")?.textContent).toBe("Feed content");
+    expect(internal.readingContainer.querySelector(".rss-reader-article")?.innerHTML).toBe(originalHtml);
   });
 
   it("localizes the real video fallback and feed-description surfaces", async () => {

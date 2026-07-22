@@ -115,8 +115,8 @@ export class DiscoverView extends ItemView {
 
       this.filterFeeds();
     } catch (error) {
-      this.error =
-        error instanceof Error ? error.message : "Unknown error occurred";
+      console.error("[RSS Dashboard] Discover data failed to load:", error);
+      this.error = "load-failed";
     } finally {
       this.isLoading = false;
     }
@@ -445,6 +445,10 @@ export class DiscoverView extends ItemView {
     this.renderLayout(container);
   }
 
+  public refreshLocalization(): void {
+    this.render();
+  }
+
   private renderLoading(container: HTMLElement): void {
     const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     const loadingEl = container.createDiv({ cls: "rss-discover-loading" });
@@ -456,7 +460,7 @@ export class DiscoverView extends ItemView {
     const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     const errorEl = container.createDiv({ cls: "rss-discover-error" });
     setIcon(errorEl, "alert-triangle");
-    errorEl.appendText(` ${t("discover.error", { error: this.error ?? "" })}`);
+    errorEl.appendText(` ${t("discover.loadFailed")}`);
 
     const retryBtn = errorEl.createEl("button", { cls: "mod-cta" });
     retryBtn.textContent = t("common.retry");
@@ -517,70 +521,6 @@ export class DiscoverView extends ItemView {
     if (windowInstanceOf(contentEl, HTMLElement)) {
       this.renderContent(contentEl);
     }
-  }
-
-  private renderSidebarContent(container: HTMLElement): void {
-    const navContainer = container.createDiv({
-      cls: "rss-discover-sidebar-nav",
-    });
-
-    const contentContainer = container.createDiv({
-      cls: "rss-discover-sidebar-content",
-    });
-
-    const renderContent = () => {
-      contentContainer.empty();
-      switch (this.activeSidebarSection) {
-        case "types":
-          this.renderTypeFilter(contentContainer);
-          break;
-        case "categories":
-          this.renderCategoryTree(contentContainer);
-          break;
-        case "tags":
-          this.renderTagFilter(contentContainer);
-          break;
-      }
-    };
-
-    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
-    const typesBtn = navContainer.createEl("button", { text: t("discover.types") });
-    const categoriesBtn = navContainer.createEl("button", {
-      text: t("discover.categories"),
-    });
-    const tagsBtn = navContainer.createEl("button", { text: t("discover.tags") });
-
-    const buttons = [
-      { el: typesBtn, section: "types" as const },
-      { el: categoriesBtn, section: "categories" as const },
-      { el: tagsBtn, section: "tags" as const },
-    ];
-
-    const updateActiveButton = () => {
-      buttons.forEach((btn) => {
-        if (btn.section === this.activeSidebarSection) {
-          btn.el.addClass("active");
-        } else {
-          btn.el.removeClass("active");
-        }
-      });
-    };
-
-    buttons.forEach((btn) => {
-      btn.el.addEventListener("click", () => {
-        this.activeSidebarSection = btn.section;
-        updateActiveButton();
-        renderContent();
-      });
-    });
-
-    updateActiveButton();
-
-    this.renderSearch(container);
-
-    // Re-append content container to ensure it's at the bottom
-    container.appendChild(contentContainer);
-    renderContent();
   }
 
   private renderSidebarHeader(container: HTMLElement): void {
@@ -1087,16 +1027,6 @@ export class DiscoverView extends ItemView {
       cls: "rss-discover-filter-header-right",
     });
 
-    // Smallweb navigation button
-    const smallwebBtn = rightSection.createDiv({
-      cls: "rss-dashboard-nav-button",
-    });
-    smallwebBtn.appendText("✦ Smallweb");
-    smallwebBtn.addEventListener("click", () => {
-      void this.plugin.activateSmallwebView();
-    });
-    smallwebBtn.remove();
-
     const desktopFilterControls = rightSection.createDiv({
       cls: "rss-discover-filter-controls",
     });
@@ -1220,7 +1150,7 @@ export class DiscoverView extends ItemView {
         cls: "rss-discover-empty",
       });
       setIcon(emptyState, "search");
-      emptyState.appendText(" No feeds match your filters");
+      emptyState.appendText(` ${t("discover.noMatches")}`);
       return;
     }
 

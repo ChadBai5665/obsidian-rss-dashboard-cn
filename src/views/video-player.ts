@@ -44,7 +44,7 @@ export class VideoPlayer {
       flush?: boolean,
     ) => void,
     progressTrackingEnabled = true,
-    locale: Locale = "en",
+    locale: Locale = "zh-CN",
   ) {
     this.container = container;
     this.onVideoSelect = onVideoSelect;
@@ -66,10 +66,23 @@ export class VideoPlayer {
       this.lastTrackedPosition = item.playbackProgress?.position ?? null;
       this.render();
     } catch (error) {
-      const msg = this.t("video.loadError", { error: error instanceof Error ? error.message : "Unknown error" });
+      console.error("[RSS Dashboard] Video player failed to render:", error);
+      const msg = this.t("video.loadError");
       new Notice(msg);
       console.debug("[Stub Notice]", msg);
     }
+  }
+
+  /** Update localized links/headings without recreating the YouTube iframe. */
+  public refreshLocalization(locale: Locale): void {
+    this.locale = locale;
+    this.playerEl
+      ?.querySelector<HTMLElement>(".rss-video-youtube-button span:last-child")
+      ?.setText(this.t("video.watch"));
+    this.playerEl
+      ?.querySelector<HTMLElement>(".rss-video-tos-link")
+      ?.setText(this.t("settings.media.youtubeTos"));
+    this.renderRelatedVideos();
   }
 
   private render(): void {
