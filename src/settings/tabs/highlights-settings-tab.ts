@@ -10,6 +10,7 @@
 import { Notice, Setting } from "obsidian";
 import RssDashboardPlugin from "../../../main";
 import { HighlightWordEditModal, ConfirmDeleteModal } from "../modals/settings-modals";
+import { createTranslator } from "../../i18n";
 
 // ── Types (inline to avoid circular deps) ────────────────────────────────────
 
@@ -80,6 +81,7 @@ export function renderHighlightsSettingsTab(
   plugin: RssDashboardPlugin,
   onRefresh: () => void,
 ): void {
+  const t = createTranslator(plugin.settings.locale ?? "zh-CN");
   // ── Shared view-refresh helpers ───────────────────────────────────────────
 
   const refreshHighlightStatusBarOnly = async (): Promise<void> => {
@@ -124,10 +126,8 @@ export function renderHighlightsSettingsTab(
   // ── Main toggle ───────────────────────────────────────────────────────────
 
   new Setting(containerEl)
-    .setName("Enable word highlighting")
-    .setDesc(
-      "Highlight specified words in article titles, summaries, and content",
-    )
+    .setName(t("settings.highlight.enable"))
+    .setDesc(t("settings.highlight.enableDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.highlights?.enabled ?? false)
@@ -141,9 +141,9 @@ export function renderHighlightsSettingsTab(
 
   // ── Highlight locations ───────────────────────────────────────────────────
 
-  new Setting(containerEl).setName("Highlight locations").setHeading();
+  new Setting(containerEl).setName(t("settings.highlight.locations")).setHeading();
   containerEl.createEl("p", {
-    text: "Choose where to apply highlights:",
+    text: t("settings.highlight.locationsDesc"),
     cls: "rss-dashboard-settings-description",
   });
 
@@ -168,26 +168,26 @@ export function renderHighlightsSettingsTab(
   };
 
   renderLocationToggle(
-    "Highlight in titles",
-    "Apply highlights to article titles in the list/card view",
+    t("settings.highlight.titles"),
+    t("settings.highlight.titlesDesc"),
     "highlightInTitles",
   );
   renderLocationToggle(
-    "Highlight in summaries",
-    "Apply highlights to article summaries in card view",
+    t("settings.highlight.summaries"),
+    t("settings.highlight.summariesDesc"),
     "highlightInSummaries",
   );
   renderLocationToggle(
-    "Highlight in content",
-    "Apply highlights to article content in reader view",
+    t("settings.highlight.content"),
+    t("settings.highlight.contentDesc"),
     "highlightInContent",
   );
 
   // ── Existing words list ───────────────────────────────────────────────────
 
-  new Setting(containerEl).setName("Highlight words").setHeading();
+  new Setting(containerEl).setName(t("settings.highlight.words")).setHeading();
   containerEl.createEl("p", {
-    text: "Words and phrases to highlight in articles:",
+    text: t("settings.highlight.wordsDesc"),
     cls: "rss-dashboard-settings-description",
   });
 
@@ -198,7 +198,7 @@ export function renderHighlightsSettingsTab(
   const words = plugin.settings.highlights?.words ?? [];
   if (words.length === 0) {
     wordsContainer.createEl("p", {
-      text: "No highlight words configured. Add words below to highlight them in articles.",
+      text: t("settings.highlight.none"),
       cls: "rss-dashboard-settings-note",
     });
   } else {
@@ -216,7 +216,7 @@ export function renderHighlightsSettingsTab(
           if (nextTextRaw === null) return;
           const nextText = nextTextRaw.trim();
           if (!nextText) {
-            new Notice("Please enter a word to highlight");
+            new Notice(t("settings.highlight.enter"));
             return;
           }
           if (
@@ -226,7 +226,7 @@ export function renderHighlightsSettingsTab(
               index,
             )
           ) {
-            new Notice("This word is already in the list");
+            new Notice(t("settings.highlight.duplicate"));
             return;
           }
           const h = ensureHighlights(plugin);
@@ -323,26 +323,26 @@ export function renderHighlightsSettingsTab(
 
   // ── Add new word ──────────────────────────────────────────────────────────
 
-  new Setting(containerEl).setName("Add new word").setHeading();
+  new Setting(containerEl).setName(t("settings.highlight.add")).setHeading();
 
   const newWordContainer = containerEl.createDiv();
 
   const wordInputSetting = new Setting(newWordContainer)
-    .setName("Word or phrase")
-    .addText((text) => text.setPlaceholder("Enter word to highlight"));
+    .setName(t("settings.highlight.word"))
+    .addText((text) => text.setPlaceholder(t("settings.highlight.wordPlaceholder")));
 
   const wholeWordSetting = new Setting(newWordContainer)
-    .setName("Whole word only")
-    .setDesc("Only highlight complete words (not partial matches)")
+    .setName(t("settings.highlight.whole"))
+    .setDesc(t("settings.highlight.wholeDesc"))
     .addToggle((toggle) => toggle.setValue(false));
 
   const caseSensitiveSetting = new Setting(newWordContainer)
-    .setName("Case sensitive")
-    .setDesc("Only match this word/phrase with exact letter case")
+    .setName(t("settings.highlight.case"))
+    .setDesc(t("settings.highlight.caseDesc"))
     .addToggle((toggle) => toggle.setValue(false));
 
   const colorSetting = new Setting(newWordContainer)
-    .setName("Highlight color")
+    .setName(t("settings.highlight.color"))
     .addColorPicker((colorPicker) =>
       colorPicker.setValue(
         plugin.settings.highlights?.defaultColor ?? "#ffd700",
@@ -350,7 +350,7 @@ export function renderHighlightsSettingsTab(
     );
 
   new Setting(newWordContainer).addButton((button) =>
-    button.setButtonText("Add word").onClick(async () => {
+    button.setButtonText(t("settings.highlight.addButton")).onClick(async () => {
       const textInput = wordInputSetting.components[0] as unknown as {
         inputEl: HTMLInputElement;
       };
@@ -371,14 +371,14 @@ export function renderHighlightsSettingsTab(
       const caseSensitive = caseSensitiveToggle.getValue();
 
       if (!text) {
-        new Notice("Please enter a word to highlight");
+        new Notice(t("settings.highlight.enter"));
         return;
       }
 
       const h = ensureHighlights(plugin);
 
       if (isHighlightWordDuplicate(h.words, text)) {
-        new Notice("This word is already in the list");
+        new Notice(t("settings.highlight.duplicate"));
         return;
       }
 

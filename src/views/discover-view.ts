@@ -26,6 +26,7 @@ import {
   computePagination,
   computeResultsRange,
 } from "../utils/pagination-utils";
+import { createTranslator } from "../i18n";
 
 import feedsData from "../discover/discover-feeds.json";
 
@@ -76,7 +77,7 @@ export class DiscoverView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "RSS discover";
+    return createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.viewTitle");
   }
 
   getIcon(): string {
@@ -445,18 +446,20 @@ export class DiscoverView extends ItemView {
   }
 
   private renderLoading(container: HTMLElement): void {
+    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     const loadingEl = container.createDiv({ cls: "rss-discover-loading" });
     setIcon(loadingEl, "loader-2");
-    loadingEl.appendText(" Loading discover feeds...");
+    loadingEl.appendText(` ${t("discover.loading")}`);
   }
 
   private renderError(container: HTMLElement): void {
+    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     const errorEl = container.createDiv({ cls: "rss-discover-error" });
     setIcon(errorEl, "alert-triangle");
-    errorEl.appendText(` Error: ${this.error}`);
+    errorEl.appendText(` ${t("discover.error", { error: this.error ?? "" })}`);
 
     const retryBtn = errorEl.createEl("button", { cls: "mod-cta" });
-    retryBtn.textContent = "Retry";
+    retryBtn.textContent = t("common.retry");
     retryBtn.addEventListener("click", () => {
       this.loadData();
       void this.render();
@@ -540,11 +543,12 @@ export class DiscoverView extends ItemView {
       }
     };
 
-    const typesBtn = navContainer.createEl("button", { text: "Types" });
+    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
+    const typesBtn = navContainer.createEl("button", { text: t("discover.types") });
     const categoriesBtn = navContainer.createEl("button", {
-      text: "Categories",
+      text: t("discover.categories"),
     });
-    const tagsBtn = navContainer.createEl("button", { text: "Tags" });
+    const tagsBtn = navContainer.createEl("button", { text: t("discover.tags") });
 
     const buttons = [
       { el: typesBtn, section: "types" as const },
@@ -585,6 +589,7 @@ export class DiscoverView extends ItemView {
   }
 
   private renderNavTabs(container: HTMLElement): void {
+    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     const navContainer = container.createDiv({
       cls: "rss-dashboard-nav-container",
     });
@@ -593,8 +598,8 @@ export class DiscoverView extends ItemView {
     const dashboardBtn = navContainer.createDiv({
       cls: "rss-dashboard-nav-button clickable-icon rss-discover-return-home",
       attr: {
-        title: "Return to Dashboard",
-        "aria-label": "Return to Dashboard",
+        title: t("discover.returnDashboard"),
+        "aria-label": t("discover.returnDashboard"),
         role: "button",
         tabindex: "0",
       },
@@ -604,7 +609,7 @@ export class DiscoverView extends ItemView {
     // Add "Return Home" text span
     const _returnHomeText = dashboardBtn.createSpan({
       cls: "rss-discover-return-home-text",
-      text: "Return Home",
+      text: t("discover.home"),
     });
     void _returnHomeText;
 
@@ -621,6 +626,7 @@ export class DiscoverView extends ItemView {
   }
 
   private renderMobileHeader(container: HTMLElement): void {
+    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     const header = container.createDiv({
       cls: "rss-discover-mobile-header",
     });
@@ -631,7 +637,7 @@ export class DiscoverView extends ItemView {
 
     const sidebarToggleButton = leftSection.createDiv({
       cls: "rss-dashboard-sidebar-toggle clickable-icon",
-      attr: { title: "Toggle filters" },
+      attr: { title: t("discover.toggleFilters") },
     });
     setIcon(sidebarToggleButton, "panel-left-open");
     sidebarToggleButton.addEventListener("click", () => {
@@ -640,11 +646,12 @@ export class DiscoverView extends ItemView {
 
     leftSection.createDiv({
       cls: "rss-discover-header-title",
-      text: "RSS Discover",
+      text: t("discover.title"),
     });
   }
 
   private renderSearch(container: HTMLElement): void {
+    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     const searchSection = container.createDiv({
       cls: "rss-discover-section",
     });
@@ -655,7 +662,7 @@ export class DiscoverView extends ItemView {
 
     const searchInput = searchInputWrapper.createEl("input", {
       type: "text",
-      placeholder: "Search feeds...",
+      placeholder: t("discover.search"),
       value: this.filters.query,
     });
     searchInput.addClass("rss-discover-search-input");
@@ -1027,6 +1034,7 @@ export class DiscoverView extends ItemView {
   }
 
   private renderContent(container: HTMLElement): void {
+    const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
     container.empty();
 
     const controlsContainer = container.createDiv({
@@ -1070,7 +1078,7 @@ export class DiscoverView extends ItemView {
     const resultsCount = leftSection.createDiv({
       cls: "rss-discover-results-count",
     });
-    resultsCount.textContent = `${this.filteredFeeds.length} feeds found`;
+    resultsCount.textContent = t("discover.results", { count: this.filteredFeeds.length });
     this.renderAddAllButton(leftSection);
 
     this.renderSelectedFilters(leftSection);
@@ -1106,7 +1114,7 @@ export class DiscoverView extends ItemView {
     const mobileFiltersButton = mobileFiltersMenu.createDiv({
       cls: "rss-discover-mobile-filters-button clickable-icon",
       attr: {
-        "aria-label": "Toggle discover filters menu",
+        "aria-label": createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.toggleFilters"),
         role: "button",
         tabindex: "0",
       },
@@ -1151,12 +1159,12 @@ export class DiscoverView extends ItemView {
     });
     const okBtn = mobileActionRow.createEl("button", {
       cls: "rss-discover-ok-button",
-      text: "OK",
+      text: createTranslator(this.plugin.settings.locale ?? "zh-CN")("common.ok"),
       attr: { type: "button" },
     });
     const clearBtn = mobileActionRow.createEl("button", {
       cls: "rss-clear-filter-button rss-clear-filter-button-danger",
-      text: "Clear filters",
+      text: createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.clearFilters"),
       attr: { type: "button" },
     });
 
@@ -1337,9 +1345,9 @@ export class DiscoverView extends ItemView {
     const totalCount = feedsInCurrentScope.length;
 
     const followStatusOptions: { value: FollowStatus; text: string }[] = [
-      { value: "all", text: `All feeds (${totalCount})` },
-      { value: "followed", text: `Followed (${followedCount})` },
-      { value: "unfollowed", text: `Unfollowed (${unfollowedCount})` },
+      { value: "all", text: createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.allFeeds", { count: totalCount }) },
+      { value: "followed", text: createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.followed", { count: followedCount }) },
+      { value: "unfollowed", text: createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.unfollowed", { count: unfollowedCount }) },
     ];
 
     followStatusOptions.forEach((opt) => {
@@ -1375,7 +1383,7 @@ export class DiscoverView extends ItemView {
     const clearBtn = container.createEl("button", {
       cls: "rss-clear-filter-button",
     });
-    clearBtn.textContent = "Clear filters";
+    clearBtn.textContent = createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.clearFilters");
     clearBtn.addEventListener("click", () => {
       this.clearFilters();
     });
@@ -1439,18 +1447,18 @@ export class DiscoverView extends ItemView {
         cls: "rss-discover-card-remove-btn",
       });
       setIcon(removeBtn, "check");
-      removeBtn.createSpan({ text: " Following" });
+      removeBtn.createSpan({ text: ` ${createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.following")}` });
 
       removeBtn.addEventListener("mouseenter", () => {
         removeBtn.empty();
         setIcon(removeBtn, "x");
-        removeBtn.createSpan({ text: " Remove" });
+        removeBtn.createSpan({ text: ` ${createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.remove")}` });
       });
 
       removeBtn.addEventListener("mouseleave", () => {
         removeBtn.empty();
         setIcon(removeBtn, "check");
-        removeBtn.createSpan({ text: " Following" });
+        removeBtn.createSpan({ text: ` ${createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.following")}` });
       });
 
       removeBtn.addEventListener("click", () => {
@@ -1464,9 +1472,9 @@ export class DiscoverView extends ItemView {
         cls: "rss-discover-card-add-btn rss-discover-card-add-to-btn",
       });
       setIcon(addToBtn, "plus");
-      addToBtn.createSpan({ text: " Add to..." });
+      addToBtn.createSpan({ text: ` ${createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.addTo")}` });
 
-      const defaultFolder = "Uncategorized";
+      const defaultFolder = createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.uncategorized");
       addToBtn.addEventListener("click", () => {
         new FolderSelectorPopup(this.plugin, {
           anchorEl: addToBtn,
@@ -1581,7 +1589,7 @@ export class DiscoverView extends ItemView {
       cls: "rss-discover-card-preview-btn",
     });
     setIcon(previewBtn, "file-search");
-    previewBtn.createSpan({ text: "Preview" });
+    previewBtn.createSpan({ text: createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.preview") });
     previewBtn.addEventListener("click", () => {
       new FeedPreviewModal(
         this.app,
@@ -1616,7 +1624,7 @@ export class DiscoverView extends ItemView {
         text: `Adding ${this.bulkAddCompletedCount}/${this.bulkAddTotalCount}...`,
       });
     } else {
-      addAllButton.setText("Add all...");
+      addAllButton.setText(createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.addAll"));
     }
 
     addAllButton.addEventListener("click", () => {
@@ -1900,7 +1908,7 @@ export class DiscoverView extends ItemView {
       const removeBtn = searchFilter.createDiv({
         cls: "rss-discover-selected-filter-remove",
         attr: {
-          "aria-label": "Remove search filter",
+          "aria-label": createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.removeSearch"),
           role: "button",
           tabindex: "0",
         },
@@ -1931,7 +1939,7 @@ export class DiscoverView extends ItemView {
       const removeBtn = typeFilter.createDiv({
         cls: "rss-discover-selected-filter-remove",
         attr: {
-          "aria-label": `Remove type filter: ${type}`,
+          "aria-label": createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.removeType", { type }),
           role: "button",
           tabindex: "0",
         },
@@ -1967,7 +1975,7 @@ export class DiscoverView extends ItemView {
       const removeBtn = pathFilter.createDiv({
         cls: "rss-discover-selected-filter-remove",
         attr: {
-          "aria-label": `Remove category filter: ${pathText}`,
+          "aria-label": createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.removeCategory", { category: pathText }),
           role: "button",
           tabindex: "0",
         },
@@ -2007,7 +2015,7 @@ export class DiscoverView extends ItemView {
       const removeBtn = tagFilter.createDiv({
         cls: "rss-discover-selected-filter-remove",
         attr: {
-          "aria-label": `Remove tag filter: ${tag}`,
+          "aria-label": createTranslator(this.plugin.settings.locale ?? "zh-CN")("discover.removeTag", { tag }),
           role: "button",
           tabindex: "0",
         },

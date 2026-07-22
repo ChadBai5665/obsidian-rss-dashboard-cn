@@ -26,7 +26,9 @@ function getSettingByName(containerEl: HTMLElement, name: string): HTMLElement {
 }
 
 function cloneSettings(): RssDashboardSettings {
-  return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+  const settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+  settings.locale = "en";
+  return settings;
 }
 
 beforeEach(() => {

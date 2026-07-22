@@ -43,10 +43,8 @@ export function renderImportExportSettingsTab(
   // ── data.json ─────────────────────────────────────────────────────────────
   const dataSection = containerEl.createDiv();
   new Setting(dataSection)
-    .setName("Backup & restore (data.json)")
-    .setDesc(
-      "Import or export your full dashboard dataset, including preferences, folders, feeds, and stored article retrievals.",
-    )
+    .setName(t("settings.import.data"))
+    .setDesc(t("settings.import.dataDesc"))
     .setHeading();
 
   const dataActionsSetting = new Setting(dataSection);
@@ -55,7 +53,7 @@ export function renderImportExportSettingsTab(
     .addButton((button) =>
       button
         .setIcon("upload")
-        .setButtonText("Import data.json")
+        .setButtonText(t("settings.import.importData"))
         .onClick(() => {
           const input = activeDocument.body.createEl("input", {
             attr: { type: "file", accept: ".json,.backup,application/json" },
@@ -101,7 +99,7 @@ export function renderImportExportSettingsTab(
     .addButton((button) =>
       button
         .setIcon("download")
-        .setButtonText("Export data.json")
+        .setButtonText(t("settings.import.exportData"))
         .onClick(() => {
           void plugin.exportDataJson();
         }),
@@ -109,7 +107,7 @@ export function renderImportExportSettingsTab(
     .addButton((button) =>
       button
         .setIcon("copy")
-        .setTooltip("Copy data.json to clipboard")
+        .setTooltip(t("settings.import.copyData"))
         .onClick(() => {
           void plugin.copyDataJsonToClipboard();
         }),
@@ -118,8 +116,8 @@ export function renderImportExportSettingsTab(
   // ── Shard Data ────────────────────────────────────────────────────────────
   const portableBundleSection = containerEl.createDiv();
   new Setting(portableBundleSection)
-    .setName("Shard data")
-    .setDesc("Import or export shard data bundles for cross-device migration.")
+    .setName(t("settings.import.shards"))
+    .setDesc(t("settings.import.shardsDesc"))
     .setHeading();
 
   const portableBundleActions = new Setting(portableBundleSection);
@@ -130,7 +128,7 @@ export function renderImportExportSettingsTab(
     .addButton((button) =>
       button
         .setIcon("upload")
-        .setButtonText("Import shard data")
+        .setButtonText(t("settings.import.importShards"))
         .onClick(() => {
           const input = activeDocument.body.createEl("input", {
             attr: { type: "file", accept: ".json,.backup,application/json" },
@@ -159,7 +157,7 @@ export function renderImportExportSettingsTab(
     .addButton((button) =>
       button
         .setIcon("download")
-        .setButtonText("Export shard data")
+        .setButtonText(t("settings.import.exportShards"))
         .onClick(() => {
           void plugin.exportPortableDataBundle();
         }),
@@ -168,8 +166,8 @@ export function renderImportExportSettingsTab(
   // ── usersettings.json ─────────────────────────────────────────────────────
   const userSettingsSection = containerEl.createDiv();
   new Setting(userSettingsSection)
-    .setName("User preferences file")
-    .setDesc("Import or export plugin preferences.")
+    .setName(t("settings.import.preferences"))
+    .setDesc(t("settings.import.preferencesDesc"))
     .setHeading();
 
   const userSettingsActions = new Setting(userSettingsSection);
@@ -178,7 +176,7 @@ export function renderImportExportSettingsTab(
     .addButton((button) =>
       button
         .setIcon("upload")
-        .setButtonText("Import usersettings.json")
+        .setButtonText(t("settings.import.importPreferences"))
         .onClick(() => {
           const input = activeDocument.body.createEl("input", {
             attr: { type: "file", accept: ".json,.backup,application/json" },
@@ -207,7 +205,7 @@ export function renderImportExportSettingsTab(
     .addButton((button) =>
       button
         .setIcon("download")
-        .setButtonText("Export usersettings.json")
+        .setButtonText(t("settings.import.exportPreferences"))
         .onClick(() => {
           void plugin.exportUserSettingsJson();
         }),
@@ -215,7 +213,7 @@ export function renderImportExportSettingsTab(
     .addButton((button) =>
       button
         .setIcon("copy")
-        .setTooltip("Copy usersettings.json to clipboard")
+        .setTooltip(t("settings.import.copyPreferences"))
         .onClick(() => {
           void plugin.copyUserSettingsJsonToClipboard();
         }),
@@ -225,9 +223,7 @@ export function renderImportExportSettingsTab(
   const opmlSection = containerEl.createDiv();
   new Setting(opmlSection)
     .setName("OPML")
-    .setDesc(
-      "Import or export an OPML subscription list containing your configured feed addresses.",
-    )
+    .setDesc(t("settings.import.opmlDesc"))
     .setHeading();
 
   const opmlActionsSetting = new Setting(opmlSection);
@@ -250,7 +246,7 @@ export function renderImportExportSettingsTab(
     .addButton((button) =>
       button
         .setIcon("copy")
-        .setTooltip("Copy feeds.opml to clipboard")
+        .setTooltip(t("settings.import.copyOpml"))
         .onClick(() => {
           void plugin.copyOpmlToClipboard();
         }),
@@ -259,14 +255,12 @@ export function renderImportExportSettingsTab(
   // ── Auto Backups ──────────────────────────────────────────────────────────
   const backupSection = containerEl.createDiv();
   new Setting(backupSection)
-    .setName("Auto backups")
-    .setDesc(
-      "Automatically create backup copies of your data files when the plugin closes.",
-    )
+    .setName(t("settings.import.backups"))
+    .setDesc(t("settings.import.backupsDesc"))
     .setHeading();
 
   new Setting(backupSection)
-    .setName("Back up data.json")
+    .setName(t("settings.import.backupData"))
     .setDesc("Saves a copy to data.json.backup in the plugin folder.")
     .addToggle((toggle) =>
       toggle
@@ -278,7 +272,7 @@ export function renderImportExportSettingsTab(
     );
 
   new Setting(backupSection)
-    .setName("Back up feeds")
+    .setName(t("settings.import.backupFeeds"))
     .setDesc("Saves a copy to feeds.opml.backup in the plugin folder.")
     .addToggle((toggle) =>
       toggle
@@ -290,7 +284,7 @@ export function renderImportExportSettingsTab(
     );
 
   new Setting(backupSection)
-    .setName("Back up user preferences (userdata.json)")
+    .setName(t("settings.import.backupPreferences"))
     .setDesc("Saves a copy to userdata.json.backup in the plugin folder.")
     .addToggle((toggle) =>
       toggle
@@ -304,10 +298,8 @@ export function renderImportExportSettingsTab(
   // ── Factory Reset ─────────────────────────────────────────────────────────
   const factoryResetSection = containerEl.createDiv();
   new Setting(factoryResetSection)
-    .setName("Factory reset")
-    .setDesc(
-      "Restore all plugin settings to their default values and clear plugin-managed data. Existing backup files and saved article markdown files are left untouched.",
-    )
+    .setName(t("settings.import.reset"))
+    .setDesc(t("settings.import.resetDesc"))
     .setHeading();
 
   const factoryResetActions = new Setting(factoryResetSection);
@@ -315,7 +307,7 @@ export function renderImportExportSettingsTab(
   factoryResetActions.addButton((button) =>
     button
       .setIcon("rotate-ccw")
-      .setButtonText("Factory reset")
+      .setButtonText(t("settings.import.reset"))
       .setWarning()
       .onClick(() => {
         void (async () => {

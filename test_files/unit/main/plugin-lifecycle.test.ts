@@ -451,6 +451,32 @@ describe("onload() initialization", () => {
     ).toBeGreaterThanOrEqual(7);
   });
 
+  it("registers Chinese command names by default", async () => {
+    await plugin.onload();
+
+    const commands = (plugin.addCommand as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([command]) => command as { id: string; name: string },
+    );
+    expect(commands.find((command) => command.id === "open-dashboard")?.name).toBe(
+      "打开 RSS 信息台",
+    );
+    expect(commands.find((command) => command.id === "refresh-feeds")?.name).toBe(
+      "刷新全部来源",
+    );
+  });
+
+  it("keeps English command names when English is stored", async () => {
+    plugin.loadData = vi.fn().mockResolvedValue({ locale: "en" });
+    await plugin.onload();
+
+    const commands = (plugin.addCommand as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([command]) => command as { id: string; name: string },
+    );
+    expect(commands.find((command) => command.id === "open-dashboard")?.name).toBe(
+      "Open RSS dashboard",
+    );
+  });
+
   it("sets up refresh interval only in explicit interval mode", async () => {
     plugin.loadData = vi.fn().mockResolvedValue({
       refreshMode: "interval",

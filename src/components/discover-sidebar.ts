@@ -6,6 +6,7 @@ import {
   CategoryPath,
 } from "../types/discover-types";
 import { attachInputClearButton } from "../utils/platform-utils";
+import { createTranslator } from "../i18n";
 
 interface DiscoverSidebarCallbacks {
   onFilterChange: () => void;
@@ -76,11 +77,12 @@ export class DiscoverSidebar {
       }
     };
 
-    const typesBtn = navContainer.createEl("button", { text: "Types" });
+    const t = createTranslator(this.plugin.settings?.locale ?? "en");
+    const typesBtn = navContainer.createEl("button", { text: t("discover.types") });
     const categoriesBtn = navContainer.createEl("button", {
-      text: "Categories",
+      text: t("discover.categories"),
     });
-    const tagsBtn = navContainer.createEl("button", { text: "Tags" });
+    const tagsBtn = navContainer.createEl("button", { text: t("discover.tags") });
 
     const buttons = [
       { el: typesBtn, section: "types" as const },
@@ -115,6 +117,7 @@ export class DiscoverSidebar {
   }
 
   private renderSidebarHeader(container: HTMLElement): void {
+    const t = createTranslator(this.plugin.settings?.locale ?? "en");
     const header = container.createDiv({ cls: "rss-discover-header" });
     const navContainer = header.createDiv({
       cls: "rss-dashboard-nav-container",
@@ -123,8 +126,8 @@ export class DiscoverSidebar {
     this.createHeaderNavButton(
       navContainer,
       "rss-discover-return-home",
-      "Home",
-      "Return to Dashboard",
+      t("discover.home"),
+      t("discover.returnDashboard"),
       "arrow-left",
       () => this.callbacks.onActivateView(),
     );
@@ -133,10 +136,15 @@ export class DiscoverSidebar {
       navContainer,
       "rss-discover-smallweb-button",
       "Kagi",
-      "Open Kagi Smallweb",
+      t("discover.openSmallweb"),
       "sparkles",
       () => this.callbacks.onActivateSmallwebView(),
     );
+
+    header.createSpan({
+      cls: "rss-discover-sidebar-title",
+      text: t("discover.title"),
+    });
 
     if (this.callbacks.onCloseMobileSidebar) {
       const rightActions = header.createDiv({
@@ -145,8 +153,8 @@ export class DiscoverSidebar {
       const closeBtn = rightActions.createDiv({
         cls: "rss-dashboard-header-close-button clickable-icon",
         attr: {
-          title: "Close filters",
-          "aria-label": "Close filters",
+          title: t("discover.closeFilters"),
+          "aria-label": t("discover.closeFilters"),
         },
       });
       setIcon(closeBtn, "panel-left-close");
@@ -191,6 +199,7 @@ export class DiscoverSidebar {
   }
 
   private renderSearch(container: HTMLElement): void {
+    const t = createTranslator(this.plugin.settings?.locale ?? "en");
     const searchSection = container.createDiv({
       cls: "rss-discover-section",
     });
@@ -201,7 +210,7 @@ export class DiscoverSidebar {
 
     const searchInput = searchInputWrapper.createEl("input", {
       type: "text",
-      placeholder: "Search feeds...",
+      placeholder: t("discover.search"),
       value: this.filters.query,
     });
     searchInput.addClass("rss-discover-search-input");

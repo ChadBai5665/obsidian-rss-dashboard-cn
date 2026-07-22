@@ -8,7 +8,7 @@
 import { Notice, Setting, normalizePath } from "obsidian";
 import type { App } from "obsidian";
 import { DEFAULT_SETTINGS, type SavedTemplate } from "../../types/types";
-import type { Locale } from "../../i18n";
+import { createTranslator, type Locale } from "../../i18n";
 import { VaultFolderSuggest } from "../../components/folder-suggest";
 import { TemplateNameModal } from "../modals/settings-modals";
 
@@ -33,9 +33,10 @@ export function renderArticleSavingSettingsTab(
   plugin: ArticleSavingPluginLike,
   onRefresh: () => void,
 ): void {
+  const t = createTranslator(plugin.settings.locale ?? "en");
   new Setting(containerEl)
-    .setName("Save path")
-    .setDesc("Default folder to save articles")
+    .setName(t("settings.article.savePath"))
+    .setDesc(t("settings.article.savePathDesc"))
     .addText((text) => {
       text
         .setValue(plugin.settings.articleSaving.defaultFolder)
@@ -47,8 +48,8 @@ export function renderArticleSavingSettingsTab(
     });
 
   new Setting(containerEl)
-    .setName("Add 'saved' tag")
-    .setDesc("Automatically add a 'saved' tag to saved articles")
+    .setName(t("settings.article.savedTag"))
+    .setDesc(t("settings.article.savedTagDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.articleSaving.addSavedTag)
@@ -59,10 +60,8 @@ export function renderArticleSavingSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Save full content")
-    .setDesc(
-      "Fetch and save the full article content from the web (instead of just the RSS summary)",
-    )
+    .setName(t("settings.article.fullContent"))
+    .setDesc(t("settings.article.fullContentDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.articleSaving.saveFullContent)
@@ -73,10 +72,8 @@ export function renderArticleSavingSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Fetch timeout")
-    .setDesc(
-      "Timeout in seconds for fetching full article content (prevents hanging)",
-    )
+    .setName(t("settings.article.timeout"))
+    .setDesc(t("settings.article.timeoutDesc"))
     .addSlider((slider) => {
       slider
         .setLimits(5, 30, 1)
@@ -89,15 +86,13 @@ export function renderArticleSavingSettingsTab(
     });
 
   // ── Default template ──────────────────────────────────────────────────────
-  new Setting(containerEl).setName("Default template").setHeading();
+  new Setting(containerEl).setName(t("settings.article.defaultTemplate")).setHeading();
 
   const templateContainer = containerEl.createDiv();
 
   new Setting(templateContainer)
-    .setName("Default article template")
-    .setDesc(
-      "Template for saved articles. All frontmatter properties must start with a single space indent.",
-    );
+    .setName(t("settings.article.defaultTemplate"))
+    .setDesc(t("settings.article.defaultTemplateDesc"));
 
   const templateInput = templateContainer.createEl("textarea", {
     attr: { rows: "10" },
@@ -117,7 +112,7 @@ export function renderArticleSavingSettingsTab(
     cls: "setting-item-description rss-dashboard-template-help",
   });
 
-  helpText.createEl("p", { text: "Available variables:" });
+  helpText.createEl("p", { text: t("settings.article.variables") });
   const list = helpText.createEl("ul", { cls: "rss-dashboard-variable-list" });
   [
     "{{title}}",
@@ -143,7 +138,7 @@ export function renderArticleSavingSettingsTab(
   });
 
   const resetBtn = templateBtnRow.createEl("button", {
-    text: "Reset to default",
+    text: t("settings.article.reset"),
     cls: "rss-dashboard-template-btn",
   });
   resetBtn.onclick = async () => {
@@ -151,11 +146,11 @@ export function renderArticleSavingSettingsTab(
     plugin.settings.articleSaving.defaultTemplate =
       DEFAULT_SETTINGS.articleSaving.defaultTemplate;
     await plugin.saveSettings();
-    new Notice("Template reset to default");
+    new Notice(t("settings.article.resetDone"));
   };
 
   const saveAsTemplateBtn = templateBtnRow.createEl("button", {
-    text: "Save as template",
+    text: t("settings.article.saveAs"),
     cls: "rss-dashboard-template-btn",
   });
   saveAsTemplateBtn.onclick = async () => {
@@ -173,19 +168,19 @@ export function renderArticleSavingSettingsTab(
       }
       plugin.settings.articleSaving.savedTemplates.push(newTemplate);
       await plugin.saveSettings();
-      new Notice(`Template "${name}" saved`);
+      new Notice(t("settings.article.saved", { name }));
       onRefresh();
     }
   };
 
   // ── Saved templates ───────────────────────────────────────────────────────
-  new Setting(containerEl).setName("Saved templates").setHeading();
+  new Setting(containerEl).setName(t("settings.article.savedTemplates")).setHeading();
 
   const savedTemplates = plugin.settings.articleSaving.savedTemplates || [];
 
   if (savedTemplates.length === 0) {
     containerEl.createEl("p", {
-      text: "No saved templates yet. Save the current template using the button above.",
+      text: t("settings.article.emptyTemplates"),
       cls: "rss-dashboard-settings-note",
     });
   } else {
@@ -198,24 +193,24 @@ export function renderArticleSavingSettingsTab(
         .setName(template.name)
         .addButton((button) =>
           button
-            .setButtonText("Load")
+            .setButtonText(t("settings.article.load"))
             .setTooltip("Load this template into the editor")
             .onClick(async () => {
               templateInput.value = template.template;
               plugin.settings.articleSaving.defaultTemplate = template.template;
               await plugin.saveSettings();
-              new Notice(`Template "${template.name}" loaded`);
+              new Notice(t("settings.article.loaded", { name: template.name }));
             }),
         )
         .addButton((button) =>
           button
-            .setButtonText("Update")
+            .setButtonText(t("settings.article.update"))
             .setTooltip("Update this template with current editor content")
             .onClick(async () => {
               plugin.settings.articleSaving.savedTemplates![index].template =
                 plugin.settings.articleSaving.defaultTemplate;
               await plugin.saveSettings();
-              new Notice(`Template "${template.name}" updated`);
+              new Notice(t("settings.article.updated", { name: template.name }));
             }),
         )
         .addButton((button) =>
@@ -225,7 +220,7 @@ export function renderArticleSavingSettingsTab(
             .onClick(async () => {
               plugin.settings.articleSaving.savedTemplates!.splice(index, 1);
               await plugin.saveSettings();
-              new Notice(`Template "${template.name}" deleted`);
+              new Notice(t("settings.article.deleted", { name: template.name }));
               onRefresh();
             }),
         );

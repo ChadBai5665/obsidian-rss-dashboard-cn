@@ -10,6 +10,7 @@ import RssDashboardPlugin from "../../../main";
 import { addTagMultiSelectControl } from "../../components/tag-multi-select-control";
 import { DEFAULT_SETTINGS } from "../../types/types";
 import { updateTagInSettings } from "../../utils/tag-utils";
+import { createTranslator } from "../../i18n";
 
 interface AutoTagSettingConfig {
   name: string;
@@ -24,8 +25,9 @@ export function renderTagsSettingsTab(
   plugin: RssDashboardPlugin,
   onRefresh: () => void,
 ): void {
+  const t = createTranslator(plugin.settings.locale ?? "zh-CN");
   // Auto Tagging settings
-  new Setting(containerEl).setName("Auto tagging").setHeading();
+  new Setting(containerEl).setName(t("settings.tags.auto")).setHeading();
 
   const autoTagSettings: AutoTagSettingConfig[] = [
     {
@@ -105,7 +107,7 @@ export function renderTagsSettingsTab(
       setting,
       availableTags: plugin.settings.availableTags ?? [],
       selectedTagNames: autoTagSetting.getSelectedTagNames(),
-      triggerEmptyLabel: "None",
+      triggerEmptyLabel: t("settings.tags.none"),
       menuTitle: autoTagSetting.menuTitle,
       locale: plugin.settings.locale ?? "zh-CN",
       onChange: async (selected: string[]) => {
@@ -116,10 +118,10 @@ export function renderTagsSettingsTab(
   }
 
   new Setting(containerEl)
-    .setName("Reset tag names")
-    .setDesc("Restore all tag names to their out-of-the-box defaults.")
+    .setName(t("settings.tags.reset"))
+    .setDesc(t("settings.tags.resetDesc"))
     .addButton((button) => {
-      button.setButtonText("Default tag names").onClick(async () => {
+      button.setButtonText(t("settings.tags.default")).onClick(async () => {
         const d = DEFAULT_SETTINGS.media;
         plugin.settings.media.defaultVideoTag = d.defaultVideoTag;
         plugin.settings.media.defaultVideoTags = d.defaultVideoTags;
@@ -135,13 +137,13 @@ export function renderTagsSettingsTab(
         plugin.settings.media.defaultMastodonTag = d.defaultMastodonTag;
         plugin.settings.media.defaultMastodonTags = d.defaultMastodonTags;
         await plugin.saveSettings();
-        new Notice("Tag names restored to defaults.");
+        new Notice(t("settings.tags.resetDone"));
         onRefresh();
       });
     });
 
   // Tags settings
-  new Setting(containerEl).setName("Tags").setHeading();
+  new Setting(containerEl).setName(t("settings.tags.heading")).setHeading();
 
   const tagsContainer = containerEl.createDiv({
     cls: "rss-dashboard-tags-container",
@@ -163,7 +165,7 @@ export function renderTagsSettingsTab(
       .addButton((button) =>
         button
           .setIcon("trash")
-          .setTooltip("Delete tag")
+          .setTooltip(t("settings.tags.delete"))
           .onClick(async () => {
             plugin.settings.availableTags.splice(i, 1);
             await plugin.saveSettings();
@@ -172,20 +174,20 @@ export function renderTagsSettingsTab(
       );
   }
 
-  new Setting(containerEl).setName("Add new tag").setHeading();
+  new Setting(containerEl).setName(t("settings.tags.add")).setHeading();
 
   const newTagContainer = containerEl.createDiv();
 
   const tagNameSetting = new Setting(newTagContainer)
-    .setName("Tag name")
-    .addText((text) => text.setPlaceholder("Enter tag name"));
+    .setName(t("settings.tags.name"))
+    .addText((text) => text.setPlaceholder(t("settings.tags.namePlaceholder")));
 
   const tagColorSetting = new Setting(newTagContainer)
-    .setName("Tag color")
+    .setName(t("settings.tags.color"))
     .addColorPicker((colorPicker) => colorPicker.setValue("#3498db"));
 
   new Setting(newTagContainer).addButton((button) =>
-    button.setButtonText("Add tag").onClick(async () => {
+    button.setButtonText(t("settings.tags.addButton")).onClick(async () => {
       const nameInput = tagNameSetting.components[0] as unknown as {
         inputEl: HTMLInputElement;
       };

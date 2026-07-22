@@ -200,6 +200,16 @@ describe("DiscoverView (P1-3)", () => {
     vi.spyOn(console, "debug").mockImplementation(() => {});
   });
 
+  it("renders Chinese discovery chrome by default without translating source titles", async () => {
+    const { view } = await createView();
+    view.loadData();
+    view.render();
+
+    expect(view.containerEl.textContent).toContain("发现订阅源");
+    expect(view.containerEl.textContent).toContain("类型");
+    expect(view.containerEl.textContent).toContain("Alpha Tech Blog");
+  });
+
   it("loadData() loads feeds, generates category map, and restores saved filters", async () => {
     const saved: Partial<DiscoverFilters> = {
       query: "technology",
@@ -306,8 +316,8 @@ describe("DiscoverView (P1-3)", () => {
     expect(addAllButton).not.toBeNull();
     if (!addAllButton) throw new Error("addAllButton not found");
 
-    expect(resultsCount.textContent).toBe("4 feeds found");
-    expect((addAllButton as HTMLElement).textContent).toContain("Add all...");
+    expect(resultsCount.textContent).toBe("找到 4 个订阅源");
+    expect((addAllButton as HTMLElement).textContent).toContain("全部添加");
 
     if (typeof (addAllButton as HTMLElement).click === "function") {
       (addAllButton as HTMLElement).click();
@@ -533,7 +543,7 @@ describe("DiscoverView (P1-3)", () => {
     expect(resetButton).not.toBeNull();
     if (!resetButton) throw new Error("resetButton not found");
     expect((resetButton as HTMLButtonElement).disabled).toBe(false);
-    expect((resetButton as HTMLElement).textContent).toContain("Add all...");
+    expect((resetButton as HTMLElement).textContent).toContain("全部添加");
   });
 
   it("bulk add summarizes added and skipped counts in a single notice", async () => {

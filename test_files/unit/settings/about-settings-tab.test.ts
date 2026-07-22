@@ -41,4 +41,21 @@ describe("renderAboutTab()", () => {
       expect(link.textContent?.length).toBeGreaterThan(0);
     }
   });
+
+  it("renders Chinese about copy by default and keeps English selectable", () => {
+    const chineseContainer = document.createElement("div");
+    renderAboutTab(
+      chineseContainer,
+      { manifest: { name: "RSS 信息台", version: "1.0.0" }, settings: { locale: "zh-CN" } } as unknown as import("../../../main").default,
+    );
+    expect(chineseContainer.textContent).toContain("免费开源的 Obsidian 社区插件");
+    expect(chineseContainer.textContent).toContain("支持开发");
+
+    const englishContainer = document.createElement("div");
+    renderAboutTab(
+      englishContainer,
+      { manifest: { name: "RSS Dashboard", version: "1.0.0" }, settings: { locale: "en" } } as unknown as import("../../../main").default,
+    );
+    expect(englishContainer.textContent).toContain("free, open source community plugin");
+  });
 });

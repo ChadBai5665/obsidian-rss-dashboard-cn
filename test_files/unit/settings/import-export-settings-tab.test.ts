@@ -25,9 +25,11 @@ function flushPromises(): Promise<void> {
 }
 
 function cloneSettings(): typeof DEFAULT_SETTINGS {
-  return JSON.parse(
+  const settings = JSON.parse(
     JSON.stringify(DEFAULT_SETTINGS),
   ) as typeof DEFAULT_SETTINGS;
+  settings.locale = "en";
+  return settings;
 }
 
 function createContainerEl(): HTMLDivElement {
@@ -182,7 +184,7 @@ describe("Auto Backup Helpers", () => {
         );
         const importButton = Array.from(
           containerEl.querySelectorAll<HTMLButtonElement>("button"),
-        ).find((button) => button.textContent === "Import data.json")!;
+        ).find((button) => button.textContent === (initialLocale === "zh-CN" ? "导入 data.json" : "Import data.json"))!;
         importButton.click();
         const fileInput = Array.from(
           document.body.querySelectorAll<HTMLInputElement>(
@@ -235,7 +237,7 @@ describe("Auto Backup Helpers", () => {
       const resetButton = Array.from(
         containerEl.querySelectorAll<HTMLButtonElement>("button"),
       ).find(
-        (button) => button.textContent === "Factory reset",
+        (button) => button.textContent === "恢复出厂设置",
       ) as HTMLButtonElement;
       resetButton.click();
       await flushPromises();

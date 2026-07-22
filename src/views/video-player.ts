@@ -1,6 +1,7 @@
 import { Notice, Setting, setIcon } from "obsidian";
 import { FeedItem } from "../types/types";
 import { MediaService } from "../services/media-service";
+import { createTranslator, type Locale } from "../i18n";
 
 interface YouTubeMessagePayload {
   id?: string | number;
@@ -27,6 +28,11 @@ export class VideoPlayer {
   private messageHandler: ((event: MessageEvent) => void) | null = null;
   private playStartTime: number | null = null;
   private videoDuration: number | null = null;
+  private locale: Locale;
+
+  private t(key: Parameters<ReturnType<typeof createTranslator>>[0], params?: Record<string, string | number>): string {
+    return createTranslator(this.locale)(key, params);
+  }
 
   constructor(
     container: HTMLElement,
@@ -38,17 +44,19 @@ export class VideoPlayer {
       flush?: boolean,
     ) => void,
     progressTrackingEnabled = true,
+    locale: Locale = "en",
   ) {
     this.container = container;
     this.onVideoSelect = onVideoSelect;
     this.onPlaybackProgress = onPlaybackProgress;
     this.progressTrackingEnabled = progressTrackingEnabled;
+    this.locale = locale;
     this.setupMessageListener();
   }
 
   loadVideo(item: FeedItem): void {
     if (!item.videoId) {
-      new Notice("No video id provided");
+      new Notice(this.t("video.noId"));
       console.debug("[Stub Notice]", "No video ID provided");
       return;
     }
@@ -58,7 +66,7 @@ export class VideoPlayer {
       this.lastTrackedPosition = item.playbackProgress?.position ?? null;
       this.render();
     } catch (error) {
-      const msg = `Error loading video: ${error instanceof Error ? error.message : "Unknown error"}`;
+      const msg = this.t("video.loadError", { error: error instanceof Error ? error.message : "Unknown error" });
       new Notice(msg);
       console.debug("[Stub Notice]", msg);
     }
@@ -135,7 +143,7 @@ export class VideoPlayer {
       cls: "rss-video-youtube-button-icon",
     });
     setIcon(youtubeIcon, "youtube");
-    youtubeButton.createSpan({ text: "Watch on YouTube" });
+    youtubeButton.createSpan({ text: this.t("video.watch") });
 
     const tosLink = linksContainer.createEl("a", {
       cls: "rss-video-tos-link",
@@ -350,7 +358,7 @@ export class VideoPlayer {
       )
       .slice(0, 5);
 
-    relatedContainer.createEl("h4", { text: "From the same channel" });
+    relatedContainer.createEl("h4", { text: this.t("video.related") });
 
     if (filtered.length > 0) {
       const relatedList = relatedContainer.createDiv({
@@ -396,7 +404,7 @@ export class VideoPlayer {
     } else {
       relatedContainer.createDiv({
         cls: "rss-video-related-empty",
-        text: "No related videos found",
+        text: this.t("video.noRelated"),
       });
     }
   }

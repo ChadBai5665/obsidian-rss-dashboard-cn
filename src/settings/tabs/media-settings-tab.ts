@@ -8,8 +8,10 @@
 import { App, Notice, Setting } from "obsidian";
 import { PodcastTheme } from "../../types/types";
 import type { MediaSettings } from "../../types/types";
+import { createTranslator } from "../../i18n";
 
 interface MediaTabSettings {
+  locale?: "zh-CN" | "en";
   media: MediaSettings;
 }
 
@@ -27,13 +29,12 @@ export function renderMediaSettingsTab(
   containerEl: HTMLElement,
   plugin: MediaSettingsPlugin,
 ): void {
-  new Setting(containerEl).setName("Playback progress").setHeading();
+  const t = createTranslator(plugin.settings.locale ?? "en");
+  new Setting(containerEl).setName(t("settings.media.playback")).setHeading();
 
   new Setting(containerEl)
-    .setName("Remember playback progress")
-    .setDesc(
-      "Save and restore podcast and video playback position across reader and plugin restarts",
-    )
+    .setName(t("settings.media.remember"))
+    .setDesc(t("settings.media.rememberDesc"))
     .addToggle((toggle) =>
       toggle
         .setValue(plugin.settings.media.rememberPlaybackProgress ?? true)
@@ -44,30 +45,28 @@ export function renderMediaSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Clear saved playback progress")
-    .setDesc(
-      "Remove all remembered podcast and video resume positions stored by the plugin",
-    )
+    .setName(t("settings.media.clear"))
+    .setDesc(t("settings.media.clearDesc"))
     .addButton((button) => {
       button
-        .setButtonText("Clear progress")
+        .setButtonText(t("settings.media.clearButton"))
         .setWarning()
         .onClick(async () => {
           const clearedCount = await plugin.clearPlaybackProgress();
           new Notice(
             clearedCount > 0
-              ? `Cleared saved playback progress for ${clearedCount} item${clearedCount === 1 ? "" : "s"}.`
-              : "No saved playback progress was found.",
+              ? t("settings.media.cleared", { count: clearedCount })
+              : t("settings.media.nothingToClear"),
           );
         });
     });
 
   // ── Podcast player ────────────────────────────────────────────────────────
-  new Setting(containerEl).setName("Podcast player").setHeading();
+  new Setting(containerEl).setName(t("settings.media.podcast")).setHeading();
 
   new Setting(containerEl)
-    .setName("Default play speed")
-    .setDesc("Default playback speed for podcast episodes")
+    .setName(t("settings.media.speed"))
+    .setDesc(t("settings.media.speedDesc"))
     .addDropdown((dropdown) =>
       dropdown
         .addOption("0.75", "0.75x")
@@ -86,8 +85,8 @@ export function renderMediaSettingsTab(
     );
 
   new Setting(containerEl)
-    .setName("Player theme")
-    .setDesc("Choose a visual theme for the podcast player")
+    .setName(t("settings.media.theme"))
+    .setDesc(t("settings.media.themeDesc"))
     .addDropdown((dropdown) =>
       dropdown
         .addOption("obsidian", "Default")
@@ -112,18 +111,18 @@ export function renderMediaSettingsTab(
         }),
     );
 
-  new Setting(containerEl).setName("Third-party services").setHeading();
+  new Setting(containerEl).setName(t("settings.media.services")).setHeading();
 
   const youtubeTosSetting = new Setting(containerEl).setName(
-    "YouTube terms of service",
+    t("settings.media.youtubeTos"),
   );
 
   youtubeTosSetting.descEl.createSpan({
-    text: "This plugin uses the YouTube IFrame API for video playback. By using this feature, you agree to be bound by the ",
+    text: t("settings.media.youtubeTosDesc"),
   });
 
   youtubeTosSetting.descEl.createEl("a", {
-    text: "YouTube terms of service",
+    text: t("settings.media.youtubeTos"),
     href: "https://www.youtube.com/t/terms",
     attr: { target: "_blank", rel: "noopener noreferrer" },
   });

@@ -6,11 +6,13 @@
  *   - renderAboutTab(containerEl, plugin)
  */
 import RssDashboardPlugin from "../../../main";
+import { createTranslator } from "../../i18n";
 
 export function renderAboutTab(
   containerEl: HTMLElement,
   plugin: RssDashboardPlugin,
 ): void {
+  const t = createTranslator(plugin.settings?.locale ?? "zh-CN");
   const aboutContainer = containerEl.createDiv({
     cls: "rss-dashboard-about-tab",
   });
@@ -29,21 +31,21 @@ export function renderAboutTab(
   });
 
   descriptionContainer.createEl("p", {
-    text: "RSS dashboard is a free, open source community plugin for Obsidian that makes it easy to manage your RSS feeds, YouTube subscriptions, podcasts, and twitter/x feeds in one place.",
+    text: t("settings.about.description"),
   });
 
   const featuresList = descriptionContainer.createEl("ul", {
     cls: "rss-dashboard-about-features-list",
   });
-  featuresList.createEl("li", { text: "Data is stored locally." });
+  featuresList.createEl("li", { text: t("settings.about.local") });
   featuresList.createEl("li", {
-    text: "Content can be saved directly to your vault.",
+    text: t("settings.about.save"),
   });
-  featuresList.createEl("li", { text: "No ads, no tracking, no paywalls." });
+  featuresList.createEl("li", { text: t("settings.about.noAds") });
 
   const attributionParagraph = descriptionContainer.createEl("p");
   attributionParagraph.createSpan({
-    text: "RSS Dashboard was originally created by ",
+    text: t("settings.about.created"),
   });
   const originalCreatorLink = attributionParagraph.createEl("a", {
     text: "Amatya-aditya",
@@ -53,7 +55,7 @@ export function renderAboutTab(
   originalCreatorLink.target = "_blank";
   originalCreatorLink.rel = "noopener noreferrer";
   attributionParagraph.createSpan({
-    text: ", with active development and support offered by ",
+    text: t("settings.about.maintained"),
   });
   const maintainerLink = attributionParagraph.createEl("a", {
     text: "Marcd35",
@@ -63,7 +65,7 @@ export function renderAboutTab(
   maintainerLink.target = "_blank";
   maintainerLink.rel = "noopener noreferrer";
   attributionParagraph.createSpan({
-    text: " since version 2.2.0, alongside many contributions from the community.",
+    text: t("settings.about.community"),
   });
 
   const createLinkButton = (
@@ -90,28 +92,28 @@ export function renderAboutTab(
   );
   createLinkButton(
     actionsRow,
-    "Report issue",
+    t("settings.about.reportIssue"),
     "https://github.com/amatya-aditya/obsidian-rss-dashboard/issues",
   );
   createLinkButton(actionsRow, "Discord", "https://discord.gg/9bu7V9BBbs");
 
   aboutContainer.createDiv({
     cls: "rss-dashboard-about-section-title",
-    text: "Support development",
+    text: t("settings.about.support"),
   });
   const supportRow = aboutContainer.createDiv({
     cls: "rss-dashboard-about-btn-row",
   });
   createLinkButton(
     supportRow,
-    "Buy me a coffee",
+    t("settings.about.coffee"),
     "https://www.buymeacoffee.com/amatya_aditya",
   );
   createLinkButton(supportRow, "Ko-fi", "https://ko-fi.com/Y8Y41FV4WI");
 
   aboutContainer.createDiv({
     cls: "rss-dashboard-about-section-title",
-    text: "Other plugins by the author",
+    text: t("settings.about.other"),
   });
   const otherPluginsRow = aboutContainer.createDiv({
     cls: "rss-dashboard-about-btn-row",

@@ -3,6 +3,7 @@ import { Feed } from "../types/types";
 import type RssDashboardPlugin from "../../main";
 import { setCssProps, attachInputClearButton } from "../utils/platform-utils";
 import { FolderSelectorPopup } from "../components/folder-selector-popup";
+import { createTranslator } from "../i18n";
 
 export const RSS_SMALLWEB_VIEW_TYPE = "rss-smallweb-view";
 
@@ -37,6 +38,10 @@ export class KagiSmallwebView extends ItemView {
   private smallwebSearchDebounceTimer: number | null = null;
   private smallwebFeedUpdatedAt: Date | null = null;
 
+  private t(key: Parameters<ReturnType<typeof createTranslator>>[0], params?: Record<string, string | number>): string {
+    return createTranslator(this.plugin.settings.locale ?? "zh-CN")(key, params);
+  }
+
   constructor(
     leaf: WorkspaceLeaf,
     private plugin: RssDashboardPlugin,
@@ -49,7 +54,7 @@ export class KagiSmallwebView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Kagi smallweb";
+    return this.t("smallweb.title");
   }
 
   getIcon(): string {
@@ -122,7 +127,7 @@ export class KagiSmallwebView extends ItemView {
     } catch (err) {
       console.error("[Kagi Smallweb] Error fetching feed:", err);
       this.smallwebError =
-        err instanceof Error ? err.message : "Failed to fetch feed";
+        err instanceof Error ? err.message : this.t("smallweb.failed");
     } finally {
       this.smallwebIsLoading = false;
       this.render();
@@ -151,7 +156,7 @@ export class KagiSmallwebView extends ItemView {
     for (const entry of entryElements) {
       try {
         const postTitle =
-          entry.querySelector("title")?.textContent || "Untitled";
+          entry.querySelector("title")?.textContent || this.t("smallweb.untitled");
 
         const linkEl =
           entry.querySelector("link[rel='alternate']") ||
@@ -267,7 +272,7 @@ export class KagiSmallwebView extends ItemView {
     );
 
     const retryBtn = errorEl.createEl("button", { cls: "mod-cta" });
-    retryBtn.textContent = "Retry";
+    retryBtn.textContent = this.t("common.retry");
     retryBtn.addEventListener("click", () => {
       void this.fetchSmallwebFeed(true);
     });
@@ -298,7 +303,7 @@ export class KagiSmallwebView extends ItemView {
       cls: "rss-smallweb-refresh-btn",
     });
     setIcon(refreshBtn, "refresh-cw");
-    refreshBtn.setAttribute("aria-label", "Refresh feed");
+    refreshBtn.setAttribute("aria-label", this.t("smallweb.refresh"));
     refreshBtn.addEventListener("click", () => {
       void this.fetchSmallwebFeed(true);
     });
@@ -308,10 +313,10 @@ export class KagiSmallwebView extends ItemView {
       cls: "rss-smallweb-subtitle",
     });
     subtitle.appendText(
-      "Recently published posts from independent blogs, curated by Kagi. Refreshed every 5 hours. ",
+      this.t("smallweb.description"),
     );
     subtitle.createEl("a", {
-      text: "Read more here",
+      text: this.t("smallweb.readMore"),
       attr: {
         href: "https://blog.kagi.com/small-web",
         target: "_blank",
@@ -383,7 +388,7 @@ export class KagiSmallwebView extends ItemView {
     });
     const searchInput = searchWrapper.createEl("input", {
       type: "text",
-      placeholder: "Search blogs and posts…",
+      placeholder: this.t("smallweb.search"),
       value: this.smallwebSearchQuery,
     });
     searchInput.addClass("rss-discover-search-input");
@@ -403,7 +408,7 @@ export class KagiSmallwebView extends ItemView {
     if (this.smallwebSearchQuery) {
       controlsRow.createDiv({
         cls: "rss-smallweb-results-count",
-        text: `${this.smallwebFilteredEntries.length} results`,
+        text: this.t("smallweb.results", { count: this.smallwebFilteredEntries.length }),
       });
     }
   }
@@ -862,14 +867,14 @@ export class KagiSmallwebView extends ItemView {
     const footer = container.createDiv({ cls: "rss-smallweb-footer" });
 
     footer.createEl("a", {
-      text: "View on kagi.com",
+      text: this.t("smallweb.view"),
       attr: { href: "https://kagi.com/smallweb", target: "_blank" },
     });
 
     footer.appendText(" · ");
 
     footer.createEl("a", {
-      text: "Browse all ~5,000 feeds",
+      text: this.t("smallweb.browse"),
       attr: { href: "https://kagi.com/smallweb/opml", target: "_blank" },
     });
   }

@@ -1457,6 +1457,7 @@ export class ReaderView extends ItemView {
         },
         this.onPlaybackProgress,
         this.settings.media.rememberPlaybackProgress,
+        this.settings.locale,
       );
       this.videoPlayer.loadVideo(item);
       if (this.relatedItems.length > 0) {
@@ -1528,6 +1529,7 @@ export class ReaderView extends ItemView {
         this.onPlaybackProgress,
         this.settings.media.rememberPlaybackProgress,
         this.settings.media.defaultPlaySpeed ?? 1,
+        this.settings.locale,
       );
       this.podcastPlayer.loadEpisode(item, fullFeedEpisodes);
     } else {
@@ -1546,6 +1548,7 @@ export class ReaderView extends ItemView {
           this.onPlaybackProgress,
           this.settings.media.rememberPlaybackProgress,
           this.settings.media.defaultPlaySpeed ?? 1,
+          this.settings.locale,
         );
         this.podcastPlayer.loadEpisode(podcastItem, fullFeedEpisodes);
       } else {

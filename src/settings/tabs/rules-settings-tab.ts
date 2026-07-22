@@ -8,16 +8,18 @@
 import { Setting } from "obsidian";
 import RssDashboardPlugin from "../../../main";
 import { renderKeywordFilterEditor } from "../../components/keyword-filter-editor";
+import { createTranslator } from "../../i18n";
 
 export function renderRulesSettingsTab(
   containerEl: HTMLElement,
   plugin: RssDashboardPlugin,
   onRefresh: () => void,
 ): void {
-  new Setting(containerEl).setName("Keyword rules").setHeading();
+  const t = createTranslator(plugin.settings.locale ?? "zh-CN");
+  new Setting(containerEl).setName(t("settings.rules.heading")).setHeading();
   containerEl.createEl("p", {
     cls: "rss-dashboard-settings-description",
-    text: "Create global include/exclude keyword rules. Rules are case-insensitive, and per-feed settings can optionally override these global rules.",
+    text: t("settings.rules.description"),
   });
 
   if (!plugin.settings.keywordRules) {

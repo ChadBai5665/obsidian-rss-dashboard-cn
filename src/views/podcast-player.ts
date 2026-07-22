@@ -3,6 +3,7 @@ import { App, setIcon, Menu, Notice } from "obsidian";
 import { MediaService } from "../services/media-service";
 import { sanitizeAndAppendHtml } from "../utils/safe-html";
 import { windowInstanceOf } from "../utils/platform-utils";
+import { createTranslator, type Locale } from "../i18n";
 
 export class PodcastPlayer {
   private container: HTMLElement;
@@ -54,6 +55,7 @@ export class PodcastPlayer {
   private sleepTimerTextEl: HTMLElement | null = null;
   private sleepTimerRestartBtn: HTMLElement | null = null;
   private lastSleepTimerDuration: number | "end" | null = null;
+  private locale: Locale;
 
   constructor(
     container: HTMLElement,
@@ -72,12 +74,14 @@ export class PodcastPlayer {
     ) => void,
     progressTrackingEnabled = true,
     defaultPlaySpeed = 1,
+    locale: Locale = "zh-CN",
   ) {
     this.container = container;
     this.app = app;
     this.theme = theme || "obsidian";
     this.progressTrackingEnabled = progressTrackingEnabled;
     this.defaultPlaySpeed = defaultPlaySpeed ?? 1;
+    this.locale = locale;
     if (playlist) {
       this.playlist = playlist;
       this.originalPlaylist = [...playlist];
@@ -87,6 +91,10 @@ export class PodcastPlayer {
     if (this.progressTrackingEnabled) {
       this.loadProgressData();
     }
+  }
+
+  private t(key: Parameters<ReturnType<typeof createTranslator>>[0], params?: Record<string, string | number>): string {
+    return createTranslator(this.locale)(key, params);
   }
 
   setPlaylist(playlist: FeedItem[]) {
@@ -300,10 +308,10 @@ export class PodcastPlayer {
     this.shuffleButton = transportSection.createDiv({
       cls: "rss-shuffle-btn clickable-icon",
       attr: {
-        title: "Shuffle",
+        title: this.t("media.shuffle"),
         role: "button",
         tabindex: "0",
-        "aria-label": "Shuffle",
+        "aria-label": this.t("media.shuffle"),
       },
     });
     setIcon(this.shuffleButton, "shuffle");
@@ -322,7 +330,7 @@ export class PodcastPlayer {
         title: "Rewind 30s",
         role: "button",
         tabindex: "0",
-        "aria-label": "Rewind 30 seconds",
+        "aria-label": this.t("media.rewind"),
       },
     });
     setIcon(rewindBtn, "rotate-ccw");
@@ -355,7 +363,7 @@ export class PodcastPlayer {
         title: "Play/Pause",
         role: "button",
         tabindex: "0",
-        "aria-label": "Play/Pause",
+        "aria-label": this.t("media.playPause"),
       },
     });
     setIcon(this.playButton, "play");
@@ -388,7 +396,7 @@ export class PodcastPlayer {
         title: "Forward 30s",
         role: "button",
         tabindex: "0",
-        "aria-label": "Forward 30 seconds",
+        "aria-label": this.t("media.forward"),
       },
     });
     setIcon(forwardBtn, "rotate-cw");
@@ -421,7 +429,7 @@ export class PodcastPlayer {
         title: "Repeat",
         role: "button",
         tabindex: "0",
-        "aria-label": "Repeat",
+        "aria-label": this.t("media.repeat"),
       },
     });
     setIcon(this.repeatButton, "repeat");
@@ -465,7 +473,7 @@ export class PodcastPlayer {
         title: "Sleep Timer",
         role: "button",
         tabindex: "0",
-        "aria-label": "Sleep Timer",
+        "aria-label": this.t("media.sleep"),
       },
     });
     setIcon(this.sleepTimerButton, "moon");
@@ -481,7 +489,7 @@ export class PodcastPlayer {
         title: "Volume",
         role: "button",
         tabindex: "0",
-        "aria-label": "Adjust volume",
+        "aria-label": this.t("media.volume"),
       },
     });
     const updateVolumeIcon = () => {
@@ -706,7 +714,7 @@ export class PodcastPlayer {
       });
       playlistHeader.createDiv({
         cls: "playlist-title",
-        text: `Playlist (${this.playlist.length} episodes)`,
+        text: this.t("media.playlist", { count: this.playlist.length }),
       });
 
       const sortControls = playlistHeader.createDiv({
@@ -724,24 +732,24 @@ export class PodcastPlayer {
       });
       autoplayCheckbox.checked = this.isAutoplayEnabled;
       
-      autoplayLabel.createSpan({ text: "Autoplay" });
+      autoplayLabel.createSpan({ text: this.t("media.autoplay") });
       
       autoplayCheckbox.onchange = () => {
         this.isAutoplayEnabled = autoplayCheckbox.checked;
-        new Notice(this.isAutoplayEnabled ? "Autoplay enabled" : "Autoplay disabled");
+        new Notice(this.isAutoplayEnabled ? this.t("media.autoplayOn") : this.t("media.autoplayOff"));
       };
 
 
       const recentBtn = sortControls.createEl("button", {
         cls: "playlist-sort-btn",
-        text: "Recent",
+        text: this.t("media.recent"),
       });
       if (this.sortOrder === "recent") recentBtn.addClass("active-sort");
       recentBtn.onclick = () => this.sortPlaylist("recent");
 
       const oldestBtn = sortControls.createEl("button", {
         cls: "playlist-sort-btn",
-        text: "Oldest",
+        text: this.t("media.oldest"),
       });
       if (this.sortOrder === "oldest") oldestBtn.addClass("active-sort");
       oldestBtn.onclick = () => this.sortPlaylist("oldest");
@@ -832,7 +840,7 @@ export class PodcastPlayer {
       }
     } else {
       const emptyState = this.container.createDiv({ cls: "playlist-empty" });
-      emptyState.textContent = "No other episodes available in this feed";
+      emptyState.textContent = this.t("media.noEpisodes");
     }
   }
 
@@ -1052,7 +1060,7 @@ export class PodcastPlayer {
       });
       playlistHeader.createDiv({
         cls: "playlist-title",
-        text: `Playlist (${this.playlist.length} episodes)`,
+        text: this.t("media.playlist", { count: this.playlist.length }),
       });
 
       const sortControls = playlistHeader.createDiv({
@@ -1070,23 +1078,23 @@ export class PodcastPlayer {
       });
       autoplayCheckbox.checked = this.isAutoplayEnabled;
       
-      autoplayLabel.createSpan({ text: "Autoplay" });
+      autoplayLabel.createSpan({ text: this.t("media.autoplay") });
       
       autoplayCheckbox.onchange = () => {
         this.isAutoplayEnabled = autoplayCheckbox.checked;
-        new Notice(this.isAutoplayEnabled ? "Autoplay enabled" : "Autoplay disabled");
+        new Notice(this.isAutoplayEnabled ? this.t("media.autoplayOn") : this.t("media.autoplayOff"));
       };
 
       const recentBtn = sortControls.createEl("button", {
         cls: "playlist-sort-btn",
-        text: "Recent",
+        text: this.t("media.recent"),
       });
       if (this.sortOrder === "recent") recentBtn.addClass("active-sort");
       recentBtn.onclick = () => this.sortPlaylist("recent");
 
       const oldestBtn = sortControls.createEl("button", {
         cls: "playlist-sort-btn",
-        text: "Oldest",
+        text: this.t("media.oldest"),
       });
       if (this.sortOrder === "oldest") oldestBtn.addClass("active-sort");
       oldestBtn.onclick = () => this.sortPlaylist("oldest");
@@ -1182,7 +1190,7 @@ export class PodcastPlayer {
     }
 
     const emptyState = this.container.createDiv({ cls: "playlist-empty" });
-    emptyState.textContent = "No other episodes available in this feed";
+    emptyState.textContent = this.t("media.noEpisodes");
   }
 
   private createCoverPlaceholder(container: HTMLElement): void {

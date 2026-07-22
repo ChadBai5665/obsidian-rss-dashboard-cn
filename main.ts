@@ -89,6 +89,7 @@ import {
   resolveFeedItemStableId,
 } from "./src/collection/item-identity";
 import type { CollectedItem } from "./src/collection/collected-item";
+import { createTranslator, type Translator } from "./src/i18n";
 
 export interface FeedRefreshResult {
   feed: Feed;
@@ -654,6 +655,8 @@ export default class RssDashboardPlugin extends Plugin {
   private statusTransactionQueue: Promise<void> = Promise.resolve();
   private static readonly FEED_REFRESH_RENDER_THROTTLE_MS = 250;
   private readonly feedStorageRepository: FeedStorageRepository;
+  /** Commands are registered once by Obsidian, so this translator is frozen at load. */
+  private commandTranslator: Translator = createTranslator("zh-CN");
 
   constructor(app: App, manifest: ConstructorParameters<typeof Plugin>[1]) {
     super(app, manifest);
@@ -1200,6 +1203,7 @@ export default class RssDashboardPlugin extends Plugin {
     }
 
     await this.loadSettings();
+    this.commandTranslator = createTranslator(this.settings?.locale ?? "zh-CN");
     this.registerVaultMetadataChangeListeners();
 
     const view = await this.getActiveDashboardView();
@@ -1290,7 +1294,7 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.addCommand({
         id: "open-dashboard",
-        name: "Open dashboard",
+        name: this.commandTranslator("command.openDashboard"),
         callback: () => {
           void this.activateView();
         },
@@ -1298,7 +1302,7 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.addCommand({
         id: "open-discover",
-        name: "Open discover",
+        name: this.commandTranslator("command.openDiscover"),
         callback: () => {
           void this.activateDiscoverView();
         },
@@ -1306,7 +1310,7 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.addCommand({
         id: "refresh-feeds",
-        name: "Refresh all sources",
+        name: this.commandTranslator("command.refreshAllSources"),
         callback: () => {
           void this.manualRefreshAllSources();
         },
@@ -1314,7 +1318,7 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.addCommand({
         id: "refresh-failed-sources",
-        name: "Refresh failed sources",
+        name: this.commandTranslator("command.refreshFailedSources"),
         callback: () => {
           void this.manualRefreshFailedSources();
         },
@@ -1322,7 +1326,7 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.addCommand({
         id: "import-opml",
-        name: "Import OPML",
+        name: this.commandTranslator("command.importOpml"),
         callback: () => {
           new ImportOpmlModal(this.app, this).open();
         },
@@ -1330,7 +1334,7 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.addCommand({
         id: "export-opml",
-        name: "Export OPML",
+        name: this.commandTranslator("command.exportOpml"),
         callback: () => {
           void this.exportOpml();
         },
@@ -1338,7 +1342,7 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.addCommand({
         id: "import-usersettings-json",
-        name: "Import usersettings.json",
+        name: this.commandTranslator("command.importUserSettings"),
         callback: () => {
           this.importUserSettingsJson();
         },
@@ -1346,7 +1350,7 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.addCommand({
         id: "export-usersettings-json",
-        name: "Export usersettings.json",
+        name: this.commandTranslator("command.exportUserSettings"),
         callback: () => {
           void this.exportUserSettingsJson();
         },
@@ -1354,7 +1358,7 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.addCommand({
         id: "apply-feed-limits",
-        name: "Apply feed limits to all feeds",
+        name: this.commandTranslator("command.applyFeedLimits"),
         callback: () => {
           void this.applyFeedLimitsToAllFeeds();
         },
@@ -1362,7 +1366,7 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.addCommand({
         id: "toggle-sidebar",
-        name: "Toggle sidebar",
+        name: this.commandTranslator("command.toggleSidebar"),
         checkCallback: (checking: boolean) => {
           const leaves = this.app.workspace.getLeavesOfType(
             RSS_DASHBOARD_VIEW_TYPE,

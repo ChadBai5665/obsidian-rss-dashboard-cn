@@ -72,6 +72,7 @@ export function renderGeneralSettingsTab(
           plugin.settings.locale = value === "en" ? "en" : "zh-CN";
           await plugin.saveSettings();
           plugin.settingTab?.display();
+          new Notice(createTranslator(plugin.settings.locale)("notice.commandNamesReload"));
         }),
     );
 
