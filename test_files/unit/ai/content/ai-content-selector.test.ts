@@ -397,6 +397,23 @@ describe("AiContentSelector", () => {
     expect(result.content).not.toContain(AI_CONTENT_OMISSION_MARKER);
   });
 
+  it("normalizes decoded entities and Unicode whitespace before bounding", async () => {
+    const selector = new AiContentSelector({ contentRepository: repository(null) });
+    const whitespace = "&nbsp;\u3000&#32;".repeat(100_000);
+    const result = await selector.select({
+      item: item({ excerpt: `HEAD${whitespace}TAIL &amp; &#x1F642;` }),
+      maxInputCharacters: 200,
+      fetchFullText: false,
+    });
+
+    expect(result).toMatchObject({
+      content: "HEAD TAIL & 🙂",
+      characterCount: 14,
+      truncated: false,
+    });
+    expect(result.content).not.toContain(AI_CONTENT_OMISSION_MARKER);
+  });
+
   it("strips script content before bounding hostile oversized HTML", async () => {
     const selector = new AiContentSelector({ contentRepository: repository(null) });
     const oversized = `${"正文".repeat(300_000)}<script>${"SECRET".repeat(200_000)}</script>`;
