@@ -386,6 +386,12 @@ export function renderTikHubSettingsTab(
       .onClick(() => {
         let apiKey: string | undefined = secretInputEl?.value ?? "";
         if (secretInputEl) secretInputEl.value = "";
+        secretErrorEl.setText("");
+        if (!apiKey.trim()) {
+          apiKey = undefined;
+          secretErrorEl.setText(t("settings.tikhub.keyRequired"));
+          return;
+        }
         const operation = beginOperation(true);
         if (operation === undefined) {
           apiKey = undefined;
@@ -394,34 +400,29 @@ export function renderTikHubSettingsTab(
         let refreshAfter = false;
         void (async () => {
           try {
-            secretErrorEl.setText("");
-            if (!apiKey?.trim()) {
-              secretErrorEl.setText(t("settings.tikhub.keyRequired"));
-            } else {
-              try {
-                let connectionId = plugin.settings.tikhub.connectionId;
-                if (!UUID_PATTERN.test(connectionId)) {
-                  const originalConnectionId = connectionId;
-                  connectionId = createConnectionId();
-                  if (!UUID_PATTERN.test(connectionId)) throw new Error("invalid connection id");
-                  plugin.settings.tikhub.connectionId = connectionId;
-                  try {
-                    await plugin.saveSettings();
-                  } catch (error) {
-                    plugin.settings.tikhub.connectionId = originalConnectionId;
-                    throw error;
-                  }
+            try {
+              let connectionId = plugin.settings.tikhub.connectionId;
+              if (!UUID_PATTERN.test(connectionId)) {
+                const originalConnectionId = connectionId;
+                connectionId = createConnectionId();
+                if (!UUID_PATTERN.test(connectionId)) throw new Error("invalid connection id");
+                plugin.settings.tikhub.connectionId = connectionId;
+                try {
+                  await plugin.saveSettings();
+                } catch (error) {
+                  plugin.settings.tikhub.connectionId = originalConnectionId;
+                  throw error;
                 }
-                await secretStore.set(connectionId, apiKey);
-                if (!isOperationCurrent(operation)) return;
-                hasSecret = true;
-                updateStatus();
-                secretErrorEl.setText(t("settings.tikhub.keySaved"));
-              } catch {
-                refreshAfter = true;
-                if (isOperationCurrent(operation)) {
-                  secretErrorEl.setText(t("settings.tikhub.keySaveFailed"));
-                }
+              }
+              await secretStore.set(connectionId, apiKey);
+              if (!isOperationCurrent(operation)) return;
+              hasSecret = true;
+              updateStatus();
+              secretErrorEl.setText(t("settings.tikhub.keySaved"));
+            } catch {
+              refreshAfter = true;
+              if (isOperationCurrent(operation)) {
+                secretErrorEl.setText(t("settings.tikhub.keySaveFailed"));
               }
             }
           } finally {

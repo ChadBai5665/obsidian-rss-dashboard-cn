@@ -165,6 +165,24 @@ describe("renderTikHubSettingsTab", () => {
     expect(test.containerEl.textContent).not.toContain(credential);
   });
 
+  it("keeps a valid initial key status alive when an empty key save is rejected", async () => {
+    const status = deferred<{ hasSecret: boolean }>();
+    const test = harness({ getStatus: () => status.promise });
+    const keySetting = getSetting(test.containerEl, "API 密钥");
+    const input = keySetting.querySelector<HTMLInputElement>("input")!;
+    const save = getButton(keySetting, "保存密钥");
+    input.value = "   ";
+
+    save.click();
+
+    expect(input.value).toBe("");
+    expect(save.disabled).toBe(false);
+    expect(test.containerEl.textContent).toContain("请输入非空 API 密钥");
+    status.resolve({ hasSecret: true });
+    await flushPromises();
+    expect(test.containerEl.textContent).toContain("状态：已配置");
+  });
+
   it("requires deletion confirmation, removes only the external key, and disables paid refresh", async () => {
     const declined = harness({ confirmed: false, hasSecret: true });
     const definitions = structuredClone(declined.plugin.settings.feeds);

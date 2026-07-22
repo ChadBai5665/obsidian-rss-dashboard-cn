@@ -82,8 +82,39 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
     expect(tabButtons[0].getAttribute("tabindex")).toBe("0");
     expect(tabButtons[1].getAttribute("aria-selected")).toBe("false");
     expect(tabButtons[1].getAttribute("tabindex")).toBe("-1");
+    expect(new Set(tabButtons.map((button) => button.id)).size).toBe(tabButtons.length);
+    const panel = tab.containerEl.querySelector<HTMLElement>("[role=tabpanel]")!;
+    expect(panel.id).toBe(tabButtons[0].getAttribute("aria-controls"));
+    expect(panel.getAttribute("aria-labelledby")).toBe(tabButtons[0].id);
 
     expect(vi.mocked(general.renderGeneralSettingsTab)).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses Arrow keys, Home, and End to activate and focus tabs", async () => {
+    const { RssDashboardSettingTab } = await import("../../../src/settings/settings-tab");
+    const app = obsidian.App.createMock();
+    const plugin = { app, settings: { locale: "zh-CN" } } as unknown as RssDashboardPlugin;
+    const tab = new RssDashboardSettingTab(app, plugin);
+    tab.containerEl = document.body.appendChild(document.createElement("div"));
+    tab.display();
+    const active = (): HTMLButtonElement =>
+      tab.containerEl.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')!;
+    const press = (key: string): void => {
+      active().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    };
+
+    press("ArrowRight");
+    expect(active().textContent).toBe("我的订阅");
+    expect(document.activeElement).toBe(active());
+    press("End");
+    expect(active().textContent).toBe("关于");
+    expect(document.activeElement).toBe(active());
+    press("ArrowRight");
+    expect(active().textContent).toBe("常规");
+    press("ArrowLeft");
+    expect(active().textContent).toBe("关于");
+    press("Home");
+    expect(active().textContent).toBe("常规");
   });
 
   it("switches tabs on button click and via activateTab()", async () => {
@@ -169,6 +200,31 @@ describe("RssDashboardSettingTab (orchestrator)", () => {
 
     contentEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
     expect(vi.mocked(general.renderGeneralSettingsTab)).toHaveBeenCalledTimes(2);
+  });
+
+  it("removes refresh listeners when the current panel is replaced or hidden", async () => {
+    const { RssDashboardSettingTab } = await import("../../../src/settings/settings-tab");
+    const general = await import("../../../src/settings/tabs/general-settings-tab");
+    const app = obsidian.App.createMock();
+    const plugin = { app, settings: { locale: "zh-CN" } } as unknown as RssDashboardPlugin;
+    const tab = new RssDashboardSettingTab(app, plugin);
+    tab.containerEl = document.body.appendChild(document.createElement("div"));
+    tab.display();
+    const firstPanel = tab.containerEl.querySelector<HTMLElement>(
+      ".rss-dashboard-settings-tab-content",
+    )!;
+    tab.display();
+    vi.mocked(general.renderGeneralSettingsTab).mockClear();
+
+    firstPanel.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+    expect(general.renderGeneralSettingsTab).not.toHaveBeenCalled();
+
+    const currentPanel = tab.containerEl.querySelector<HTMLElement>(
+      ".rss-dashboard-settings-tab-content",
+    )!;
+    tab.hide();
+    currentPanel.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+    expect(general.renderGeneralSettingsTab).not.toHaveBeenCalled();
   });
 
   it("keeps the stable active tab when the locale is changed and re-rendered", async () => {

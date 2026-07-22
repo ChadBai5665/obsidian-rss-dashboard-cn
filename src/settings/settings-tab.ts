@@ -52,12 +52,17 @@ import {
 } from "./tab-names";
 import { createTranslator } from "../i18n";
 
+const SETTINGS_DISPOSE_EVENT = "rss-settings-dispose";
+let settingsTabInstanceSequence = 0;
+
 // ── Main class ────────────────────────────────────────────────────────────────
 
 export class RssDashboardSettingTab extends PluginSettingTab {
   plugin: RssDashboardPlugin;
   private currentTab: SettingsTabId = getInitialTab();
   private pendingSection: string | null = null;
+  private readonly accessibilityId = `rss-dashboard-settings-${++settingsTabInstanceSequence}`;
+  private activePanelCleanup: (() => void) | undefined;
 
   constructor(app: App, plugin: RssDashboardPlugin) {
     super(app, plugin);
@@ -74,34 +79,77 @@ export class RssDashboardSettingTab extends PluginSettingTab {
     }
   }
 
+  private tabButtonId(tab: SettingsTabId): string {
+    return `${this.accessibilityId}-tab-${tab}`;
+  }
+
+  private tabPanelId(tab: SettingsTabId): string {
+    return `${this.accessibilityId}-panel-${tab}`;
+  }
+
+  private cleanupActivePanel(): void {
+    const cleanup = this.activePanelCleanup;
+    this.activePanelCleanup = undefined;
+    cleanup?.();
+  }
+
+  private activateTabFromKeyboard(tab: SettingsTabId): void {
+    this.currentTab = tab;
+    this.pendingSection = null;
+    this.display();
+    this.containerEl.querySelector<HTMLElement>(`#${this.tabButtonId(tab)}`)?.focus();
+  }
+
   display(): void {
     const { containerEl } = this;
+    this.cleanupActivePanel();
     containerEl.empty();
 
     // ── Tab bar ──────────────────────────────────────────────────────────────
     const tabBar = containerEl.createDiv("rss-dashboard-settings-tab-bar");
     tabBar.setAttribute("role", "tablist");
+    tabBar.setAttribute("aria-orientation", "horizontal");
     const t = createTranslator(this.plugin.settings.locale);
-    SETTINGS_TAB_IDS.forEach((tab) => {
+    SETTINGS_TAB_IDS.forEach((tab, index) => {
       const tabBtn = tabBar.createEl("button", {
         text: getSettingsTabLabel(tab, t),
         cls:
           "rss-dashboard-settings-tab-btn" +
           (this.currentTab === tab ? " active" : ""),
       });
+      tabBtn.id = this.tabButtonId(tab);
       tabBtn.setAttribute("role", "tab");
+      tabBtn.setAttribute("aria-controls", this.tabPanelId(tab));
       tabBtn.setAttribute("aria-selected", String(this.currentTab === tab));
       tabBtn.setAttribute("tabindex", this.currentTab === tab ? "0" : "-1");
       tabBtn.onclick = () => {
         this.currentTab = tab;
         this.display();
       };
+      tabBtn.addEventListener("keydown", (event) => {
+        let targetIndex: number | undefined;
+        if (event.key === "ArrowRight") {
+          targetIndex = (index + 1) % SETTINGS_TAB_IDS.length;
+        } else if (event.key === "ArrowLeft") {
+          targetIndex = (index - 1 + SETTINGS_TAB_IDS.length) % SETTINGS_TAB_IDS.length;
+        } else if (event.key === "Home") {
+          targetIndex = 0;
+        } else if (event.key === "End") {
+          targetIndex = SETTINGS_TAB_IDS.length - 1;
+        }
+        if (targetIndex === undefined) return;
+        event.preventDefault();
+        this.activateTabFromKeyboard(SETTINGS_TAB_IDS[targetIndex]);
+      });
     });
 
     // ── Tab content ──────────────────────────────────────────────────────────
     const tabContent = containerEl.createDiv(
       "rss-dashboard-settings-tab-content",
     );
+    tabContent.id = this.tabPanelId(this.currentTab);
+    tabContent.setAttribute("role", "tabpanel");
+    tabContent.setAttribute("aria-labelledby", this.tabButtonId(this.currentTab));
 
     /** Shorthand refresh callback passed to tab renderers that need it. */
     const onRefresh = () => this.display();
@@ -109,6 +157,13 @@ export class RssDashboardSettingTab extends PluginSettingTab {
     // Listen for CustomEvents emitted by tab renderers that need a full refresh
     // (e.g. the General tab's CORS proxy toggle) without holding a class reference.
     tabContent.addEventListener("rss-settings-refresh", onRefresh);
+    let cleaned = false;
+    this.activePanelCleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      tabContent.removeEventListener("rss-settings-refresh", onRefresh);
+      tabContent.dispatchEvent(new CustomEvent(SETTINGS_DISPOSE_EVENT));
+    };
 
     switch (this.currentTab) {
       case "general":
@@ -178,5 +233,10 @@ export class RssDashboardSettingTab extends PluginSettingTab {
         this.pendingSection = null;
         break;
     }
+  }
+
+  hide(): void {
+    this.cleanupActivePanel();
+    super.hide();
   }
 }

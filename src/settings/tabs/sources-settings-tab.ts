@@ -22,42 +22,109 @@ export function renderSourcesSettingsTab(
   new Setting(containerEl).setName(t("settings.sources.heading")).setHeading();
 
   const accounts = getXAccountConfigs(plugin.settings.feeds);
+  const modalTriggers = new Set<HTMLButtonElement>();
   let saveInFlight = false;
+  let disposed = false;
+  let lifecycleEpoch = 0;
+  let modalSequence = 0;
+  let activeModalToken: number | undefined;
+  let activeModal: XAccountSourceModal | undefined;
+  const setModalGate = (open: boolean): void => {
+    for (const button of modalTriggers) {
+      button.disabled = open;
+      button.setAttribute("aria-disabled", String(open));
+    }
+  };
+  const registerModalTrigger = (button: HTMLButtonElement): void => {
+    modalTriggers.add(button);
+    button.disabled = disposed || activeModalToken !== undefined;
+    button.setAttribute("aria-disabled", String(button.disabled));
+  };
+  const isLifecycleCurrent = (epoch: number): boolean =>
+    !disposed && lifecycleEpoch === epoch && containerEl.isConnected;
+  const releaseModal = (token: number): void => {
+    if (activeModalToken !== token) return;
+    activeModalToken = undefined;
+    activeModal = undefined;
+    if (!disposed && containerEl.isConnected) setModalGate(false);
+  };
   const openEditor = (existing?: XAccountSourceConfig): void => {
-    new XAccountSourceModal(plugin.app, {
+    if (disposed || !containerEl.isConnected || activeModalToken !== undefined) return;
+    const modalToken = ++modalSequence;
+    activeModalToken = modalToken;
+    setModalGate(true);
+    const modal = new XAccountSourceModal(plugin.app, {
       locale: plugin.settings.locale,
       existing,
       existingAccounts: accounts,
       maxRequestsPerRun: plugin.settings.tikhub.maxRequestsPerRun,
       maxRequestsPerDay: plugin.settings.tikhub.maxRequestsPerDay,
+      onClose: () => releaseModal(modalToken),
       onSave: async (config) => {
         if (saveInFlight) throw new Error("X source save already in progress");
         saveInFlight = true;
+        const saveEpoch = lifecycleEpoch;
         const originalFeeds = plugin.settings.feeds;
+        let candidateAssigned = false;
         try {
+          assertNoAccountConflict(originalFeeds, config);
           const candidateFeeds = structuredClone(originalFeeds);
           upsertAccountFeed(candidateFeeds, config);
           plugin.settings.feeds = candidateFeeds;
+          candidateAssigned = true;
           await plugin.saveSettings();
-          containerEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+          if (isLifecycleCurrent(saveEpoch)) {
+            containerEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+          }
         } catch (error) {
-          plugin.settings.feeds = originalFeeds;
-          containerEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+          if (candidateAssigned) {
+            plugin.settings.feeds = originalFeeds;
+            if (isLifecycleCurrent(saveEpoch)) {
+              containerEl.dispatchEvent(new CustomEvent("rss-settings-refresh"));
+            }
+          }
           throw error;
         } finally {
           saveInFlight = false;
         }
       },
-    }).open();
+    });
+    activeModal = modal;
+    try {
+      modal.open();
+    } catch (error) {
+      try {
+        modal.close();
+      } finally {
+        releaseModal(modalToken);
+      }
+      throw error;
+    }
   };
+
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    lifecycleEpoch += 1;
+    containerEl.removeEventListener("rss-settings-dispose", dispose);
+    setModalGate(true);
+    const modal = activeModal;
+    activeModal = undefined;
+    activeModalToken = undefined;
+    modal?.close();
+  };
+  containerEl.addEventListener("rss-settings-dispose", dispose);
 
   new Setting(containerEl)
     .setName(t("settings.sources.accountSubscriptions"))
     .setDesc(t("settings.sources.accountSubscriptionsDesc"))
-    .addButton((button) => button
-      .setButtonText(t("settings.sources.addAccount"))
-      .setCta()
-      .onClick(() => openEditor()));
+    .addButton((button) => {
+      registerModalTrigger(button.buttonEl);
+      button
+        .setButtonText(t("settings.sources.addAccount"))
+        .setCta()
+        .onClick(() => openEditor());
+    });
 
   if (accounts.length === 0) {
     containerEl.createEl("p", { text: t("settings.sources.empty") });
@@ -75,9 +142,25 @@ export function renderSourcesSettingsTab(
           day: plugin.settings.tikhub.maxRequestsPerDay,
         }),
       ].join(" · "))
-      .addButton((button) => button
-        .setButtonText(t("common.edit"))
-        .onClick(() => openEditor(account)));
+      .addButton((button) => {
+        registerModalTrigger(button.buttonEl);
+        button
+          .setButtonText(t("common.edit"))
+          .onClick(() => openEditor(account));
+      });
+  }
+}
+
+function assertNoAccountConflict(
+  feeds: readonly Feed[],
+  config: XAccountSourceConfig,
+): void {
+  for (const feed of feeds) {
+    if (feed.sourceKind !== "x-account") continue;
+    const current = normalizeXAccountSourceConfig(feed.sourceConfig);
+    if (current && current.id !== config.id && current.handle === config.handle) {
+      throw new Error("X account handle is already owned by another source");
+    }
   }
 }
 

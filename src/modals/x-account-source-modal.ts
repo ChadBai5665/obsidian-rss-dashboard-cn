@@ -13,6 +13,7 @@ export interface XAccountSourceModalOptions {
   maxRequestsPerRun: number;
   maxRequestsPerDay: number;
   onSave(config: XAccountSourceConfig): Promise<void> | void;
+  onClose?(): void;
 }
 
 export class XAccountSourceModal extends Modal {
@@ -187,7 +188,11 @@ export class XAccountSourceModal extends Modal {
 
   onClose(): void {
     this.lifecycleEpoch += 1;
-    this.contentEl.empty();
+    try {
+      this.contentEl.empty();
+    } finally {
+      this.options.onClose?.();
+    }
   }
 }
 

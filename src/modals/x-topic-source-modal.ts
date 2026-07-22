@@ -16,6 +16,7 @@ export interface XTopicSourceModalOptions {
   maxRequestsPerRun: number;
   maxRequestsPerDay: number;
   onSave(config: XTopicSourceConfig): Promise<void> | void;
+  onClose?(): void;
 }
 
 export class XTopicSourceModal extends Modal {
@@ -202,7 +203,11 @@ export class XTopicSourceModal extends Modal {
 
   onClose(): void {
     this.lifecycleEpoch += 1;
-    this.contentEl.empty();
+    try {
+      this.contentEl.empty();
+    } finally {
+      this.options.onClose?.();
+    }
   }
 }
 
