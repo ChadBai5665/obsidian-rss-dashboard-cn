@@ -28,33 +28,19 @@ const DEFAULT_FEED_KEYWORD_RULES = {
   rules: [],
 };
 
-const TOP_LEVEL_TIKHUB_SECRET_ALIASES = [
-  "tikhubApiKey",
-  "tikHubApiKey",
-  "tikhub_api_key",
-  "TIKHUB_API_KEY",
-  "tikhubToken",
-  "tikHubToken",
-  "tikhub_token",
-  "TIKHUB_TOKEN",
-  "tikhubAccessToken",
-  "tikHubAccessToken",
-  "tikhubBearerToken",
-  "tikHubBearerToken",
-] as const;
-const TOP_LEVEL_TIKHUB_SECRET_ALIAS_SET = new Set<string>(
-  TOP_LEVEL_TIKHUB_SECRET_ALIASES,
-);
+const TOP_LEVEL_TIKHUB_SECRET_ALIAS_KEYS = new Set([
+  "tikhubapikey",
+  "tikhubtoken",
+  "tikhubaccesstoken",
+  "tikhubbearertoken",
+]);
 
-const TIKHUB_SCOPED_SECRET_ALIASES = new Set<string>([
-  ...TOP_LEVEL_TIKHUB_SECRET_ALIASES,
-  "apiKey",
-  "api_key",
+const TIKHUB_SCOPED_SECRET_ALIAS_KEYS = new Set([
+  ...TOP_LEVEL_TIKHUB_SECRET_ALIAS_KEYS,
+  "apikey",
   "token",
-  "accessToken",
-  "access_token",
-  "bearerToken",
-  "bearer_token",
+  "accesstoken",
+  "bearertoken",
 ]);
 
 const PAGE_SIZE_FIELDS: Array<
@@ -307,7 +293,7 @@ function copyOwnTopLevelSettings(
       key === "__proto__" ||
       key === "prototype" ||
       key === "constructor" ||
-      TOP_LEVEL_TIKHUB_SECRET_ALIAS_SET.has(key)
+      isTopLevelTikHubSecretAlias(key)
     ) {
       continue;
     }
@@ -364,10 +350,8 @@ function normalizeTikHubSettings(value: unknown): RssDashboardSettings["tikhub"]
 function removeTopLevelTikHubSecretAliases(
   settings: Record<string, unknown>,
 ): void {
-  for (const alias of TOP_LEVEL_TIKHUB_SECRET_ALIASES) {
-    if (Object.prototype.hasOwnProperty.call(settings, alias)) {
-      delete settings[alias];
-    }
+  for (const key of Object.getOwnPropertyNames(settings)) {
+    if (isTopLevelTikHubSecretAlias(key)) delete settings[key];
   }
 }
 
@@ -379,17 +363,30 @@ function copyOwnTikHubSettingsWithoutSecrets(
   try {
     for (const key of Object.getOwnPropertyNames(value)) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (descriptor && "value" in descriptor) {
+      if (
+        descriptor &&
+        "value" in descriptor &&
+        !isTikHubScopedSecretAlias(key)
+      ) {
         sanitized[key] = descriptor.value;
       }
     }
   } catch {
     return undefined;
   }
-  for (const alias of TIKHUB_SCOPED_SECRET_ALIASES) {
-    delete sanitized[alias];
-  }
   return sanitized;
+}
+
+function isTopLevelTikHubSecretAlias(key: string): boolean {
+  return TOP_LEVEL_TIKHUB_SECRET_ALIAS_KEYS.has(normalizeSecretAliasKey(key));
+}
+
+function isTikHubScopedSecretAlias(key: string): boolean {
+  return TIKHUB_SCOPED_SECRET_ALIAS_KEYS.has(normalizeSecretAliasKey(key));
+}
+
+function normalizeSecretAliasKey(key: string): string {
+  return key.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/gu, "");
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

@@ -335,6 +335,8 @@ export const zhCN = {
   "plugin.openSmallwebFailed": "无法打开 Kagi Smallweb。",
   "plugin.refreshFailed": "来源刷新失败，请查看来源状态了解详情。",
   "plugin.refreshing": "正在刷新 {source}…",
+  "plugin.refreshingWithTikHubEstimate":
+    "正在刷新 {source}… 本次 TikHub 请求预计 {count} 次（单次上限 {run} 次；每日上限 {day} 次）。",
   "plugin.multiRefresh": "已有多来源刷新正在进行。",
   "plugin.feedAdded": "订阅源“{feed}”已添加",
   "plugin.feedUpdated": "订阅源“{feed}”已更新",

@@ -94,6 +94,7 @@ import { DesktopSecretStore } from "./src/security/desktop-secret-store";
 import { SourceRegistry } from "./src/sources/source-registry";
 import {
   normalizeSourceConfig,
+  sourceConfigUrl,
   type FeedSourceConfig,
   type XAccountSourceConfig,
   type XTopicSourceConfig,
@@ -2023,7 +2024,17 @@ export default class RssDashboardPlugin extends Plugin {
         });
       }
 
-      this.notify("plugin.refreshing", { source: feedNoticeText });
+      const estimatedTikHubRequests = this.estimateTikHubRequests(feedsToRefresh);
+      if (estimatedTikHubRequests > 0) {
+        this.notify("plugin.refreshingWithTikHubEstimate", {
+          source: feedNoticeText,
+          count: estimatedTikHubRequests,
+          run: this.settings.tikhub.maxRequestsPerRun,
+          day: this.settings.tikhub.maxRequestsPerDay,
+        });
+      } else {
+        this.notify("plugin.refreshing", { source: feedNoticeText });
+      }
       const sourceRegistry = this.takeSourceRegistryForRun();
       if (feedsToRefresh.length === 1) {
         await this.refreshSingleFeed(
@@ -4087,6 +4098,28 @@ export default class RssDashboardPlugin extends Plugin {
 
   private getRefreshableFeeds(feeds: Feed[]): Feed[] {
     return feeds.filter((feed) => !this.isFeedExcludedFromRefresh(feed));
+  }
+
+  private estimateTikHubRequests(feeds: readonly Feed[]): number {
+    if (!this.settings.tikhub.enabled) return 0;
+
+    let count = 0;
+    for (const feed of feeds) {
+      const config = normalizeSourceConfig(feed.sourceConfig);
+      if (
+        !config ||
+        feed.sourceKind !== config.kind ||
+        feed.url !== sourceConfigUrl(config)
+      ) {
+        continue;
+      }
+      if (config.kind === "x-account") {
+        count += config.includeReplies ? 2 : 1;
+      } else if (config.kind === "x-topic") {
+        count += config.priorityAccounts.length > 0 ? 3 : 2;
+      }
+    }
+    return count;
   }
 
   private mergeRefreshedFeed(updatedFeed: Feed): void {

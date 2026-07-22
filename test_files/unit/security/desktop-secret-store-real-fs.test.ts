@@ -72,6 +72,27 @@ async function createPath(): Promise<{ root: string; parent: string; secretPath:
 }
 
 describe("DesktopSecretStore real filesystem ownership", () => {
+  it("creates and repairs real Unix secret permissions on every write", async () => {
+    const { parent, secretPath } = await createPath();
+    await chmod(parent, 0o777);
+    const store = new DesktopSecretStore({
+      secretPath,
+      platform: "linux",
+      randomSuffix: () => "permissions",
+      fileSystem: createRealFileSystem(),
+    });
+
+    await store.set(CONNECTION_ID, "temporary-test-secret");
+    expect((await lstat(parent)).mode & 0o777).toBe(0o700);
+    expect((await lstat(secretPath)).mode & 0o777).toBe(0o600);
+
+    await chmod(parent, 0o777);
+    await chmod(secretPath, 0o666);
+    await store.set(CONNECTION_ID, "replacement-test-secret");
+    expect((await lstat(parent)).mode & 0o777).toBe(0o700);
+    expect((await lstat(secretPath)).mode & 0o777).toBe(0o600);
+  });
+
   it("does not delete a competitor file created after the missing-temp check", async () => {
     const { secretPath } = await createPath();
     const tempPath = `${secretPath}.tmp-fixed`;

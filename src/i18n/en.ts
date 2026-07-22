@@ -337,6 +337,8 @@ export const en = {
   "plugin.openSmallwebFailed": "Could not open Kagi Smallweb.",
   "plugin.refreshFailed": "Source refresh failed. Check source status for details.",
   "plugin.refreshing": "Refreshing {source}…",
+  "plugin.refreshingWithTikHubEstimate":
+    "Refreshing {source}… Estimated TikHub requests: {count} (per-run cap {run}; daily cap {day}).",
   "plugin.multiRefresh": "A multi-source refresh is already in progress.",
   "plugin.feedAdded": "Feed \"{feed}\" added",
   "plugin.feedUpdated": "Feed \"{feed}\" updated",

@@ -703,6 +703,8 @@ describe("TikHub settings metadata", () => {
   it("removes top-level and nested TikHub secret aliases without touching AI settings", () => {
     const raw = {
       tikhubApiKey: TIKHUB_SECRET_SENTINEL,
+      TikHubApiKey: TIKHUB_SECRET_SENTINEL,
+      TIKHUBBEARERTOKEN: TIKHUB_SECRET_SENTINEL,
       tikhubToken: TIKHUB_SECRET_SENTINEL,
       apiKey: "unrelated-top-level-key",
       token: "unrelated-top-level-token",
@@ -716,6 +718,8 @@ describe("TikHub settings metadata", () => {
         token: TIKHUB_SECRET_SENTINEL,
         accessToken: TIKHUB_SECRET_SENTINEL,
         bearerToken: TIKHUB_SECRET_SENTINEL,
+        APIKEY: TIKHUB_SECRET_SENTINEL,
+        Bearer_Token: TIKHUB_SECRET_SENTINEL,
       },
     } as unknown as Partial<typeof DEFAULT_SETTINGS>;
 
@@ -725,6 +729,8 @@ describe("TikHub settings metadata", () => {
     >;
 
     expect(normalized.tikhubApiKey).toBeUndefined();
+    expect(normalized.TikHubApiKey).toBeUndefined();
+    expect(normalized.TIKHUBBEARERTOKEN).toBeUndefined();
     expect(normalized.tikhubToken).toBeUndefined();
     expect(normalized.apiKey).toBe("unrelated-top-level-key");
     expect(normalized.token).toBe("unrelated-top-level-token");

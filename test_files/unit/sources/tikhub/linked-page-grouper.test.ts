@@ -113,6 +113,7 @@ describe("groupLinkedPages", () => {
     "https://x.com../outside",
     "https://sub.twitter.com./outside",
     "https://t.co../outside",
+    "https://sub.t.co./outside",
   ])("does not group an X-family FQDN with trailing dots: %s", (url) => {
     expect(
       groupLinkedPages([
