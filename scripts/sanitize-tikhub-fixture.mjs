@@ -24,6 +24,7 @@ const SENSITIVE_TOKENS = new Set([
  */
 export function sanitizeTikHubFixture(value, aliases = {}) {
   const replacements = buildReplacements(aliases);
+  const propertyAliases = buildPropertyAliases(aliases);
   const seen = new WeakSet();
   const state = { nodes: 0 };
 
@@ -88,7 +89,7 @@ export function sanitizeTikHubFixture(value, aliases = {}) {
       ) {
         continue;
       }
-      const sanitizedProperty = replaceAliases(property, replacements);
+      const sanitizedProperty = replacePropertyAlias(property, propertyAliases);
       if (
         isUnsafeProperty(sanitizedProperty) ||
         isProviderMetadataKey(sanitizedProperty) ||
@@ -194,6 +195,38 @@ function buildReplacements(aliases) {
     }
   }
   return replacements;
+}
+
+function buildPropertyAliases(aliases) {
+  const propertyAliases = [];
+  for (const [input, replacement] of [
+    [aliases.handle, "fixture_account"],
+    [aliases.query, "fixture_topic"],
+  ]) {
+    if (typeof input !== "string" || input.length === 0) continue;
+    propertyAliases.push({
+      normalized: normalizePropertyAlias(input),
+      replacement,
+    });
+  }
+  return propertyAliases;
+}
+
+function replacePropertyAlias(property, propertyAliases) {
+  const normalized = normalizePropertyAlias(property);
+  const alias = propertyAliases.find((candidate) => candidate.normalized === normalized);
+  return alias?.replacement ?? property;
+}
+
+function normalizePropertyAlias(value) {
+  const plusDecoded = value.replace(/\+/g, " ");
+  let decoded = plusDecoded;
+  try {
+    decoded = decodeURIComponent(plusDecoded);
+  } catch {
+    // Invalid percent sequences remain literal, so malformed keys cannot throw.
+  }
+  return decoded.normalize("NFKC").toLowerCase();
 }
 
 function replaceAliases(value, replacements) {

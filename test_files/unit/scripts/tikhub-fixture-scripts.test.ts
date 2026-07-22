@@ -22,6 +22,7 @@ import {
   assertTikHubFixtureSanitized,
   sanitizeTikHubFixture,
 } from "../../../scripts/sanitize-tikhub-fixture.mjs";
+import { parseTikHubTimeline } from "../../../src/sources/tikhub/tikhub-parser";
 
 const temporaryDirectories: string[] = [];
 
@@ -183,6 +184,46 @@ describe("sanitizeTikHubFixture", () => {
         { query: "token" },
       ),
     ).toThrow("TikHub fixture sanitization verification failed.");
+  });
+
+  it("preserves structural ID keys when the handle alias is exactly id", () => {
+    const raw = Object.assign(candidateFixture("123"), { id: "personal account" });
+    const sanitized = sanitizeTikHubFixture(raw, { handle: "id" });
+    const entry = sanitized.data.timeline.instructions[0].entries[0];
+    const result = entry.content.itemContent.tweet_results.result;
+
+    expect(sanitized.fixture_account).toBe("personal account");
+    expect(entry.entryId).toBe("tweet-123");
+    expect(result.rest_id).toBe("123");
+    expect(parseTikHubTimeline(sanitized).posts).toMatchObject([
+      { id: "123", authorHandle: "fixture_ai" },
+    ]);
+  });
+
+  it("preserves expanded URL keys when the query alias is exactly url", () => {
+    const raw = Object.assign(candidateFixture("456"), { url: "personal topic" });
+    const result =
+      raw.data.timeline.instructions[0].entries[0].content.itemContent.tweet_results
+        .result;
+    Object.assign(result.legacy, {
+      entities: {
+        urls: [{ expanded_url: "https://example.com/fixture-report" }],
+      },
+    });
+
+    const sanitized = sanitizeTikHubFixture(raw, { query: "url" });
+    const sanitizedResult =
+      sanitized.data.timeline.instructions[0].entries[0].content.itemContent
+        .tweet_results.result;
+
+    expect(sanitized.fixture_topic).toBe("personal topic");
+    expect(sanitizedResult.legacy.entities.urls[0]).toHaveProperty(
+      "expanded_url",
+      "https://example.com/fixture-report",
+    );
+    expect(parseTikHubTimeline(sanitized).posts[0]?.externalUrls).toEqual([
+      "https://example.com/fixture-report",
+    ]);
   });
 
   it("normalizes numeric and bigint volatile timestamps before write validation", () => {
