@@ -4,7 +4,7 @@ export interface SanitizedExternalError {
 }
 
 const MAX_PUBLIC_MESSAGE_LENGTH = 300;
-const SENSITIVE_NAMES = "authorization|proxy-authorization|x-api-key|api[-_]?key|token";
+const SENSITIVE_NAMES = "authorization|proxy-authorization|x-api-key|api[-_]?key|access[-_]?token|refresh[-_]?token|token";
 
 /** Removes credentials and all URL query values before text reaches a UI or log. */
 export function redactSensitiveText(input: string): string {
@@ -50,9 +50,9 @@ export function sanitizeExternalError(error: unknown): SanitizedExternalError {
 }
 
 function redactUrlQueries(value: string): string {
-  const withoutAbsolute = value.replace(/https?:\/\/[^\s"'<>]+/gi, redactUrl);
+  const withoutAbsolute = value.replace(/(?:https?:)?\/\/[^\s"'<>]+/gi, redactUrl);
   return withoutAbsolute.replace(
-    /(?<![\w-])(?:\.{1,2}\/|\/)?[\w.-]+(?:\/[\w./-]*)?\?[^\s"'<>]*/g,
+    /(?<![\w-])(?:\.{1,2}\/|\/)?[\w.-]+(?:\/[\w./-]*)?[?#][^\s"'<>]*/g,
     redactUrl,
   );
 }
@@ -111,8 +111,8 @@ function ownString(value: Record<string, unknown>, key: string): string | undefi
 }
 
 function ownValue(value: Record<string, unknown>, key: string): unknown {
-  if (!Object.prototype.hasOwnProperty.call(value, key)) return undefined;
   try {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) return undefined;
     return value[key];
   } catch {
     return undefined;

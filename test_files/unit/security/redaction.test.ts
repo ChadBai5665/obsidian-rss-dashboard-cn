@@ -39,6 +39,29 @@ describe("redactSensitiveText", () => {
     }
     expect(output).toContain("https://api.example.test/v1");
   });
+
+  it("redacts protocol-relative and relative fragments plus access and refresh tokens", () => {
+    const output = redactSensitiveText([
+      "//api.example.test/path#access_token=protocol-secret",
+      "../path#refresh_token=relative-secret",
+      "access_token=standalone-secret; refresh_token: another-secret",
+      '{"access_token":"json-secret","refresh_token":"json-refresh"}',
+      "Authorization: Bearer first-bearer\nAuthorization: Bearer second-bearer",
+    ].join("\n"));
+
+    for (const secret of [
+      "protocol-secret",
+      "relative-secret",
+      "standalone-secret",
+      "another-secret",
+      "json-secret",
+      "json-refresh",
+      "first-bearer",
+      "second-bearer",
+    ]) {
+      expect(output).not.toContain(secret);
+    }
+  });
 });
 
 describe("sanitizeExternalError", () => {
@@ -84,6 +107,19 @@ describe("sanitizeExternalError", () => {
       enumerable: true,
       get(): never {
         throw new Error("getter-secret");
+      },
+    }));
+
+    expect(result).toEqual({
+      code: "external-error",
+      message: "External provider request failed.",
+    });
+  });
+
+  it("does not invoke a proxy own-property trap while sanitizing an error", () => {
+    const result = sanitizeExternalError(new Proxy({}, {
+      getOwnPropertyDescriptor(): never {
+        throw new Error("trap-secret");
       },
     }));
 

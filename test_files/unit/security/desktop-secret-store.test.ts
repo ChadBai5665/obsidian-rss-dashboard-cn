@@ -19,6 +19,7 @@ class MemoryDesktopFileSystem implements DesktopSecretFileSystem {
   readonly modes = new Map<string, number>();
   readonly directoryInodes = new Map<string, number>();
   failAt?: "write" | "chmod" | "fsync-file" | "lstat-after-write" | "rename";
+  private lstatFailureTriggered = false;
   swapParentAfterTempWrite = false;
 
   private stats(path: string, kind: "directory" | "file" | "symlink") {
@@ -29,12 +30,18 @@ class MemoryDesktopFileSystem implements DesktopSecretFileSystem {
       isFile: () => kind === "file",
       dev: 1,
       ino: numericIdentity,
+      size: new TextEncoder().encode(this.files.get(path) ?? "").byteLength,
     };
   }
 
   async lstat(path: string) {
     this.operations.push(`lstat:${path}`);
-    if (this.failAt === "lstat-after-write" && this.files.has(`${SECRET_PATH}.tmp-fixed`)) {
+    if (
+      this.failAt === "lstat-after-write" &&
+      !this.lstatFailureTriggered &&
+      (this.files.get(`${SECRET_PATH}.tmp-fixed`) ?? "").length > 0
+    ) {
+      this.lstatFailureTriggered = true;
       throw new Error("lstat-after-write");
     }
     if (this.symlinks.has(path)) return this.stats(path, "symlink");
@@ -109,6 +116,7 @@ class MemoryDesktopFileSystem implements DesktopSecretFileSystem {
     stat: () => Promise<Awaited<ReturnType<MemoryDesktopFileSystem["lstat"]>>>;
     readFile: () => Promise<string>;
     writeFile: (content: string) => Promise<void>;
+    truncate: (length: number) => Promise<void>;
     sync: () => Promise<void>;
     close: () => Promise<void>;
   }> {
@@ -131,6 +139,10 @@ class MemoryDesktopFileSystem implements DesktopSecretFileSystem {
         if (this.swapParentAfterTempWrite) {
           this.directoryInodes.set(SECRET_DIRECTORY, 999_999);
         }
+      },
+      truncate: async (length) => {
+        const content = this.files.get(path) ?? "";
+        this.files.set(path, content.slice(0, length));
       },
       sync: async () => {
         if (this.failAt === "fsync-file") throw new Error("fsync-file");

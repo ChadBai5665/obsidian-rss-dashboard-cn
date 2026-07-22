@@ -33,12 +33,14 @@ interface PathStats {
   isFile(): boolean;
   dev: number;
   ino: number;
+  size: number;
 }
 
 interface SecretFileHandle {
   stat(): Promise<PathStats>;
   readFile(): Promise<string>;
   writeFile(content: string): Promise<void>;
+  truncate(length: number): Promise<void>;
   sync(): Promise<void>;
   close(): Promise<void>;
 }
@@ -54,6 +56,14 @@ interface SecureParentDirectory {
   dev: number;
   ino: number;
   realPath: string;
+}
+
+interface OwnedTemporaryFile {
+  path: string;
+  handle: SecretFileHandle;
+  dev: number;
+  ino: number;
+  byteLength: number;
 }
 
 export interface DesktopSecretFileSystem {
@@ -182,7 +192,7 @@ export class DesktopSecretStore {
   private async writeSecretFile(file: SecretFileV1): Promise<void> {
     await this.ensureSecureDirectory();
     const tempPath = `${this.secretPath}.tmp-${this.randomSuffix()}`;
-    let temporaryMayExist = false;
+    let ownedTemporary: OwnedTemporaryFile | undefined;
     let parent: SecureParentDirectory | undefined;
     try {
       parent = await this.openSecureParentDirectory();
@@ -190,22 +200,33 @@ export class DesktopSecretStore {
       await this.assertPathMissing(tempPath);
       await this.assertSameParentDirectory(parent);
       const serialized = `${JSON.stringify(file, null, 2)}\n`;
-      temporaryMayExist = true;
       const temporary = await this.fileSystem.openFile(
         tempPath,
         WRITE_SECRET_FLAGS,
         0o600,
       );
-      try {
-        await temporary.writeFile(serialized);
-        if (this.isUnix()) await this.fileSystem.chmod(tempPath, 0o600);
-        await temporary.sync();
-      } finally {
+      const temporaryStats = await temporary.stat();
+      if (temporaryStats.isSymbolicLink() || !temporaryStats.isFile()) {
         await temporary.close();
+        throw new SecretStoreSecurityError("The external secret temporary file must be a regular file.");
       }
+      ownedTemporary = {
+        path: tempPath,
+        handle: temporary,
+        dev: temporaryStats.dev,
+        ino: temporaryStats.ino,
+        byteLength: new TextEncoder().encode(serialized).byteLength,
+      };
+      await temporary.writeFile(serialized);
+      if ((await temporary.stat()).size !== ownedTemporary.byteLength) {
+        throw new SecretStoreSecurityError("The external secret temporary file was modified during writing.");
+      }
+      if (this.isUnix()) await this.fileSystem.chmod(tempPath, 0o600);
+      await temporary.sync();
       await this.assertSameParentDirectory(parent);
       await this.fileSystem.rename(tempPath, this.secretPath);
-      temporaryMayExist = false;
+      ownedTemporary = undefined;
+      await temporary.close();
       await this.assertSameParentDirectory(parent);
       if (this.isUnix()) {
         await this.fileSystem.chmod(this.secretPath, 0o600);
@@ -213,14 +234,8 @@ export class DesktopSecretStore {
       }
       await this.syncDirectoryIfSupported(parent.handle);
     } finally {
-      if (temporaryMayExist) {
-        try {
-          await this.fileSystem.unlink(tempPath);
-        } catch {
-          // Preserve the original failure; an attacker-controlled path is never retried.
-        }
-      }
-      if (parent) await parent.handle.close();
+      if (ownedTemporary) await this.clearOwnedTemporaryFile(ownedTemporary);
+      if (parent) await closeQuietly(parent.handle);
     }
   }
 
@@ -295,7 +310,9 @@ export class DesktopSecretStore {
     // Node exposes no openat-style API for a FileHandle. Path mutations below
     // therefore re-check this pinned directory identity around every critical
     // path operation; a hostile swap can still cause a failed operation, never
-    // a successful write we report as safe.
+    // a successful write we report as safe. This protects against accidental
+    // races and hostile links, not a malicious same-account process capable of
+    // repeated namespace swaps between every check (Node has no openat here).
     await this.assertSecureDirectory();
     const stats = await this.fileSystem.lstat(this.secretDirectory);
     const realPath = await this.fileSystem.realpath(this.secretDirectory);
@@ -318,6 +335,32 @@ export class DesktopSecretStore {
     }
   }
 
+  private async clearOwnedTemporaryFile(temporary: OwnedTemporaryFile): Promise<void> {
+    // The open handle remains pinned even if the directory is renamed. Clear it
+    // before using a path again so a moved temporary file cannot retain a key.
+    try {
+      await temporary.handle.truncate(0);
+      await temporary.handle.sync();
+    } catch {
+      // The original operation error remains the user-facing failure.
+    }
+    await closeQuietly(temporary.handle);
+
+    try {
+      const current = await this.fileSystem.lstat(temporary.path);
+      if (
+        !current.isSymbolicLink() &&
+        current.isFile() &&
+        current.dev === temporary.dev &&
+        current.ino === temporary.ino
+      ) {
+        await this.fileSystem.unlink(temporary.path);
+      }
+    } catch {
+      // Never delete a replacement path or replace the original error.
+    }
+  }
+
   private isUnix(): boolean {
     return this.platform !== "win32";
   }
@@ -336,6 +379,7 @@ const NODE_FILE_SYSTEM: DesktopSecretFileSystem = {
       stat: () => handle.stat(),
       readFile: async () => handle.readFile({ encoding: "utf8" }),
       writeFile: async (content) => handle.writeFile(content, { encoding: "utf8" }),
+      truncate: (length) => handle.truncate(length),
       sync: () => handle.sync(),
       close: () => handle.close(),
     };
@@ -414,6 +458,14 @@ function isMissingFile(error: unknown): boolean {
 function isUnsupportedDirectorySync(error: unknown): boolean {
   if (!isRecord(error) || typeof error.code !== "string") return false;
   return ["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EISDIR"].includes(error.code);
+}
+
+async function closeQuietly(handle: { close(): Promise<void> }): Promise<void> {
+  try {
+    await handle.close();
+  } catch {
+    // Cleanup must not replace the original storage error.
+  }
 }
 
 function defaultRandomSuffix(): string {
