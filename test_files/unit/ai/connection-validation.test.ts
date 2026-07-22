@@ -8,7 +8,7 @@ import {
 
 function connection(overrides: Record<string, unknown> = {}) {
   return {
-    id: "connection-1",
+    id: "11111111-1111-4111-8111-111111111111",
     name: "OpenAI",
     providerKind: "openai",
     protocol: "openai-chat",
@@ -109,6 +109,25 @@ describe("AI connection validation", () => {
         defaultConnectionId: "missing",
       }),
     ).toEqual({ connections: [connection()] });
+  });
+
+  it("requires canonical UUID connection IDs and caps timeout at ten minutes", () => {
+    expect(normalizeAiConnection(connection({ id: "connection-1" }))).toBeUndefined();
+    expect(normalizeAiConnection(connection({ id: "11111111111141118111111111111111" }))).toBeUndefined();
+    expect(normalizeAiConnection(connection({ timeoutMs: 600_001 }))).toBeUndefined();
+    expect(normalizeAiConnection(connection({ timeoutMs: Number.MAX_SAFE_INTEGER }))).toBeUndefined();
+    expect(normalizeAiConnection(connection({ timeoutMs: 600_000 }))).toMatchObject({
+      timeoutMs: 600_000,
+    });
+    expect(normalizeAiConnection(connection({
+      id: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+    }))).toMatchObject({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    expect(normalizeAiSettings({
+      connections: [connection({ id: "legacy-connection" })],
+      defaultConnectionId: "legacy-connection",
+    })).toEqual({ connections: [] });
   });
 
   it("rejects unknown keys, inherited fields, getters, and sparse connection arrays", () => {

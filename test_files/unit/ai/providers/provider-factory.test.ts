@@ -1,14 +1,25 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import process from "node:process";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AiConnection } from "../../../../src/ai/ai-types";
 import { createTextGenerationProvider } from "../../../../src/ai/providers/provider-factory";
 import type { AiTransport } from "../../../../src/ai/providers/text-generation-provider";
+import { DesktopSecretStore } from "../../../../src/security/desktop-secret-store";
 
 const API_KEY = "factory-secret-key";
+const temporaryRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
+});
 
 function connection(overrides: Partial<AiConnection> = {}): AiConnection {
   return {
-    id: "ai-connection-1",
+    id: "11111111-1111-4111-8111-111111111111",
     name: "OpenAI",
     providerKind: "openai",
     protocol: "openai-chat",
@@ -44,7 +55,7 @@ describe("AI provider factory", () => {
       secretStore,
       { transport },
     );
-    expect(events).toEqual(["get:ai-connection-1"]);
+    expect(events).toEqual(["get:11111111-1111-4111-8111-111111111111"]);
     expect(JSON.stringify(provider)).not.toContain(API_KEY);
     expect(Object.values(provider as unknown as Record<string, unknown>)).not.toContain(API_KEY);
 
@@ -53,7 +64,10 @@ describe("AI provider factory", () => {
       user: "user",
       maxOutputTokens: 10,
     })).resolves.toMatchObject({ text: "ok" });
-    expect(events).toEqual(["get:ai-connection-1", "transport"]);
+    expect(events).toEqual([
+      "get:11111111-1111-4111-8111-111111111111",
+      "transport",
+    ]);
   });
 
   it.each([undefined, "", "  ", "key\nheader"]) (
@@ -74,6 +88,14 @@ describe("AI provider factory", () => {
     const transport = vi.fn<AiTransport>();
     await expect(createTextGenerationProvider(
       connection({ protocol: "anthropic-messages" }),
+      { get },
+      { transport },
+    )).rejects.toMatchObject({ code: "invalid-connection" });
+    expect(get).not.toHaveBeenCalled();
+    expect(transport).not.toHaveBeenCalled();
+
+    await expect(createTextGenerationProvider(
+      connection({ id: "legacy-connection-id" }),
       { get },
       { transport },
     )).rejects.toMatchObject({ code: "invalid-connection" });
@@ -153,7 +175,7 @@ describe("AI provider factory", () => {
 
     const relay = await createTextGenerationProvider(
       connection({
-        id: "relay-1",
+        id: "22222222-2222-4222-8222-222222222222",
         name: "Relay",
         providerKind: "openai-compatible",
         protocol: "openai-chat",
@@ -166,7 +188,7 @@ describe("AI provider factory", () => {
 
     const anthropic = await createTextGenerationProvider(
       connection({
-        id: "claude-1",
+        id: "33333333-3333-4333-8333-333333333333",
         name: "Claude",
         providerKind: "claude",
         protocol: "anthropic-messages",
@@ -206,5 +228,34 @@ describe("AI provider factory", () => {
     await provider.generate({ system: "s", user: "u", maxOutputTokens: 10 });
     expect(requests[0]?.url).toBe("https://api.openai.com/v1/chat/completions");
     expect(requests[0]?.body).not.toContain(API_KEY);
+  });
+
+  it("integrates with a real temporary DesktopSecretStore using the same UUID", async () => {
+    const root = await mkdtemp(join(process.cwd(), ".tmp-rss-ai-factory-"));
+    temporaryRoots.push(root);
+    const store = new DesktopSecretStore({
+      secretPath: join(root, "secrets", "secrets.json"),
+      platform: "linux",
+      randomSuffix: () => "factory-integration",
+    });
+    await store.set("11111111-1111-4111-8111-111111111111", API_KEY);
+    const transport = vi.fn<AiTransport>(() => ({
+      status: 200,
+      headers: {},
+      json: { choices: [{ message: { content: "safe result" } }] },
+    }));
+
+    const provider = await createTextGenerationProvider(
+      connection(),
+      store,
+      { transport },
+    );
+    await expect(provider.generate({
+      system: "system",
+      user: "user",
+      maxOutputTokens: 10,
+    })).resolves.toEqual({ text: "safe result" });
+    expect(JSON.stringify(provider)).not.toContain(API_KEY);
+    expect(JSON.stringify(await store.getStatus(connection().id))).not.toContain(API_KEY);
   });
 });

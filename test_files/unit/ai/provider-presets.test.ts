@@ -54,13 +54,13 @@ describe("AI provider presets", () => {
   it("creates metadata defaults without inventing a model or storing a key", () => {
     expect(
       createAiConnection({
-        id: "connection-1",
+        id: "11111111-1111-4111-8111-111111111111",
         name: "Kimi",
         providerKind: "kimi",
         model: "moonshot-user-selected",
       }),
     ).toEqual({
-      id: "connection-1",
+      id: "11111111-1111-4111-8111-111111111111",
       name: "Kimi",
       providerKind: "kimi",
       protocol: "openai-chat",
@@ -78,7 +78,7 @@ describe("AI provider presets", () => {
   it("requires a user-supplied endpoint for compatible relays", () => {
     expect(() =>
       createAiConnection({
-        id: "relay-1",
+        id: "22222222-2222-4222-8222-222222222222",
         name: "OpenAI relay",
         providerKind: "openai-compatible",
         baseUrl: "",
@@ -103,7 +103,7 @@ describe("AI provider presets", () => {
       }
       expect(
         createAiConnection({
-          id: "connection-1",
+          id: "11111111-1111-4111-8111-111111111111",
           name: "Kimi",
           providerKind: "kimi",
           model: "selected-model",
@@ -114,7 +114,7 @@ describe("AI provider presets", () => {
       });
       expect(
         normalizeAiConnection({
-          id: "connection-1",
+          id: "11111111-1111-4111-8111-111111111111",
           name: "Kimi",
           providerKind: "kimi",
           protocol: "openai-chat",
@@ -143,7 +143,7 @@ describe("AI provider presets", () => {
       Reflect.deleteProperty(publicPresets, 1);
       expect(
         createAiConnection({
-          id: "connection-1",
+          id: "11111111-1111-4111-8111-111111111111",
           name: "Kimi",
           providerKind: "kimi",
           model: "selected-model",

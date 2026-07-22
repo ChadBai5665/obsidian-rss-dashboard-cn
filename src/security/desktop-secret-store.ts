@@ -19,6 +19,10 @@ import {
   projectSecretStatus,
 } from "./secret-types";
 import { resolveDesktopSecretPath } from "./secret-path";
+import {
+  isCanonicalConnectionId,
+  requireConnectionId,
+} from "./connection-id";
 
 export {
   SecretStoreCorruptError,
@@ -88,7 +92,6 @@ export interface DesktopSecretStoreOptions {
 
 const EMPTY_SECRET_FILE = (): SecretFileV1 => ({ schemaVersion: 1, secrets: {} });
 const mutationQueues = new Map<string, Promise<void>>();
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class DesktopSecretStore {
   private readonly fileSystem: DesktopSecretFileSystem;
@@ -114,8 +117,8 @@ export class DesktopSecretStore {
   }
 
   async get(connectionId: string): Promise<string | undefined> {
-    assertConnectionId(connectionId);
-    return (await this.readSecretFile()).secrets[connectionId]?.apiKey;
+    const normalizedId = requireConnectionId(connectionId);
+    return (await this.readSecretFile()).secrets[normalizedId]?.apiKey;
   }
 
   async has(connectionId: string): Promise<boolean> {
@@ -127,20 +130,20 @@ export class DesktopSecretStore {
   }
 
   async set(connectionId: string, apiKey: string): Promise<void> {
-    assertConnectionId(connectionId);
+    const normalizedId = requireConnectionId(connectionId);
     if (!apiKey.trim()) {
       throw new Error("External secret API key must not be blank.");
     }
 
     await this.update((file) => {
-      file.secrets[connectionId] = { apiKey, updatedAt: this.now().toISOString() };
+      file.secrets[normalizedId] = { apiKey, updatedAt: this.now().toISOString() };
     });
   }
 
   async delete(connectionId: string): Promise<void> {
-    assertConnectionId(connectionId);
+    const normalizedId = requireConnectionId(connectionId);
     await this.update((file) => {
-      delete file.secrets[connectionId];
+      delete file.secrets[normalizedId];
     });
   }
 
@@ -418,7 +421,7 @@ function parseSecretFile(raw: string): SecretFileV1 {
 function isSecretFileV1(value: unknown): value is SecretFileV1 {
   if (!isPlainRecord(value) || !hasExactOwnKeys(value, ["schemaVersion", "secrets"]) || value.schemaVersion !== 1 || !isPlainRecord(value.secrets)) return false;
   return Object.entries(value.secrets).every(([connectionId, secret]) =>
-    UUID_PATTERN.test(connectionId) &&
+    isCanonicalConnectionId(connectionId) &&
     isPlainRecord(secret) &&
     hasExactOwnKeys(secret, ["apiKey", "updatedAt"]) &&
     typeof secret.apiKey === "string" &&
@@ -443,12 +446,6 @@ function hasExactOwnKeys(value: Record<string, unknown>, expected: string[]): bo
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function assertConnectionId(connectionId: string): void {
-  if (!UUID_PATTERN.test(connectionId)) {
-    throw new Error("External secret connection ID must be a UUID.");
-  }
 }
 
 function isMissingFile(error: unknown): boolean {

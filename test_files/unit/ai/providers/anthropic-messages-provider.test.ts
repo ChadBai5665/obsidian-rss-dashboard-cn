@@ -11,7 +11,7 @@ const API_KEY = "anthropic-secret-key";
 
 function connection(baseUrl = "https://api.anthropic.com"): AiConnection {
   return {
-    id: "claude-1",
+    id: "33333333-3333-4333-8333-333333333333",
     name: "Claude",
     providerKind: baseUrl === "https://api.anthropic.com"
       ? "claude"
@@ -133,5 +133,29 @@ describe("Anthropic-compatible provider", () => {
       });
       expect(String(error)).not.toContain(API_KEY);
     }
+  });
+
+  it("rejects accumulated text and block counts beyond bounded response resources", async () => {
+    const oversizedText = harness(success({
+      content: [
+        { type: "text", text: "x".repeat(100) },
+        { type: "text", text: "y".repeat(100) },
+      ],
+    }));
+    await expect(oversizedText.provider.generate({
+      system: "system",
+      user: "user",
+      maxOutputTokens: 10,
+    })).rejects.toMatchObject({ code: "response-too-large" });
+
+    const blocks = Array.from({ length: 10_001 }, () => ({
+      type: "tool_use",
+      id: "ignored",
+    }));
+    await expect(harness(success({ content: blocks })).provider.generate({
+      system: "system",
+      user: "user",
+      maxOutputTokens: 10,
+    })).rejects.toMatchObject({ code: "response-too-large" });
   });
 });

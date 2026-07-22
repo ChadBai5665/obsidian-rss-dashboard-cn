@@ -27,3 +27,5 @@ export interface AiSettings {
   connections: AiConnection[];
   defaultConnectionId?: string;
 }
+
+export const MAX_AI_TIMEOUT_MS = 600_000;

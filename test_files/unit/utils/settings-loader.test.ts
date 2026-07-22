@@ -249,7 +249,7 @@ describe("settings-loader", () => {
         ai: {
           connections: [
             {
-              id: "connection-1",
+              id: "11111111-1111-4111-8111-111111111111",
               name: "Relay",
               providerKind: "openai-compatible",
               protocol: "openai-chat",
@@ -270,7 +270,7 @@ describe("settings-loader", () => {
       expect(result.ai).toEqual({
         connections: [
           {
-            id: "connection-1",
+            id: "11111111-1111-4111-8111-111111111111",
             name: "Relay",
             providerKind: "openai-compatible",
             protocol: "openai-chat",
@@ -289,7 +289,7 @@ describe("settings-loader", () => {
         await import("../../../src/utils/settings-loader");
       const unknownField = Symbol("unknown-field");
       const candidate = {
-        id: "connection-1",
+        id: "11111111-1111-4111-8111-111111111111",
         name: "Relay",
         providerKind: "openai-compatible",
         protocol: "openai-chat",

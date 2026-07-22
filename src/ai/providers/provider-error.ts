@@ -12,6 +12,7 @@ export type ProviderErrorCode =
   | "network-failure"
   | "aborted"
   | "malformed-response"
+  | "response-too-large"
   | "empty-output"
   | "secret-store-failure";
 
@@ -96,5 +97,12 @@ export function malformedProviderResponse(): ProviderError {
   return new ProviderError(
     "malformed-response",
     "The AI provider returned an invalid response.",
+  );
+}
+
+export function providerResponseTooLarge(): ProviderError {
+  return new ProviderError(
+    "response-too-large",
+    "The AI provider response exceeded the safe processing limit.",
   );
 }

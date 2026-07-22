@@ -1,5 +1,11 @@
-import type { AiConnection, AiProviderKind, AiSettings } from "./ai-types";
+import {
+  MAX_AI_TIMEOUT_MS,
+  type AiConnection,
+  type AiProviderKind,
+  type AiSettings,
+} from "./ai-types";
 import type { AiProviderPreset } from "./provider-presets";
+import { normalizeConnectionId } from "../security/connection-id";
 
 const VALIDATION_PROVIDER_PRESETS = Object.freeze({
   kimi: Object.freeze({
@@ -54,9 +60,7 @@ const CONNECTION_KEYS = new Set([
   "enabled",
 ]);
 const SETTINGS_KEYS = new Set(["connections", "defaultConnectionId"]);
-const UNSAFE_IDS = new Set(["__proto__", "prototype", "constructor"]);
 const WHITESPACE = /\s/u;
-const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MAX_CONNECTIONS = 1_000;
 
 export function normalizeAiConnection(
@@ -89,6 +93,7 @@ export function normalizeAiConnection(
     !baseUrl ||
     (preset.baseUrl !== undefined && baseUrl !== preset.baseUrl) ||
     !positiveSafeInteger(timeoutMs) ||
+    timeoutMs > MAX_AI_TIMEOUT_MS ||
     !positiveSafeInteger(maxInputCharacters) ||
     typeof enabled !== "boolean"
   ) {
@@ -229,10 +234,7 @@ function normalizedText(value: unknown): string | undefined {
 }
 
 function normalizedId(value: unknown): string | undefined {
-  const id = normalizedText(value);
-  return id && SAFE_ID.test(id) && !UNSAFE_IDS.has(id.toLowerCase())
-    ? id
-    : undefined;
+  return normalizeConnectionId(value);
 }
 
 function positiveSafeInteger(value: unknown): value is number {

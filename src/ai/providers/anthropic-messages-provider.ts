@@ -7,6 +7,7 @@ import {
   hasOwnData,
   obsidianAiTransport,
   optionalUsageInteger,
+  outputCharacterLimit,
   ownData,
   performAiRequest,
   plainDataRecord,
@@ -16,7 +17,7 @@ import {
   type TextGenerationRequest,
   type TextGenerationResult,
   validApiKeyValue,
-  validateGenerationRequest,
+  snapshotGenerationRequest,
 } from "./text-generation-provider";
 
 export type { AiTransport, AiTransportRequest } from "./text-generation-provider";
@@ -63,7 +64,7 @@ export class AnthropicMessagesProvider implements TextGenerationProvider {
   async generate(
     request: TextGenerationRequest,
   ): Promise<TextGenerationResult> {
-    validateGenerationRequest(request);
+    const snapshot = snapshotGenerationRequest(request);
     const state = requirePrivateState(this);
     const response = await performAiRequest(
       this.transport,
@@ -77,19 +78,21 @@ export class AnthropicMessagesProvider implements TextGenerationProvider {
         },
         body: JSON.stringify({
           model: state.model,
-          max_tokens: request.maxOutputTokens,
-          system: request.system,
-          messages: [{ role: "user", content: request.user }],
+          max_tokens: snapshot.maxOutputTokens,
+          system: snapshot.system,
+          messages: [{ role: "user", content: snapshot.user }],
         }),
-        ...(request.signal ? { signal: request.signal } : {}),
+        ...(snapshot.signal ? { signal: snapshot.signal } : {}),
       },
       state.timeoutMs,
       state.apiKey,
+      snapshot.signalWasAborted,
     );
     return parseAnthropicResult(
       response.json,
       response.requestId,
       state.apiKey,
+      outputCharacterLimit(snapshot.maxOutputTokens),
     );
   }
 }
@@ -105,16 +108,28 @@ function parseAnthropicResult(
   value: unknown,
   headerRequestId: string | undefined,
   apiKey: string,
+  maximumOutputCharacters: number,
 ): TextGenerationResult {
   const root = plainDataRecord(value);
   if (!root) throw malformedProviderResponse();
-  const blocks = denseDataArray(ownData(root, "content"), 100_000);
+  const contentValue = ownData(root, "content");
+  const contentLength = Array.isArray(contentValue)
+    ? ownArrayLength(contentValue)
+    : undefined;
+  if (contentLength !== undefined && contentLength > 10_000) {
+    throw new ProviderError(
+      "response-too-large",
+      "The AI provider response exceeded the safe processing limit.",
+    );
+  }
+  const blocks = denseDataArray(contentValue, 10_000);
   if (!blocks) throw malformedProviderResponse();
   if (blocks.length === 0) {
     throw new ProviderError("empty-output", "The AI provider returned no text.");
   }
 
   const textParts: string[] = [];
+  let textCharacters = 0;
   for (const blockValue of blocks) {
     const block = plainDataRecord(blockValue);
     if (!block) throw malformedProviderResponse();
@@ -123,6 +138,13 @@ function parseAnthropicResult(
     if (type !== "text") continue;
     const text = ownData(block, "text");
     if (typeof text !== "string") throw malformedProviderResponse();
+    textCharacters += text.length;
+    if (textCharacters > maximumOutputCharacters) {
+      throw new ProviderError(
+        "response-too-large",
+        "The AI provider response exceeded the safe processing limit.",
+      );
+    }
     textParts.push(text);
   }
   const text = textParts.join("").trim();
@@ -145,6 +167,20 @@ function parseAnthropicResult(
     inputTokens,
     outputTokens,
   );
+}
+
+function ownArrayLength(value: unknown[]): number | undefined {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, "length");
+    const length: unknown = descriptor && "value" in descriptor
+      ? descriptor.value
+      : undefined;
+    return typeof length === "number" && Number.isSafeInteger(length) && length >= 0
+      ? length
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function validatedApiKey(value: unknown): string {

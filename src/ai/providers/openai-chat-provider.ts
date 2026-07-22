@@ -7,6 +7,7 @@ import {
   hasOwnData,
   obsidianAiTransport,
   optionalUsageInteger,
+  outputCharacterLimit,
   ownData,
   performAiRequest,
   plainDataRecord,
@@ -16,7 +17,7 @@ import {
   type TextGenerationRequest,
   type TextGenerationResult,
   validApiKeyValue,
-  validateGenerationRequest,
+  snapshotGenerationRequest,
 } from "./text-generation-provider";
 
 export type { AiTransport, AiTransportRequest } from "./text-generation-provider";
@@ -64,15 +65,15 @@ export class OpenAiChatProvider implements TextGenerationProvider {
   async generate(
     request: TextGenerationRequest,
   ): Promise<TextGenerationResult> {
-    validateGenerationRequest(request);
+    const snapshot = snapshotGenerationRequest(request);
     const state = requirePrivateState(this);
     const body: Record<string, unknown> = {
       model: state.model,
       messages: [
-        { role: "system", content: request.system },
-        { role: "user", content: request.user },
+        { role: "system", content: snapshot.system },
+        { role: "user", content: snapshot.user },
       ],
-      max_tokens: request.maxOutputTokens,
+      max_tokens: snapshot.maxOutputTokens,
       stream: false,
     };
     if (this.supportsStoreFalse) body.store = false;
@@ -87,13 +88,19 @@ export class OpenAiChatProvider implements TextGenerationProvider {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
-        ...(request.signal ? { signal: request.signal } : {}),
+        ...(snapshot.signal ? { signal: snapshot.signal } : {}),
       },
       state.timeoutMs,
       state.apiKey,
+      snapshot.signalWasAborted,
     );
 
-    return parseOpenAiResult(response.json, response.requestId, state.apiKey);
+    return parseOpenAiResult(
+      response.json,
+      response.requestId,
+      state.apiKey,
+      outputCharacterLimit(snapshot.maxOutputTokens),
+    );
   }
 }
 
@@ -101,6 +108,7 @@ function parseOpenAiResult(
   value: unknown,
   headerRequestId: string | undefined,
   apiKey: string,
+  maximumOutputCharacters: number,
 ): TextGenerationResult {
   const root = plainDataRecord(value);
   if (!root) throw malformedProviderResponse();
@@ -114,6 +122,12 @@ function parseOpenAiResult(
   const content = message && ownData(message, "content");
   if (typeof content !== "string") throw malformedProviderResponse();
   const text = content.trim();
+  if (text.length > maximumOutputCharacters) {
+    throw new ProviderError(
+      "response-too-large",
+      "The AI provider response exceeded the safe processing limit.",
+    );
+  }
   if (!text || text.includes(apiKey)) {
     throw new ProviderError("empty-output", "The AI provider returned no text.");
   }

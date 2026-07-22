@@ -12,7 +12,7 @@ const API_KEY = "provider-secret-key";
 
 function connection(overrides: Partial<AiConnection> = {}): AiConnection {
   return {
-    id: "openai-1",
+    id: "11111111-1111-4111-8111-111111111111",
     name: "OpenAI",
     providerKind: "openai",
     protocol: "openai-chat",
@@ -382,5 +382,156 @@ describe("OpenAI-compatible provider", () => {
       expect(error).toMatchObject({ code: "malformed-response" });
       expect(String(error)).not.toContain(API_KEY);
     }
+  });
+
+  it("snapshots only exact own-data request fields without invoking getters or accepting prototypes", async () => {
+    let getterCalls = 0;
+    const getterRequest: Record<string, unknown> = {
+      user: "user",
+      maxOutputTokens: 10,
+    };
+    Object.defineProperty(getterRequest, "system", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error(`${API_KEY} request getter`);
+      },
+    });
+    const inherited = Object.create({ system: "system" }) as Record<string, unknown>;
+    inherited.user = "user";
+    inherited.maxOutputTokens = 10;
+    const symbolRequest = {
+      system: "system",
+      user: "user",
+      maxOutputTokens: 10,
+      [Symbol("extra")]: true,
+    };
+    const extraRequest = {
+      system: "system",
+      user: "user",
+      maxOutputTokens: 10,
+      extra: "not-allowed",
+    };
+    const proxyRequest = new Proxy(
+      { system: "system", user: "user", maxOutputTokens: 10 },
+      {
+        ownKeys() {
+          throw new Error(`${API_KEY} proxy trap`);
+        },
+      },
+    );
+
+    for (const request of [
+      getterRequest,
+      inherited,
+      symbolRequest,
+      extraRequest,
+      proxyRequest,
+    ]) {
+      const test = harness();
+      const error = await test.provider.generate(
+        request as unknown as Parameters<typeof test.provider.generate>[0],
+      ).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "invalid-request" });
+      expect(String(error)).not.toContain(API_KEY);
+      expect(test.transport).not.toHaveBeenCalled();
+    }
+    expect(getterCalls).toBe(0);
+  });
+
+  it("requires a real AbortSignal brand and ignores hostile instance method overrides", async () => {
+    const fakeSignal = {
+      aborted: false,
+      addEventListener() {
+        throw new Error(API_KEY);
+      },
+      removeEventListener() {
+        throw new Error(API_KEY);
+      },
+    };
+    const rejected = harness();
+    const error = await rejected.provider.generate({
+      system: "system",
+      user: "user",
+      maxOutputTokens: 10,
+      signal: fakeSignal as unknown as AbortSignal,
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "invalid-request" });
+    expect(String(error)).not.toContain(API_KEY);
+    expect(rejected.transport).not.toHaveBeenCalled();
+
+    const controller = new AbortController();
+    Object.defineProperty(controller.signal, "addEventListener", {
+      get() {
+        throw new Error(`${API_KEY} add getter`);
+      },
+    });
+    Object.defineProperty(controller.signal, "removeEventListener", {
+      get() {
+        throw new Error(`${API_KEY} remove getter`);
+      },
+    });
+    const accepted = harness();
+    await expect(accepted.provider.generate({
+      system: "system",
+      user: "user",
+      maxOutputTokens: 10,
+      signal: controller.signal,
+    })).resolves.toMatchObject({ text: "生成结果" });
+    expect(accepted.requests[0]?.signal).toBe(controller.signal);
+  });
+
+  it("caps maxOutputTokens before transport", async () => {
+    const test = harness();
+    await expect(test.provider.generate({
+      system: "system",
+      user: "user",
+      maxOutputTokens: Number.MAX_SAFE_INTEGER,
+    })).rejects.toMatchObject({ code: "invalid-request" });
+    expect(test.transport).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized raw responses, output text, cycles, and excessive nodes", async () => {
+    const oversizedRaw = harness({
+      status: 200,
+      headers: {},
+      text: JSON.stringify({
+        choices: [{ message: { content: "x".repeat(1_000_001) } }],
+      }),
+    });
+    await expect(oversizedRaw.provider.generate({
+      system: "system",
+      user: "user",
+      maxOutputTokens: 10,
+    })).rejects.toMatchObject({ code: "response-too-large" });
+
+    const oversizedOutput = harness(success({
+      choices: [{ message: { content: "x".repeat(10_000) } }],
+    }));
+    await expect(oversizedOutput.provider.generate({
+      system: "system",
+      user: "user",
+      maxOutputTokens: 10,
+    })).rejects.toMatchObject({ code: "response-too-large" });
+
+    const cyclic: Record<string, unknown> = {
+      choices: [{ message: { content: "ok" } }],
+    };
+    cyclic.cycle = cyclic;
+    await expect(harness(success(cyclic)).provider.generate({
+      system: "system",
+      user: "user",
+      maxOutputTokens: 10,
+    })).rejects.toMatchObject({ code: "malformed-response" });
+
+    const excessiveNodes = Array.from({ length: 10_001 }, () => null);
+    await expect(harness(success({
+      choices: [{ message: { content: "ok" } }],
+      excessiveNodes,
+    })).provider.generate({
+      system: "system",
+      user: "user",
+      maxOutputTokens: 10,
+    })).rejects.toMatchObject({ code: "response-too-large" });
   });
 });
