@@ -1,5 +1,15 @@
 import { Buffer } from "node:buffer";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,6 +18,10 @@ import {
   checkReleaseArtifacts,
   stageReleaseArtifacts,
 } from "../../../scripts/check-release-artifacts.mjs";
+import {
+  safeReleaseTextCases,
+  unsafeReleaseTextCases,
+} from "./release-safety-rule-fixtures";
 
 const temporaryDirectories: string[] = [];
 
@@ -109,19 +123,24 @@ describe("release artifact validator", () => {
   });
 
   it("rejects private paths, credentials, source maps, and oversized bundles", async () => {
-    for (const source of [
-      "const p = '/Users/private/Vault';",
-      "const p = 'C:\\\\Users\\\\private\\\\Vault';",
-      "const key = 'sk-livecredentialmaterial';",
-      "Authorization: Bearer release-secret",
-      "//# sourceMappingURL=main.js.map",
-    ]) {
+    for (const { rule, text: source } of unsafeReleaseTextCases) {
       const root = await temporaryRoot();
       await writeFile(join(root, "main.js"), source);
       await expect(stageReleaseArtifacts({ root })).rejects.toThrow(
-        /bundle-(?:private-path|credential|source-map)/,
+        rule === "home-path" ? "bundle-private-path" : "bundle-credential",
       );
     }
+    const safe = await temporaryRoot();
+    await writeFile(join(safe, "main.js"), safeReleaseTextCases.join("\n"));
+    await expect(stageReleaseArtifacts({ root: safe })).resolves.toMatchObject({
+      ok: true,
+    });
+
+    const sourceMap = await temporaryRoot();
+    await writeFile(join(sourceMap, "main.js"), "//# sourceMappingURL=main.js.map");
+    await expect(stageReleaseArtifacts({ root: sourceMap })).rejects.toThrow(
+      "bundle-source-map",
+    );
 
     const oversized = await temporaryRoot();
     await writeFile(
@@ -157,6 +176,80 @@ describe("release artifact validator", () => {
     expect(
       (await readdir(root)).filter((name) => name.startsWith(".release-stage-")),
     ).toEqual([]);
+  });
+
+  it("retains a named recovery copy when restoring the prior release fails", async () => {
+    const root = await temporaryRoot();
+    await stageReleaseArtifacts({ root });
+    const priorMain = await readFile(join(root, "release/main.js"));
+    await writeFile(join(root, "main.js"), "console.log('replacement');\n");
+    let renameCalls = 0;
+
+    await expect(
+      stageReleaseArtifacts({
+        root,
+        hooks: {
+          afterBackup() {
+            throw new Error("simulated-install-failure");
+          },
+        },
+        operations: {
+          lstat,
+          rename: async (source: string, destination: string) => {
+            renameCalls += 1;
+            if (
+              renameCalls === 2 &&
+              source.includes(".release-backup-") &&
+              destination.endsWith("/release")
+            ) {
+              throw new Error("simulated-restore-failure");
+            }
+            await rename(source, destination);
+          },
+          rm,
+        },
+      }),
+    ).rejects.toThrow(/release-recovery-required:.*\.release-backup-/);
+
+    const recoveryName = (await readdir(root)).find((name) =>
+      name.startsWith(".release-backup-"),
+    );
+    expect(recoveryName).toBeDefined();
+    expect(await readFile(join(root, recoveryName!, "main.js"))).toEqual(
+      priorMain,
+    );
+  });
+
+  it("retains the prior release when backup cleanup fails", async () => {
+    const root = await temporaryRoot();
+    await stageReleaseArtifacts({ root });
+    const priorMain = await readFile(join(root, "release/main.js"));
+    await writeFile(join(root, "main.js"), "console.log('replacement');\n");
+
+    await expect(
+      stageReleaseArtifacts({
+        root,
+        operations: {
+          rm: async (
+            path: string,
+            options?: Parameters<typeof rm>[1],
+          ) => {
+            if (path.includes(".release-backup-")) {
+              throw new Error("simulated-backup-cleanup-failure");
+            }
+            await rm(path, options);
+          },
+        },
+      }),
+    ).rejects.toThrow(/release-recovery-required:.*\.release-backup-/);
+
+    const recoveryName = (await readdir(root)).find((name) =>
+      name.startsWith(".release-backup-"),
+    );
+    expect(recoveryName).toBeDefined();
+    expect(await readFile(join(root, recoveryName!, "main.js"))).toEqual(
+      priorMain,
+    );
   });
 
   it("rejects root artifact symlinks without following them", async () => {

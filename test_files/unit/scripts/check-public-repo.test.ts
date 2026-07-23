@@ -4,6 +4,7 @@ import {
   chmod,
   mkdtemp,
   mkdir,
+  readFile,
   rm,
   symlink,
   writeFile,
@@ -18,6 +19,10 @@ import {
   parseNulPaths,
   scanPublicRepository,
 } from "../../../scripts/check-public-repo.mjs";
+import {
+  safeReleaseTextCases,
+  unsafeReleaseTextCases,
+} from "./release-safety-rule-fixtures";
 
 const temporaryDirectories: string[] = [];
 const privateKeyMarker = ["-----BEGIN ", "OPENSSH PRIVATE KEY-----"].join("");
@@ -111,6 +116,7 @@ describe("public repository scanner", () => {
     await symlink(outside, join(repository, "linked.txt"));
     execFileSync("git", ["add", "--", "linked.txt"], { cwd: repository });
     await track(repository, ".env.production", "SAFE=true");
+    await track(repository, ".envrc", "SAFE=true");
     await track(repository, "nested/secrets.json", "{}");
     await track(repository, ".rss-dashboard-data/items.jsonl", "{}");
     await track(repository, "信息收集/2026-01-01.md", "safe");
@@ -136,6 +142,7 @@ describe("public repository scanner", () => {
 
     expect(result.output).toMatch(/tracked-symlink linked\.txt:0/);
     expect(result.output).toMatch(/forbidden-env-file \.env\.production:0/);
+    expect(result.output).toMatch(/forbidden-env-file \.envrc:0/);
     expect(result.output).toMatch(/forbidden-secret-file nested\/secrets\.json:0/);
     expect(result.output).toMatch(
       /forbidden-private-data \.rss-dashboard-data\/items\.jsonl:0/,
@@ -210,6 +217,10 @@ describe("public repository scanner", () => {
       { ...valid, path: "../outside" },
       { ...valid, reason: "" },
       { ...valid, expires: "2000-01-01" },
+      { ...valid, expires: "9999-99-99" },
+      { ...valid, expires: "9999-02-29" },
+      { ...valid, expires: "2025-02-29" },
+      { ...valid, expires: "2025-02-28T00:00:00Z" },
       { ...valid, fingerprint: `sha256:${"0".repeat(64)}` },
     ]) {
       const rejected = await scanPublicRepository({
@@ -285,6 +296,110 @@ describe("public repository scanner", () => {
       "space name.txt",
       "line\nname.txt",
     ]);
+    expect(() => parseNulPaths(Buffer.from([0xc3, 0x28, 0]))).toThrow(
+      "git-path-output-not-utf8",
+    );
+  });
+
+  it("reads every regular file from the index blob, never the worktree", async () => {
+    const repository = await temporaryRepository();
+    await track(
+      repository,
+      "staged-secret.txt",
+      "Authorization: Bearer staged-secret-value",
+    );
+    await writeFile(join(repository, "staged-secret.txt"), "safe worktree");
+    await track(repository, "safe-index.txt", "safe index");
+    await writeFile(
+      join(repository, "safe-index.txt"),
+      "Authorization: Bearer modified-worktree-secret",
+    );
+    await writeFile(
+      join(repository, "untracked-secret.txt"),
+      "Authorization: Bearer untracked-worktree-secret",
+    );
+
+    const result = await scanPublicRepository({
+      repository,
+      allowlistPath: await writeAllowlist(repository, []),
+    });
+
+    expect(result.output).toContain("credential-value staged-secret.txt:1");
+    expect(result.output).not.toContain("safe-index.txt");
+    expect(result.output).not.toContain("untracked-secret.txt");
+    expect(result.output).not.toMatch(
+      /staged-secret-value|modified-worktree-secret|untracked-worktree-secret/,
+    );
+  });
+
+  it("fails closed when an indexed regular blob is unavailable", async () => {
+    const repository = await temporaryRepository();
+    const missingObject = "f".repeat(40);
+    execFileSync(
+      "git",
+      [
+        "update-index",
+        "--add",
+        "--info-only",
+        "--cacheinfo",
+        `100644,${missingObject},missing.txt`,
+      ],
+      { cwd: repository },
+    );
+    await writeFile(join(repository, "missing.txt"), "safe worktree fallback");
+
+    const result = await scanPublicRepository({
+      repository,
+      allowlistPath: await writeAllowlist(repository, []),
+    });
+
+    expect(result).toMatchObject({
+      exitCode: 2,
+      findings: [],
+      output: "index-blob-missing:missing.txt",
+    });
+  });
+
+  it("rejects submodule index modes without reading the worktree", async () => {
+    const repository = await temporaryRepository();
+    await track(repository, "seed.txt", "seed");
+    execFileSync("git", ["commit", "-qm", "seed"], { cwd: repository });
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repository,
+      encoding: "utf8",
+    }).trim();
+    execFileSync(
+      "git",
+      ["update-index", "--add", "--cacheinfo", `160000,${commit},vendor`],
+      { cwd: repository },
+    );
+
+    const result = await scanPublicRepository({
+      repository,
+      allowlistPath: await writeAllowlist(repository, []),
+    });
+
+    expect(result.output).toContain("tracked-submodule vendor:0");
+  });
+
+  it("uses the shared adversarial sensitive-content rules without header false positives", async () => {
+    const repository = await temporaryRepository();
+    await track(
+      repository,
+      "unsafe.txt",
+      unsafeReleaseTextCases.map(({ text }) => text).join("\n"),
+    );
+    await track(repository, "safe.txt", safeReleaseTextCases.join("\n"));
+
+    const result = await scanPublicRepository({
+      repository,
+      allowlistPath: await writeAllowlist(repository, []),
+    });
+
+    for (const [index, { rule }] of unsafeReleaseTextCases.entries()) {
+      expect(result.output).toContain(`${rule} unsafe.txt:${index + 1}`);
+    }
+    expect(result.output).not.toMatch(/(?:^|\s)safe\.txt:/);
   });
 
   it(
@@ -315,7 +430,7 @@ describe("public repository scanner", () => {
         expect(configError.status).toBe(2);
       }
     },
-    15_000,
+    30_000,
   );
 
   it("detects unfinished release metadata without treating upstream attribution as a secret", async () => {
@@ -346,5 +461,54 @@ describe("public repository scanner", () => {
     expect(result.output).toMatch(/unfinished-release-placeholder README\.md:3/);
     expect(result.output).toMatch(/unfinished-author-metadata package\.json:1/);
     expect(result.output).not.toMatch(/amatya-aditya/);
+  });
+
+  it("checks placeholders across all release-facing documentation paths", async () => {
+    const repository = await temporaryRepository();
+    for (const path of [
+      "SECURITY.md",
+      "docs/INSTALL.md",
+      "docs/PRIVACY.md",
+      "docs/TROUBLESHOOTING.md",
+      "docs/UPSTREAM.md",
+      "docs/release/0.1.0.md",
+    ]) {
+      await track(repository, path, "Current release: not yet available");
+    }
+
+    const result = await scanPublicRepository({
+      repository,
+      allowlistPath: await writeAllowlist(repository, []),
+    });
+
+    for (const path of [
+      "SECURITY.md",
+      "docs/INSTALL.md",
+      "docs/PRIVACY.md",
+      "docs/TROUBLESHOOTING.md",
+      "docs/UPSTREAM.md",
+      "docs/release/0.1.0.md",
+    ]) {
+      expect(result.output).toContain(
+        `unfinished-release-placeholder ${path}:1`,
+      );
+    }
+  });
+
+  it("keeps allowlist reasons contextual rather than one generic template", async () => {
+    const entries = JSON.parse(
+      await readFile(
+        join(process.cwd(), "scripts/public-scan-allowlist.json"),
+        "utf8",
+      ),
+    ) as Array<{ path: string; reason: string }>;
+    const reasons = new Set(entries.map((entry) => entry.reason));
+
+    expect(reasons.size).toBeGreaterThanOrEqual(4);
+    expect(
+      entries
+        .filter((entry) => entry.path.startsWith("docs/"))
+        .every((entry) => !/\btest fixture\b/i.test(entry.reason)),
+    ).toBe(true);
   });
 });

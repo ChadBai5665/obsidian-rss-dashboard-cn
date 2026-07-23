@@ -53,17 +53,29 @@ function serializeJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-function assertVersionFilesClean(repository) {
+function parseStatusPaths(output) {
+  const records = output.toString("utf8").split("\0");
+  const paths = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record) continue;
+    if (record.length < 4 || record[2] !== " ") {
+      throw new Error("git-status-output-invalid");
+    }
+    paths.push(record.slice(3));
+    if (/[RC]/.test(record.slice(0, 2))) index += 1;
+  }
+  return paths;
+}
+
+function assertExpectedNpmVersionChanges(repository) {
   const status = execFileSync(
     "git",
     [
       "status",
       "--porcelain=v1",
       "-z",
-      "--untracked-files=no",
-      "--",
-      "manifest.json",
-      "versions.json",
+      "--untracked-files=all",
     ],
     {
       cwd: repository,
@@ -72,8 +84,41 @@ function assertVersionFilesClean(repository) {
       stdio: ["ignore", "pipe", "ignore"],
     },
   );
-  if (status.length !== 0) {
-    throw new Error("version-metadata-dirty");
+  const paths = parseStatusPaths(status);
+  if (
+    paths.some(
+      (path) => path !== "package.json" && path !== "package-lock.json",
+    )
+  ) {
+    throw new Error("version-worktree-unexpected-change");
+  }
+  if (
+    !paths.includes("package.json") ||
+    !paths.includes("package-lock.json")
+  ) {
+    throw new Error("npm-version-files-not-dirty");
+  }
+  const ignoredSensitive = execFileSync(
+    "git",
+    [
+      "ls-files",
+      "--others",
+      "--ignored",
+      "--exclude-standard",
+      "-z",
+      "--",
+      ":(glob)**/.env*",
+      ":(glob)**/secrets.json",
+    ],
+    {
+      cwd: repository,
+      encoding: "buffer",
+      maxBuffer: 4 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    },
+  );
+  if (ignoredSensitive.length !== 0) {
+    throw new Error("version-worktree-sensitive-untracked");
   }
 }
 
@@ -81,23 +126,40 @@ export async function bumpVersion({
   repository = process.cwd(),
   environment = process.env,
   hooks = {},
+  operations = {},
 } = {}) {
   const root = resolve(repository);
   const targetVersion = environment.npm_package_version;
-  if (environment.npm_lifecycle_event !== "version") {
+  if (
+    environment.npm_lifecycle_event !== "version" ||
+    environment.npm_command !== "version"
+  ) {
     throw new Error("npm-version-lifecycle-required");
   }
   if (!isStrictSemVer(targetVersion)) {
     throw new Error("target-version-invalid");
   }
-  assertVersionFilesClean(root);
-
+  const packagePath = join(root, "package.json");
+  const packageLockPath = join(root, "package-lock.json");
   const manifestPath = join(root, "manifest.json");
   const versionsPath = join(root, "versions.json");
-  const [manifestSource, versionsSource] = await Promise.all([
+  const [packageSource, packageLockSource, manifestSource, versionsSource] =
+    await Promise.all([
+    readMetadata(packagePath, "package"),
+    readMetadata(packageLockPath, "package-lock"),
     readMetadata(manifestPath, "manifest"),
     readMetadata(versionsPath, "versions"),
   ]);
+  if (packageSource.parsed.version !== targetVersion) {
+    throw new Error("package-version-target-mismatch");
+  }
+  if (
+    packageLockSource.parsed.version !== targetVersion ||
+    packageLockSource.parsed.packages?.[""]?.version !== targetVersion
+  ) {
+    throw new Error("package-lock-target-mismatch");
+  }
+  assertExpectedNpmVersionChanges(root);
   if (!isStrictSemVer(manifestSource.parsed.minAppVersion)) {
     throw new Error("manifest-min-app-version-invalid");
   }
@@ -122,31 +184,35 @@ export async function bumpVersion({
   let versionsInstalled = false;
   let manifestBackupPresent = false;
   let versionsBackupPresent = false;
+  let preserveManifestBackup = false;
+  let preserveVersionsBackup = false;
+  const ops = { lstat, rename, rm, writeFile, ...operations };
   try {
-    await writeFile(manifestTemp, serializeJson(nextManifest), {
+    await ops.writeFile(manifestTemp, serializeJson(nextManifest), {
       flag: "wx",
       mode: 0o600,
     });
-    await writeFile(versionsTemp, serializeJson(nextVersions), {
+    await ops.writeFile(versionsTemp, serializeJson(nextVersions), {
       flag: "wx",
       mode: 0o600,
     });
-    await writeFile(manifestBackup, manifestSource.bytes, {
+    await ops.writeFile(manifestBackup, manifestSource.bytes, {
       flag: "wx",
       mode: 0o600,
     });
     manifestBackupPresent = true;
-    await writeFile(versionsBackup, versionsSource.bytes, {
+    await ops.writeFile(versionsBackup, versionsSource.bytes, {
       flag: "wx",
       mode: 0o600,
     });
     versionsBackupPresent = true;
 
-    await rename(manifestTemp, manifestPath);
+    await ops.rename(manifestTemp, manifestPath);
     manifestInstalled = true;
     await hooks.beforeVersionsInstall?.();
-    await rename(versionsTemp, versionsPath);
+    await ops.rename(versionsTemp, versionsPath);
     versionsInstalled = true;
+    await hooks.afterVersionsInstall?.();
 
     const [installedManifest, installedVersions] = await Promise.all([
       readMetadata(manifestPath, "manifest"),
@@ -161,36 +227,65 @@ export async function bumpVersion({
       throw new Error("version-install-verification-failed");
     }
     const cleanup = await Promise.allSettled([
-      rm(manifestBackup),
-      rm(versionsBackup),
+      ops.rm(manifestBackup),
+      ops.rm(versionsBackup),
     ]);
     if (cleanup[0].status === "fulfilled") manifestBackupPresent = false;
     if (cleanup[1].status === "fulfilled") versionsBackupPresent = false;
+    if (cleanup.some((result) => result.status === "rejected")) {
+      preserveManifestBackup = manifestBackupPresent;
+      preserveVersionsBackup = versionsBackupPresent;
+      const paths = [
+        manifestBackupPresent ? manifestBackup : undefined,
+        versionsBackupPresent ? versionsBackup : undefined,
+      ].filter(Boolean);
+      throw new Error(`version-recovery-required:${paths.join(",")}`);
+    }
     return {
       version: targetVersion,
       minAppVersion: installedManifest.parsed.minAppVersion,
     };
   } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.startsWith("version-recovery-required:")
+    ) {
+      throw error;
+    }
+    const recoveryPaths = [];
     if (versionsInstalled && versionsBackupPresent) {
-      await rename(versionsBackup, versionsPath);
-      versionsBackupPresent = false;
-      versionsInstalled = false;
+      try {
+        await ops.rename(versionsBackup, versionsPath);
+        versionsBackupPresent = false;
+        versionsInstalled = false;
+      } catch {
+        preserveVersionsBackup = true;
+        recoveryPaths.push(versionsBackup);
+      }
     }
     if (manifestInstalled && manifestBackupPresent) {
-      await rename(manifestBackup, manifestPath);
-      manifestBackupPresent = false;
-      manifestInstalled = false;
+      try {
+        await ops.rename(manifestBackup, manifestPath);
+        manifestBackupPresent = false;
+        manifestInstalled = false;
+      } catch {
+        preserveManifestBackup = true;
+        recoveryPaths.push(manifestBackup);
+      }
+    }
+    if (recoveryPaths.length > 0) {
+      throw new Error(`version-recovery-required:${recoveryPaths.join(",")}`);
     }
     throw error;
   } finally {
     await Promise.allSettled([
-      rm(manifestTemp, { force: true }),
-      rm(versionsTemp, { force: true }),
-      manifestBackupPresent
-        ? rm(manifestBackup, { force: true })
+      ops.rm(manifestTemp, { force: true }),
+      ops.rm(versionsTemp, { force: true }),
+      manifestBackupPresent && !preserveManifestBackup
+        ? ops.rm(manifestBackup, { force: true })
         : Promise.resolve(),
-      versionsBackupPresent
-        ? rm(versionsBackup, { force: true })
+      versionsBackupPresent && !preserveVersionsBackup
+        ? ops.rm(versionsBackup, { force: true })
         : Promise.resolve(),
     ]);
   }

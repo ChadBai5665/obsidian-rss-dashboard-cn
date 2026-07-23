@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, readFile } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { lstat, readFile } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sensitiveRuleIdsForText } from "./release-safety-rules.mjs";
 
 export const PUBLIC_SCAN_LIMITS = Object.freeze({
   maxTrackedFiles: 20_000,
@@ -13,7 +13,7 @@ export const PUBLIC_SCAN_LIMITS = Object.freeze({
   maxAllowlistBytes: 256 * 1024,
   maxAllowlistEntries: 256,
   maxPrivateTerms: 256,
-  maxFindings: 200,
+  maxFindings: 512,
 });
 
 const CONTENT_RULE_IDS = new Set([
@@ -34,6 +34,8 @@ const CONTENT_RULE_IDS = new Set([
 const NEVER_ALLOWLIST_RULE_IDS = new Set([
   "private-key-material",
   "tracked-symlink",
+  "tracked-submodule",
+  "unsafe-index-mode",
   "unsafe-tracked-path",
   "forbidden-env-file",
   "forbidden-secret-file",
@@ -52,11 +54,16 @@ const RELEASE_FACING_PATHS = new Set([
   "readme.md",
   "notice.md",
   "contributing.md",
+  "security.md",
   "package.json",
   "manifest.json",
+  "docs/install.md",
   "docs/install.zh-cn.md",
+  "docs/privacy.md",
   "docs/privacy.zh-cn.md",
+  "docs/troubleshooting.md",
   "docs/troubleshooting.zh-cn.md",
+  "docs/upstream.md",
   "docs/security.md",
 ]);
 
@@ -70,12 +77,17 @@ export function fingerprintFinding(rule, lineText) {
 
 export function parseNulPaths(output) {
   const paths = [];
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let start = 0;
   for (let index = 0; index < output.length; index += 1) {
     if (output[index] !== 0) {
       continue;
     }
-    paths.push(output.subarray(start, index).toString("utf8"));
+    try {
+      paths.push(decoder.decode(output.subarray(start, index)));
+    } catch {
+      throw new Error("git-path-output-not-utf8");
+    }
     start = index + 1;
   }
   if (start !== output.length) {
@@ -84,8 +96,9 @@ export function parseNulPaths(output) {
   return paths.filter((entry) => entry.length > 0);
 }
 
-function parseStageEntries(output) {
-  const entries = new Map();
+export function parseStageEntries(output) {
+  const entries = [];
+  const paths = new Set();
   for (const record of parseNulPaths(output)) {
     const separator = record.indexOf("\t");
     if (separator < 0) throw new Error("git-stage-output-invalid");
@@ -94,9 +107,101 @@ function parseStageEntries(output) {
     const match = header.match(/^([0-7]{6}) ([a-f0-9]{40,64}) (\d+)$/);
     if (!match || !path) throw new Error("git-stage-output-invalid");
     if (match[3] !== "0") throw new Error("git-unmerged-entry");
-    entries.set(path, { mode: match[1], objectId: match[2] });
+    if (paths.has(path)) throw new Error("git-stage-path-duplicate");
+    paths.add(path);
+    entries.push({ path, mode: match[1], objectId: match[2] });
   }
   return entries;
+}
+
+function verifyIndexBlobs(root, entries, environment) {
+  const blobEntries = entries.filter((entry) =>
+    ["100644", "100755", "120000"].includes(entry.mode),
+  );
+  if (blobEntries.length === 0) return { sizes: new Map() };
+  const input = Buffer.from(
+    `${blobEntries.map((entry) => `${entry.objectId}^{blob}`).join("\n")}\n`,
+  );
+  const output = execFileSync(
+    "git",
+    ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+    {
+      cwd: root,
+      input,
+      encoding: "utf8",
+      env: environment,
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ["pipe", "pipe", "ignore"],
+    },
+  );
+  const lines = output.split("\n").filter(Boolean);
+  if (lines.length !== blobEntries.length) {
+    throw new Error("git-batch-check-count-invalid");
+  }
+  const sizes = new Map();
+  for (let index = 0; index < blobEntries.length; index += 1) {
+    const entry = blobEntries[index];
+    const match = lines[index].match(/^([a-f0-9]{40,64}) blob (\d+)$/);
+    if (!match || match[1] !== entry.objectId) {
+      return { missingPath: entry.path };
+    }
+    const size = Number(match[2]);
+    if (!Number.isSafeInteger(size) || size < 0) {
+      throw new Error("index-blob-size-invalid");
+    }
+    sizes.set(entry.path, size);
+  }
+  return { sizes };
+}
+
+function readIndexBlobs(root, entries, sizes, environment) {
+  const selected = [];
+  let total = 0;
+  for (const entry of entries) {
+    if (!/^100(?:644|755)$/.test(entry.mode)) continue;
+    const size = sizes.get(entry.path);
+    if (size > PUBLIC_SCAN_LIMITS.maxFileBytes) continue;
+    total += size;
+    if (total > PUBLIC_SCAN_LIMITS.maxTotalBytes) break;
+    selected.push(entry);
+  }
+  if (selected.length === 0) return new Map();
+  const output = execFileSync("git", ["cat-file", "--batch"], {
+    cwd: root,
+    input: Buffer.from(
+      `${selected.map((entry) => entry.objectId).join("\n")}\n`,
+    ),
+    encoding: "buffer",
+    env: environment,
+    maxBuffer:
+      PUBLIC_SCAN_LIMITS.maxTotalBytes + 16 * 1024 * 1024,
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  const bytesByPath = new Map();
+  let offset = 0;
+  for (const entry of selected) {
+    const newline = output.indexOf(0x0a, offset);
+    if (newline < 0) throw new Error("git-batch-output-invalid");
+    const header = output.subarray(offset, newline).toString("ascii");
+    const match = header.match(/^([a-f0-9]{40,64}) blob (\d+)$/);
+    const expectedSize = sizes.get(entry.path);
+    if (
+      !match ||
+      match[1] !== entry.objectId ||
+      Number(match[2]) !== expectedSize
+    ) {
+      throw new Error("git-batch-output-invalid");
+    }
+    const start = newline + 1;
+    const end = start + expectedSize;
+    if (end >= output.length || output[end] !== 0x0a) {
+      throw new Error("git-batch-output-invalid");
+    }
+    bytesByPath.set(entry.path, output.subarray(start, end));
+    offset = end + 1;
+  }
+  if (offset !== output.length) throw new Error("git-batch-output-invalid");
+  return bytesByPath;
 }
 
 function safeDisplayPath(path) {
@@ -133,7 +238,7 @@ function filenameRule(path) {
   const normalized = path.toLowerCase();
   const segments = normalized.split("/");
   const basename = segments.at(-1) ?? "";
-  if (basename === ".env" || basename.startsWith(".env.")) {
+  if (basename.startsWith(".env")) {
     return "forbidden-env-file";
   }
   if (basename === "secrets.json") {
@@ -173,96 +278,16 @@ function filenameRule(path) {
   return undefined;
 }
 
-function decodePercentLayers(value) {
-  const values = [value];
-  let current = value;
-  for (let count = 0; count < 2; count += 1) {
-    try {
-      const decoded = decodeURIComponent(current);
-      if (decoded === current) break;
-      values.push(decoded);
-      current = decoded;
-    } catch {
-      break;
-    }
-  }
-  return values;
-}
-
-function hasCredentialUrl(value) {
+function isReleaseFacingPath(path) {
+  const normalized = path.toLowerCase();
   return (
-    /(?:https?|ftp):\/\/[^/\s:@]+:[^/\s@]+@/i.test(value) ||
-    /(?:https?|ftp):\/\/[^\s"'<>]+[?&](?:api[_-]?key|access[_-]?token|token|secret|password)=[^&#\s"'<>]{4,}/i.test(
-      value,
-    )
+    RELEASE_FACING_PATHS.has(normalized) ||
+    /^docs\/releases?\/[^/]+\.md$/.test(normalized)
   );
 }
 
-function hasCredentialValue(value) {
-  if (
-    /\bauthorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+(?![{<$`])[A-Za-z0-9._~+/-]{4,}/i.test(
-      value,
-    )
-  ) {
-    return true;
-  }
-  if (
-    /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password)["']?\s*[:=]\s*(["'])(?![{<$])[^"'\r\n]{8,}\1/i.test(
-      value,
-    )
-  ) {
-    return true;
-  }
-  if (
-    /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password)\b\s*[:=]\s*(?![{<$`"'(])(?=[A-Za-z0-9_-]{8,}(?:[\s,;)}\]]|$))(?=[A-Za-z0-9_-]*-)[A-Za-z0-9_-]+/i.test(
-      value,
-    )
-  ) {
-    return true;
-  }
-  return /\b(?:sk|xox[baprs]|gh[pousr])-[A-Za-z0-9_-]{12,}\b/.test(value);
-}
-
 function contentRulesForLine(path, lineText, privateTerms) {
-  const rules = [];
-  const decodedLayers = decodePercentLayers(lineText);
-  if (
-    decodedLayers.some(
-      (value) =>
-        /(?:file:\/\/\/|\/)(?:Users|home)\/[^/\s"'<>]+(?:\/|\\)/.test(
-          value,
-        ) ||
-        /[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"'<>]+[\\/]|\\\\[A-Za-z0-9._-]{1,64}\\[A-Za-z0-9$._-]{1,64}(?:\\|$)/i.test(
-          value,
-        ),
-    )
-  ) {
-    rules.push("home-path");
-  }
-  if (
-    decodedLayers.some(
-      (value) =>
-        /(?:file:\/\/\/|\/)(?:Users|home)\/[^/\s"'<>]+[\\/][^\r\n]*?(?:\.obsidian[\\/]plugins[\\/][^\s"'<>]*secrets\.json|(?:Library[\\/]Application Support|\.config)[\\/]+rss-dashboard-cn[\\/]+secrets\.json)/.test(
-          value,
-        ) ||
-        /[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"'<>]+[\\/][^\r\n]*?(?:\.obsidian[\\/]plugins[\\/][^\s"'<>]*secrets\.json|AppData[\\/]Roaming[\\/]+rss-dashboard-cn[\\/]+secrets\.json)/i.test(
-          value,
-        ),
-    )
-  ) {
-    rules.push("vault-secret-path");
-  }
-  if (decodedLayers.some(hasCredentialValue)) {
-    rules.push("credential-value");
-  }
-  if (decodedLayers.some(hasCredentialUrl)) {
-    rules.push("credential-url");
-  }
-  if (
-    /-----BEGIN (?:OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----/.test(lineText)
-  ) {
-    rules.push("private-key-material");
-  }
+  const rules = sensitiveRuleIdsForText(lineText);
   const lowerLine = lineText.toLocaleLowerCase("en-US");
   if (
     privateTerms.handles.some((handle) =>
@@ -278,9 +303,9 @@ function contentRulesForLine(path, lineText, privateTerms) {
   ) {
     rules.push("private-topic-keyword");
   }
-  if (RELEASE_FACING_PATHS.has(path.toLowerCase())) {
+  if (isReleaseFacingPath(path)) {
     if (
-      /\b(?:TODO|TBD)\b|YOUR[_ -]?NAME|your-name\/your-repo|your-repo|sample author|example\.com/i.test(
+      /\b(?:TODO|TBD)\b|YOUR[_ -]?NAME|your-name\/your-repo|your-repo|sample author|example\.com|not yet available|coming soon|尚未提供|待发布/i.test(
         lineText,
       )
     ) {
@@ -385,12 +410,13 @@ function validateAllowlist(value) {
       !/^sha256:[a-f0-9]{64}$/.test(fingerprint) ||
       typeof reason !== "string" ||
       reason.trim() !== reason ||
-      reason.length < 8 ||
+      reason.length < 24 ||
+      reason.trim().split(/\s+/).length < 3 ||
       reason.length > 256 ||
       /[\u0000-\u001f\u007f]/.test(reason) ||
       (expires !== undefined &&
         (typeof expires !== "string" ||
-          !/^\d{4}-\d{2}-\d{2}$/.test(expires) ||
+          !isValidUtcDate(expires) ||
           expires < today))
     ) {
       throw new Error("allowlist-entry-invalid");
@@ -418,18 +444,21 @@ function renderFindings(findings) {
     .join("\n");
 }
 
-async function safeReadTrackedFile(absolutePath, expectedSize) {
-  const noFollow = constants.O_NOFOLLOW ?? 0;
-  const handle = await open(absolutePath, constants.O_RDONLY | noFollow);
-  try {
-    const stats = await handle.stat();
-    if (!stats.isFile() || stats.size !== expectedSize) {
-      throw new Error("tracked-file-raced");
-    }
-    return await handle.readFile();
-  } finally {
-    await handle.close();
+function isValidUtcDate(value) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return false;
   }
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
 }
 
 export async function scanPublicRepository({
@@ -439,27 +468,36 @@ export async function scanPublicRepository({
 } = {}) {
   try {
     const root = resolve(repository);
-    const trackedOutput = execFileSync("git", ["ls-files", "-z"], {
+    const gitEnvironment = { ...process.env, GIT_NO_LAZY_FETCH: "1" };
+    const stageEntries = parseStageEntries(
+      execFileSync("git", ["ls-files", "-s", "-z"], {
       cwd: root,
       encoding: "buffer",
+      env: gitEnvironment,
       maxBuffer: 8 * 1024 * 1024,
       stdio: ["ignore", "pipe", "ignore"],
-    });
-    const trackedPaths = parseNulPaths(trackedOutput);
-    if (trackedPaths.length > PUBLIC_SCAN_LIMITS.maxTrackedFiles) {
+      }),
+    );
+    if (stageEntries.length > PUBLIC_SCAN_LIMITS.maxTrackedFiles) {
       return {
         exitCode: 2,
         findings: [],
         output: "tracked-file-count-limit",
       };
     }
-    const stageEntries = parseStageEntries(
-      execFileSync("git", ["ls-files", "--stage", "-z"], {
-        cwd: root,
-        encoding: "buffer",
-        maxBuffer: 16 * 1024 * 1024,
-        stdio: ["ignore", "pipe", "ignore"],
-      }),
+    const verified = verifyIndexBlobs(root, stageEntries, gitEnvironment);
+    if (verified.missingPath) {
+      return {
+        exitCode: 2,
+        findings: [],
+        output: `index-blob-missing:${safeDisplayPath(verified.missingPath)}`,
+      };
+    }
+    const indexBytes = readIndexBlobs(
+      root,
+      stageEntries,
+      verified.sizes,
+      gitEnvironment,
     );
 
     const allowlistValue = await readBoundedJson(
@@ -494,58 +532,34 @@ export async function scanPublicRepository({
       });
     };
 
-    for (const path of trackedPaths) {
+    for (const { path, mode } of stageEntries) {
       if (!isSafeRelativePath(path)) {
         addFinding(path, 0, "unsafe-tracked-path", path);
         continue;
       }
-      const absolutePath = resolve(root, path);
-      const fromRoot = relative(root, absolutePath);
-      if (
-        fromRoot.startsWith("..") ||
-        isAbsolute(fromRoot) ||
-        fromRoot.replaceAll("\\", "/") !== path
-      ) {
-        addFinding(path, 0, "unsafe-tracked-path", path);
-        continue;
-      }
-      let stats;
-      try {
-        stats = await lstat(absolutePath);
-      } catch (error) {
-        if (error?.code !== "ENOENT") throw error;
-      }
-      const stageEntry = stageEntries.get(path);
-      const stageMode = stageEntry?.mode;
-      if (stats?.isSymbolicLink() || (!stats && stageMode === "120000")) {
+      if (mode === "120000") {
         addFinding(path, 0, "tracked-symlink", path);
         continue;
       }
-      if ((stats && !stats.isFile()) || (!stats && !/^100(?:644|755)$/.test(stageMode ?? ""))) {
-        addFinding(path, 0, "unsafe-tracked-path", path);
+      if (mode === "160000") {
+        addFinding(path, 0, "tracked-submodule", path);
+        continue;
+      }
+      if (!/^100(?:644|755)$/.test(mode)) {
+        addFinding(path, 0, "unsafe-index-mode", path);
         continue;
       }
       const filenameFinding = filenameRule(path);
       if (filenameFinding) {
         addFinding(path, 0, filenameFinding, path);
       }
-      const expectedSize = stats?.size;
-      if (
-        expectedSize !== undefined &&
-        expectedSize > PUBLIC_SCAN_LIMITS.maxFileBytes
-      ) {
+      const expectedSize = verified.sizes.get(path);
+      if (expectedSize > PUBLIC_SCAN_LIMITS.maxFileBytes) {
         addFinding(path, 0, "file-size-limit", path);
         continue;
       }
-      const bytes = stats
-        ? await safeReadTrackedFile(absolutePath, expectedSize)
-        : execFileSync("git", ["cat-file", "blob", stageEntry.objectId], {
-            cwd: root,
-            encoding: "buffer",
-            env: { ...process.env, GIT_NO_LAZY_FETCH: "1" },
-            maxBuffer: PUBLIC_SCAN_LIMITS.maxFileBytes + 1,
-            stdio: ["ignore", "pipe", "ignore"],
-          });
+      const bytes = indexBytes.get(path);
+      if (!bytes) throw new Error("index-blob-content-missing");
       if (bytes.length > PUBLIC_SCAN_LIMITS.maxFileBytes) {
         addFinding(path, 0, "file-size-limit", path);
         continue;

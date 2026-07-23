@@ -4,8 +4,10 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const VERSION_FILE_MAX_BYTES = 1024 * 1024;
+const EXPECTED_PACKAGE_NAME = "rss-dashboard-cn";
+const EXPECTED_PLUGIN_AUTHOR = "ChadBai";
 const SEMVER_PATTERN =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 
 export function isStrictSemVer(value) {
   return typeof value === "string" && SEMVER_PATTERN.test(value);
@@ -57,8 +59,9 @@ export async function checkVersionConsistency({
   tag,
 } = {}) {
   const root = resolve(repository);
-  const [packageJson, manifest, versions] = await Promise.all([
+  const [packageJson, packageLock, manifest, versions] = await Promise.all([
     readJsonNoFollow(join(root, "package.json"), "package-json"),
+    readJsonNoFollow(join(root, "package-lock.json"), "package-lock-json"),
     readJsonNoFollow(join(root, "manifest.json"), "manifest-json"),
     readJsonNoFollow(join(root, "versions.json"), "versions-json"),
   ]);
@@ -75,6 +78,35 @@ export async function checkVersionConsistency({
   }
   if (packageVersion !== manifestVersion) {
     errors.push("package-manifest-version-mismatch");
+  }
+  if (packageLock.version !== packageVersion) {
+    errors.push("package-lock-version-mismatch");
+  }
+  if (packageLock.name !== EXPECTED_PACKAGE_NAME) {
+    errors.push("package-lock-name-mismatch");
+  }
+  const lockRoot =
+    packageLock.packages &&
+    typeof packageLock.packages === "object" &&
+    !Array.isArray(packageLock.packages)
+      ? packageLock.packages[""]
+      : undefined;
+  if (
+    !lockRoot ||
+    typeof lockRoot !== "object" ||
+    Array.isArray(lockRoot)
+  ) {
+    errors.push("package-lock-root-missing");
+  } else {
+    if (
+      lockRoot.name !== packageJson.name ||
+      lockRoot.name !== EXPECTED_PACKAGE_NAME
+    ) {
+      errors.push("package-lock-root-name-mismatch");
+    }
+    if (lockRoot.version !== packageVersion) {
+      errors.push("package-lock-root-version-mismatch");
+    }
   }
   if (!isStrictSemVer(minAppVersion)) {
     errors.push("manifest-min-app-version-invalid");
@@ -103,6 +135,15 @@ export async function checkVersionConsistency({
   }
   if (manifest.isDesktopOnly !== true) {
     errors.push("plugin-desktop-only-mismatch");
+  }
+  if (packageJson.name !== EXPECTED_PACKAGE_NAME) {
+    errors.push("package-name-mismatch");
+  }
+  if (packageJson.author !== EXPECTED_PLUGIN_AUTHOR) {
+    errors.push("package-author-mismatch");
+  }
+  if (manifest.author !== EXPECTED_PLUGIN_AUTHOR) {
+    errors.push("manifest-author-mismatch");
   }
   if (
     tag !== undefined &&

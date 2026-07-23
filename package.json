@@ -1,5 +1,5 @@
 {
-  "name": "obsidian-rss-dashboard-cn",
+  "name": "rss-dashboard-cn",
   "version": "0.1.0",
   "description": "Chinese-first RSS, website, YouTube, podcast, and optional X dashboard for Obsidian",
   "main": "main.js",

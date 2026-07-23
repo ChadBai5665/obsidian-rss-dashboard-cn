@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   open,
+  realpath,
   readdir,
   rename,
   rm,
@@ -11,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sensitiveRuleIdsForText } from "./release-safety-rules.mjs";
 
 export const RELEASE_BUNDLE_MAX_BYTES = 16 * 1024 * 1024;
 const RELEASE_FILE_MAX_BYTES = 20 * 1024 * 1024;
@@ -76,7 +78,7 @@ async function readRegularFileNoFollow(
   }
 }
 
-function inspectBundle(bytes) {
+export function inspectBundle(bytes) {
   if (bytes.length > RELEASE_BUNDLE_MAX_BYTES) {
     throw new Error("bundle-size-limit");
   }
@@ -86,39 +88,15 @@ function inspectBundle(bytes) {
   } catch {
     throw new Error("bundle-not-utf8");
   }
-  const decoded = [text];
-  let current = text;
-  for (let count = 0; count < 2; count += 1) {
-    try {
-      const next = decodeURIComponent(current);
-      if (next === current) break;
-      decoded.push(next);
-      current = next;
-    } catch {
-      break;
-    }
-  }
-  if (
-    decoded.some(
-      (value) =>
-        /(?:file:\/\/\/|\/)(?:Users|home)\/[^/\s"'<>]+(?:\/|\\)/.test(
-          value,
-        ) ||
-        /[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"'<>]+[\\/]|\\\\[A-Za-z0-9._-]{1,64}\\[A-Za-z0-9$._-]{1,64}(?:\\|$)/i.test(
-          value,
-        ),
-    )
-  ) {
+  const sensitiveRules = sensitiveRuleIdsForText(text);
+  if (sensitiveRules.includes("home-path")) {
     throw new Error("bundle-private-path");
   }
   if (
-    decoded.some(
-      (value) =>
-        /\bauthorization\s*[:=]\s*(?:bearer|basic)\s+(?![{<$])[^\s"',;)}\]]{4,}/i.test(
-          value,
-        ) ||
-        /\b(?:sk|xox[baprs]|gh[pousr])-[A-Za-z0-9_-]{12,}\b/.test(value) ||
-        /(?:https?|ftp):\/\/[^/\s:@]+:[^/\s@]+@/i.test(value),
+    sensitiveRules.some((rule) =>
+      ["credential-value", "credential-url", "private-key-material"].includes(
+        rule,
+      ),
     )
   ) {
     throw new Error("bundle-credential");
@@ -270,14 +248,46 @@ async function prepareStage(root, stageDirectory) {
 export async function stageReleaseArtifacts({
   root = process.cwd(),
   hooks = {},
+  operations = {},
 } = {}) {
   const resolvedRoot = resolve(root);
+  const ops = {
+    lstat,
+    mkdir,
+    realpath,
+    rename,
+    rm,
+    writeFile,
+    ...operations,
+  };
   const nonce = `${process.pid}-${randomUUID()}`;
   const releaseDirectory = join(resolvedRoot, "release");
   const stageDirectory = join(resolvedRoot, `.release-stage-${nonce}`);
   const backupDirectory = join(resolvedRoot, `.release-backup-${nonce}`);
   let priorMoved = false;
   let installed = false;
+  let preserveBackup = false;
+  const rootBefore = await ops.lstat(resolvedRoot);
+  const rootRealpath = await ops.realpath(resolvedRoot);
+  const assertRootIdentity = async () => {
+    // Node does not expose openat(2); pin the parent by checking realpath and inode
+    // around every directory swap and retain backups whenever identity is uncertain.
+    const current = await ops.lstat(resolvedRoot);
+    const currentRealpath = await ops.realpath(resolvedRoot);
+    if (
+      !current.isDirectory() ||
+      current.dev !== rootBefore.dev ||
+      current.ino !== rootBefore.ino ||
+      currentRealpath !== rootRealpath
+    ) {
+      throw new Error("release-root-identity-changed");
+    }
+  };
+  const renameWithinRoot = async (source, destination) => {
+    await assertRootIdentity();
+    await ops.rename(source, destination);
+    await assertRootIdentity();
+  };
   try {
     const existingRelease = await lstatIfPresent(releaseDirectory);
     if (existingRelease?.isSymbolicLink()) {
@@ -287,12 +297,12 @@ export async function stageReleaseArtifacts({
     await hooks.beforeInstall?.();
 
     if (existingRelease) {
-      await rename(releaseDirectory, backupDirectory);
+      await renameWithinRoot(releaseDirectory, backupDirectory);
       priorMoved = true;
     }
     try {
       await hooks.afterBackup?.();
-      await rename(stageDirectory, releaseDirectory);
+      await renameWithinRoot(stageDirectory, releaseDirectory);
       installed = true;
       const finalValidation = await inspectReleaseDirectory({
         root: resolvedRoot,
@@ -303,28 +313,54 @@ export async function stageReleaseArtifacts({
       }
     } catch (error) {
       if (installed) {
-        await rename(releaseDirectory, stageDirectory);
-        installed = false;
+        try {
+          await renameWithinRoot(releaseDirectory, stageDirectory);
+          installed = false;
+        } catch {
+          preserveBackup = priorMoved;
+          throw new Error(
+            priorMoved
+              ? `release-recovery-required:${backupDirectory}`
+              : "release-install-recovery-failed",
+          );
+        }
       }
       if (priorMoved) {
-        await rename(backupDirectory, releaseDirectory);
-        priorMoved = false;
+        try {
+          await renameWithinRoot(backupDirectory, releaseDirectory);
+          priorMoved = false;
+        } catch {
+          preserveBackup = true;
+          throw new Error(`release-recovery-required:${backupDirectory}`);
+        }
       }
       throw error;
     }
     if (priorMoved) {
-      await rm(backupDirectory, { recursive: true });
-      priorMoved = false;
+      try {
+        await ops.rm(backupDirectory, { recursive: true });
+        priorMoved = false;
+      } catch {
+        preserveBackup = true;
+        throw new Error(`release-recovery-required:${backupDirectory}`);
+      }
     }
     return { ok: true, files: await expectedReleaseFiles(resolvedRoot) };
   } finally {
     if (!installed) {
-      await rm(stageDirectory, { recursive: true, force: true });
+      await ops.rm(stageDirectory, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
     }
-    if (priorMoved) {
+    if (priorMoved && !preserveBackup) {
       const releasePresent = await lstatIfPresent(releaseDirectory);
       if (!releasePresent) {
-        await rename(backupDirectory, releaseDirectory);
+        try {
+          await renameWithinRoot(backupDirectory, releaseDirectory);
+          priorMoved = false;
+        } catch {
+          preserveBackup = true;
+        }
       }
     }
   }

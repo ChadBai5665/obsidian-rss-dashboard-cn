@@ -1,5 +1,12 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
@@ -18,9 +25,9 @@ async function fixtureRepository(version = "0.1.0"): Promise<string> {
   await writeFile(
     join(repository, "package.json"),
     `${JSON.stringify({
-      name: "obsidian-rss-dashboard-cn",
+      name: "rss-dashboard-cn",
       version,
-      author: "Confirmed Author",
+      author: "ChadBai",
     }, null, 2)}\n`,
   );
   await writeFile(
@@ -30,8 +37,22 @@ async function fixtureRepository(version = "0.1.0"): Promise<string> {
       name: "RSS Dashboard CN",
       version,
       minAppVersion: "1.1.0",
-      author: "Confirmed Author",
+      author: "ChadBai",
       isDesktopOnly: true,
+    }, null, 2)}\n`,
+  );
+  await writeFile(
+    join(repository, "package-lock.json"),
+    `${JSON.stringify({
+      name: "rss-dashboard-cn",
+      version,
+      lockfileVersion: 3,
+      packages: {
+        "": {
+          name: "rss-dashboard-cn",
+          version,
+        },
+      },
     }, null, 2)}\n`,
   );
   await writeFile(
@@ -118,6 +139,7 @@ describe("version consistency validator", () => {
   it("uses a strict ASCII SemVer grammar", () => {
     expect(isStrictSemVer("0.1.0")).toBe(true);
     expect(isStrictSemVer("2.5.0-beta.10+build.2")).toBe(true);
+    expect(isStrictSemVer("1.0.0-1alpha+build.2")).toBe(true);
     for (const invalid of [
       "01.0.0",
       "1.0",
@@ -142,7 +164,65 @@ describe("version consistency validator", () => {
     expect(result.status).toBe(1);
     expect(result.stdout.trim()).toBe("release-tag-invalid");
   });
+
+  it("requires canonical package and lock metadata with the exact author", async () => {
+    const repository = await fixtureRepository();
+    const packageJson = JSON.parse(
+      await readFile(join(repository, "package.json"), "utf8"),
+    );
+    packageJson.name = "other";
+    packageJson.author = "Other";
+    await writeFile(
+      join(repository, "package.json"),
+      `${JSON.stringify(packageJson, null, 2)}\n`,
+    );
+    const packageLock = JSON.parse(
+      await readFile(join(repository, "package-lock.json"), "utf8"),
+    );
+    packageLock.version = "0.2.0";
+    packageLock.name = "other";
+    packageLock.packages[""].name = "other";
+    packageLock.packages[""].version = "0.3.0";
+    await writeFile(
+      join(repository, "package-lock.json"),
+      `${JSON.stringify(packageLock, null, 2)}\n`,
+    );
+
+    const result = await checkVersionConsistency({ repository });
+
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        "package-name-mismatch",
+        "package-author-mismatch",
+        "package-lock-version-mismatch",
+        "package-lock-name-mismatch",
+        "package-lock-root-name-mismatch",
+        "package-lock-root-version-mismatch",
+      ]),
+    );
+  });
 });
+
+async function prepareNpmVersionLifecycle(
+  repository: string,
+  targetVersion = "0.2.0",
+): Promise<void> {
+  for (const name of ["package.json", "package-lock.json"]) {
+    const path = join(repository, name);
+    const value = JSON.parse(await readFile(path, "utf8"));
+    value.version = targetVersion;
+    if (name === "package-lock.json") {
+      value.packages[""].version = targetVersion;
+    }
+    await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+  }
+}
+
+const lifecycleEnvironment = {
+  npm_package_version: "0.2.0",
+  npm_lifecycle_event: "version",
+  npm_command: "version",
+};
 
 describe("version bump", () => {
   it("requires the npm version lifecycle and strict target version", async () => {
@@ -153,6 +233,7 @@ describe("version bump", () => {
         environment: {
           npm_package_version: "0.2.0",
           npm_lifecycle_event: "test",
+          npm_command: "version",
         },
       }),
     ).rejects.toThrow("npm-version-lifecycle-required");
@@ -162,6 +243,7 @@ describe("version bump", () => {
         environment: {
           npm_package_version: "v0.2.0",
           npm_lifecycle_event: "version",
+          npm_command: "version",
         },
       }),
     ).rejects.toThrow("target-version-invalid");
@@ -169,6 +251,7 @@ describe("version bump", () => {
 
   it("refuses dirty metadata and preserves original bytes", async () => {
     const repository = await fixtureRepository();
+    await prepareNpmVersionLifecycle(repository);
     const manifestPath = join(repository, "manifest.json");
     await writeFile(manifestPath, `${await readFile(manifestPath, "utf8")} `);
     const beforeManifest = await readFile(manifestPath);
@@ -180,9 +263,10 @@ describe("version bump", () => {
         environment: {
           npm_package_version: "0.2.0",
           npm_lifecycle_event: "version",
+          npm_command: "version",
         },
       }),
-    ).rejects.toThrow("version-metadata-dirty");
+    ).rejects.toThrow("version-worktree-unexpected-change");
     expect(await readFile(manifestPath)).toEqual(beforeManifest);
     expect(await readFile(join(repository, "versions.json"))).toEqual(
       beforeVersions,
@@ -191,12 +275,10 @@ describe("version bump", () => {
 
   it("writes two-space JSON with trailing newlines and preserves history order", async () => {
     const repository = await fixtureRepository();
+    await prepareNpmVersionLifecycle(repository);
     await bumpVersion({
       repository,
-      environment: {
-        npm_package_version: "0.2.0",
-        npm_lifecycle_event: "version",
-      },
+      environment: lifecycleEnvironment,
     });
 
     const manifest = await readFile(join(repository, "manifest.json"), "utf8");
@@ -216,16 +298,14 @@ describe("version bump", () => {
 
   it("rolls back both files when installation fails partway", async () => {
     const repository = await fixtureRepository();
+    await prepareNpmVersionLifecycle(repository);
     const beforeManifest = await readFile(join(repository, "manifest.json"));
     const beforeVersions = await readFile(join(repository, "versions.json"));
 
     await expect(
       bumpVersion({
         repository,
-        environment: {
-          npm_package_version: "0.2.0",
-          npm_lifecycle_event: "version",
-        },
+        environment: lifecycleEnvironment,
         hooks: {
           beforeVersionsInstall() {
             throw new Error("simulated-second-install-failure");
@@ -239,5 +319,175 @@ describe("version bump", () => {
     expect(await readFile(join(repository, "versions.json"))).toEqual(
       beforeVersions,
     );
+  });
+
+  it("rejects forged lifecycle state, lock mismatch, and unrelated dirty files", async () => {
+    const repository = await fixtureRepository();
+    await expect(
+      bumpVersion({
+        repository,
+        environment: lifecycleEnvironment,
+      }),
+    ).rejects.toThrow("package-version-target-mismatch");
+
+    await prepareNpmVersionLifecycle(repository);
+    const packageLock = JSON.parse(
+      await readFile(join(repository, "package-lock.json"), "utf8"),
+    );
+    packageLock.packages[""].version = "0.1.0";
+    await writeFile(
+      join(repository, "package-lock.json"),
+      `${JSON.stringify(packageLock, null, 2)}\n`,
+    );
+    await expect(
+      bumpVersion({
+        repository,
+        environment: lifecycleEnvironment,
+      }),
+    ).rejects.toThrow("package-lock-target-mismatch");
+
+    packageLock.packages[""].version = "0.2.0";
+    await writeFile(
+      join(repository, "package-lock.json"),
+      `${JSON.stringify(packageLock, null, 2)}\n`,
+    );
+    await writeFile(join(repository, "unrelated.txt"), "dirty");
+    await expect(
+      bumpVersion({
+        repository,
+        environment: lifecycleEnvironment,
+      }),
+    ).rejects.toThrow("version-worktree-unexpected-change");
+  });
+
+  it("rejects ignored untracked sensitive metadata during the lifecycle", async () => {
+    const repository = await fixtureRepository();
+    await prepareNpmVersionLifecycle(repository);
+    await writeFile(join(repository, ".git/info/exclude"), ".envrc\n");
+    await writeFile(join(repository, ".envrc"), "TOKEN=runtime-secret\n");
+
+    await expect(
+      bumpVersion({
+        repository,
+        environment: lifecycleEnvironment,
+      }),
+    ).rejects.toThrow("version-worktree-sensitive-untracked");
+  });
+
+  it(
+    "runs successfully inside an actual temporary npm version lifecycle",
+    async () => {
+      const repository = await fixtureRepository();
+      const packagePath = join(repository, "package.json");
+      const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
+      packageJson.scripts = {
+        version: `node ${JSON.stringify(join(process.cwd(), "version-bump.mjs"))}`,
+      };
+      await writeFile(
+        packagePath,
+        `${JSON.stringify(packageJson, null, 2)}\n`,
+      );
+      execFileSync("git", ["add", "package.json"], { cwd: repository });
+      execFileSync("git", ["commit", "-qm", "add version lifecycle"], {
+        cwd: repository,
+      });
+
+      const result = spawnSync(
+        "npm",
+        ["version", "0.2.0", "--no-git-tag-version"],
+        {
+          cwd: repository,
+          encoding: "utf8",
+        },
+      );
+
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      await expect(
+        checkVersionConsistency({ repository }),
+      ).resolves.toMatchObject({ ok: true, errors: [] });
+    },
+    30_000,
+  );
+
+  it("keeps exact recovery paths when a restore rename fails", async () => {
+    const repository = await fixtureRepository();
+    await prepareNpmVersionLifecycle(repository);
+    const originalManifest = await readFile(join(repository, "manifest.json"));
+    let restoreFailureInjected = false;
+
+    await expect(
+      bumpVersion({
+        repository,
+        environment: lifecycleEnvironment,
+        hooks: {
+          afterVersionsInstall() {
+            throw new Error("simulated-install-failure");
+          },
+        },
+        operations: {
+          lstat,
+          rename: async (source: string, destination: string) => {
+            if (
+              !restoreFailureInjected &&
+              source.includes(".manifest-") &&
+              source.endsWith(".backup") &&
+              destination.endsWith("/manifest.json")
+            ) {
+              restoreFailureInjected = true;
+              throw new Error("simulated-restore-failure");
+            }
+            await rename(source, destination);
+          },
+          rm,
+        },
+      }),
+    ).rejects.toThrow(/version-recovery-required:.*\.manifest-.*\.backup/);
+
+    const backupName = (await import("node:fs/promises").then(({ readdir }) =>
+      readdir(repository),
+    )).find(
+      (name) => name.startsWith(".manifest-") && name.endsWith(".backup"),
+    );
+    expect(backupName).toBeDefined();
+    expect(await readFile(join(repository, backupName!))).toEqual(
+      originalManifest,
+    );
+  });
+
+  it("retains named prior metadata when backup cleanup fails", async () => {
+    const repository = await fixtureRepository();
+    await prepareNpmVersionLifecycle(repository);
+
+    await expect(
+      bumpVersion({
+        repository,
+        environment: lifecycleEnvironment,
+        operations: {
+          rm: async (
+            path: string,
+            options?: Parameters<typeof rm>[1],
+          ) => {
+            if (path.endsWith(".backup")) {
+              throw new Error("simulated-backup-cleanup-failure");
+            }
+            await rm(path, options);
+          },
+        },
+      }),
+    ).rejects.toThrow(/version-recovery-required:.*\.backup/);
+
+    const names = await import("node:fs/promises").then(({ readdir }) =>
+      readdir(repository),
+    );
+    expect(
+      names.some(
+        (name) => name.startsWith(".manifest-") && name.endsWith(".backup"),
+      ),
+    ).toBe(true);
+    expect(
+      names.some(
+        (name) => name.startsWith(".versions-") && name.endsWith(".backup"),
+      ),
+    ).toBe(true);
   });
 });
