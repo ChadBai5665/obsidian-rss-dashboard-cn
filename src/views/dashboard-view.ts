@@ -1030,11 +1030,6 @@ export class RssDashboardView extends ItemView {
             this.activeAiModal = this.plugin.openAiOperationForItem(
               article,
               operation,
-              {
-                saveArticleFirst: async () => {
-                  await this.handleArticleSave(article);
-                },
-              },
             );
           },
           onToggleSidebar: this.handleToggleSidebar.bind(this),

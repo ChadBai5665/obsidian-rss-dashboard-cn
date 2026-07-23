@@ -24,6 +24,7 @@ import {
   FeedKeywordRulesSettings,
   FeedIngestionCandidate,
   FeedIngestionOptions,
+  Tag,
 } from "./src/types/types";
 import { RssDashboardSettingTab } from "./src/settings/settings-tab";
 import {
@@ -43,7 +44,10 @@ import {
   FeedParser,
   applyFeedRetentionLimits,
 } from "./src/services/feed-parser";
-import { ArticleSaver } from "./src/services/article-saver";
+import {
+  ArticleSaver,
+  DEFAULT_ARTICLE_TEMPLATE,
+} from "./src/services/article-saver";
 import { BackupService } from "./src/services/backup-service";
 import { FolderService } from "./src/services/folder-service";
 import {
@@ -98,6 +102,11 @@ import { AiContentSelector } from "./src/ai/content/ai-content-selector";
 import { AiOperationService } from "./src/ai/ai-operation-service";
 import { AnalysisRepository } from "./src/ai/analysis-repository";
 import { AnalysisNoteInserter } from "./src/ai/analysis-note-inserter";
+import {
+  cloneAiSourceItem,
+  resolveAndSnapshotAiSource,
+  type AiSourceSnapshot,
+} from "./src/ai/ai-source-snapshot";
 import type { AiOperation } from "./src/ai/prompts/prompt-types";
 import {
   AiOperationModal,
@@ -146,69 +155,54 @@ export interface FiltersUpdatedEventPayload {
   timestamp: number;
 }
 
-/**
- * Resolves the source that actually owns an item. Feed URLs are not unique:
- * users may subscribe to the same endpoint more than once with different
- * folders or source identities, so an ambiguous URL must never select the
- * first source and leak its metadata into an AI request.
- */
-function resolveAiOwningFeed(feeds: Feed[], item: FeedItem): Feed | undefined {
-  if (hasOwnAccessor(item, "rssDashboardSourceId")) return undefined;
-  const referenceMatches = feeds.filter((candidate) =>
-    feedContainsItemReference(candidate, item));
-  if (referenceMatches.length > 0) {
-    return referenceMatches.length === 1 ? referenceMatches[0] : undefined;
-  }
-
-  const sourceId = ownStringData(item, "rssDashboardSourceId")?.trim();
-  if (sourceId) {
-    const sourceMatches = feeds.filter((candidate) => {
-      const feedId = ownStringData(candidate, "feedId")?.trim();
-      const feedUrl = ownStringData(candidate, "url")?.trim();
-      return (feedId || feedUrl) === sourceId;
-    });
-    if (sourceMatches.length > 0) {
-      return sourceMatches.length === 1 ? sourceMatches[0] : undefined;
-    }
-  }
-
-  const itemFeedUrl = ownStringData(item, "feedUrl");
-  if (!itemFeedUrl) return undefined;
-  const urlMatches = feeds.filter((candidate) =>
-    ownStringData(candidate, "url") === itemFeedUrl);
-  return urlMatches.length === 1 ? urlMatches[0] : undefined;
+interface AiArticleSaveSnapshot {
+  source: AiSourceSnapshot;
+  folder: string;
+  template: string;
+  saveFullContent: boolean;
+  addSavedTag: boolean;
+  savedTag: Tag;
 }
 
-function feedContainsItemReference(feed: Feed, item: FeedItem): boolean {
+function canWriteOwnDataValue(target: object, key: string): boolean {
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(feed, "items");
-    return Boolean(
-      descriptor && "value" in descriptor && Array.isArray(descriptor.value) &&
-      Array.prototype.includes.call(descriptor.value, item),
-    );
+    const descriptor = Object.getOwnPropertyDescriptor(target, key);
+    if (!descriptor) return Object.isExtensible(target);
+    if (descriptor.configurable) return true;
+    return "value" in descriptor && descriptor.writable === true;
   } catch {
     return false;
   }
 }
 
-function hasOwnAccessor(value: object, key: string): boolean {
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return Boolean(descriptor && !("value" in descriptor));
-  } catch {
-    return true;
-  }
+function canWriteAiSavedState(target: FeedItem): boolean {
+  return ["saved", "savedFilePath", "tags"].every((key) =>
+    canWriteOwnDataValue(target, key));
 }
 
-function ownStringData(value: object, key: string): string | undefined {
+function writeOwnDataValue(
+  target: object,
+  key: string,
+  value: unknown,
+): boolean {
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor && "value" in descriptor &&
-        typeof descriptor.value === "string"
-      ? descriptor.value
-      : undefined;
+    if (!canWriteOwnDataValue(target, key)) return false;
+    const descriptor = Object.getOwnPropertyDescriptor(target, key);
+    Object.defineProperty(
+      target,
+      key,
+      descriptor && !descriptor.configurable
+        ? { value }
+        : {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value,
+          },
+    );
+    return true;
   } catch {
-    return undefined;
+    return false;
   }
 }
 
@@ -1501,7 +1495,6 @@ export default class RssDashboardPlugin extends Plugin {
   public openAiOperationForItem(
     item: FeedItem,
     operation: AiOperation,
-    options: { saveArticleFirst?: () => Promise<void> | void } = {},
   ): AiOperationModal | null {
     try {
       return openAiOperationModal({
@@ -1510,9 +1503,28 @@ export default class RssDashboardPlugin extends Plugin {
         openSettings: () => { void this.openSettingsToTab("ai"); },
         showNotice: () => { this.notify("ai.noEnabledConnection"); },
         createModal: (enabledConnections) => {
-          const feed = resolveAiOwningFeed(this.settings.feeds, item);
-          if (!feed) throw new Error("Selected AI item has no owning feed");
-          const selectedItem = normalizeFeedItem(feed, item, new Date());
+          const source = resolveAndSnapshotAiSource(this.settings.feeds, item);
+          if (!source) throw new Error("Selected AI item has no trusted source");
+          const normalizationItem = cloneAiSourceItem(source.item);
+          const normalizationFeed: Feed = {
+            ...source.feed,
+            items: [normalizationItem],
+          };
+          const selectedItem = normalizeFeedItem(
+            normalizationFeed,
+            normalizationItem,
+            new Date(),
+          );
+          if (
+            source.originalTarget &&
+            !writeOwnDataValue(
+              source.originalTarget,
+              "rssDashboardId",
+              selectedItem.id,
+            )
+          ) throw new Error("Selected AI item identity cannot be bound safely");
+          const saveSnapshot = this.createAiArticleSaveSnapshot(source);
+          let savedNotePath = this.resolveExistingSavedNotePath(source.item);
           const dataRoot = this.settings.collection.dataFolder.trim();
           const contentSelector = new AiContentSelector({
             contentRepository: new ContentRepository(
@@ -1553,7 +1565,7 @@ export default class RssDashboardPlugin extends Plugin {
             openAnalysis: async (path) => {
               await this.openAiVaultFile(path);
             },
-            getSavedNotePath: () => this.resolveExistingSavedNotePath(item),
+            getSavedNotePath: () => savedNotePath,
             insertIntoSavedNote: async (result, artifactPath, notePath) =>
               await analysisRepository.withVerifiedArtifact(
                 artifactPath,
@@ -1571,8 +1583,9 @@ export default class RssDashboardPlugin extends Plugin {
             openSavedNote: async (notePath, marker) => {
               await this.openAiVaultFile(notePath, marker);
             },
-            saveArticleFirst: options.saveArticleFirst ?? (() =>
-              this.saveArticleForAiInsertion(item, feed)),
+            saveArticleFirst: async () => {
+              savedNotePath = await this.saveArticleForAiInsertion(saveSnapshot);
+            },
           });
         },
       });
@@ -1592,25 +1605,81 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private async saveArticleForAiInsertion(
-    item: FeedItem,
-    feed: Feed,
-  ): Promise<void> {
-    const template = feed.customTemplate
-      ? this.settings.articleSaving.savedTemplates.find(
-          ({ id }) => id === feed.customTemplate,
-        )?.template
-      : undefined;
-    const file = this.settings.articleSaving.saveFullContent
+    snapshot: AiArticleSaveSnapshot,
+  ): Promise<string> {
+    const target = snapshot.source.originalTarget;
+    if (!target || !canWriteAiSavedState(target)) {
+      throw new Error("The original source item is no longer writable");
+    }
+    const item = cloneAiSourceItem(snapshot.source.item);
+    const file = snapshot.saveFullContent
       ? await this.articleSaver.saveArticleWithFullContent(
           item,
-          undefined,
-          template,
+          snapshot.folder,
+          snapshot.template,
         )
-      : await this.articleSaver.saveArticle(item, undefined, template);
+      : await this.articleSaver.saveArticle(
+          item,
+          snapshot.folder,
+          snapshot.template,
+        );
     if (!file) throw new Error("The source article could not be saved");
-    item.saved = true;
-    item.savedFilePath = file.path;
-    await this.onArticleSaved(item, feed);
+    const tags = this.createAiSavedTags(snapshot);
+    if (
+      !writeOwnDataValue(target, "saved", true) ||
+      !writeOwnDataValue(target, "savedFilePath", file.path) ||
+      !writeOwnDataValue(target, "tags", tags)
+    ) throw new Error("The original source item could not be updated safely");
+
+    const updates = {
+      saved: true,
+      savedFilePath: file.path,
+      tags,
+    };
+    await this.syncDashboardArticleUpdate(
+      snapshot.source.item.guid,
+      snapshot.source.feed.url,
+      updates,
+      false,
+    );
+    await this.syncReaderArticleUpdate(snapshot.source.item.guid, updates);
+    return file.path;
+  }
+
+  private createAiArticleSaveSnapshot(
+    source: AiSourceSnapshot,
+  ): AiArticleSaveSnapshot {
+    const customTemplateId = source.feed.customTemplate;
+    const customTemplate = customTemplateId
+      ? this.settings.articleSaving.savedTemplates.find(
+          ({ id }) => id === customTemplateId,
+        )?.template
+      : undefined;
+    const savedTag = this.settings.availableTags.find(
+      ({ name }) => name.toLowerCase() === "saved",
+    );
+    return Object.freeze({
+      source,
+      folder: this.settings.collection.savedNoteFolder,
+      template: customTemplate ||
+        this.settings.articleSaving.defaultTemplate ||
+        DEFAULT_ARTICLE_TEMPLATE,
+      saveFullContent: this.settings.articleSaving.saveFullContent,
+      addSavedTag: this.settings.articleSaving.addSavedTag,
+      savedTag: Object.freeze(savedTag
+        ? { name: savedTag.name, color: savedTag.color }
+        : { name: "saved", color: "#3498db" }),
+    });
+  }
+
+  private createAiSavedTags(snapshot: AiArticleSaveSnapshot): Tag[] {
+    const item = cloneAiSourceItem(snapshot.source.item);
+    const tags = item.tags ? item.tags.map((tag) => ({ ...tag })) : [];
+    if (
+      snapshot.addSavedTag &&
+      !tags.some(({ name }) => name.toLowerCase() === "saved")
+    ) tags.push({ ...snapshot.savedTag });
+    return tags;
   }
 
   private async openAiVaultFile(path: string, marker?: string): Promise<void> {

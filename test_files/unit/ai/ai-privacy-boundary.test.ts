@@ -400,9 +400,250 @@ describe("AI privacy boundary", () => {
     },
   );
 
-  it("keeps save-first bound to the feed resolved when the AI modal opened", async () => {
+  it.each([
+    "feedId",
+    "url",
+    "title",
+    "folder",
+    "customTemplate",
+  ] as const)(
+    "fails closed without invoking an own selected-feed %s accessor",
+    (field) => {
+      const test = harness();
+      const saver = installArticleSaver(test);
+      let getterCalls = 0;
+      Object.defineProperty(test.selectedFeed, field, {
+        configurable: true,
+        get() {
+          getterCalls += 1;
+          throw new Error(`selected feed ${field} getter must not run`);
+        },
+      });
+      const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+      const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+      expect(modal).toBeNull();
+      expect(getterCalls).toBe(0);
+      expect(requestUrl).not.toHaveBeenCalled();
+      expect(secretState.reads).toEqual([]);
+      expect(saver.saveArticle).not.toHaveBeenCalled();
+      expect(saver.saveArticleWithFullContent).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    "feedId",
+    "url",
+    "title",
+    "folder",
+    "customTemplate",
+  ] as const)(
+    "rejects inherited selected-feed %s data",
+    (field) => {
+      const test = harness();
+      const inheritedValue = field === "customTemplate"
+        ? "inherited-template"
+        : test.selectedFeed[field];
+      delete test.selectedFeed[field];
+      Object.setPrototypeOf(test.selectedFeed, {
+        [field]: inheritedValue,
+      });
+      const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+      const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+      expect(modal).toBeNull();
+      expect(requestUrl).not.toHaveBeenCalled();
+      expect(secretState.reads).toEqual([]);
+    },
+  );
+
+  it.each([
+    "feedId",
+    "url",
+    "title",
+    "folder",
+    "customTemplate",
+  ] as const)(
+    "rejects an inherited selected-feed %s accessor without invoking it",
+    (field) => {
+      const test = harness();
+      let getterCalls = 0;
+      delete test.selectedFeed[field];
+      const prototype = {};
+      Object.defineProperty(prototype, field, {
+        configurable: true,
+        get() {
+          getterCalls += 1;
+          throw new Error(`inherited selected feed ${field} getter must not run`);
+        },
+      });
+      Object.setPrototypeOf(test.selectedFeed, prototype);
+      const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+      const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+      expect(modal).toBeNull();
+      expect(getterCalls).toBe(0);
+      expect(requestUrl).not.toHaveBeenCalled();
+      expect(secretState.reads).toEqual([]);
+    },
+  );
+
+  it.each([
+    "title",
+    "link",
+    "guid",
+    "content",
+    "description",
+    "feedUrl",
+    "feedTitle",
+  ] as const)(
+    "fails closed without invoking an own selected-item %s accessor",
+    (field) => {
+      const test = harness();
+      let getterCalls = 0;
+      Object.defineProperty(test.selected, field, {
+        configurable: true,
+        get() {
+          getterCalls += 1;
+          throw new Error(`selected item ${field} getter must not run`);
+        },
+      });
+      const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+      const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+      expect(modal).toBeNull();
+      expect(getterCalls).toBe(0);
+      expect(requestUrl).not.toHaveBeenCalled();
+      expect(secretState.reads).toEqual([]);
+    },
+  );
+
+  it.each([
+    "title",
+    "link",
+    "guid",
+    "content",
+    "description",
+    "feedUrl",
+    "feedTitle",
+  ] as const)(
+    "rejects inherited selected-item %s data",
+    (field) => {
+      const test = harness();
+      const inheritedValue = field === "content"
+        ? "inherited content"
+        : test.selected[field];
+      delete test.selected[field];
+      Object.setPrototypeOf(test.selected, {
+        [field]: inheritedValue,
+      });
+      const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+      const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+      expect(modal).toBeNull();
+      expect(requestUrl).not.toHaveBeenCalled();
+      expect(secretState.reads).toEqual([]);
+    },
+  );
+
+  it.each([
+    "title",
+    "link",
+    "guid",
+    "content",
+    "description",
+    "feedUrl",
+    "feedTitle",
+  ] as const)(
+    "rejects an inherited selected-item %s accessor without invoking it",
+    (field) => {
+      const test = harness();
+      let getterCalls = 0;
+      delete test.selected[field];
+      const prototype = {};
+      Object.defineProperty(prototype, field, {
+        configurable: true,
+        get() {
+          getterCalls += 1;
+          throw new Error(`inherited selected item ${field} getter must not run`);
+        },
+      });
+      Object.setPrototypeOf(test.selected, prototype);
+      const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+      const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+      expect(modal).toBeNull();
+      expect(getterCalls).toBe(0);
+      expect(requestUrl).not.toHaveBeenCalled();
+      expect(secretState.reads).toEqual([]);
+    },
+  );
+
+  it("rejects a selected feed items index accessor without invoking it", () => {
+    const test = harness();
+    let getterCalls = 0;
+    Object.defineProperty(test.selectedFeed.items, "0", {
+      configurable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("selected feed item index getter must not run");
+      },
+    });
+    const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+    expect(modal).toBeNull();
+    expect(getterCalls).toBe(0);
+    expect(requestUrl).not.toHaveBeenCalled();
+    expect(secretState.reads).toEqual([]);
+  });
+
+  it("does not invoke accessors on an unrelated candidate while resolving a safe reference", async () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    let getterCalls = 0;
+    Object.defineProperty(test.settings.feeds[0].items, "0", {
+      configurable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("unrelated candidate item getter must not run");
+      },
+    });
+    for (const field of ["feedId", "url", "customTemplate"] as const) {
+      Object.defineProperty(test.settings.feeds[0], field, {
+        configurable: true,
+        get() {
+          getterCalls += 1;
+          throw new Error(`unrelated candidate ${field} getter must not run`);
+        },
+      });
+    }
+    const requestUrl = vi.spyOn(obsidian, "requestUrl")
+      .mockResolvedValue(responseWithText("safe unrelated-accessor analysis"));
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      SELECTED_FEED_TITLE,
+    ));
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(requestUrl).toHaveBeenCalledTimes(1));
+
+    expect(getterCalls).toBe(0);
+    expect(outboundUserPayload(requestUrl).sourceName).toBe(SELECTED_FEED_TITLE);
+    modal?.close();
+  });
+
+  it("uses the immutable open-time source snapshot for AI and save-first", async () => {
     const test = harness();
     const detached = structuredClone(test.selected);
+    detached.content = "SELECTED_ORIGINAL_CONTENT_CANARY";
     installAtomicAdapter(test.app);
     await test.app.vault.createFolder("Notes");
     const savedFile = await test.app.vault.create(
@@ -423,6 +664,7 @@ describe("AI privacy boundary", () => {
         template: "SELECTED_SAVE_TEMPLATE_CANARY",
       },
     ];
+    test.settings.collection.savedNoteFolder = "Notes/Snapshot Folder";
     const saver = installArticleSaver(test, savedFile);
     const requestUrl = vi.spyOn(obsidian, "requestUrl")
       .mockResolvedValue(responseWithText("safe save-first analysis"));
@@ -431,25 +673,63 @@ describe("AI privacy boundary", () => {
     await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
       SELECTED_FEED_TITLE,
     ));
+    const replacement = structuredClone(test.selected);
+    replacement.saved = false;
+    test.selectedFeed.feedId = "mutated-feed-id";
+    test.selectedFeed.url = "https://feeds.example.invalid/mutated.xml";
+    test.selectedFeed.title = "MUTATED_FEED_TITLE_CANARY";
+    test.selectedFeed.folder = "MUTATED_FEED_FOLDER_CANARY";
+    test.selectedFeed.customTemplate = "unrelated-template";
+    test.selectedFeed.items = [replacement];
+    test.settings.articleSaving.savedTemplates[1].template =
+      "MUTATED_SELECTED_TEMPLATE_CANARY";
+    test.settings.collection.savedNoteFolder = "Notes/Mutated Folder";
+    Object.assign(detached, {
+      rssDashboardSourceId: "mutated-feed-id",
+      guid: "mutated-guid",
+      link: "https://articles.example.invalid/mutated",
+      title: "MUTATED_ITEM_TITLE_CANARY",
+      content: "MUTATED_ITEM_CONTENT_CANARY",
+      description: "MUTATED_ITEM_DESCRIPTION_CANARY",
+      feedUrl: "https://feeds.example.invalid/mutated.xml",
+      feedTitle: "MUTATED_FEED_TITLE_CANARY",
+    });
     button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(requestUrl).toHaveBeenCalledTimes(1));
+    expect(outboundUserPayload(requestUrl)).toMatchObject({
+      title: "SELECTED_ITEM_TITLE_CANARY",
+      sourceName: SELECTED_FEED_TITLE,
+      sourceUrl: "https://articles.example.invalid/selected-guid",
+      content: "SELECTED_ITEM_TITLE_CANARY description",
+    });
     await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
       "先保存原文",
     ));
-    detached.feedUrl = "";
     button(modal!.contentEl, "先保存原文").click();
     await vi.waitFor(() => expect(
       saver.saveArticleWithFullContent,
     ).toHaveBeenCalledTimes(1));
 
-    expect(saver.saveArticleWithFullContent).toHaveBeenCalledWith(
-      detached,
-      undefined,
-      "SELECTED_SAVE_TEMPLATE_CANARY",
-    );
+    const [savedItem, savedFolder, savedTemplate] =
+      saver.saveArticleWithFullContent.mock.calls[0];
+    expect(savedItem).not.toBe(detached);
+    expect(savedItem).toMatchObject({
+      rssDashboardSourceId: "selected-feed-id",
+      guid: "selected-guid",
+      link: "https://articles.example.invalid/selected-guid",
+      title: "SELECTED_ITEM_TITLE_CANARY",
+      content: "SELECTED_ORIGINAL_CONTENT_CANARY",
+      description: "SELECTED_ITEM_TITLE_CANARY description",
+      feedUrl: DUPLICATE_FEED_URL,
+      feedTitle: "selected-feed-id",
+    });
+    expect(savedFolder).toBe("Notes/Snapshot Folder");
+    expect(savedTemplate).toBe("SELECTED_SAVE_TEMPLATE_CANARY");
     expect(requestUrl).toHaveBeenCalledTimes(1);
     expect(saver.saveArticle).not.toHaveBeenCalled();
     expect(test.selected.saved).toBe(true);
     expect(test.selected.savedFilePath).toBe(savedFile.path);
+    expect(replacement.saved).toBe(false);
     modal?.close();
   });
 

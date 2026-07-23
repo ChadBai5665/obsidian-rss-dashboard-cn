@@ -46,6 +46,8 @@ import { isYouTubeItem } from "../utils/youtube-detection";
 import { createTranslator, type Locale, type Translator } from "../i18n";
 
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/;
+export const DEFAULT_ARTICLE_TEMPLATE =
+  "# {{title}}\n\n{{content}}\n\n[Source]({{link}})";
 const OWNED_FRONTMATTER_KEYS = [
   "rssDashboardId",
   "source",
@@ -1032,7 +1034,7 @@ guid: "{{guid}}"
     const template =
       input.customTemplate ||
       this.settings.defaultTemplate ||
-      "# {{title}}\n\n{{content}}\n\n[Source]({{link}})";
+      DEFAULT_ARTICLE_TEMPLATE;
     let contentToWrite = "";
     const templateFrontmatter = this.extractFrontmatter(template);
     const frontmatterLike = template
