@@ -3,69 +3,62 @@ name: Release Obsidian plugin
 on:
   push:
     tags:
-      - "*"
+      - "[0-9]+.[0-9]+.[0-9]+*"
 
 jobs:
-  build:
+  draft-release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - name: Use Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22.x"
+          node-version: "22"
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint and build plugin
-        run: npm run build
+      - name: Validate tag against package version
+        run: node scripts/check-version-consistency.mjs --tag "$GITHUB_REF_NAME"
 
-      - name: Create release assets
-        run: |
-          # Create a release directory
-          mkdir -p release
+      - name: Run canonical checks
+        run: npm run check
 
-          # Copy main files
-          cp main.js manifest.json styles.css release/
+      - name: Stage release assets
+        run: npm run release:stage
+
+      - name: Validate staged release assets
+        run: npm run release:check
 
       - name: Attest build provenance for release assets
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
-            main.js
-            styles.css
+            release/main.js
+            release/manifest.json
+            release/styles.css
 
-      - name: Create release
+      - name: Create draft release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
-
-          release_notes="Release $tag"
-          release_flags=(--title="$tag" --notes="$release_notes" --draft)
-
-          # Alpha tags are prereleases and should be published (not drafts) so BRAT can see them.
-          if [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
-            release_notes="Alpha release $tag"
-            release_flags=(--title="$tag" --notes="$release_notes" --prerelease)
+          release_flags=(--draft)
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            release_flags+=(--prerelease)
           fi
 
-          # Beta tags must be formatted without a leading "v", e.g. 2.1.0-beta.1
-          if [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
-            release_notes="Beta release $tag"
-            release_flags=(--title="$tag" --notes="$release_notes" --prerelease)
-          fi
-
-          # Create release with all assets
-          gh release create "$tag" \
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Release $GITHUB_REF_NAME" \
             "${release_flags[@]}" \
-            main.js \
-            manifest.json \
-            styles.css \
+            release/main.js \
+            release/manifest.json \
+            release/styles.css

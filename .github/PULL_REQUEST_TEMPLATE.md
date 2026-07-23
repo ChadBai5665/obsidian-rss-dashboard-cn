@@ -30,7 +30,10 @@
 ## Testing
 
 - [ ] Unit tests added/updated
-- [ ] Existing tests pass locally
+- [ ] `npm run test:unit` passes locally
+- [ ] `npm run audit:i18n` passes locally
+- [ ] `npm run check:public` passes locally
+- [ ] `npm run build` passes locally
 - [ ] Manual smoke test completed
 
 ### Test Evidence
@@ -55,8 +58,10 @@ Rollback plan:
 
 ## Checklist
 
-- [ ] Base branch is dev
+- [ ] Base branch is master
 - [ ] Branch is scoped to one concern
 - [ ] No unrelated files included
 - [ ] If validation logic changed, tests updated
-- [ ] Changelog handling decided (Release Notes Candidate or N/A)
+- [ ] Release Notes Candidate is complete, or explicitly marked N/A
+- [ ] Test fixtures are synthetic and sanitized
+- [ ] Fork changes preserve required upstream attribution
