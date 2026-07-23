@@ -41,96 +41,23 @@ export function renderAboutTab(
   featuresList.createEl("li", {
     text: t("settings.about.save"),
   });
-  featuresList.createEl("li", { text: t("settings.about.noAds") });
+  featuresList.createEl("li", { text: t("settings.about.manualAi") });
 
-  const attributionParagraph = descriptionContainer.createEl("p");
-  attributionParagraph.createSpan({
-    text: t("settings.about.created"),
+  descriptionContainer.createEl("p", {
+    text: t("settings.about.upstreamAttribution"),
   });
-  const originalCreatorLink = attributionParagraph.createEl("a", {
-    text: "Amatya-aditya",
-    href: "https://github.com/amatya-aditya/",
-    cls: "rss-dashboard-about-link",
+  descriptionContainer.createEl("p", {
+    text: t("settings.about.upstreamChannels"),
   });
-  originalCreatorLink.target = "_blank";
-  originalCreatorLink.rel = "noopener noreferrer";
-  attributionParagraph.createSpan({
-    text: t("settings.about.maintained"),
-  });
-  const maintainerLink = attributionParagraph.createEl("a", {
-    text: "Marcd35",
-    href: "https://github.com/marcd35",
-    cls: "rss-dashboard-about-link",
-  });
-  maintainerLink.target = "_blank";
-  maintainerLink.rel = "noopener noreferrer";
-  attributionParagraph.createSpan({
-    text: t("settings.about.community"),
-  });
-
-  const createLinkButton = (
-    parent: HTMLElement,
-    label: string,
-    href: string,
-  ): void => {
-    const link = parent.createEl("a", {
-      text: label,
-      href,
-      cls: "rss-dashboard-about-btn",
-    });
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-  };
 
   const actionsRow = aboutContainer.createDiv({
     cls: "rss-dashboard-about-btn-row",
   });
-  createLinkButton(
-    actionsRow,
-    "GitHub",
-    "https://github.com/amatya-aditya/obsidian-rss-dashboard",
-  );
-  createLinkButton(
-    actionsRow,
-    t("settings.about.reportIssue"),
-    "https://github.com/amatya-aditya/obsidian-rss-dashboard/issues",
-  );
-  createLinkButton(actionsRow, "Discord", "https://discord.gg/9bu7V9BBbs");
-
-  aboutContainer.createDiv({
-    cls: "rss-dashboard-about-section-title",
-    text: t("settings.about.support"),
+  const upstreamLink = actionsRow.createEl("a", {
+    text: t("settings.about.upstreamProject"),
+    href: "https://github.com/amatya-aditya/obsidian-rss-dashboard",
+    cls: "rss-dashboard-about-btn",
   });
-  const supportRow = aboutContainer.createDiv({
-    cls: "rss-dashboard-about-btn-row",
-  });
-  createLinkButton(
-    supportRow,
-    t("settings.about.coffee"),
-    "https://www.buymeacoffee.com/amatya_aditya",
-  );
-  createLinkButton(supportRow, "Ko-fi", "https://ko-fi.com/Y8Y41FV4WI");
-
-  aboutContainer.createDiv({
-    cls: "rss-dashboard-about-section-title",
-    text: t("settings.about.other"),
-  });
-  const otherPluginsRow = aboutContainer.createDiv({
-    cls: "rss-dashboard-about-btn-row",
-  });
-  createLinkButton(
-    otherPluginsRow,
-    "Advanced Multi Column",
-    "https://github.com/amatya-aditya/advanced-multi-column",
-  );
-  createLinkButton(
-    otherPluginsRow,
-    "Media Slider",
-    "https://github.com/amatya-aditya/obsidian-media-slider",
-  );
-  createLinkButton(
-    otherPluginsRow,
-    "Zen Space",
-    "https://github.com/amatya-aditya/obsidian-zen-space",
-  );
+  upstreamLink.target = "_blank";
+  upstreamLink.rel = "noopener noreferrer";
 }
