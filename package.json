@@ -1,7 +1,7 @@
 {
   "name": "obsidian-rss-dashboard-cn",
-  "version": "2.5.0",
-  "description": "RSS dashboard for Obsidian",
+  "version": "0.1.0",
+  "description": "Chinese-first RSS, website, YouTube, podcast, and optional X dashboard for Obsidian",
   "main": "main.js",
   "type": "commonjs",
   "scripts": {
@@ -23,7 +23,7 @@
     "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
   "keywords": [],
-  "author": "",
+  "author": "ChadBai",
   "license": "MIT",
   "engines": {
     "node": ">=20.19.0"

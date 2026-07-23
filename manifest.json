@@ -1,11 +1,9 @@
 {
 	"id": "rss-dashboard-cn",
 	"name": "RSS Dashboard CN",
-	"version": "2.5.0",
+	"version": "0.1.0",
 	"minAppVersion": "1.1.0",
-	"description": "A dashboard for organizing and consuming RSS feeds, YouTube channels, and podcasts with smart tagging, media playback, and seamless content flow.",
-	"author": "Aditya Amatya",
-	"authorUrl": "https://github.com/amatya-aditya",
-	"fundingUrl": "https://buymeacoffee.com/amatya_aditya",
+	"description": "中文优先的本地 RSS、网站、YouTube、播客与可选 X 信息采集面板。",
+	"author": "ChadBai",
 	"isDesktopOnly": true
 }

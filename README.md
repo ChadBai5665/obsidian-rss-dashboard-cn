@@ -1,390 +1,145 @@
-<div align="center">
-  <img src="assets/branding/logo.png" alt="RSS Dashboard Logo" width="180" />
-</div>
+# RSS 信息台
 
-# RSS Dashboard
+RSS Dashboard CN 是一个中文优先、仅桌面端使用的 Obsidian 信息采集插件。它把 RSS、网站、播客、YouTube，以及可选的 X 账号和主题订阅汇集到一个面板中；需要长期保留的内容可以保存为 Markdown，再交给你选择的模型或其他工具继续整理。
 
-Only the feeds you need. Stream the world's knowledge into your vault: RSS, podcasts, YouTube, and more, all in one dashboard.
+当前版本为 `0.1.0`，采用手动自安装方式。它尚不代表已经进入 Obsidian 社区插件目录。
 
-[![Latest release](https://img.shields.io/github/v/release/amatya-aditya/obsidian-rss-dashboard?style=flat-square&color=573E7A&label=release)](https://github.com/amatya-aditya/obsidian-rss-dashboard/releases/latest)
-![Release date](https://img.shields.io/github/release-date/amatya-aditya/obsidian-rss-dashboard)
-[![License](https://img.shields.io/github/license/amatya-aditya/obsidian-rss-dashboard)](https://github.com/amatya-aditya/obsidian-rss-dashboard/blob/main/LICENSE)
-![Total downloads](https://img.shields.io/github/downloads/amatya-aditya/obsidian-rss-dashboard/total)
-[![Open issues](https://img.shields.io/github/issues/amatya-aditya/obsidian-rss-dashboard)](https://github.com/amatya-aditya/obsidian-rss-dashboard/issues)
+## 它做什么
 
-[Version 2.2.0 Showcase Video](https://www.youtube.com/watch?v=Lq2TRCZlqlQ)
+- 在 Obsidian 内订阅、刷新、筛选和阅读多个信息源。
+- 默认在每天打开 Obsidian 时刷新当天尚未成功刷新的来源，也保留全部、失败来源和单一来源的手动刷新。
+- 把每日采集结果写入本地索引，把感兴趣的单条内容保存为 Markdown。
+- 为 X 账号跟踪和主题发现提供可选的 TikHub 接入。
+- 对选中的单条信息提供手动摘要、翻译为中文、提炼核心观点和深度分析。
+- 默认中文界面，也可在设置中切换为英文。
 
-## Table of Contents
+基础采集不需要配置 AI，也不需要 TikHub。只使用 RSS、网站、播客或 YouTube 时，可以一直关闭这两项可选能力。
 
-- [About](#about)
-- [Community](#community)
-- [Features](#features)
-- [Screenshots](#screenshots)
-- [Roadmap](#roadmap)
-- [Vault Shards Storage Guide](#vault-shards-storage-guide)
-- [Tags Guide](#tags-guide)
-- [Installation](#installation)
-- [Getting Started](#getting-started)
-- [One-Click Subscribe URI](#one-click-subscribe-uri)
-- [Keyboard Shortcuts](#keyboard-shortcuts)
-- [Syncing across devices](#syncing-across-devices)
-- [Development](#development)
-- [Troubleshooting](#troubleshooting)
-- [YouTube Embeds and Terms](#youtube-embeds-and-terms)
-- [Support the Development](#support-the-development)
-- [Other Plugins by Me](#other-plugins-by-me)
-- [License](#license)
+## 它不做什么
 
-## About
+- Obsidian 关闭后不会继续运行，没有常驻守护进程或云端后台任务。
+- 不会自动摘要、自动翻译、自动评分、自动排名或自动选择“Top 10”。
+- 不会在 AI 服务失败后自动换到另一个模型，也不会自动重试并产生额外费用。
+- 不会把 TikHub 的 `Top` 当成内容质量、权威性或推荐分数。
+- 不会为 YouTube 下载字幕、音频或视频。
+- 不会在卸载时自动删除已经采集或保存的文件。
 
-RSS Dashboard is a free, open source community plugin for Obsidian that makes it easy to manage your RSS feeds, YouTube subscriptions, podcasts, and Twitter/X feeds in one place.
+## 支持的信息源
 
-- Data is stored locally.
-- Content can be saved directly to your vault.
-- No ads, no tracking, no paywalls.
+| 信息源 | 采集方式 | 备注 |
+|---|---|---|
+| RSS / Atom / JSON Feed | 订阅源解析 | 沿用上游项目的采集架构 |
+| 普通网站 | Feed 自动发现、网页阅读与保存 | 网站结构或访问限制可能影响提取 |
+| 播客 | 播客 Feed 和媒体元数据 | 可在 Obsidian 内播放 |
+| YouTube | 频道或视频的 Feed/元数据 | AI 只使用标题和简介，不读取字幕、音频或视频 |
+| X 账号 | TikHub 时间线接口 | 可选，可能产生 TikHub 费用 |
+| X 主题 | TikHub 的最新、平台 `Top` 和重点账号观察 | 可选；这些是观察分类，不是插件推荐 |
 
-## Community
+## 每天打开时刷新
 
-Want to help shape the next release? Join the Discord server: <https://discord.gg/9bu7V9BBbs>
+默认刷新模式是“每天打开时刷新”。Obsidian 布局就绪后，插件按本机日期检查每个当前订阅来源：同一天已经成功刷新的来源不再自动刷新，尚未成功的来源才进入本次刷新。启动延迟默认为 5 秒，可在设置中调整。
 
-Community highlights:
+这个机制只在 Obsidian 正在运行时生效。电脑关机、Obsidian 退出或插件被禁用时不会联网。需要立即更新时，可随时使用手动刷新全部、失败来源或单一来源。
 
-- Build the manually curated Discover page with one-click subscriptions grouped by category.
-- Discuss ideas, questions, and best practices in real time.
-- Share sneak peeks of upcoming features and gather early feedback.
+## 安装
 
-## Features
-
-### Feed and Media Support
-
-| Feature                  | Description                                                                         |
-| ------------------------ | ----------------------------------------------------------------------------------- |
-| Multi-Format RSS Support | Support for RSS, Atom, XML and JSON feeds with automatic feed discovery and parsing |
-| YouTube Integration      | Convert YouTube channels to RSS feeds with embedded video playback                  |
-| Podcast Support          | Full podcast feed support with an integrated podcast player                         |
-| Twitter/X Support        | Convert Twitter/X profile URLs to chronological Nitter RSS feeds automatically      |
-| Media Detection          | Automatic detection of video and podcast content                                    |
-
-### Reading and Saving
-
-| Feature               | Description                                                                 |
-| --------------------- | --------------------------------------------------------------------------- |
-| Article Reader View   | Built-in reader with full article content fetching and Markdown conversion  |
-| Article Saving        | Save articles as Markdown files with customizable templates and frontmatter |
-| Custom Templates      | Customize saved article output with variable substitution                   |
-| Media Progress        | Resume from where you left off in videos and podcasts                       |
-| Pagination            | Paginated article lists with configurable page sizes                        |
-| Android/Apple Support | Responsive support for cross-platform mobile devices                        |
-
-### Organization and Workflow
-
-| Feature             | Description                                                            |
-| ------------------- | ---------------------------------------------------------------------- |
-| Folder Organization | Organize feeds into folders and subfolders with hierarchical structure |
-| Tag Management      | Add custom tags to feeds and articles for better organization          |
-| Article Filtering   | Filter articles by read status, age, starred, saved, and more          |
-| Article Sorting     | Sort articles by newest, oldest, and group by feed, date, or folder    |
-| Auto-Refresh        | Automatic feed refresh with configurable intervals                     |
-| OPML Import/Export  | Import and export feed subscriptions in OPML format                    |
-
-### Discovery
-
-| Feature       | Description                                                                        |
-| ------------- | ---------------------------------------------------------------------------------- |
-| Discover Page | Curated collection of RSS feeds organized by categories                            |
-| Kagi Smallweb | Browse and subscribe to a curated stream of smaller independent blogs and websites |
-
-## Screenshots
-
-![RSS Dashboard main dashboard view](assets/2.2/2.2_Dashboard.jpg)
-
-![Article reader view](assets/2.2/2.2_Dashboard_reader.jpg)
-
-![RSS Dashboard Discover page](assets/2.2/2.2_Discover.jpg)
-
-![RSS Dashboard feed view in light mode](assets/2.2/2.2_Dashboard_feedview_light.jpg)
-
-![YouTube integration in light mode](assets/2.2/2.2_Dashboard_youtube_light.jpg)
-
-## Video Showcase
-
-[![What's New in 2.2.0?](assets/2.2/video_thumbnail/2.2_Dashboard_video_thumbnail_youtube_icon.png)](https://www.youtube.com/watch?v=Lq2TRCZlqlQ)
-
-## Roadmap
-
-Looking for upcoming features? The old README planned-features list now lives in [docs/plans/public-roadmap.md](docs/plans/public-roadmap.md), along with links to other public-facing plans that have not been implemented yet.
-
-## Vault Shards Storage Guide
-
-Using the new Vault Shards storage mode? See the user-facing guide here: [docs/storage-vault-shards-guide.md](docs/storage-vault-shards-guide.md).
-
-## Tags Guide
-
-Tags let you label and filter articles the way that works best for you. Automatic tagging is available at three levels: feed-type defaults (Settings), folder rules (right-click a folder → **Auto tag feeds in folder...**), and per-feed custom tags (Add/Edit feed). For a full walkthrough of precedence, backfill, and filter modes, see [docs/tags-primer.md](docs/tags-primer.md).
-
-## Installation
-
-### Community Plugins Directory
-
-1. Open **Settings** in Obsidian.
-2. Go to **Community plugins** and disable **Restricted mode** if it is enabled.
-3. Click **Browse**.
-4. Search for **RSS Dashboard**.
-5. Click **Install**, then **Enable**.
-
-### Installing Through BRAT
-
-1. Install BRAT from Obsidian's Community Plugins browser.
-2. Copy the repository URL: `https://github.com/amatya-aditya/obsidian-rss-dashboard`
-3. Open the command palette and run `BRAT: Add a beta plugin for testing`.
-4. Paste the repository URL into the modal and select the latest version.
-5. Click **Add Plugin** and wait for BRAT to finish.
-6. Open **Settings** > **Community plugins**.
-7. Refresh the plugin list if needed.
-8. Find **RSS Dashboard** and enable it.
-
-### Manual Installation
-
-1. Download the latest release files (`manifest.json`, `styles.css`, `main.js`) from the [Releases page](https://github.com/amatya-aditya/obsidian-rss-dashboard/releases).
-2. Create a folder named `rss-dashboard` in your vault's `.obsidian/plugins` directory.
-3. Copy the downloaded files into that folder.
-4. Enable the plugin in **Settings** > **Community plugins**. You may need to restart Obsidian before it appears.
-
-## Getting Started
-
-### Adding Your First Feed
-
-1. Open the RSS Dashboard view using the ribbon icon or the command palette.
-2. Click the `+` button in the sidebar to add a new feed.
-3. Enter a feed URL or website URL. The plugin will try to auto-discover the feed for you.
-4. Choose a folder to organize the feed.
-5. Click **Add Feed** to subscribe.
-
-### Using the Discover Page
-
-1. Open the RSS Discover view using the Discover icon or the command palette.
-2. Browse curated feeds organized by category.
-3. Use the Kagi Smallweb button at the top of the Discover sidebar to open a curated collection of smaller independent blogs and websites.
-4. Use filters or search to find content you want to follow.
-5. Click **Add Feed** on any feed card to subscribe instantly.
-
-### Reading Articles
-
-1. Click any article in the dashboard to open it in the reader view.
-2. Use the built-in reader for a cleaner reading experience.
-3. Save articles as Markdown files for long-term storage in your vault.
-4. Use the video player for YouTube content or the audio player for podcasts.
-5. YouTube embeds use Privacy Enhanced Mode through `youtube-nocookie.com`, and each video includes a visible **Watch on YouTube** link.
-
-## One-Click Subscribe URI
-
-RSS Dashboard supports adding feeds directly from external apps and browser extensions through Obsidian's URI protocol handler.
-
-Use this format:
+手动安装需要把同一版本的三个独立发布文件放进：
 
 ```text
-obsidian://rss-dashboard?action=add-feed&url=<encoded-feed-url>
+{vault-root}/.obsidian/plugins/rss-dashboard-cn/
+  main.js
+  manifest.json
+  styles.css
 ```
 
-Example:
+随后重新加载或重启 Obsidian，在“设置 → 第三方插件”中启用 `RSS Dashboard CN`。更新时应同时替换三个文件，不要混用不同版本。
 
-```text
-obsidian://rss-dashboard?action=add-feed&url=https%3A%2F%2Fexample.com%2Frss.xml
-```
+完整步骤见 [中文安装指南](docs/INSTALL.zh-CN.md)。
 
-Browser-extension mapping example:
+## 第一次使用
 
-- Set your extension's subscribe/open URL target to `obsidian://rss-dashboard?action=add-feed&url=${encodeURIComponent(feedUrl)}` (replace `feedUrl` with your extension's feed URL variable).
+1. 打开命令面板，运行“打开 RSS 信息台”。
+2. 添加一个 RSS、网站、播客或 YouTube 来源。
+3. 保持默认的“每天打开时刷新”，或在设置中选择其他刷新模式。
+4. 在列表或阅读器中查看内容；需要长期保留时，点击保存为 Markdown。
+5. 只有需要 X 时才配置 TikHub；只有需要手动 AI 操作时才配置 AI 连接和密钥。
 
-Notes:
+未配置密钥时，相关操作会给出配置或错误指引，不影响普通采集。
 
-- The `url` query parameter is required.
-- Feed URLs must be URL-encoded before being inserted into the URI.
-- The URI opens the Add Feed modal with the URL prefilled so you can confirm settings before saving.
+## 数据存在哪里
 
-Troubleshooting:
+默认情况下，数据都保存在本机：
 
-- `Unsupported RSS Dashboard URI action`: verify `action=add-feed`.
-- `Missing required URL parameter for add-feed.`: include `url=<encoded-feed-url>`.
-- `URL must start with http:// or https://`: pass a valid web feed URL.
-- `Feed URL is malformed. Ensure the url parameter is URL-encoded.`: encode the feed URL before launching the URI.
+| 类别 | 默认位置（相对知识库根目录） |
+|---|---|
+| 插件设置元数据 | `.obsidian/plugins/rss-dashboard-cn/data.json` |
+| 采集记录、全文缓存、索引、刷新状态、AI 分析产物 | `.rss-dashboard-data/` |
+| Feed 分片 | `.rss-dashboard-data/feeds/` |
+| 每日 Markdown 索引 | `信息收集/每日采集/` |
+| 手动保存的 Markdown | `信息收集/已保存/` |
 
-### Organizing Your Feeds
+以上目录可以在设置中改动。若把元数据迁移到知识库目录，`data.json` 会写入配置的目录；改回默认位置时，原副本会保留作恢复用途。
 
-1. Create folders and subfolders to organize your subscriptions.
-2. Drag and drop feeds and folders to reorder them and build the structure you want more directly.
-3. Add tags to categorize your content.
-4. Use the filtering and sorting options to find specific articles quickly.
-5. Export your feed list as OPML for backup or migration.
+TikHub 与 AI 密钥不写入 `data.json` 或知识库，而是写入桌面系统用户目录中的外部 `secrets.json`。各系统的准确默认路径和权限边界见 [隐私与数据说明](docs/PRIVACY.zh-CN.md)。
 
-### Keyboard Shortcuts
+## TikHub 与费用边界
 
-To quickly access the keyboard shortcuts help file, press `?` (Shift + /) within the app. This will display a comprehensive list of available shortcuts and their functions.
+TikHub 只服务于可选的 X 账号和 X 主题来源。插件会在请求前使用单次和每日上限进行预算控制，默认上限分别为 40 次/轮和 100 次/本机日；实际计费、接口可用性和价格由 TikHub 决定，使用前应查看自己的 TikHub 套餐。
 
-For a preview of the keyboard shortcuts, see [Keyboard Shortcuts](docs/keyboard-shortcuts.md).
+主题发现会观察最新结果、平台 `Top` 结果，并可增加重点账号查询。`Top` 只是 TikHub/X 的搜索类别，不表示观点新颖度、公众热度、思考深度、来源权威性或插件推荐。
 
-## Syncing Across Devices
+关闭 TikHub、未配置密钥、密钥失效或达到预算上限时，X 来源会停止或报错；RSS、网站、播客和 YouTube 仍可使用。
 
-RSS Dashboard supports Obsidian Sync and some other third-party sync solutions, but requires
-a specific setup order on new devices to prevent feed data from being overwritten.
+## 按需 AI 与隐私边界
 
-### Before you begin: folder naming requirements
+AI 功能完全按需：你必须先选中一条信息，再明确选择摘要、翻译为中文、核心观点或深度分析。确认前不会向模型发送请求；确认后只向当前选定的连接发送一次该条信息的受限快照和对应操作指令。
 
-For sync to work reliably across devices, two naming rules must be followed in General
-Settings → Storage > Storage Mode **as well as** Metadata storage > Metadata data.json location:
+快照包含处理所需的单条标题、来源元数据、内容或简介，不会扫描并发送其他订阅、其他文章、其他笔记或整个知识库。YouTube 只使用标题和简介；普通文章只有在你明确选择获取全文时才会尝试读取或抓取该条全文。
 
-- **No dot prefix on folder names.** Folders beginning with `.` are hidden by the
-  operating system and ignored by most sync tools. For example, use `rss-dashboard-data`
-  not `.rss-dashboard-data`.
-- **Folder names must match exactly across all devices.** Your shard storage location
-  and your data folder must use identical names on every device you sync to.
+内置连接元数据预设包括 Kimi、DeepSeek、通义千问、GLM、OpenAI、Claude，以及 OpenAI/Anthropic 兼容中转接口。接口地址和模型名可编辑，服务商以后也可能改变要求。没有密钥、密钥失效、余额不足、限流或网络失败时，插件只显示对应指引，不会自动切换服务商。
 
-### How to set up a new device
+模型服务商会接收到你确认发送的内容，并可能按其政策记录或计费；使用前请自行核对服务商条款。
 
-Let's assume your desktop PC is your **existing device** and your phone or tablet is
-your **new device**.
+## 备份与删除
 
-1. If you already have RSS Dashboard installed on your **new device** (phone/tablet), disable it there before beginning these steps: (Obsidian settings > Community Plugins > RSS Dashboard > Toggle 'Off').
-2. If you do not yet have the plugin installed on your **new device**, install it but **do not enable it yet**.
+- 备份时至少保留需要的 `信息收集/` Markdown、订阅设置和 `.rss-dashboard-data/`。
+- 公开分享任何导出文件前先人工检查；导出内容可能包含订阅地址、X 账号、关键词、标题或文件夹名。
+- 公共设置导出不会携带 TikHub/AI 密钥。导入的 TikHub 与 AI 连接会保持禁用或未配置，必须在本机重新绑定密钥。
+- 从分片存储切回传统 JSON 时，插件不会自动删除原分片；从知识库元数据位置切回插件默认位置时，也会保留原副本供恢复。
+- 卸载前先禁用插件并备份需要的 Markdown。只删除你已核对属于本插件的准确目录，不要直接删除整个知识库或整个用户目录。
 
-> ⚠️ **Important:** Enabling the plugin before Obsidian Sync finishes its initial pull
-> will cause it to write empty defaults to disk. Sync will treat this empty file as the
-> authoritative state and propagate it to all your devices, wiping your feeds.
+详细清理顺序见 [隐私与数据说明](docs/PRIVACY.zh-CN.md)。
 
-> ⚠️ **Important:** Sync will only work on legacy mode if your data.json file is below 5mb. It is highly recommended to use Shard Storage v2 since it is currently the most robust version for data storage.
+## 已知限制
 
-3. On your **existing device** (PC): Set up RSS Dashboard with all the feeds, folders, and tags you want to sync.
-4. On your **existing device** (PC): Confirm your storage folder names follow the requirements above (Settings → RSS Dashboard → Storage, **as well as** Storage → Metadata storage > Metadata data.json location).
-5. On your **existing device** (PC): Open Obsidian Settings → Core Plugins → Sync → Activity Log and wait until it shows today's date and time with the text "Fully synced"
+- 仅支持 Obsidian 桌面端；外部密钥存储依赖 Node.js 文件系统能力。
+- 网站全文提取受网页结构、登录、反爬策略和网络环境影响。
+- YouTube 不提供字幕抓取，AI 不能基于未采集的音视频内容分析。
+- TikHub 和各 AI 服务商的接口、模型、价格与配额可能变化。
+- Windows 的外部密钥文件依赖操作系统账户和文件系统访问控制，不是加密凭证库。
+- 自动刷新必须等 Obsidian 打开；若来源当天失败，可手动重试。
 
-6. On your **new device** (phone/tablet): Open Obsidian and check the same Sync Activity Log. Wait until it shows today's date and time with the text "Fully synced". Close the sync window.
-7. On your **new device** (phone/tablet): Enable the RSS Dashboard plugin. Your data should now be synced.
+遇到问题请先看 [中文故障排查](docs/TROUBLESHOOTING.zh-CN.md)。
 
-> ⚠️ **Important:** If feeds do not appear after enabling, disable the plugin, wait two minutes, and re-enable it. If the issue persists, see [Troubleshooting] or open an issue.
+## 上游项目与许可证
 
-8. On your **new device** (phone/tablet): Verify that the storage folder paths match your **existing device**'s (PC) folder structure exactly. These settings sync automatically, but a mismatch here will cause future sync issues.
+本项目由 ChadBai 维护，是 [Aditya Amatya 的 Obsidian RSS Dashboard](https://github.com/amatya-aditya/obsidian-rss-dashboard) 的衍生版本，起点为上游 `2.5.0`。
 
-If you've already hit this issue, disable the plugin on the affected device, wait for
-"Fully synced", then re-enable it.
+上游项目与本衍生项目均使用 MIT License。仓库中的 [LICENSE](LICENSE) 保留上游版权与许可文本，更多说明见 [NOTICE.md](NOTICE.md)。上游作者、社区、资助或发布入口不代表对本衍生版本的背书。
 
-### Why this happens
+## 开发与验证
 
-Obsidian Sync has no public API to signal when a sync is in progress. On a clean install,
-if the plugin loads before your data has arrived from the server, it falls back to empty
-defaults and immediately writes them to disk — giving Sync a newer timestamp to treat as
-authoritative.
-
-### Ongoing sync reliability
-
-To ensure minor changes (feed reorders, tag edits, folder renames) are always detected
-by Obsidian Sync, the plugin appends a variable-length sync nonce to every write. This
-guarantees the file size changes on each save, which Obsidian Sync uses alongside
-modification time to detect changes.
-
-## Development
-
-Before opening a PR, read the contributor policy in [CONTRIBUTING.MD](CONTRIBUTING.MD), especially the **Compliance Declarations (Audit Guardrails)** section.
-
-For implementation examples and approved patterns used in recent compliance passes, see [docs/development/compliance-patterns.md](docs/development/compliance-patterns.md).
-
-### Local Setup
-
-This repo targets Node 22 for local development and CI. Both `.nvmrc` and `.node-version` are pinned to `22`.
-
-If you use `nvm`, run:
+需要 Node.js 22：
 
 ```bash
-nvm use
 npm ci
+npm run check
 ```
 
-### Local Development
-
-Use the development build while making changes locally:
+`npm run check` 会运行单元测试、本地化审计、代码检查和构建。单独构建可运行：
 
 ```bash
-nvm use
-npm ci
-npm run dev
-```
-
-### Local CI-Equivalent Commands
-
-Run the same install and unit test flow used in GitHub Actions:
-
-```bash
-nvm use
-npm ci
-npm run test:unit -- --coverage
-```
-
-**Test Baseline**: 177 test files, 1530 passing tests. See [testing-guide.md](docs/development/test_coverage/testing-guide.md) for details.
-
-### Production Build
-
-To mirror the release workflow build step locally:
-
-```bash
-nvm use
-npm ci
 npm run build
 ```
 
-## Troubleshooting
-
-### Common Issues
-
-**Feed not loading**
-
-- Check that the feed URL is correct.
-- Try refreshing the feed manually.
-- Some feeds require authentication.
-
-**YouTube feeds not working**
-
-- Make sure you are using a valid YouTube channel, user, or playlist URL.
-- Try using the channel ID instead of a custom URL.
-- Some channels have disabled RSS feeds.
-- YouTube feed retrieval is currently limited, and only about 15 YouTube feeds can usually be fetched at a time.
-- Embedded playback uses `youtube-nocookie.com` with a strict referrer policy to satisfy current YouTube embed requirements.
-
-**Podcast audio not playing**
-
-- Check that the audio URL is accessible.
-- Some podcasts require authentication.
-- Try opening the audio URL in a browser.
-
-### Getting Help
-
-If you run into an issue or have a suggestion:
-
-- Create an issue on [GitHub](https://github.com/amatya-aditya/obsidian-rss-dashboard/issues)
-- Join the [Discord community](https://discord.com/invite/9bu7V9BBbs)
-- Check existing issues for known fixes and workarounds
-
-## YouTube Embeds and Terms
-
-RSS Dashboard resolves YouTube feed items to a canonical `videoId`, renders the embedded player through Privacy Enhanced Mode (`https://www.youtube-nocookie.com/embed/...`), and provides a standard **Watch on YouTube** link that opens the original video in your browser or native YouTube app.
-
-The plugin does not add YouTube download features, background audio-only playback, or ad-blocking behavior around the embedded player.
-
-YouTube embeds and API usage are subject to:
-
-- [YouTube API Services Terms of Service](https://developers.google.com/youtube/terms/api-services-terms-of-service)
-- [YouTube Terms of Service](https://www.youtube.com/t/terms)
-
-## Support the Development
-
-If you find this plugin useful, consider supporting its long-term development:
-
-- Buy me a coffee: <https://www.buymeacoffee.com/amatya_aditya>
-- Ko-fi: <https://ko-fi.com/Y8Y41FV4WI>
-
-## Other Plugins by Me
-
-1. [Media Slider](https://github.com/amatya-aditya/obsidian-media-slider)
-2. [Zen Space](https://github.com/amatya-aditya/obsidian-zen-space)
-
-## License
-
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+贡献前请阅读 [CONTRIBUTING.MD](CONTRIBUTING.MD)，尤其是隐私数据、测试夹具和上游署名要求。
