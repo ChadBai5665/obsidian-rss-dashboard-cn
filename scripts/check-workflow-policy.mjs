@@ -1,22 +1,103 @@
+import { isDeepStrictEqual } from "node:util";
 import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse } from "yaml";
+import { parseAllDocuments, visit } from "yaml";
 
-const TEST_ACTIONS = new Set([
-  "actions/checkout@v4",
-  "actions/setup-node@v4",
-]);
-const RELEASE_ACTIONS = new Set([
-  "actions/attest-build-provenance@v2",
-  "actions/checkout@v4",
-  "actions/setup-node@v4",
-]);
+const CHECKOUT_ACTION =
+  "actions/checkout@11d5960a326750d5838078e36cf38b85af677262";
+const SETUP_NODE_ACTION =
+  "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020";
+const ATTEST_ACTION =
+  "actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45";
 const RELEASE_FILES = [
   "release/main.js",
   "release/manifest.json",
   "release/styles.css",
 ];
+const RELEASE_TAG_PATTERNS = [
+  "[0-9]+.[0-9]+.[0-9]+",
+  "[0-9]+.[0-9]+.[0-9]+-*",
+  String.raw`[0-9]+.[0-9]+.[0-9]+\+*`,
+];
+
+const EXPECTED_TEST_WORKFLOW = {
+  name: "Test",
+  permissions: { contents: "read" },
+  on: {
+    push: { branches: ["master"] },
+    pull_request: { branches: ["master"] },
+  },
+  jobs: {
+    check: {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 30,
+      steps: [
+        {
+          name: "Check out repository",
+          uses: CHECKOUT_ACTION,
+          with: { "persist-credentials": false },
+        },
+        {
+          name: "Set up Node.js",
+          uses: SETUP_NODE_ACTION,
+          with: { "node-version": "22", cache: "npm" },
+        },
+        { name: "Install dependencies", run: "npm ci" },
+        { name: "Run canonical checks", run: "npm run check" },
+      ],
+    },
+  },
+};
+
+const EXPECTED_RELEASE_WORKFLOW = {
+  name: "Release Obsidian plugin",
+  on: { push: { tags: RELEASE_TAG_PATTERNS } },
+  jobs: {
+    "draft-release": {
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 30,
+      permissions: {
+        contents: "write",
+        attestations: "write",
+        "id-token": "write",
+      },
+      steps: [
+        {
+          name: "Check out repository",
+          uses: CHECKOUT_ACTION,
+          with: { "persist-credentials": false },
+        },
+        {
+          name: "Set up Node.js",
+          uses: SETUP_NODE_ACTION,
+          with: { "node-version": "22", cache: "npm" },
+        },
+        { name: "Install dependencies", run: "npm ci" },
+        {
+          name: "Validate tag against package version",
+          run: 'node scripts/check-version-consistency.mjs --tag "$GITHUB_REF_NAME"',
+        },
+        { name: "Run canonical checks", run: "npm run check" },
+        { name: "Stage release assets", run: "npm run release:stage" },
+        {
+          name: "Validate staged release assets",
+          run: "npm run release:check",
+        },
+        {
+          name: "Attest build provenance for release assets",
+          uses: ATTEST_ACTION,
+          with: { "subject-path": RELEASE_FILES.join("\n") },
+        },
+        {
+          name: "Create draft release",
+          env: { GH_TOKEN: "${{ github.token }}" },
+          run: "node scripts/create-draft-release.mjs",
+        },
+      ],
+    },
+  },
+};
 
 function record(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -24,294 +105,335 @@ function record(value) {
     : {};
 }
 
+function normalizeWorkflow(value) {
+  const normalized = structuredClone(value);
+  for (const job of Object.values(record(normalized.jobs))) {
+    const steps = record(job).steps;
+    if (!Array.isArray(steps)) continue;
+    for (const step of steps) {
+      if (typeof step?.run === "string") step.run = step.run.trim();
+      if (typeof step?.with?.["subject-path"] === "string") {
+        step.with["subject-path"] = step.with["subject-path"]
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .join("\n");
+      }
+    }
+  }
+  return normalized;
+}
+
 function parseWorkflow(text, prefix, errors) {
   try {
-    const value = parse(text, { maxAliasCount: 0 });
+    const documents = parseAllDocuments(text, {
+      maxAliasCount: 0,
+      merge: false,
+      uniqueKeys: true,
+      version: "1.2",
+    });
+    let unsafe = documents.length !== 1;
+    const document = documents[0];
+    if (
+      !document ||
+      document.errors.length > 0 ||
+      document.warnings.length > 0
+    ) {
+      unsafe = true;
+    }
+    if (document) {
+      visit(document, {
+        Alias() {
+          unsafe = true;
+        },
+        Pair(_key, pair) {
+          const key = pair.key;
+          if (
+            key &&
+            typeof key === "object" &&
+            "value" in key &&
+            key.value === "<<"
+          ) {
+            unsafe = true;
+          }
+        },
+      });
+    }
+    if (unsafe) {
+      errors.push(`${prefix}-yaml-unsafe`);
+      return {};
+    }
+    const value = document.toJS({ maxAliasCount: 0 });
     if (
       value === null ||
       typeof value !== "object" ||
       Array.isArray(value)
     ) {
-      errors.push(`${prefix}-yaml-shape-invalid`);
+      errors.push(`${prefix}-yaml-unsafe`);
       return {};
     }
-    return value;
+    return normalizeWorkflow(value);
   } catch {
-    errors.push(`${prefix}-yaml-invalid`);
+    errors.push(`${prefix}-yaml-unsafe`);
     return {};
   }
 }
 
-function workflowSteps(workflow) {
-  return Object.values(record(workflow.jobs)).flatMap((job) => {
-    const steps = record(job).steps;
-    return Array.isArray(steps) ? steps.map(record) : [];
-  });
+function jobs(workflow) {
+  return Object.values(record(workflow.jobs)).map(record);
 }
 
-function allPermissions(workflow) {
-  return [
-    record(workflow.permissions),
-    ...Object.values(record(workflow.jobs)).map((job) =>
-      record(record(job).permissions),
-    ),
-  ].filter((permissions) => Object.keys(permissions).length > 0);
+function steps(workflow) {
+  return jobs(workflow).flatMap((job) =>
+    Array.isArray(job.steps) ? job.steps.map(record) : [],
+  );
+}
+
+function containsKey(value, target) {
+  if (!value || typeof value !== "object") return false;
+  if (!Array.isArray(value) && Object.hasOwn(value, target)) return true;
+  return Object.values(value).some((child) => containsKey(child, target));
+}
+
+function hasUnsafeEnvironment(workflow, expectedCreateEnvironment) {
+  if (Object.hasOwn(workflow, "env")) return true;
+  const workflowJobs = jobs(workflow);
+  if (workflowJobs.some((job) => Object.hasOwn(job, "env"))) return true;
+  const workflowSteps = steps(workflow);
+  const envSteps = workflowSteps.filter((step) => Object.hasOwn(step, "env"));
+  return (
+    envSteps.length !== 1 ||
+    !isDeepStrictEqual(envSteps[0].env, expectedCreateEnvironment)
+  );
 }
 
 function checkTestWorkflow(text, errors) {
   const workflow = parseWorkflow(text, "test", errors);
-  const jobs = Object.values(record(workflow.jobs)).map(record);
-  if (
-    jobs.length !== 1 ||
-    jobs[0]["runs-on"] !== "ubuntu-latest"
-  ) {
-    errors.push("test-job-not-single");
+  if (!isDeepStrictEqual(workflow, EXPECTED_TEST_WORKFLOW)) {
+    errors.push("test-schema-unsafe");
   }
-  const triggers = record(workflow.on);
-  const triggerNames = Object.keys(triggers).sort();
   if (
-    !triggerNames.includes("pull_request") ||
-    !triggerNames.includes("push") ||
-    triggerNames.some((name) => !["pull_request", "push"].includes(name))
-  ) {
-    errors.push("test-trigger-unsafe");
-  }
-  const pushBranches = record(triggers.push).branches;
-  const pullRequestBranches = record(triggers.pull_request).branches;
-  if (
-    !Array.isArray(pushBranches) ||
-    pushBranches.length !== 1 ||
-    pushBranches[0] !== "master" ||
-    !Array.isArray(pullRequestBranches) ||
-    pullRequestBranches.length !== 1 ||
-    pullRequestBranches[0] !== "master"
-  ) {
-    errors.push("test-base-branch-mismatch");
-  }
-
-  const permissions = allPermissions(workflow);
-  if (
-    permissions.length === 0 ||
-    permissions.some(
-      (entry) =>
-        Object.keys(entry).length !== 1 || entry.contents !== "read",
-    )
+    !isDeepStrictEqual(workflow.permissions, { contents: "read" })
   ) {
     errors.push("test-permissions-not-read-only");
   }
-
-  const steps = workflowSteps(workflow);
-  const actions = steps
+  const trigger = record(workflow.on);
+  if (
+    !isDeepStrictEqual(Object.keys(trigger).sort(), [
+      "pull_request",
+      "push",
+    ])
+  ) {
+    errors.push("test-trigger-unsafe");
+  }
+  if (
+    !isDeepStrictEqual(record(trigger.push).branches, ["master"]) ||
+    !isDeepStrictEqual(record(trigger.pull_request).branches, ["master"])
+  ) {
+    errors.push("test-base-branch-mismatch");
+  }
+  const workflowJobs = jobs(workflow);
+  if (
+    workflowJobs.length !== 1 ||
+    workflowJobs[0]["runs-on"] !== "ubuntu-latest"
+  ) {
+    errors.push("test-job-not-single");
+  }
+  const workflowSteps = steps(workflow);
+  const actionValues = workflowSteps
     .map((step) => step.uses)
     .filter((value) => typeof value === "string");
   if (
-    actions.some((action) => !TEST_ACTIONS.has(action)) ||
-    !actions.includes("actions/checkout@v4") ||
-    !actions.includes("actions/setup-node@v4")
+    !isDeepStrictEqual(actionValues, [CHECKOUT_ACTION, SETUP_NODE_ACTION])
   ) {
     errors.push("test-actions-not-minimal");
   }
-  const nodeStep = steps.find(
-    (step) => step.uses === "actions/setup-node@v4",
+  const checkout = workflowSteps.filter((step) =>
+    String(step.uses ?? "").startsWith("actions/checkout@"),
   );
-  if (String(record(nodeStep?.with)["node-version"]) !== "22") {
+  if (
+    checkout.length !== 1 ||
+    !isDeepStrictEqual(checkout[0], EXPECTED_TEST_WORKFLOW.jobs.check.steps[0])
+  ) {
+    errors.push("test-checkout-unsafe");
+  }
+  if (
+    record(
+      workflowSteps.find((step) => step.uses === SETUP_NODE_ACTION)?.with,
+    )["node-version"] !== "22"
+  ) {
     errors.push("test-node-version-mismatch");
   }
-
-  const commands = steps
+  const commands = workflowSteps
     .map((step) => step.run)
-    .filter((value) => typeof value === "string")
-    .map((value) => value.trim());
-  if (
-    commands.length !== 2 ||
-    commands[0] !== "npm ci" ||
-    commands[1] !== "npm run check"
-  ) {
+    .filter((value) => typeof value === "string");
+  if (!isDeepStrictEqual(commands, ["npm ci", "npm run check"])) {
     errors.push("test-not-canonical-check");
+  }
+  if (
+    containsKey(workflow, "continue-on-error") ||
+    containsKey(workflow, "if") ||
+    containsKey(workflow, "working-directory") ||
+    containsKey(workflow, "shell")
+  ) {
+    errors.push("test-unsafe-control");
+  }
+  if (
+    Object.hasOwn(workflow, "env") ||
+    workflowJobs.some((job) => Object.hasOwn(job, "env")) ||
+    workflowSteps.some((step) => Object.hasOwn(step, "env"))
+  ) {
+    errors.push("test-environment-unsafe");
   }
 }
 
 function checkReleaseWorkflow(text, errors) {
   const workflow = parseWorkflow(text, "release", errors);
-  const jobs = Object.values(record(workflow.jobs)).map(record);
-  if (
-    jobs.length !== 1 ||
-    jobs[0]["runs-on"] !== "ubuntu-latest"
-  ) {
-    errors.push("release-job-not-single");
+  if (!isDeepStrictEqual(workflow, EXPECTED_RELEASE_WORKFLOW)) {
+    errors.push("release-schema-unsafe");
   }
-  const triggers = record(workflow.on);
-  const triggerNames = Object.keys(triggers);
-  const tags = record(triggers.push).tags;
+  const trigger = record(workflow.on);
   if (
-    triggerNames.length !== 1 ||
-    triggerNames[0] !== "push" ||
-    !Array.isArray(tags) ||
-    tags.length !== 1 ||
-    tags[0] !== "[0-9]+.[0-9]+.[0-9]+*"
+    !isDeepStrictEqual(Object.keys(trigger), ["push"]) ||
+    !isDeepStrictEqual(record(trigger.push).tags, RELEASE_TAG_PATTERNS)
   ) {
     errors.push("release-trigger-not-numeric-semver");
   }
 
-  const permissions = allPermissions(workflow);
-  const expectedPermissions = [
-    "attestations:write",
-    "contents:write",
-    "id-token:write",
-  ];
+  const workflowJobs = jobs(workflow);
   if (
-    permissions.length !== 1 ||
-    Object.entries(permissions[0])
-      .map(([name, value]) => `${name}:${value}`)
-      .sort()
-      .join(",") !== expectedPermissions.join(",")
+    workflowJobs.length !== 1 ||
+    workflowJobs[0]["runs-on"] !== "ubuntu-latest"
+  ) {
+    errors.push("release-job-not-single");
+  }
+  if (
+    workflowJobs.length !== 1 ||
+    !isDeepStrictEqual(
+      workflowJobs[0].permissions,
+      EXPECTED_RELEASE_WORKFLOW.jobs["draft-release"].permissions,
+    )
   ) {
     errors.push("release-permissions-not-minimal");
   }
+  if (
+    containsKey(workflow, "continue-on-error") ||
+    containsKey(workflow, "if")
+  ) {
+    errors.push("release-unsafe-control");
+  }
+  if (
+    hasUnsafeEnvironment(workflow, { GH_TOKEN: "${{ github.token }}" })
+  ) {
+    errors.push("release-environment-unsafe");
+    errors.push("release-token-source-unsafe");
+  }
 
-  const steps = workflowSteps(workflow);
-  const actions = steps
+  const workflowSteps = steps(workflow);
+  const expectedSteps =
+    EXPECTED_RELEASE_WORKFLOW.jobs["draft-release"].steps;
+  if (
+    !isDeepStrictEqual(
+      workflowSteps.map((step) => step.name),
+      expectedSteps.map((step) => step.name),
+    )
+  ) {
+    errors.push("release-step-order-invalid");
+  }
+  const actionValues = workflowSteps
     .map((step) => step.uses)
     .filter((value) => typeof value === "string");
   if (
-    actions.some((action) => !RELEASE_ACTIONS.has(action)) ||
-    !actions.includes("actions/checkout@v4") ||
-    !actions.includes("actions/setup-node@v4") ||
-    !actions.includes("actions/attest-build-provenance@v2")
+    !isDeepStrictEqual(actionValues, [
+      CHECKOUT_ACTION,
+      SETUP_NODE_ACTION,
+      ATTEST_ACTION,
+    ])
   ) {
     errors.push("release-actions-not-minimal");
   }
-  const nodeStep = steps.find(
-    (step) => step.uses === "actions/setup-node@v4",
+  const checkout = workflowSteps.filter((step) =>
+    String(step.uses ?? "").startsWith("actions/checkout@"),
   );
-  if (String(record(nodeStep?.with)["node-version"]) !== "22") {
-    errors.push("release-node-version-mismatch");
+  if (
+    checkout.length !== 1 ||
+    !isDeepStrictEqual(checkout[0], expectedSteps[0])
+  ) {
+    errors.push("release-checkout-unsafe");
   }
 
-  const commands = steps
+  const commands = workflowSteps
     .map((step) => step.run)
     .filter((value) => typeof value === "string");
-  const commandText = commands.join("\n");
+  const expectedCommands = expectedSteps
+    .map((step) => step.run)
+    .filter((value) => typeof value === "string");
+  if (!isDeepStrictEqual(commands, expectedCommands)) {
+    errors.push("release-commands-not-minimal");
+  }
   if (commands.some((command) => command.includes("${{"))) {
     errors.push("release-shell-expression-interpolation");
   }
-  const installIndex = commands.findIndex(
-    (command) => command.trim() === "npm ci",
+  const versionStep = workflowSteps.find(
+    (step) => step.name === "Validate tag against package version",
   );
-  const versionIndex = commands.findIndex((command) =>
-    command
-      .trim()
-      .includes(
-        'node scripts/check-version-consistency.mjs --tag "$GITHUB_REF_NAME"',
-      ),
-  );
-  const checkIndex = commands.findIndex(
-    (command) => command.trim() === "npm run check",
-  );
-  const stageIndex = commands.findIndex(
-    (command) => command.trim() === "npm run release:stage",
-  );
-  const artifactCheckIndex = commands.findIndex(
-    (command) => command.trim() === "npm run release:check",
-  );
-  const createIndex = commands.findIndex((command) =>
-    command.includes("gh release create"),
-  );
-  if (
-    commands.length !== 6 ||
-    installIndex !== 0 ||
-    versionIndex !== 1 ||
-    checkIndex !== 2 ||
-    stageIndex !== 3 ||
-    artifactCheckIndex !== 4 ||
-    createIndex !== 5
-  ) {
-    errors.push("release-commands-not-minimal");
-  }
-  if (versionIndex < 0) {
+  if (versionStep?.run !== expectedSteps[3].run) {
     errors.push("release-version-tag-not-validated");
   }
-  if (artifactCheckIndex < 0) {
+  const artifactCheckIndex = workflowSteps.findIndex(
+    (step) => step.run === "npm run release:check",
+  );
+  if (artifactCheckIndex !== 6) {
     errors.push("release-artifacts-not-checked");
   }
+  const attestationIndex = workflowSteps.findIndex(
+    (step) => step.uses === ATTEST_ACTION,
+  );
+  const createIndex = workflowSteps.findIndex(
+    (step) => step.run === "node scripts/create-draft-release.mjs",
+  );
   if (
-    !(
-      installIndex >= 0 &&
-      installIndex < versionIndex &&
-      versionIndex < checkIndex &&
-      checkIndex < stageIndex &&
-      stageIndex < artifactCheckIndex &&
-      artifactCheckIndex < createIndex
-    )
+    artifactCheckIndex !== 6 ||
+    attestationIndex !== 7 ||
+    createIndex !== 8
   ) {
+    errors.push("release-step-order-invalid");
     errors.push("release-validation-order-invalid");
   }
-
-  const attestationStep = steps.find(
-    (step) => step.uses === "actions/attest-build-provenance@v2",
-  );
-  const subjects = String(record(attestationStep?.with)["subject-path"] ?? "")
-    .split(/\r?\n/)
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .sort();
-  if (subjects.join(",") !== [...RELEASE_FILES].sort().join(",")) {
+  const attestation = workflowSteps[attestationIndex] ?? {};
+  if (
+    !isDeepStrictEqual(
+      record(attestation.with)["subject-path"],
+      RELEASE_FILES.join("\n"),
+    )
+  ) {
     errors.push("release-attestation-subjects-invalid");
+    errors.push("release-assets-not-individual-files");
   }
-
-  const createCommand =
-    commands.find((command) => command.includes("gh release create")) ?? "";
-  const createStep = steps.find(
-    (step) =>
-      typeof step.run === "string" &&
-      step.run.includes("gh release create"),
-  );
-  const createEnvironment = record(createStep?.env);
-  if (
-    Object.keys(createEnvironment).length !== 1 ||
-    createEnvironment.GH_TOKEN !== "${{ github.token }}"
-  ) {
-    errors.push("release-token-source-unsafe");
-  }
-  if (
-    !createCommand.includes('gh release create "$GITHUB_REF_NAME"') ||
-    !createCommand.includes('--title "$GITHUB_REF_NAME"') ||
-    !createCommand.includes("--verify-tag")
-  ) {
+  const createStep = workflowSteps[createIndex] ?? {};
+  if (createStep.run !== "node scripts/create-draft-release.mjs") {
+    errors.push("release-not-always-draft");
     errors.push("release-name-or-tag-mismatch");
+    errors.push("release-assets-not-individual-files");
   }
   if (
-    !createCommand.includes("--draft") ||
-    createCommand.includes("--draft=false") ||
-    createCommand.includes("gh release edit")
+    workflowSteps.some(
+      (step) =>
+        typeof step.run === "string" &&
+        step.run.includes("gh release create"),
+    )
   ) {
     errors.push("release-not-always-draft");
   }
   if (
-    !createCommand.includes('[[ "$GITHUB_REF_NAME" == *-* ]]') ||
-    !createCommand.includes("--prerelease")
+    containsKey(workflow, "working-directory") ||
+    containsKey(workflow, "shell") ||
+    containsKey(workflow, "container") ||
+    containsKey(workflow, "services") ||
+    containsKey(workflow, "strategy") ||
+    containsKey(workflow, "needs")
   ) {
-    errors.push("release-prerelease-policy-missing");
-  }
-  if (
-    RELEASE_FILES.some(
-      (file) =>
-        !new RegExp(
-          `(?:^|\\s)${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`,
-        ).test(createCommand),
-    ) ||
-    /(?:^|\s)release\/(?:\s|$)|release\/[*]|\.zip\b|\.tar(?:\.gz)?\b/.test(
-      createCommand,
-    )
-  ) {
-    errors.push("release-assets-not-individual-files");
-  }
-
-  if (
-    !commandText.includes("npm run check") ||
-    !commandText.includes("npm run release:stage")
-  ) {
-    errors.push("release-required-check-missing");
+    errors.push("release-schema-unsafe");
   }
 }
 
@@ -345,9 +467,20 @@ export function checkWorkflowPolicy({
   return [...new Set(errors)].sort();
 }
 
+async function fundingPresent(github) {
+  for (const name of ["funding.yml", "FUNDING.yml"]) {
+    try {
+      await access(join(github, name));
+      return true;
+    } catch {
+      // Continue checking the other supported filename.
+    }
+  }
+  return false;
+}
+
 async function main() {
-  const root = resolve(process.cwd());
-  const github = join(root, ".github");
+  const github = join(resolve(process.cwd()), ".github");
   try {
     const inputs = {
       testWorkflow: await readFile(
@@ -362,10 +495,7 @@ async function main() {
         join(github, "PULL_REQUEST_TEMPLATE.md"),
         "utf8",
       ),
-      fundingPresent: await access(join(github, "funding.yml")).then(
-        () => true,
-        () => false,
-      ),
+      fundingPresent: await fundingPresent(github),
     };
     const errors = checkWorkflowPolicy(inputs);
     if (errors.length > 0) {

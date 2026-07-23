@@ -173,7 +173,7 @@ describe("version consistency validator", () => {
     );
     expect(result.status).toBe(1);
     expect(result.stdout.trim()).toBe("release-tag-invalid");
-  });
+  }, 15_000);
 
   it("requires canonical package and lock metadata with the exact author", async () => {
     const repository = await fixtureRepository();

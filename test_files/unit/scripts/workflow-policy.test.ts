@@ -58,7 +58,7 @@ describe("public workflow policy", () => {
 
   it("rejects broad release triggers and expression interpolation in shell", () => {
     const unsafe = inputs.releaseWorkflow
-      .replace('"[0-9]+.[0-9]+.[0-9]+*"', '"*"')
+      .replace('"[0-9]+.[0-9]+.[0-9]+"', '"*"')
       .replace(
         'node scripts/check-version-consistency.mjs --tag "$GITHUB_REF_NAME"',
         "node scripts/check-version-consistency.mjs --tag ${{ github.ref_name }}",
@@ -91,10 +91,10 @@ describe("public workflow policy", () => {
 
   it("rejects publishing instead of drafting and directory uploads", () => {
     const unsafe = inputs.releaseWorkflow
-      .replace("--draft", "--draft=false")
-      .replaceAll("release/main.js", "release/")
-      .replaceAll("release/manifest.json", "release/")
-      .replaceAll("release/styles.css", "release/");
+      .replace(
+        "node scripts/create-draft-release.mjs",
+        'gh release create "$GITHUB_REF_NAME" release/',
+      );
 
     expect(
       checkWorkflowPolicy({ ...inputs, releaseWorkflow: unsafe }),

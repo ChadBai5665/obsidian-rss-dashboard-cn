@@ -59,6 +59,14 @@ export const unsafeReleaseTextCases = [
     text: String.raw`\\server\share\Vault\private\note.md`,
   },
   { rule: "home-path", text: String.raw`\\server\share` },
+  {
+    rule: "credential-value",
+    text: ["API", "_TOKEN = ", "abcdefghijklmnop"].join(""),
+  },
+  {
+    rule: "credential-value",
+    text: ["api", "-token: ", "abcdefghijklmnop"].join(""),
+  },
 ] as const;
 
 export const safeReleaseTextCases = [
