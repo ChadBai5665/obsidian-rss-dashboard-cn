@@ -756,7 +756,12 @@ describe("refreshFeeds() pipeline behavior", () => {
     plugin.settings.metadataStorageMode = "vault-location";
     plugin.settings.metadataStorageFolder = "RSS Metadata";
     plugin.saveData = vi.fn(async (data: unknown) => {
-      await plugin.app.vault.adapter.write("data.json", JSON.stringify(data));
+      const contents = JSON.stringify(data);
+      if (await plugin.app.vault.adapter.exists("data.json")) {
+        await plugin.app.vault.adapter.write("data.json", contents);
+        return;
+      }
+      await plugin.app.vault.create("data.json", contents);
     });
     await plugin.saveSettings({ forceAllShards: true, forceMetadata: true });
     const paths = [

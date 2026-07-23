@@ -2284,9 +2284,10 @@ describe("onunload()", () => {
     vi.restoreAllMocks();
   });
 
-  it("calls async performAutoBackups on onunload", () => {
+  it("calls async performAutoBackups on onunload after the settings queue", async () => {
     // When: onunload is called
     plugin.onunload();
+    await flushPromises();
 
     // Then: performAutoBackups should be called
     expect(
@@ -2646,10 +2647,13 @@ describe("transactional public settings imports", () => {
   const writeDurable = async (
     settings: RssDashboardSettings,
   ): Promise<void> => {
-    await plugin.app.vault.adapter.write(
-      "data.json",
-      JSON.stringify(settings),
-    );
+    const contents = JSON.stringify(settings);
+    const existing = plugin.app.vault.getAbstractFileByPath("data.json");
+    if (existing) {
+      await plugin.app.vault.adapter.write("data.json", contents);
+    } else {
+      await plugin.app.vault.create("data.json", contents);
+    }
   };
 
   const readDurable = async (): Promise<RssDashboardSettings> =>
@@ -2916,6 +2920,12 @@ describe("transactional public settings imports", () => {
       }
     });
 
+    const backupLocales: string[] = [];
+    (
+      plugin as unknown as PluginPrivateAPI
+    ).backupService.performAutoBackups = vi.fn(async () => {
+      backupLocales.push(plugin.settings.locale);
+    });
     const operation = plugin.importUserSettingsJsonFromFile(
       new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
     );
@@ -2924,9 +2934,51 @@ describe("transactional public settings imports", () => {
     releaseWrite.resolve();
 
     await expect(operation).rejects.toThrow("Settings import canceled");
+    await flushPromises();
     expect(plugin.settings).toBe(previous);
     expect(plugin.feedParser).toBe(previousFeedParser);
     expect((await readDurable()).locale).toBe("zh-CN");
+    expect(backupLocales).toEqual(["zh-CN"]);
+  });
+
+  it("preserves an external plugin metadata rewrite on import rollback", async () => {
+    vi.mocked(plugin.refreshDashboardViews).mockImplementationOnce(async () => {
+      await plugin.app.vault.adapter.write(
+        "data.json",
+        "EXTERNAL-METADATA",
+      );
+      throw new Error("refresh failed");
+    });
+
+    await expect(
+      plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      ),
+    ).rejects.toThrow("Settings import rollback incomplete");
+    expect(await plugin.app.vault.adapter.read("data.json")).toBe(
+      "EXTERNAL-METADATA",
+    );
+  });
+
+  it("does not overwrite a same-byte ABA replacement of plugin metadata", async () => {
+    vi.mocked(plugin.refreshDashboardViews).mockImplementationOnce(async () => {
+      const candidateBytes = await plugin.app.vault.adapter.read("data.json");
+      const candidateFile =
+        plugin.app.vault.getAbstractFileByPath("data.json");
+      if (!candidateFile) throw new Error("missing candidate file");
+      await plugin.app.vault.delete(candidateFile);
+      await plugin.app.vault.create("data.json", candidateBytes);
+      throw new Error("refresh failed");
+    });
+
+    await expect(
+      plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      ),
+    ).rejects.toThrow("Settings import rollback incomplete");
+    expect(
+      JSON.parse(await plugin.app.vault.adapter.read("data.json")),
+    ).toEqual(expect.objectContaining({ locale: "en" }));
   });
 
   it("cancels and compensates when unload happens during the final async view lookup", async () => {
@@ -3028,6 +3080,10 @@ describe("transactional public settings imports", () => {
         );
       });
 
+      const expectedError =
+        mode === "missing"
+          ? "Settings import persistence verification failed"
+          : "Settings import rollback incomplete";
       await expect(
         plugin.importUserSettingsJsonFromFile(
           new File(
@@ -3040,17 +3096,21 @@ describe("transactional public settings imports", () => {
             "usersettings.json",
           ),
         ),
-      ).rejects.toThrow("Settings import persistence verification failed");
+      ).rejects.toThrow(expectedError);
 
       expect(plugin.settings).toBe(previous);
-      expect(await plugin.app.vault.adapter.read("data.json")).toBe(
-        previousBytes,
-      );
+      const durableBootstrap =
+        await plugin.app.vault.adapter.read("data.json");
+      if (mode === "missing") {
+        expect(durableBootstrap).toBe(previousBytes);
+      } else {
+        expect(durableBootstrap).not.toBe(previousBytes);
+      }
       expect(
         await plugin.app.vault.adapter.exists(
           "Vault Metadata/data.json",
         ),
-      ).toBe(false);
+      ).toBe(mode !== "missing");
     },
   );
 

@@ -316,6 +316,14 @@ export class MockDataVault {
       write: async (path: string, content: string) => {
         this.adapterFiles.set(path, content);
       },
+      process: async (
+        path: string,
+        update: (contents: string) => string,
+      ) => {
+        const next = update(this.adapterFiles.get(path) ?? "");
+        this.adapterFiles.set(path, next);
+        return next;
+      },
       remove: async (path: string) => {
         this.adapterFiles.delete(path);
       },

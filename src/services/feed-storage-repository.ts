@@ -1,4 +1,11 @@
-import { App, Notice, TFile, TFolder, normalizePath } from "obsidian";
+import {
+  App,
+  Notice,
+  TFile,
+  TFolder,
+  normalizePath,
+  type TAbstractFile,
+} from "obsidian";
 import type {
   Feed,
   FeedItemsShard,
@@ -11,6 +18,12 @@ import type {
 } from "../types/types";
 import { bindFeedItemsToSourceIdentity } from "../collection/item-identity";
 import { createTranslator } from "../i18n";
+import {
+  assertControlledRelativePath,
+  VaultPathIdentityProvider,
+  type ControlledPathIdentity,
+  type PathIdentityProvider,
+} from "../security/path-identity-provider";
 
 const SHARD_VERSION = 1;
 
@@ -37,11 +50,6 @@ export interface FeedStorageMetadataTransaction {
   getTargetPaths?(
     settingsSnapshots: readonly RssDashboardSettings[],
   ): readonly string[];
-  capture(
-    settingsSnapshots?: readonly RssDashboardSettings[],
-  ): Promise<unknown>;
-  restore(snapshot: unknown): Promise<void>;
-  verify?(snapshot: unknown): Promise<void>;
 }
 
 export interface RevertToLegacyJsonOptions {
@@ -74,15 +82,16 @@ interface MigrationSnapshot {
 interface SettingsPersistenceFileSnapshot {
   path: string;
   contents: string | null;
+  identity: ControlledPathIdentity;
 }
 
 interface SettingsPersistenceDirectorySnapshot {
   path: string;
   existed: boolean;
+  identity: ControlledPathIdentity;
 }
 
 interface SettingsPersistenceTransactionSnapshot {
-  metadata: unknown;
   files: SettingsPersistenceFileSnapshot[];
   directories: SettingsPersistenceDirectorySnapshot[];
   lastPersistedMetadataJson: string | null;
@@ -91,7 +100,14 @@ interface SettingsPersistenceTransactionSnapshot {
 }
 
 interface ActiveSettingsPersistenceTransaction {
-  lastWrittenBytesByPath: Map<string, string>;
+  snapshot: SettingsPersistenceTransactionSnapshot;
+  fileOperations: Map<string, {
+    operation: "write" | "delete";
+    intendedBytes: string | null;
+    postIdentity?: ControlledPathIdentity;
+    restoredIdentity?: ControlledPathIdentity;
+  }>;
+  createdDirectories: Map<string, ControlledPathIdentity>;
 }
 
 const MAX_SETTINGS_TRANSACTION_PATHS = 40_000;
@@ -244,6 +260,7 @@ export class FeedStorageRepository {
   private lastRepairResult = "Not yet run";
   private writeWrapper?: <T>(fn: () => Promise<T>) => Promise<T>;
   private metadataTransaction?: FeedStorageMetadataTransaction;
+  private readonly pathIdentityProvider: PathIdentityProvider;
   private app: App;
   private settingsPersistenceQueue: Promise<void> = Promise.resolve();
   private activeSettingsPersistenceTransaction:
@@ -253,10 +270,13 @@ export class FeedStorageRepository {
   constructor(app: App, options?: {
     writeWrapper?: <T>(fn: () => Promise<T>) => Promise<T>;
     metadataTransaction?: FeedStorageMetadataTransaction;
+    pathIdentityProvider?: PathIdentityProvider;
   }) {
     this.app = app;
     this.writeWrapper = options?.writeWrapper;
     this.metadataTransaction = options?.metadataTransaction;
+    this.pathIdentityProvider =
+      options?.pathIdentityProvider ?? new VaultPathIdentityProvider(app);
   }
 
   public ensureFeedIds(settings: RssDashboardSettings): boolean {
@@ -437,9 +457,17 @@ export class FeedStorageRepository {
     shardWriteCount: number;
     shardDeleteCount: number;
   }> {
-    return this.enqueueSettingsPersistence(() =>
-      this.persistSettingsUnlocked(settings, saveData, options),
-    );
+    return this.enqueueSettingsPersistence(async () => {
+      this.ensureFeedIds(settings);
+      const snapshot = await this.captureSettingsPersistenceTransaction(
+        settings,
+        settings,
+      );
+      return this.runWithSettingsPersistenceJournal(
+        snapshot,
+        () => this.persistSettingsUnlocked(settings, saveData, options),
+      );
+    });
   }
 
   public async persistSettingsTransaction<T>(
@@ -457,33 +485,47 @@ export class FeedStorageRepository {
         previousSettings,
         candidateSettings,
       );
-      const activeTransaction: ActiveSettingsPersistenceTransaction = {
-        lastWrittenBytesByPath: new Map(),
-      };
-      this.activeSettingsPersistenceTransaction = activeTransaction;
-      try {
+      return this.runWithSettingsPersistenceJournal(snapshot, async () => {
         await this.persistSettingsUnlocked(
           candidateSettings,
           saveData,
           options,
         );
-        return await afterPersist();
-      } catch (error) {
-        try {
-          await this.restoreSettingsPersistenceTransaction(
-            snapshot,
-            activeTransaction,
-          );
-          await this.verifySettingsPersistenceTransaction(snapshot);
-        } catch {
-          this.clearPersistedStateCache();
-          throw new FeedStorageRollbackIncompleteError();
-        }
-        throw error;
-      } finally {
-        this.activeSettingsPersistenceTransaction = undefined;
-      }
+        return afterPersist();
+      });
     });
+  }
+
+  private async runWithSettingsPersistenceJournal<T>(
+    snapshot: SettingsPersistenceTransactionSnapshot,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const activeTransaction: ActiveSettingsPersistenceTransaction = {
+      snapshot,
+      fileOperations: new Map(),
+      createdDirectories: new Map(),
+    };
+    this.activeSettingsPersistenceTransaction = activeTransaction;
+    try {
+      return await operation();
+    } catch (error) {
+      try {
+        await this.restoreSettingsPersistenceTransaction(
+          snapshot,
+          activeTransaction,
+        );
+        await this.verifySettingsPersistenceTransaction(
+          snapshot,
+          activeTransaction,
+        );
+      } catch {
+        this.clearPersistedStateCache();
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      throw error;
+    } finally {
+      this.activeSettingsPersistenceTransaction = undefined;
+    }
   }
 
   private async persistSettingsUnlocked(
@@ -504,84 +546,18 @@ export class FeedStorageRepository {
       forceAllShards: Boolean(options.forceAllShards),
     });
 
-    const previousShardCache = new Map(this.lastPersistedShardJsonByFeedId);
-    const previousMetadataCache = this.lastPersistedMetadataJson;
-    const previousStorageFolderCache = this.lastStorageFolderPath;
-    const metadataSnapshot = this.metadataTransaction
-      ? await this.metadataTransaction.capture([settings])
-      : undefined;
-
     if (settings.storageMode !== "vault-shards" && settings.storageMode !== "vault-shards-v2") {
-      try {
-        await saveData(withSyncNonce(cloneJson(settings)));
-        storageLog("Saved full settings to legacy data.json");
-        this.capturePersistedState(settings);
-        return {
-          metadataSaved: true,
-          shardWriteCount: 0,
-          shardDeleteCount: 0,
-        };
-      } catch (error) {
-        try {
-          if (this.metadataTransaction) {
-            await this.metadataTransaction.restore(metadataSnapshot);
-          } else if (previousMetadataCache !== null) {
-            await saveData(withSyncNonce(JSON.parse(previousMetadataCache)));
-          }
-        } catch {
-          this.lastPersistedShardJsonByFeedId.clear();
-          this.lastPersistedMetadataJson = null;
-          this.lastStorageFolderPath = null;
-          throw new FeedStorageRollbackIncompleteError();
-        }
-        this.lastPersistedShardJsonByFeedId = previousShardCache;
-        this.lastPersistedMetadataJson = previousMetadataCache;
-        this.lastStorageFolderPath = previousStorageFolderCache;
-        throw error;
-      }
+      await saveData(withSyncNonce(cloneJson(settings)));
+      storageLog("Saved full settings to legacy data.json");
+      this.capturePersistedState(settings);
+      return {
+        metadataSaved: true,
+        shardWriteCount: 0,
+        shardDeleteCount: 0,
+      };
     }
 
     const normalizedStorageFolder = normalizeFolderPath(settings.storageFolder);
-    // A shard write followed by a metadata/user-state failure used to leave a
-    // restart with a mixed generation. Keep the old bytes for every touched
-    // vault file and compensate them as one persistence attempt on failure.
-    const rollbackFileBytes = new Map<string, string | null>();
-    let metadataWriteStarted = false;
-    const captureRollbackFile = async (path: string): Promise<void> => {
-      if (rollbackFileBytes.has(path)) return;
-      rollbackFileBytes.set(
-        path,
-        (await this.app.vault.adapter.exists(path))
-          ? await this.app.vault.adapter.read(path)
-          : null,
-      );
-    };
-    const restoreRollbackFiles = async (): Promise<boolean> => {
-      let didRestoreEveryFile = true;
-      for (const [path, contents] of [...rollbackFileBytes.entries()].reverse()) {
-        try {
-          if (contents !== null) {
-            await this.app.vault.adapter.write(path, contents);
-          } else {
-            const adapter = this.app.vault.adapter as typeof this.app.vault.adapter & {
-              remove?: (target: string) => Promise<void>;
-            };
-            if (typeof adapter.remove === "function") {
-              await adapter.remove(path);
-            } else {
-              await (this.app.vault as unknown as {
-                delete: (target: string) => Promise<void>;
-              }).delete(path);
-            }
-          }
-        } catch {
-          // Keep restoring later targets even if one filesystem operation is
-          // broken; the caller must retain a recovery journal in that case.
-          didRestoreEveryFile = false;
-        }
-      }
-      return didRestoreEveryFile;
-    };
     const storageFolderChanged =
       this.lastStorageFolderPath !== null &&
       this.lastStorageFolderPath !== normalizedStorageFolder;
@@ -596,8 +572,7 @@ export class FeedStorageRepository {
       });
     }
 
-    try {
-      await this.ensureStorageFolderExists(normalizedStorageFolder);
+    await this.ensureStorageFolderExists(normalizedStorageFolder);
 
     let shardWriteCount = 0;
     let shardDeleteCount = 0;
@@ -620,7 +595,6 @@ export class FeedStorageRepository {
           normalizedStorageFolder,
           feed.feedId,
         );
-        await captureRollbackFile(shardPath);
         await this.writeSettingsFile(shardPath, shardJson);
         this.lastPersistedShardJsonByFeedId.set(
           feed.feedId,
@@ -642,9 +616,14 @@ export class FeedStorageRepository {
         );
         const previousShard =
           this.app.vault.getAbstractFileByPath(previousShardPath);
-        if (previousShard) {
-          await captureRollbackFile(previousShardPath);
-          await this.app.fileManager.trashFile(previousShard);
+        if (
+          previousShard ||
+          await this.app.vault.adapter.exists(previousShardPath)
+        ) {
+          await this.deleteSettingsFile(
+            previousShardPath,
+            previousShard ?? undefined,
+          );
           storageLog("Deleted shard from previous storage folder", {
             feedId: feed.feedId,
             previousShardPath,
@@ -665,9 +644,8 @@ export class FeedStorageRepository {
         previousFeedId,
       );
       const existing = this.app.vault.getAbstractFileByPath(shardPath);
-      if (existing) {
-        await captureRollbackFile(shardPath);
-        await this.app.fileManager.trashFile(existing);
+      if (existing || await this.app.vault.adapter.exists(shardPath)) {
+        await this.deleteSettingsFile(shardPath, existing ?? undefined);
         storageLog("Deleted shard for removed feed", {
           feedId: previousFeedId,
           shardPath,
@@ -683,7 +661,6 @@ export class FeedStorageRepository {
       options.forceMetadata || this.lastPersistedMetadataJson !== metadataJson;
 
     if (shouldSaveMetadata) {
-      metadataWriteStarted = true;
       await saveData(withSyncNonce(persistedSettings));
       this.lastPersistedMetadataJson = metadataJson;
       storageLog("Saved shard metadata to data.json", {
@@ -692,7 +669,6 @@ export class FeedStorageRepository {
     }
 
     if (settings.storageMode === "vault-shards-v2") {
-      await captureRollbackFile(this.getUserStatePath(settings));
       await this.saveUserStateFromFeeds(settings);
     }
 
@@ -708,34 +684,6 @@ export class FeedStorageRepository {
       shardWriteCount,
       shardDeleteCount,
     };
-    } catch (error) {
-      let didRestore = await restoreRollbackFiles();
-      if (metadataWriteStarted) {
-        try {
-          if (this.metadataTransaction) {
-            await this.metadataTransaction.restore(metadataSnapshot);
-          } else if (previousMetadataCache !== null) {
-            await saveData(withSyncNonce(JSON.parse(previousMetadataCache)));
-          }
-        } catch {
-          // The caller records a repair marker. Never include vault paths or
-          // source data in the user-visible failure message.
-          didRestore = false;
-        }
-      }
-      if (!didRestore) {
-        // A cache that still claims the failed generation was written could
-        // skip the only corrective write. Clear it rather than guessing.
-        this.lastPersistedShardJsonByFeedId.clear();
-        this.lastPersistedMetadataJson = null;
-        this.lastStorageFolderPath = null;
-        throw new FeedStorageRollbackIncompleteError();
-      }
-      this.lastPersistedShardJsonByFeedId = previousShardCache;
-      this.lastPersistedMetadataJson = previousMetadataCache;
-      this.lastStorageFolderPath = previousStorageFolderCache;
-      throw error;
-    }
   }
 
   private enqueueSettingsPersistence<T>(
@@ -749,11 +697,58 @@ export class FeedStorageRepository {
     return result;
   }
 
+  public async writeMetadataCandidate(
+    path: string,
+    write: () => Promise<void>,
+    isExpectedCandidate: (actualBytes: string) => boolean,
+  ): Promise<void> {
+    const active = this.activeSettingsPersistenceTransaction;
+    if (!active) {
+      await write();
+      return;
+    }
+    const snapshot = active.snapshot.files.find((entry) => entry.path === path);
+    if (!snapshot) throw new FeedStorageRollbackIncompleteError();
+    active.fileOperations.set(path, {
+      operation: "write",
+      intendedBytes: null,
+    });
+    try {
+      await write();
+    } finally {
+      const exists = await this.app.vault.adapter.exists(path);
+      const currentBytes = exists
+        ? await this.app.vault.adapter.read(path)
+        : null;
+      if (
+        currentBytes !== null &&
+        isExpectedCandidate(currentBytes)
+      ) {
+        const postIdentity =
+          await this.pathIdentityProvider.inspect(path);
+        const operation = active.fileOperations.get(path);
+        if (operation && postIdentity.kind === "file") {
+          operation.intendedBytes = currentBytes;
+          operation.postIdentity = postIdentity;
+        }
+      } else if (currentBytes === snapshot.contents) {
+        active.fileOperations.delete(path);
+      }
+    }
+  }
+
+  public async writeMetadataBytes(
+    path: string,
+    contents: string,
+  ): Promise<void> {
+    await this.writeSettingsFile(path, contents);
+  }
+
   private async captureSettingsPersistenceTransaction(
     previousSettings: RssDashboardSettings,
     candidateSettings: RssDashboardSettings,
   ): Promise<SettingsPersistenceTransactionSnapshot> {
-    const filePaths = this.getSettingsPersistenceWriteSet(
+    const storageFilePaths = this.getSettingsPersistenceWriteSet(
       previousSettings,
       candidateSettings,
     );
@@ -762,8 +757,14 @@ export class FeedStorageRepository {
         previousSettings,
         candidateSettings,
       ]) ?? [];
+    const filePaths = [...new Set([
+      ...storageFilePaths,
+      ...metadataTargetPaths,
+    ])].sort();
     if (
-      metadataTargetPaths.some((path) => filePaths.includes(path)) ||
+      metadataTargetPaths.some((path) =>
+        storageFilePaths.includes(path),
+      ) ||
       new Set(metadataTargetPaths).size !== metadataTargetPaths.length
     ) {
       throw new FeedStorageRollbackIncompleteError();
@@ -777,6 +778,15 @@ export class FeedStorageRepository {
       filePaths.length + directoryPaths.length >
       MAX_SETTINGS_TRANSACTION_PATHS
     ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    let identities: Map<string, ControlledPathIdentity>;
+    try {
+      identities = await this.pathIdentityProvider.assertSafePaths([
+        ...filePaths,
+        ...directoryPaths,
+      ]);
+    } catch {
       throw new FeedStorageRollbackIncompleteError();
     }
 
@@ -795,23 +805,24 @@ export class FeedStorageRepository {
           throw new FeedStorageRollbackIncompleteError();
         }
       }
-      files.push({ path, contents });
+      const identity = identities.get(path);
+      if (!identity || (contents !== null && identity.kind !== "file")) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      files.push({ path, contents, identity });
     }
 
     const directories: SettingsPersistenceDirectorySnapshot[] = [];
     for (const path of directoryPaths) {
       const existed = await this.app.vault.adapter.exists(path);
-      if (existed) this.assertKnownVaultFolder(path);
-      directories.push({ path, existed });
+      const identity = identities.get(path);
+      if (!identity || (existed && identity.kind !== "directory")) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      directories.push({ path, existed, identity });
     }
 
     return {
-      metadata: this.metadataTransaction
-        ? await this.metadataTransaction.capture([
-            previousSettings,
-            candidateSettings,
-          ])
-        : undefined,
       files,
       directories,
       lastPersistedMetadataJson: this.lastPersistedMetadataJson,
@@ -826,55 +837,127 @@ export class FeedStorageRepository {
     snapshot: SettingsPersistenceTransactionSnapshot,
     activeTransaction: ActiveSettingsPersistenceTransaction,
   ): Promise<void> {
-    const failures: unknown[] = [];
-
-    if (this.metadataTransaction) {
+    let rollbackConflict = false;
+    for (const fileSnapshot of [...snapshot.files].reverse()) {
+      if (rollbackConflict) break;
+      const { path, contents, identity: beforeIdentity } = fileSnapshot;
+      const operation = activeTransaction.fileOperations.get(path);
       try {
-        await this.metadataTransaction.restore(snapshot.metadata);
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-
-    for (const { path, contents } of [...snapshot.files].reverse()) {
-      try {
-        if (contents !== null) {
-          await this.app.vault.adapter.write(path, contents);
+        const currentExists =
+          await this.app.vault.adapter.exists(path);
+        const currentBytes = currentExists
+          ? await this.app.vault.adapter.read(path)
+          : null;
+        const currentIdentity =
+          await this.pathIdentityProvider.inspect(path);
+        if (
+          currentBytes === contents &&
+          (
+            contents === null ||
+            (
+              !operation &&
+              !beforeIdentity.destructiveSafe
+            ) ||
+            (
+              beforeIdentity.destructiveSafe &&
+              this.pathIdentityProvider.isSameIdentity(
+                beforeIdentity,
+                currentIdentity,
+              )
+            )
+          )
+        ) {
           continue;
         }
-        if (!(await this.app.vault.adapter.exists(path))) continue;
-        const expectedCandidateBytes =
-          activeTransaction.lastWrittenBytesByPath.get(path);
-        if (
-          expectedCandidateBytes === undefined ||
-          (await this.app.vault.adapter.read(path)) !==
-            expectedCandidateBytes
-        ) {
-          throw new Error("Unknown settings file replaced a rollback target");
+        if (!operation) {
+          throw new Error("Unjournaled controlled path mutation");
         }
-        await this.app.vault.adapter.remove(path);
-      } catch (error) {
-        failures.push(error);
-      }
-    }
 
-    for (const { path, existed } of snapshot.directories) {
-      if (!existed) continue;
-      try {
-        if (!(await this.app.vault.adapter.exists(path))) {
-          await this.app.vault.createFolder(path);
+        if (contents !== null) {
+          if (operation.operation === "delete") {
+            if (currentIdentity.kind !== "missing") {
+              throw new Error("Deleted settings file was externally recreated");
+            }
+            await this.createSettingsFileExclusively(path, contents);
+            operation.restoredIdentity =
+              await this.pathIdentityProvider.inspect(path);
+            continue;
+          }
+          if (
+            operation.intendedBytes === null ||
+            currentIdentity.kind !== "file" ||
+            !operation.postIdentity ||
+            !this.pathIdentityProvider.isSameIdentity(
+              operation.postIdentity,
+              currentIdentity,
+            ) ||
+            (await this.app.vault.adapter.read(path)) !==
+              operation.intendedBytes
+          ) {
+            throw new Error("Settings file changed after transaction write");
+          }
+          await this.compareAndSwapSettingsFile(
+            path,
+            operation.intendedBytes,
+            contents,
+          );
+          continue;
         }
-        this.assertKnownVaultFolder(path);
+
+        if (operation.operation !== "write") {
+          throw new Error("Invalid journal operation");
+        }
+        if (currentIdentity.kind === "missing") continue;
+        if (
+          operation.intendedBytes === null ||
+          currentIdentity.kind !== "file" ||
+          !currentIdentity.destructiveSafe ||
+          !operation.postIdentity ||
+          !this.pathIdentityProvider.isSameIdentity(
+            operation.postIdentity,
+            currentIdentity,
+          ) ||
+          (await this.app.vault.adapter.read(path)) !==
+            operation.intendedBytes
+        ) {
+          throw new Error("Candidate-created settings file changed identity");
+        }
+        const abstractFile =
+          this.app.vault.getAbstractFileByPath(path);
+        if (abstractFile instanceof TFile) {
+          await this.app.fileManager.trashFile(abstractFile);
+        } else {
+          await this.app.vault.adapter.remove(path);
+        }
+        if ((await this.pathIdentityProvider.inspect(path)).kind !== "missing") {
+          throw new Error("Candidate-created settings file still exists");
+        }
       } catch (error) {
-        failures.push(error);
+        void error;
+        rollbackConflict = true;
       }
     }
 
     for (const { path, existed } of [...snapshot.directories].reverse()) {
+      if (rollbackConflict) break;
       if (existed) continue;
       try {
-        if (!(await this.app.vault.adapter.exists(path))) continue;
-        this.assertKnownVaultFolder(path);
+        const createdIdentity =
+          activeTransaction.createdDirectories.get(path);
+        const currentIdentity =
+          await this.pathIdentityProvider.inspect(path);
+        if (currentIdentity.kind === "missing") continue;
+        if (
+          !createdIdentity ||
+          currentIdentity.kind !== "directory" ||
+          !currentIdentity.destructiveSafe ||
+          !this.pathIdentityProvider.isSameIdentity(
+            createdIdentity,
+            currentIdentity,
+          )
+        ) {
+          throw new Error("Candidate-created directory changed identity");
+        }
         const contents = await this.app.vault.adapter.list(path);
         if (
           contents.files.length > 0 ||
@@ -883,8 +966,12 @@ export class FeedStorageRepository {
           throw new Error("Candidate-created settings folder is not empty");
         }
         await this.app.vault.adapter.rmdir(path, false);
+        if ((await this.pathIdentityProvider.inspect(path)).kind !== "missing") {
+          throw new Error("Candidate-created directory still exists");
+        }
       } catch (error) {
-        failures.push(error);
+        void error;
+        rollbackConflict = true;
       }
     }
 
@@ -895,18 +982,54 @@ export class FeedStorageRepository {
     );
     this.lastStorageFolderPath = snapshot.lastStorageFolderPath;
 
-    if (failures.length > 0) {
+    if (rollbackConflict) {
       throw new FeedStorageRollbackIncompleteError();
+    }
+  }
+
+  private async compareAndSwapSettingsFile(
+    path: string,
+    expected: string,
+    replacement: string,
+  ): Promise<void> {
+    const adapter = this.app.vault.adapter as typeof this.app.vault.adapter & {
+      process?: (
+        target: string,
+        update: (contents: string) => string,
+      ) => Promise<string>;
+    };
+    if (typeof adapter.process !== "function") {
+      throw new Error("Adapter cannot provide conditional replacement");
+    }
+    let matched = false;
+    await adapter.process(path, (contents) => {
+      if (contents !== expected) return contents;
+      matched = true;
+      return replacement;
+    });
+    if (!matched || (await adapter.read(path)) !== replacement) {
+      throw new Error("Conditional settings restore lost its comparison");
+    }
+  }
+
+  private async createSettingsFileExclusively(
+    path: string,
+    contents: string,
+  ): Promise<void> {
+    if (await this.app.vault.adapter.exists(path)) {
+      throw new Error("Settings rollback target was externally recreated");
+    }
+    await this.pathIdentityProvider.createExclusive(path, contents);
+    if ((await this.app.vault.adapter.read(path)) !== contents) {
+      throw new Error("Exclusive settings restore was not durable");
     }
   }
 
   private async verifySettingsPersistenceTransaction(
     snapshot: SettingsPersistenceTransactionSnapshot,
+    activeTransaction: ActiveSettingsPersistenceTransaction,
   ): Promise<void> {
-    if (this.metadataTransaction?.verify) {
-      await this.metadataTransaction.verify(snapshot.metadata);
-    }
-    for (const { path, contents } of snapshot.files) {
+    for (const { path, contents, identity } of snapshot.files) {
       const exists = await this.app.vault.adapter.exists(path);
       if (contents === null) {
         if (exists) throw new FeedStorageRollbackIncompleteError();
@@ -918,13 +1041,39 @@ export class FeedStorageRepository {
       ) {
         throw new FeedStorageRollbackIncompleteError();
       }
+      if (identity.destructiveSafe) {
+        const operation = activeTransaction.fileOperations.get(path);
+        const expectedIdentity =
+          operation?.operation === "delete"
+            ? operation.restoredIdentity
+            : identity;
+        const currentIdentity =
+          await this.pathIdentityProvider.inspect(path);
+        if (
+          !expectedIdentity ||
+          !this.pathIdentityProvider.isSameIdentity(
+            expectedIdentity,
+            currentIdentity,
+          )
+        ) {
+          throw new FeedStorageRollbackIncompleteError();
+        }
+      }
     }
-    for (const { path, existed } of snapshot.directories) {
+    for (const { path, existed, identity } of snapshot.directories) {
       const exists = await this.app.vault.adapter.exists(path);
       if (exists !== existed) {
         throw new FeedStorageRollbackIncompleteError();
       }
-      if (exists) this.assertKnownVaultFolder(path);
+      if (exists) {
+        const currentIdentity = await this.pathIdentityProvider.inspect(path);
+        if (
+          identity.destructiveSafe &&
+          !this.pathIdentityProvider.isSameIdentity(identity, currentIdentity)
+        ) {
+          throw new FeedStorageRollbackIncompleteError();
+        }
+      }
     }
   }
 
@@ -1052,39 +1201,31 @@ export class FeedStorageRepository {
     input: string,
     fallback: string,
   ): string {
-    const trimmed = input.trim().replace(/\\/g, "/");
-    const withoutEdgeSlashes = (trimmed || fallback).replace(
-      /^\/+|\/+$/g,
-      "",
-    );
-    const segments = withoutEdgeSlashes.split("/");
+    const controlledPath = input || fallback;
+    const segments = controlledPath.split("/");
     if (
-      withoutEdgeSlashes.length === 0 ||
-      withoutEdgeSlashes.length >
+      controlledPath.length === 0 ||
+      controlledPath.length >
         MAX_SETTINGS_TRANSACTION_PATH_LENGTH ||
       segments.length > MAX_SETTINGS_TRANSACTION_DEPTH ||
-      segments.some(
-        (segment) =>
-          segment.length === 0 ||
-          segment === "." ||
-          segment === ".." ||
-          /[:*?"<>|]/u.test(segment) ||
-          hasControlCharacters(segment),
-      )
+      hasControlCharacters(controlledPath)
     ) {
       throw new FeedStorageRollbackIncompleteError();
     }
-    const normalized = normalizePath(withoutEdgeSlashes);
-    if (normalized !== withoutEdgeSlashes) {
+    try {
+      assertControlledRelativePath(controlledPath);
+    } catch {
       throw new FeedStorageRollbackIncompleteError();
     }
-    return normalized;
+    return controlledPath;
   }
 
   private getControlledFeedId(feedId: string | undefined): string {
-    const value = feedId?.trim() ?? "";
+    const value = feedId ?? "";
     if (
       value.length === 0 ||
+      value !== value.trim() ||
+      value !== value.normalize("NFC") ||
       value.length > 256 ||
       !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value) ||
       value === "." ||
@@ -1100,7 +1241,7 @@ export class FeedStorageRepository {
   ): void {
     const seen = new Set<string>();
     for (const feed of settings.feeds) {
-      const raw = feed.feedId?.trim();
+      const raw = feed.feedId;
       if (!raw) continue;
       const feedId = this.getControlledFeedId(raw);
       if (seen.has(feedId)) {
@@ -1139,6 +1280,10 @@ export class FeedStorageRepository {
     saveData: (data: unknown) => Promise<void>,
   ): Promise<void> {
     const snapshot = this.captureMigrationSnapshot(settings);
+    this.getControlledFolderPath(
+      settings.storageFolder,
+      ".rss-dashboard-data/feeds",
+    );
     storageLog("Starting migration to vault shards", {
       currentMode: settings.storageMode,
       folder: normalizeFolderPath(settings.storageFolder),
@@ -1173,6 +1318,10 @@ export class FeedStorageRepository {
     saveData: (data: unknown) => Promise<void>,
   ): Promise<void> {
     const snapshot = this.captureMigrationSnapshot(settings);
+    this.getControlledFolderPath(
+      settings.storageFolder,
+      ".rss-dashboard-data/feeds",
+    );
     storageLog("Starting migration to vault shards v2 (split state)", {
       currentMode: settings.storageMode,
       folder: normalizeFolderPath(settings.storageFolder),
@@ -1213,7 +1362,10 @@ export class FeedStorageRepository {
     saveData: (data: unknown) => Promise<void>,
     options: RevertToLegacyJsonOptions = {},
   ): Promise<void> {
-    const storageFolder = normalizeFolderPath(settings.storageFolder);
+    const storageFolder = this.getControlledFolderPath(
+      settings.storageFolder,
+      ".rss-dashboard-data/feeds",
+    );
     storageLog("Reverting to legacy JSON storage", {
       storageFolder,
       feedCount: settings.feeds.length,
@@ -1241,6 +1393,10 @@ export class FeedStorageRepository {
       folder: normalizeFolderPath(settings.storageFolder),
       feedCount: settings.feeds.length,
     });
+    this.getControlledFolderPath(
+      settings.storageFolder,
+      ".rss-dashboard-data/feeds",
+    );
     settings.storageFolder = normalizeFolderPath(settings.storageFolder);
     await this.persistSettings(settings, saveData, {
       forceAllShards: true,
@@ -1295,8 +1451,27 @@ export class FeedStorageRepository {
     settings: RssDashboardSettings,
     saveData: (data: unknown) => Promise<void>,
   ): Promise<void> {
+    const previousSettings = cloneJson(settings);
+    const candidate = this.buildPortableDataBundleCandidate(
+      input,
+      previousSettings,
+    );
+    await this.persistSettingsTransaction(
+      previousSettings,
+      candidate,
+      saveData,
+      async () => {
+        Object.assign(settings, cloneJson(candidate));
+      },
+      { forceAllShards: true, forceMetadata: true },
+    );
+  }
+
+  public buildPortableDataBundleCandidate(
+    input: unknown,
+    settings: RssDashboardSettings,
+  ): RssDashboardSettings {
     const bundle = this.validatePortableDataBundle(input);
-    const backupBundle = this.buildPortableDataBundle(settings);
 
     storageLog("Starting portable bundle import", {
       sourceMode: bundle.storageMode,
@@ -1304,95 +1479,30 @@ export class FeedStorageRepository {
       sourceShardCount: bundle.shards.length,
     });
 
-    try {
-      const shardItemsByFeedId = new Map(
-        bundle.shards.map((shard) => [shard.feedId, cloneJson(shard.items)]),
-      );
-      const importedMetadata = cloneJson(bundle.metadata);
-      const importedFeeds = importedMetadata.feeds.map((feed) => {
-        const feedItems = feed.feedId
-          ? shardItemsByFeedId.get(feed.feedId)
-          : undefined;
-        return {
-          ...feed,
-          items: Array.isArray(feedItems) ? feedItems : [],
-        };
-      });
-
-      const nextSettings = {
-        ...settings,
-        ...importedMetadata,
-        storageMode: bundle.storageMode,
-        storageFolder: normalizeFolderPath(importedMetadata.storageFolder),
-        metadataStorageMode:
-          bundle.metadataStorageMode ?? settings.metadataStorageMode,
-        metadataStorageFolder:
-          bundle.metadataStorageFolder ?? settings.metadataStorageFolder,
-        feeds: importedFeeds,
-      } as RssDashboardSettings;
-
-      Object.assign(settings, cloneJson(nextSettings));
-
-      await this.persistSettings(settings, saveData, {
-        forceAllShards: true,
-        forceMetadata: true,
-      });
-
-      storageLog("Completed portable bundle import", {
-        mode: settings.storageMode,
-        folder: settings.storageFolder,
-        feedCount: settings.feeds.length,
-      });
-    } catch (error) {
-      storageError(
-        "Portable bundle import failed; restoring previous state",
-        error,
-      );
-
-      try {
-        const backupShardItemsByFeedId = new Map(
-          backupBundle.shards.map((shard) => [
-            shard.feedId,
-            cloneJson(shard.items),
-          ]),
-        );
-        const rollbackSettings = {
-          ...settings,
-          ...backupBundle.metadata,
-          storageMode: backupBundle.storageMode,
-          storageFolder: normalizeFolderPath(
-            backupBundle.metadata.storageFolder,
-          ),
-          metadataStorageMode:
-            backupBundle.metadataStorageMode ?? settings.metadataStorageMode,
-          metadataStorageFolder:
-            backupBundle.metadataStorageFolder ??
-            settings.metadataStorageFolder,
-          feeds: backupBundle.metadata.feeds.map((feed) => ({
-            ...feed,
-            items: feed.feedId
-              ? (backupShardItemsByFeedId.get(feed.feedId) ?? [])
-              : [],
-          })),
-        } as RssDashboardSettings;
-
-        Object.assign(settings, cloneJson(rollbackSettings));
-        await this.persistSettings(settings, saveData, {
-          forceAllShards: true,
-          forceMetadata: true,
-        });
-        storageLog(
-          "Restored previous state after failed portable bundle import",
-        );
-      } catch (rollbackError) {
-        storageError(
-          "Rollback failed after portable bundle import failure",
-          rollbackError,
-        );
-      }
-
-      throw error;
-    }
+    const shardItemsByFeedId = new Map(
+      bundle.shards.map((shard) => [shard.feedId, cloneJson(shard.items)]),
+    );
+    const importedMetadata = cloneJson(bundle.metadata);
+    const importedFeeds = importedMetadata.feeds.map((feed) => {
+      const feedItems = feed.feedId
+        ? shardItemsByFeedId.get(feed.feedId)
+        : undefined;
+      return {
+        ...feed,
+        items: Array.isArray(feedItems) ? feedItems : [],
+      };
+    });
+    return {
+      ...settings,
+      ...importedMetadata,
+      storageMode: bundle.storageMode,
+      storageFolder: importedMetadata.storageFolder,
+      metadataStorageMode:
+        bundle.metadataStorageMode ?? settings.metadataStorageMode,
+      metadataStorageFolder:
+        bundle.metadataStorageFolder ?? settings.metadataStorageFolder,
+      feeds: importedFeeds,
+    } as RssDashboardSettings;
   }
 
   public getStatus(settings: RssDashboardSettings): FeedStorageStatus {
@@ -1483,56 +1593,53 @@ export class FeedStorageRepository {
     if (!normalizedFolder) {
       return;
     }
-
-    const existing = this.app.vault.getAbstractFileByPath(normalizedFolder);
-    if (existing instanceof TFolder) {
-      storageLog("Storage folder already exists", { folder: normalizedFolder });
-      return;
-    }
-
-    if (existing instanceof TFile) {
-      throw new Error(
-        `Storage path points to a file, not a folder: ${normalizedFolder}`,
-      );
-    }
-
-    try {
-      await this.app.vault.createFolder(normalizedFolder);
-    } catch (error) {
-      const resolved = this.app.vault.getAbstractFileByPath(normalizedFolder);
-      if (resolved instanceof TFolder) {
-        storageLog("Storage folder became available after createFolder error", {
-          folder: normalizedFolder,
-        });
-        return;
-      }
-
-      if (await this.app.vault.adapter.exists(normalizedFolder)) {
-        storageLog(
-          "Storage folder exists on adapter after createFolder error",
-          {
-            folder: normalizedFolder,
-          },
-        );
-        return;
-      }
-
-      throw error;
-    }
-
-    const created = this.app.vault.getAbstractFileByPath(normalizedFolder);
-    if (!(created instanceof TFolder)) {
-      if (await this.app.vault.adapter.exists(normalizedFolder)) {
-        storageLog("Storage folder exists on adapter after creation", {
-          folder: normalizedFolder,
-        });
-        return;
-      }
-
-      throw new Error(`Failed to create storage folder: ${normalizedFolder}`);
-    }
-
+    await this.ensureSettingsDirectory(normalizedFolder);
     storageLog("Created storage folder", { folder: normalizedFolder });
+  }
+
+  public async ensureMetadataDirectory(path: string): Promise<void> {
+    await this.ensureSettingsDirectory(path);
+  }
+
+  private async ensureSettingsDirectory(path: string): Promise<void> {
+    const active = this.activeSettingsPersistenceTransaction;
+    const segments = assertControlledRelativePath(path).split("/");
+    for (let index = 1; index <= segments.length; index += 1) {
+      const currentPath = segments.slice(0, index).join("/");
+      const currentIdentity =
+        await this.pathIdentityProvider.inspect(currentPath);
+      if (currentIdentity.kind === "directory") continue;
+      if (currentIdentity.kind !== "missing") {
+        throw new Error("Settings directory path is not a directory");
+      }
+      const snapshot = active?.snapshot.directories.find(
+        (entry) => entry.path === currentPath,
+      );
+      if (active && (!snapshot || snapshot.existed)) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      try {
+        await this.app.vault.createFolder(currentPath);
+      } catch (error) {
+        const racedIdentity =
+          await this.pathIdentityProvider.inspect(currentPath);
+        if (racedIdentity.kind === "directory") {
+          // A concurrent creator owns this directory. It is usable, but never
+          // eligible for this transaction's destructive cleanup.
+          continue;
+        }
+        throw error;
+      }
+      const createdIdentity =
+        await this.pathIdentityProvider.inspect(currentPath);
+      if (
+        createdIdentity.kind !== "directory" ||
+        !createdIdentity.destructiveSafe
+      ) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      active?.createdDirectories.set(currentPath, createdIdentity);
+    }
   }
 
   private async deleteShardFolder(folderPath: string): Promise<void> {
@@ -1682,11 +1789,7 @@ export class FeedStorageRepository {
     const normalizedFolder = normalizePath(folder.replace(/^\/+|\/+$/g, ""));
     const folderExists = await this.app.vault.adapter.exists(normalizedFolder);
     if (!folderExists) {
-      try {
-        await this.app.vault.createFolder(normalizedFolder);
-      } catch {
-        // ignore race conditions
-      }
+      await this.ensureSettingsDirectory(normalizedFolder);
     }
 
     const userStateJson = JSON.stringify(userStateFile, null, 2);
@@ -1704,10 +1807,62 @@ export class FeedStorageRepository {
     path: string,
     contents: string,
   ): Promise<void> {
-    this.activeSettingsPersistenceTransaction?.lastWrittenBytesByPath.set(
-      path,
-      contents,
+    const active = this.activeSettingsPersistenceTransaction;
+    if (!active) {
+      await this.app.vault.adapter.write(path, contents);
+      return;
+    }
+    const snapshot = active.snapshot.files.find((entry) => entry.path === path);
+    if (!snapshot) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    active.fileOperations.set(path, {
+      operation: "write",
+      intendedBytes: contents,
+    });
+    if (snapshot.contents === null) {
+      await this.pathIdentityProvider.createExclusive(path, contents);
+    } else {
+      await this.app.vault.adapter.write(path, contents);
+    }
+    const postIdentity = await this.pathIdentityProvider.inspect(path);
+    const operation = active.fileOperations.get(path);
+    if (!operation || postIdentity.kind !== "file") {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    operation.postIdentity = postIdentity;
+  }
+
+  private async deleteSettingsFile(
+    path: string,
+    file?: TAbstractFile,
+  ): Promise<void> {
+    const active = this.activeSettingsPersistenceTransaction;
+    if (!active) {
+      if (file) {
+        await this.app.fileManager.trashFile(file);
+      } else {
+        await this.app.vault.adapter.remove(path);
+      }
+      return;
+    }
+    const snapshot = active.snapshot.files.find(
+      (entry) => entry.path === path,
     );
-    await this.app.vault.adapter.write(path, contents);
+    if (!snapshot || !snapshot.identity.destructiveSafe) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    active.fileOperations.set(path, {
+      operation: "delete",
+      intendedBytes: null,
+    });
+    if (file) {
+      await this.app.fileManager.trashFile(file);
+    } else {
+      await this.app.vault.adapter.remove(path);
+    }
+    if ((await this.pathIdentityProvider.inspect(path)).kind !== "missing") {
+      throw new FeedStorageRollbackIncompleteError();
+    }
   }
 }

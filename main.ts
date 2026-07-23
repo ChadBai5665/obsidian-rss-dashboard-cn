@@ -98,6 +98,7 @@ import type { CollectedItem } from "./src/collection/collected-item";
 import { createTranslator, type Translator } from "./src/i18n";
 import { isLocalizedView } from "./src/views/localized-view";
 import { DesktopSecretStore } from "./src/security/desktop-secret-store";
+import { assertControlledRelativePath } from "./src/security/path-identity-provider";
 import {
   assertPublicSettingsJsonTextBudget,
   preparePublicSettingsImport,
@@ -276,11 +277,6 @@ type StatusRepairJournal = {
   items: StatusJournalItem[];
 };
 
-type MetadataPersistenceSnapshot = Array<{
-  path: string;
-  contents: string | null;
-}>;
-
 class SettingsImportRollbackError extends Error {
   constructor() {
     super("Settings import rollback incomplete");
@@ -289,7 +285,6 @@ class SettingsImportRollbackError extends Error {
 }
 
 const PERSISTENCE_SYNC_FIELDS = new Set(["_syncNonce", "_syncPad"]);
-const MAX_METADATA_TRANSACTION_SNAPSHOT_BYTES = 100_000_000;
 const MAX_PERSISTED_SETTINGS_VERIFICATION_BYTES = 6_000_000;
 
 const STATUS_JOURNAL_PHASES = new Set<StatusJournalPhase>([
@@ -823,18 +818,6 @@ export default class RssDashboardPlugin extends Plugin {
       metadataTransaction: {
         getTargetPaths: (settingsSnapshots) =>
           this.getMetadataPersistenceFilePaths(...settingsSnapshots),
-        capture: (settingsSnapshots) =>
-          this.captureMetadataPersistenceSnapshot(
-            ...(settingsSnapshots ?? []),
-          ),
-        restore: (snapshot) =>
-          this.restoreMetadataPersistenceSnapshot(
-            snapshot as MetadataPersistenceSnapshot,
-          ),
-        verify: (snapshot) =>
-          this.verifyMetadataPersistenceSnapshot(
-            snapshot as MetadataPersistenceSnapshot,
-          ),
       },
     });
   }
@@ -882,9 +865,8 @@ export default class RssDashboardPlugin extends Plugin {
     input: string,
     options: { allowCurrentDirectory?: boolean } = {},
   ): string {
-    const trimmed = input.trim().replace(/\\/g, "/");
-    if (options.allowCurrentDirectory && trimmed === ".") return ".";
-    const folder = trimmed.replace(/^\/+|\/+$/g, "");
+    if (options.allowCurrentDirectory && input === ".") return ".";
+    const folder = input;
     const segments = folder.split("/");
     if (
       folder.length === 0 ||
@@ -901,72 +883,12 @@ export default class RssDashboardPlugin extends Plugin {
     ) {
       throw new Error("Invalid metadata persistence path");
     }
+    try {
+      assertControlledRelativePath(folder);
+    } catch {
+      throw new Error("Invalid metadata persistence path");
+    }
     return folder;
-  }
-
-  private async captureMetadataPersistenceSnapshot(
-    ...settingsSnapshots: RssDashboardSettings[]
-  ): Promise<MetadataPersistenceSnapshot> {
-    const snapshot: MetadataPersistenceSnapshot = [];
-    let totalBytes = 0;
-    for (const path of this.getMetadataPersistenceFilePaths(
-      ...settingsSnapshots,
-    )) {
-      const contents = (await this.app.vault.adapter.exists(path))
-        ? await this.app.vault.adapter.read(path)
-        : null;
-      if (contents !== null) {
-        totalBytes += new TextEncoder().encode(contents).byteLength;
-        if (totalBytes > MAX_METADATA_TRANSACTION_SNAPSHOT_BYTES) {
-          throw new Error("Metadata transaction snapshot is too large");
-        }
-      }
-      snapshot.push({
-        path,
-        contents,
-      });
-    }
-    return snapshot;
-  }
-
-  private async restoreMetadataPersistenceSnapshot(
-    snapshot: MetadataPersistenceSnapshot,
-  ): Promise<void> {
-    const failures: unknown[] = [];
-    for (const { path, contents } of [...snapshot].reverse()) {
-      try {
-        if (contents === null) {
-          if (await this.app.vault.adapter.exists(path)) {
-            await this.app.vault.adapter.remove(path);
-          }
-        } else {
-          await this.app.vault.adapter.write(path, contents);
-        }
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    if (failures.length > 0) {
-      throw new Error("Metadata rollback incomplete");
-    }
-  }
-
-  private async verifyMetadataPersistenceSnapshot(
-    snapshot: MetadataPersistenceSnapshot,
-  ): Promise<void> {
-    for (const { path, contents } of snapshot) {
-      const exists = await this.app.vault.adapter.exists(path);
-      if (contents === null) {
-        if (exists) throw new Error("Metadata rollback verification failed");
-        continue;
-      }
-      if (
-        !exists ||
-        (await this.app.vault.adapter.read(path)) !== contents
-      ) {
-        throw new Error("Metadata rollback verification failed");
-      }
-    }
   }
 
   private captureSettingsBackedRuntime() {
@@ -3594,21 +3516,12 @@ export default class RssDashboardPlugin extends Plugin {
     });
 
     try {
-      await this.feedStorageRepository.importPortableDataBundle(
+      const candidate =
+        this.feedStorageRepository.buildPortableDataBundleCandidate(
         bundle,
         this.settings,
-        (data) => this.saveData(data),
       );
-      this.migrateLegacySettings();
-      this.initializeSettingsBackedServices();
-
-      if (this.settingTab) {
-        this.settingTab.display();
-      }
-
-      await this.refreshDashboardViews();
-      const discoverView = await this.getActiveDiscoverView();
-      discoverView?.render();
+      await this.commitSettingsImport(() => candidate);
 
       storageLog("Plugin portable bundle import completed", {
         currentMode: this.settings.storageMode,
@@ -4688,31 +4601,69 @@ export default class RssDashboardPlugin extends Plugin {
       const metadataPath = getMetadataPath(settings);
       if (metadataPath) {
         try {
-          await ensureMetadataFolderExists(this.app, settings);
+          await this.feedStorageRepository.ensureMetadataDirectory(
+            metadataPath,
+          );
           const dataFilePath = `${metadataPath}/data.json`;
           const jsonContent = JSON.stringify(settingsData, null, 2);
-          await this.app.vault.adapter.write(dataFilePath, jsonContent);
+          await this.feedStorageRepository.writeMetadataBytes(
+            dataFilePath,
+            jsonContent,
+          );
           storageLog("Metadata saved to vault location", {
             path: dataFilePath,
           });
           // Bootstrap pointer only — just enough for loadSettings to
           // find the vault data.json on restart. Does NOT write full
           // settings to .obsidian, preventing the stale-read bug on mobile.
-          await this.saveData({
+          const bootstrap = {
             metadataStorageMode: settings.metadataStorageMode,
             metadataStorageFolder: settings.metadataStorageFolder,
             metadataStorageSchemaVersion:
               settings.metadataStorageSchemaVersion,
-          });
+          };
+          const pluginDataPath = this.getPluginDataFilePath();
+          await this.feedStorageRepository.writeMetadataCandidate(
+            pluginDataPath,
+            () => this.saveData(bootstrap),
+            (actualBytes) =>
+              this.isExpectedMetadataBytes(actualBytes, bootstrap),
+          );
         } catch (error) {
           storageError("Failed to save metadata to vault location", error);
           throw error;
         }
       } else {
-        await this.saveData(settingsData);
+        const pluginDataPath = this.getPluginDataFilePath();
+        await this.feedStorageRepository.writeMetadataCandidate(
+          pluginDataPath,
+          () => this.saveData(settingsData),
+          (actualBytes) =>
+            this.isExpectedMetadataBytes(actualBytes, settingsData),
+        );
         storageLog("Metadata saved to plugin default location");
       }
     };
+  }
+
+  private isExpectedMetadataBytes(
+    actualBytes: string,
+    expected: unknown,
+  ): boolean {
+    if (
+      actualBytes.length === 0 ||
+      actualBytes.length > MAX_PERSISTED_SETTINGS_VERIFICATION_BYTES ||
+      new TextEncoder().encode(actualBytes).byteLength >
+        MAX_PERSISTED_SETTINGS_VERIFICATION_BYTES
+    ) {
+      return false;
+    }
+    try {
+      return stableOwnDataJson(JSON.parse(actualBytes) as unknown) ===
+        stableOwnDataJson(expected);
+    } catch {
+      return false;
+    }
   }
 
   async saveSettings(options: PersistSettingsOptions = {}) {
@@ -5296,8 +5247,12 @@ export default class RssDashboardPlugin extends Plugin {
 
     this.cancelPendingStartupRefresh();
 
-    // Run backups asynchronously on plugin disable/unload (best effort)
-    void this.backupService.performAutoBackups();
+    // Back up only after every queued settings write/import has either
+    // committed or completed its rollback. This prevents an unload in the
+    // candidate-published window from copying an uncommitted generation.
+    void this.enqueueSettingsOperation(async () => {
+      await this.backupService.performAutoBackups();
+    });
   }
 
   public cancelPendingStartupRefresh(): void {

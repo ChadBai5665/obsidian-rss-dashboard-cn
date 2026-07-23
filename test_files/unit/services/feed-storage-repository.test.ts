@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { App } from "obsidian";
+import { App, TFile } from "obsidian";
 import {
   FeedStorageRepository,
   FeedStorageRollbackIncompleteError,
@@ -11,6 +11,10 @@ import {
   type Feed,
   type RssDashboardSettings,
 } from "../../../src/types/types";
+import type {
+  ControlledPathIdentity,
+  PathIdentityProvider,
+} from "../../../src/security/path-identity-provider";
 
 interface VaultAdapterStub {
   exists(path: string): Promise<boolean>;
@@ -18,6 +22,10 @@ interface VaultAdapterStub {
   read(path: string): Promise<string>;
   remove(path: string): Promise<void>;
   rmdir(path: string, recursive: boolean): Promise<void>;
+  process(
+    path: string,
+    update: (contents: string) => string,
+  ): Promise<string>;
 }
 
 function vaultAdapter(app: App): VaultAdapterStub {
@@ -352,23 +360,31 @@ describe("FeedStorageRepository", () => {
     settings.storageFolder = "RSS Data/Feeds";
     settings.metadataStorageFolder = "RSS Metadata";
     settings.feeds = [makeFeed({ feedId: "feed-rollback-all" })];
-    let metadataBytes = "metadata-not-written";
-    const transactionalSave = vi.fn(async (data: unknown) => {
-      metadataBytes = JSON.stringify(data);
-    });
+    const metadataPath = "plugin-data.json";
     const metadataTransaction = {
-      capture: vi.fn(async () => metadataBytes),
-      restore: vi.fn(async (snapshot: unknown) => {
-        metadataBytes = String(snapshot);
-      }),
+      getTargetPaths: () => [metadataPath],
     };
     repository = new FeedStorageRepository(app, { metadataTransaction });
+    const transactionalSave = vi.fn(async (data: unknown) => {
+      const bytes = JSON.stringify(data);
+      await repository.writeMetadataCandidate(
+        metadataPath,
+        async () => {
+          if (await app.vault.adapter.exists(metadataPath)) {
+            await app.vault.adapter.write(metadataPath, bytes);
+          } else {
+            await app.vault.create(metadataPath, bytes);
+          }
+        },
+        (actual) => actual === bytes,
+      );
+    });
 
     await repository.persistSettings(settings, transactionalSave, {
       forceAllShards: true,
       forceMetadata: true,
     });
-    const oldMetadata = metadataBytes;
+    const oldMetadata = await app.vault.adapter.read(metadataPath);
     const oldShard = await vaultAdapter(app).read(
       "RSS Data/Feeds/feed-rollback-all.json",
     );
@@ -397,23 +413,23 @@ describe("FeedStorageRepository", () => {
       }),
     ).rejects.toThrow("user state unavailable");
 
-    expect(metadataBytes).toBe(oldMetadata);
+    expect(await app.vault.adapter.read(metadataPath)).toBe(oldMetadata);
     expect(
       await vaultAdapter(app).read("RSS Data/Feeds/feed-rollback-all.json"),
     ).toBe(oldShard);
     expect(
       await vaultAdapter(app).read("RSS Metadata/user-state.json"),
     ).toBe(oldUserState);
-    expect(metadataTransaction.restore).toHaveBeenCalledTimes(1);
-
-    const restarted = JSON.parse(metadataBytes) as RssDashboardSettings;
+    const restarted = JSON.parse(
+      await app.vault.adapter.read(metadataPath),
+    ) as RssDashboardSettings;
     const restartRepository = new FeedStorageRepository(app);
     await restartRepository.hydrateSettings(restarted);
     expect(restarted.feeds[0].title).toBe("Example Feed");
     expect(restarted.feeds[0].items[0].read).toBe(false);
   });
 
-  it("attempts every rollback target and dirties caches when one restore fails", async () => {
+  it("stops destructive rollback after the first CAS failure and dirties caches", async () => {
     const settings = cloneSettings();
     settings.storageMode = "vault-shards";
     settings.storageFolder = "RSS Data/Feeds";
@@ -433,17 +449,16 @@ describe("FeedStorageRepository", () => {
     settings.feeds[1].items[0].read = true;
 
     const adapter = vaultAdapter(app);
-    const originalWrite = adapter.write.bind(adapter);
+    const writeSpy = vi.spyOn(adapter, "write");
+    const originalProcess = adapter.process.bind(adapter);
     let failSecondRestore = true;
     const attemptedRestores: string[] = [];
-    vi.spyOn(adapter, "write").mockImplementation(async (path, contents) => {
-      if (contents === firstOld || contents === secondOld) {
-        attemptedRestores.push(path);
-      }
-      if (path === secondPath && contents === secondOld && failSecondRestore) {
+    vi.spyOn(adapter, "process").mockImplementation(async (path, update) => {
+      attemptedRestores.push(path);
+      if (path === secondPath && failSecondRestore) {
         throw new Error("restore unavailable");
       }
-      await originalWrite(path, contents);
+      return originalProcess(path, update);
     });
     saveData.mockRejectedValueOnce(new Error("metadata unavailable"));
 
@@ -453,15 +468,15 @@ describe("FeedStorageRepository", () => {
         forceMetadata: true,
       }),
     ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
-    expect(attemptedRestores).toEqual([secondPath, firstPath]);
-    expect(await vaultAdapter(app).read(firstPath)).toBe(firstOld);
+    expect(attemptedRestores).toEqual([secondPath]);
+    expect(await vaultAdapter(app).read(firstPath)).not.toBe(firstOld);
     expect(await vaultAdapter(app).read(secondPath)).not.toBe(secondOld);
 
     failSecondRestore = false;
     attemptedRestores.length = 0;
-    const writeCountBeforeRetry = vi.mocked(adapter.write).mock.calls.length;
+    const writeCountBeforeRetry = writeSpy.mock.calls.length;
     await repository.persistSettings(settings, saveData);
-    const retryWrites = vi.mocked(adapter.write).mock.calls
+    const retryWrites = writeSpy.mock.calls
       .slice(writeCountBeforeRetry)
       .map(([path]) => path);
     expect(retryWrites).toEqual(expect.arrayContaining([firstPath, secondPath]));
@@ -681,15 +696,12 @@ describe("FeedStorageRepository", () => {
     candidate.storageMode = "vault-shards";
     candidate.storageFolder = previous.storageFolder;
     candidate.feeds = [makeFeed({ feedId: "candidate-feed" })];
-    const adapter = vaultAdapter(app);
-    const originalRemove = adapter.remove.bind(adapter);
-    vi.spyOn(adapter, "remove").mockImplementation(async (path: string) => {
-      if (
-        path === "Candidate Storage/Feeds/candidate-feed.json"
-      ) {
+    const originalDelete = app.fileManager.trashFile.bind(app.fileManager);
+    vi.spyOn(app.fileManager, "trashFile").mockImplementation(async (file) => {
+      if (file.path === "Candidate Storage/Feeds/candidate-feed.json") {
         throw new Error("remove-failed");
       }
-      await originalRemove(path);
+      await originalDelete(file);
     });
 
     await expect(
@@ -914,20 +926,20 @@ describe("FeedStorageRepository", () => {
     const settings = cloneSettings();
     settings.storageMode = "legacy-json";
     settings.feeds = [makeFeed({ feedId: "legacy-feed" })];
-    let vaultData = "vault-old-bytes";
-    let pluginPointer = "pointer-old-bytes";
+    const metadataPath = "data.json";
+    await app.vault.create(metadataPath, "old-bytes");
     repository = new FeedStorageRepository(app, {
       metadataTransaction: {
-        capture: async () => ({ vaultData, pluginPointer }),
-        restore: async (snapshot) => {
-          const old = snapshot as { vaultData: string; pluginPointer: string };
-          vaultData = old.vaultData;
-          pluginPointer = old.pluginPointer;
-        },
+        getTargetPaths: () => [metadataPath],
       },
     });
-    const failingSave = vi.fn(async () => {
-      vaultData = "vault-new-bytes";
+    const failingSave = vi.fn(async (data: unknown) => {
+      const bytes = JSON.stringify(data);
+      await repository.writeMetadataCandidate(
+        metadataPath,
+        () => app.vault.adapter.write(metadataPath, bytes),
+        (actual) => actual === bytes,
+      );
       throw new Error("pointer unavailable");
     });
 
@@ -935,28 +947,347 @@ describe("FeedStorageRepository", () => {
       "pointer unavailable",
     );
 
-    expect(vaultData).toBe("vault-old-bytes");
-    expect(pluginPointer).toBe("pointer-old-bytes");
+    expect(await app.vault.adapter.read(metadataPath)).toBe("old-bytes");
   });
 
-  it("raises typed incomplete rollback when legacy metadata cannot be restored", async () => {
+  it("raises typed incomplete rollback and preserves external legacy metadata", async () => {
     const settings = cloneSettings();
     settings.storageMode = "legacy-json";
     settings.feeds = [makeFeed({ feedId: "legacy-feed" })];
+    const metadataPath = "data.json";
+    await app.vault.create(metadataPath, "old-bytes");
     repository = new FeedStorageRepository(app, {
       metadataTransaction: {
-        capture: async () => "old-bytes",
-        restore: async () => {
-          throw new Error("restore unavailable");
-        },
+        getTargetPaths: () => [metadataPath],
       },
     });
 
     await expect(
-      repository.persistSettings(settings, async () => {
+      repository.persistSettings(settings, async (data: unknown) => {
+        const bytes = JSON.stringify(data);
+        await repository.writeMetadataCandidate(
+          metadataPath,
+          () => app.vault.adapter.write(metadataPath, bytes),
+          (actual) => actual === bytes,
+        );
+        await app.vault.adapter.write(metadataPath, "EXTERNAL-METADATA");
         throw new Error("metadata unavailable");
       }),
     ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+    expect(await app.vault.adapter.read(metadataPath)).toBe(
+      "EXTERNAL-METADATA",
+    );
+  });
+
+  it("preserves an external shard rewrite instead of restoring over it", async () => {
+    const previous = cloneSettings();
+    previous.storageMode = "vault-shards";
+    previous.storageFolder = "RSS Data/Feeds";
+    previous.feeds = [makeFeed({ feedId: "shared-feed" })];
+    await repository.persistSettings(previous, saveData, {
+      forceAllShards: true,
+      forceMetadata: true,
+    });
+    const candidate = cloneSettings();
+    Object.assign(candidate, previous);
+    candidate.feeds = [
+      makeFeed({
+        feedId: "shared-feed",
+        title: "Candidate",
+        items: [{ ...makeFeed().items[0], read: true }],
+      }),
+    ];
+    const shardPath = "RSS Data/Feeds/shared-feed.json";
+
+    await expect(
+      repository.persistSettingsTransaction(
+        previous,
+        candidate,
+        saveData,
+        async () => {
+          await app.vault.adapter.write(shardPath, "EXTERNAL-SHARD");
+          throw new Error("publish failed");
+        },
+        { forceAllShards: true, forceMetadata: true },
+      ),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+    expect(await app.vault.adapter.read(shardPath)).toBe("EXTERNAL-SHARD");
+  });
+
+  it("does not delete a same-byte ABA replacement of a candidate-created shard", async () => {
+    const previous = cloneSettings();
+    previous.storageMode = "legacy-json";
+    previous.feeds = [];
+    const candidate = cloneSettings();
+    candidate.storageMode = "vault-shards";
+    candidate.storageFolder = "Candidate/Feeds";
+    candidate.feeds = [makeFeed({ feedId: "candidate-feed" })];
+    const shardPath = "Candidate/Feeds/candidate-feed.json";
+
+    await expect(
+      repository.persistSettingsTransaction(
+        previous,
+        candidate,
+        saveData,
+        async () => {
+          const bytes = await app.vault.adapter.read(shardPath);
+          await app.vault.adapter.remove(shardPath);
+          await app.vault.create(shardPath, bytes);
+          throw new Error("publish failed");
+        },
+        { forceAllShards: true, forceMetadata: true },
+      ),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+    expect(await app.vault.adapter.exists(shardPath)).toBe(true);
+  });
+
+  it("does not remove a same-path ABA replacement of a candidate-created directory", async () => {
+    const previous = cloneSettings();
+    previous.storageMode = "legacy-json";
+    previous.feeds = [];
+    const candidate = cloneSettings();
+    candidate.storageMode = "vault-shards";
+    candidate.storageFolder = "Candidate/Feeds";
+    candidate.feeds = [];
+
+    await expect(
+      repository.persistSettingsTransaction(
+        previous,
+        candidate,
+        saveData,
+        async () => {
+          await app.vault.adapter.rmdir("Candidate/Feeds", false);
+          await app.vault.createFolder("Candidate/Feeds");
+          throw new Error("publish failed");
+        },
+        { forceAllShards: true, forceMetadata: true },
+      ),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+    expect(await app.vault.adapter.exists("Candidate/Feeds")).toBe(true);
+  });
+
+  it("does not overwrite an externally recreated deleted shard", async () => {
+    const previous = cloneSettings();
+    previous.storageMode = "vault-shards";
+    previous.storageFolder = "RSS Data/Feeds";
+    previous.feeds = [makeFeed({ feedId: "removed-feed" })];
+    await repository.persistSettings(previous, saveData, {
+      forceAllShards: true,
+      forceMetadata: true,
+    });
+    const shardPath = "RSS Data/Feeds/removed-feed.json";
+    const candidate = cloneSettings();
+    Object.assign(candidate, previous);
+    candidate.feeds = [];
+
+    await expect(
+      repository.persistSettingsTransaction(
+        previous,
+        candidate,
+        saveData,
+        async () => {
+          await app.vault.create(shardPath, "EXTERNAL-RECREATION");
+          throw new Error("publish failed");
+        },
+        { forceAllShards: true, forceMetadata: true },
+      ),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+    expect(await app.vault.adapter.read(shardPath)).toBe(
+      "EXTERNAL-RECREATION",
+    );
+  });
+
+  it("fails closed without destructive cleanup when a virtual adapter has no file identity", async () => {
+    const previous = cloneSettings();
+    previous.storageMode = "legacy-json";
+    previous.feeds = [];
+    const candidate = cloneSettings();
+    candidate.storageMode = "vault-shards";
+    candidate.storageFolder = "Virtual/Feeds";
+    candidate.feeds = [makeFeed({ feedId: "candidate-feed" })];
+    const shardPath = "Virtual/Feeds/candidate-feed.json";
+    const adapter = app.vault.adapter as unknown as {
+      getBasePath?: () => string;
+      getFullPath?: (path: string) => string;
+    };
+    delete adapter.getBasePath;
+    delete adapter.getFullPath;
+    vi.spyOn(app.vault, "create").mockImplementation(
+      async (path: string, contents: string) => {
+        await app.vault.adapter.write(path, contents);
+        return new TFile(path);
+      },
+    );
+
+    await expect(
+      repository.persistSettingsTransaction(
+        previous,
+        candidate,
+        saveData,
+        async () => {
+          throw new Error("publish failed");
+        },
+        { forceAllShards: true, forceMetadata: true },
+      ),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+    expect(await app.vault.adapter.exists(shardPath)).toBe(true);
+  });
+
+  it("fails closed when an identity-less existing path was journaled even if its bytes match the preimage", async () => {
+    const metadataPath = "data.json";
+    await app.vault.adapter.write(metadataPath, "unchanged-bytes");
+    repository = new FeedStorageRepository(app, {
+      metadataTransaction: {
+        getTargetPaths: () => [metadataPath],
+      },
+    });
+    const settings = cloneSettings();
+    settings.storageMode = "legacy-json";
+
+    await expect(
+      repository.persistSettings(settings, async () => {
+        await repository.writeMetadataCandidate(
+          metadataPath,
+          () =>
+            app.vault.adapter.write(metadataPath, "unchanged-bytes"),
+          (actual) => actual === "unchanged-bytes",
+        );
+        throw new Error("publish failed");
+      }),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+    expect(await app.vault.adapter.read(metadataPath)).toBe(
+      "unchanged-bytes",
+    );
+  });
+
+  it("deletes an adapter-visible cacheless shard only when its injected desktop identity is safe", async () => {
+    const identityTokenByPath = new Map<string, object>();
+    const identityProvider: PathIdentityProvider = {
+      inspect: async (path: string): Promise<ControlledPathIdentity> => {
+        const exists = await app.vault.adapter.exists(path);
+        if (!exists) {
+          return {
+            path,
+            namespaceKey: path.toLocaleLowerCase("en-US"),
+            kind: "missing",
+            destructiveSafe: true,
+          };
+        }
+        let token = identityTokenByPath.get(path);
+        if (!token) {
+          token = {};
+          identityTokenByPath.set(path, token);
+        }
+        return {
+          path,
+          namespaceKey: path.toLocaleLowerCase("en-US"),
+          kind: path.endsWith(".json") ? "file" : "directory",
+          token,
+          destructiveSafe: true,
+        };
+      },
+      assertSafePaths: async (paths) => {
+        const identities = new Map<string, ControlledPathIdentity>();
+        for (const path of paths) {
+          identities.set(path, await identityProvider.inspect(path));
+        }
+        return identities;
+      },
+      isSameIdentity: (expected, actual) =>
+        expected.path === actual.path &&
+        expected.kind === actual.kind &&
+        expected.token === actual.token,
+      createExclusive: async (path, contents) => {
+        if (await app.vault.adapter.exists(path)) {
+          throw new Error("Path already exists");
+        }
+        await app.vault.create(path, contents);
+        return identityProvider.inspect(path);
+      },
+    };
+    repository = new FeedStorageRepository(app, {
+      pathIdentityProvider: identityProvider,
+    });
+    const previous = cloneSettings();
+    previous.storageMode = "vault-shards";
+    previous.storageFolder = "RSS Data/Feeds";
+    previous.feeds = [makeFeed({ feedId: "cacheless-feed" })];
+    await repository.persistSettings(previous, saveData, {
+      forceAllShards: true,
+      forceMetadata: true,
+    });
+    const shardPath = "RSS Data/Feeds/cacheless-feed.json";
+    const getAbstractFileByPath =
+      app.vault.getAbstractFileByPath.bind(app.vault);
+    vi.spyOn(app.vault, "getAbstractFileByPath").mockImplementation(
+      (path: string) =>
+        path === shardPath ? null : getAbstractFileByPath(path),
+    );
+    const remove = vi.spyOn(vaultAdapter(app), "remove");
+    const candidate = cloneSettings();
+    candidate.storageMode = "vault-shards";
+    candidate.storageFolder = "RSS Data/Feeds";
+    candidate.feeds = [];
+
+    await repository.persistSettingsTransaction(
+      previous,
+      candidate,
+      saveData,
+      async () => undefined,
+      { forceAllShards: true, forceMetadata: true },
+    );
+
+    expect(remove).toHaveBeenCalledWith(shardPath);
+    expect(await app.vault.adapter.exists(shardPath)).toBe(false);
+  });
+
+  it.each([
+    "/RSS/Feeds",
+    "C:/RSS/Feeds",
+    "\\\\server\\share\\Feeds",
+    "RSS/Feeds ",
+    "RSS/e\u0301",
+  ])("rejects unsafe storage path %s before any write", async (storageFolder) => {
+    const previous = cloneSettings();
+    previous.storageMode = "legacy-json";
+    previous.feeds = [];
+    const candidate = cloneSettings();
+    candidate.storageMode = "vault-shards";
+    candidate.storageFolder = storageFolder;
+    candidate.feeds = [makeFeed({ feedId: "candidate-feed" })];
+    const write = vi.spyOn(app.vault.adapter, "write");
+
+    await expect(
+      repository.persistSettingsTransaction(
+        previous,
+        candidate,
+        saveData,
+        async () => undefined,
+      ),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+    expect(write).not.toHaveBeenCalled();
+    expect(saveData).not.toHaveBeenCalled();
+  });
+
+  it("rejects case-fold aliases between shard and metadata roots", async () => {
+    const previous = cloneSettings();
+    previous.storageMode = "legacy-json";
+    previous.feeds = [];
+    const candidate = cloneSettings();
+    candidate.storageMode = "vault-shards-v2";
+    candidate.storageFolder = "RSS/Feeds";
+    candidate.metadataStorageFolder = "rss";
+    candidate.feeds = [makeFeed({ feedId: "candidate-feed" })];
+
+    await expect(
+      repository.persistSettingsTransaction(
+        previous,
+        candidate,
+        saveData,
+        async () => undefined,
+      ),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+    expect(saveData).not.toHaveBeenCalled();
   });
 
   it("migrates legacy settings to shard storage and strips items from persisted metadata", async () => {
@@ -1022,7 +1353,7 @@ describe("FeedStorageRepository", () => {
     );
   });
 
-  it("continues migration when the adapter sees the folder but the vault cache does not", async () => {
+  it("fails closed when a virtual adapter sees a folder without object identity", async () => {
     const settings = cloneSettings();
     settings.storageMode = "legacy-json";
     settings.storageFolder = "RSS Data/Feeds";
@@ -1041,13 +1372,14 @@ describe("FeedStorageRepository", () => {
       return Promise.resolve(false);
     });
 
-    await repository.migrateToVaultShards(settings, saveData);
-
-    expect(settings.storageMode).toBe("vault-shards");
-    expect(saveData).toHaveBeenCalledTimes(1);
+    await expect(
+      repository.migrateToVaultShards(settings, saveData),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+    expect(settings.storageMode).toBe("legacy-json");
+    expect(saveData).not.toHaveBeenCalled();
   });
 
-  it("fails migration with a clear error when the storage path points to a file", async () => {
+  it("fails migration closed before writing when the storage path points to a file", async () => {
     const settings = cloneSettings();
     settings.storageMode = "legacy-json";
     settings.storageFolder = "RSS Data/Feeds";
@@ -1055,9 +1387,9 @@ describe("FeedStorageRepository", () => {
 
     await app.vault.create("RSS Data/Feeds", "not a folder");
 
-    await expect(repository.migrateToVaultShards(settings, saveData)).rejects.toThrow(
-      "Storage path points to a file, not a folder: RSS Data/Feeds",
-    );
+    await expect(
+      repository.migrateToVaultShards(settings, saveData),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
     expect(settings.storageMode).toBe("legacy-json");
   });
 
