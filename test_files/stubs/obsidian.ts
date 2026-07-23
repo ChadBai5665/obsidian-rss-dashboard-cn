@@ -180,6 +180,8 @@ export const Platform = {
   isDesktop: true,
 };
 
+export const apiVersion = "1.8.7";
+
 export function setIcon(el: HTMLElement, iconName: string): void {
   el.dataset.icon = iconName;
 }

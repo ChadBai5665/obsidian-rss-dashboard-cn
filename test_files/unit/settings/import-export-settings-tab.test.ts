@@ -14,6 +14,7 @@ import {
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import type RssDashboardPlugin from "../../../main";
 import { ImportSuccessModal } from "../../../src/modals/import-success-modal";
+import { DiagnosticsPreviewModal } from "../../../src/modals/diagnostics-preview-modal";
 
 type ObsidianHTMLElement = HTMLElement & {
   empty: () => void;
@@ -64,6 +65,11 @@ function createPlugin() {
     copyOpmlToClipboard: vi.fn(async () => {}),
     exportPortableDataBundle: vi.fn(async () => {}),
     importPortableDataBundleFromFile: vi.fn(async () => {}),
+    createSafeDiagnosticsPreview: vi.fn(() => ({
+      token: "preview-token",
+      text: '{"pluginVersion":"0.1.0"}',
+    })),
+    copySafeDiagnosticsPreview: vi.fn(async () => {}),
     getActiveDashboardView: vi.fn(async () => null),
     performFactoryReset: vi.fn(async () => {}),
   };
@@ -159,7 +165,7 @@ describe("Auto Backup Helpers", () => {
 
   describe("renderImportExportSettingsTab() factory reset section", () => {
     it.each([
-      ["导入分片数据", "importPortableDataBundleFromFile", "无法导入分片数据"],
+      ["导入安全配置", "importPortableDataBundleFromFile", "无法导入安全配置"],
       ["导入 usersettings.json", "importUserSettingsJsonFromFile", "无法导入用户偏好"],
     ] as const)("shows a safe localized error for %s", async (buttonLabel, method, expected) => {
       const containerEl = createContainerEl();
@@ -293,14 +299,42 @@ describe("Auto Backup Helpers", () => {
         plugin as unknown as RssDashboardPlugin,
       );
 
-      const portableSetting = getSettingByName(containerEl, "Shard data");
-      expect(portableSetting.textContent).toContain("cross-device migration");
+      const portableSetting = getSettingByName(containerEl, "Safe configuration migration");
+      expect(portableSetting.textContent).toContain("Collected article bodies");
 
       const buttons = Array.from(
         containerEl.querySelectorAll<HTMLButtonElement>("button"),
       ).map((button) => button.textContent?.trim());
-      expect(buttons).toContain("Import shard data");
-      expect(buttons).toContain("Export shard data");
+      expect(buttons).toContain("Import safe configuration");
+      expect(buttons).toContain("Export safe configuration");
+    });
+
+    it("opens a preview before any diagnostics copy and wires the exact text", () => {
+      const containerEl = createContainerEl();
+      const plugin = createPlugin();
+      const openSpy = vi
+        .spyOn(DiagnosticsPreviewModal.prototype, "open")
+        .mockImplementation(function openPreview() {
+          this.onOpen();
+          return this;
+        });
+
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+      );
+      const diagnostics = Array.from(
+        containerEl.querySelectorAll<HTMLButtonElement>("button"),
+      ).find((candidate) => candidate.textContent === "Preview diagnostics");
+      diagnostics?.click();
+
+      expect(plugin.createSafeDiagnosticsPreview).toHaveBeenCalledTimes(1);
+      expect(plugin.copySafeDiagnosticsPreview).not.toHaveBeenCalled();
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      const modal = openSpy.mock.instances[0] as DiagnosticsPreviewModal;
+      expect(modal.contentEl.querySelector("pre")?.textContent).toBe(
+        '{"pluginVersion":"0.1.0"}',
+      );
     });
 
     it("calls shard data export when Export shard data is clicked", () => {
@@ -315,7 +349,7 @@ describe("Auto Backup Helpers", () => {
       const exportButton = Array.from(
         containerEl.querySelectorAll<HTMLButtonElement>("button"),
       ).find(
-        (button) => button.textContent === "Export shard data",
+        (button) => button.textContent === "Export safe configuration",
       ) as HTMLButtonElement;
 
       exportButton.click();

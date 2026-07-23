@@ -13,6 +13,11 @@ import { FactoryResetConfirmModal } from "../modals/settings-modals";
 import { AutoBackupSettings, RssDashboardSettings } from "../../types/types";
 import { createTranslator } from "../../i18n";
 import { loadAndNormalizeSettings } from "../../utils/settings-loader";
+import { DiagnosticsPreviewModal } from "../../modals/diagnostics-preview-modal";
+import {
+  MAX_PUBLIC_SETTINGS_JSON_CHARACTERS,
+  preparePublicSettingsImport,
+} from "../../security/public-settings-export";
 
 /** @deprecated Import from settings-modals; this re-export preserves integrations. */
 export { FactoryResetConfirmModal } from "../modals/settings-modals";
@@ -64,7 +69,35 @@ export function renderImportExportSettingsTab(
               if (!file) return;
               const text = await file.text();
               try {
-                const data = JSON.parse(text) as Partial<RssDashboardSettings>;
+                if (
+                  text.length === 0 ||
+                  text.length > MAX_PUBLIC_SETTINGS_JSON_CHARACTERS
+                ) {
+                  throw new Error("Invalid public settings");
+                }
+                const rawData = JSON.parse(text) as unknown;
+                if (!rawData || typeof rawData !== "object") {
+                  throw new Error("Invalid public settings");
+                }
+                const rawRecord = rawData as Record<string, unknown>;
+                const sourceFields = ["feeds", "folders", "availableTags"];
+                const presentSourceFields = sourceFields.filter((key) =>
+                  Object.prototype.hasOwnProperty.call(rawRecord, key),
+                );
+                if (
+                  presentSourceFields.length > 0 &&
+                  presentSourceFields.length !== sourceFields.length
+                ) {
+                  throw new Error("Incomplete public source configuration");
+                }
+                const data = JSON.parse(
+                  JSON.stringify(
+                    preparePublicSettingsImport(rawData, {
+                      includeSources:
+                        presentSourceFields.length === sourceFields.length,
+                    }),
+                  ),
+                ) as Partial<RssDashboardSettings>;
                 plugin.settings = loadAndNormalizeSettings(
                   Object.assign({}, plugin.settings, data),
                 );
@@ -216,6 +249,31 @@ export function renderImportExportSettingsTab(
           void plugin.copyUserSettingsJsonToClipboard();
         }),
     );
+
+  // ── Opt-in safe diagnostics ──────────────────────────────────────────────
+  const diagnosticsSection = containerEl.createDiv();
+  new Setting(diagnosticsSection)
+    .setName(t("settings.diagnostics.title"))
+    .setDesc(t("settings.diagnostics.desc"))
+    .setHeading();
+  new Setting(diagnosticsSection).addButton((button) =>
+    button
+      .setIcon("clipboard-list")
+      .setButtonText(t("settings.diagnostics.preview"))
+      .onClick(() => {
+        try {
+          const preview = plugin.createSafeDiagnosticsPreview();
+          new DiagnosticsPreviewModal(plugin.app, {
+            locale: plugin.settings.locale ?? "zh-CN",
+            preview,
+            copyPreview: (token, exactPreview) =>
+              plugin.copySafeDiagnosticsPreview(token, exactPreview),
+          }).open();
+        } catch {
+          new Notice(t("settings.diagnostics.unavailable"));
+        }
+      }),
+  );
 
   // ── OPML ──────────────────────────────────────────────────────────────────
   const opmlSection = containerEl.createDiv();

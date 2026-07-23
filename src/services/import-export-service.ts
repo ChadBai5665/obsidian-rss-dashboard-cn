@@ -1,5 +1,10 @@
 import { Notice } from "obsidian";
-import type { PortableDataBundle, RssDashboardSettings } from "../types/types";
+import type {
+  Feed,
+  Folder,
+  PortableDataBundle,
+  RssDashboardSettings,
+} from "../types/types";
 import { OpmlManager } from "./opml-manager";
 import { createTranslator, type Locale, type Translator } from "../i18n";
 import {
@@ -7,6 +12,16 @@ import {
   copyTextToClipboard,
   type ExportBlobResult,
 } from "../utils/export-utils";
+import {
+  buildPublicPortableBundleExport,
+  buildPublicSettingsExport,
+  preparePublicSettingsImport,
+  MAX_PUBLIC_SETTINGS_JSON_CHARACTERS,
+} from "../security/public-settings-export";
+import {
+  stringifySafeDiagnostics,
+  type SafeDiagnosticsInput,
+} from "../security/safe-diagnostics";
 
 /**
  * Service for import/export functionality: JSON settings, OPML feeds, and clipboard operations.
@@ -17,13 +32,20 @@ export class ImportExportService {
   private isMobile: boolean;
   private getPortableDataBundle?: () => PortableDataBundle;
   private importPortableDataBundle?: (bundle: unknown) => Promise<void>;
+  private importPublicSettingsBundle?: (settings: unknown) => Promise<void>;
+  private readonly getSafeDiagnosticsInput?: () => SafeDiagnosticsInput;
   private readonly getLocale: () => Locale;
+  private readonly trustedDiagnosticsPreviews = new Map<string, string>();
+  private readonly createDiagnosticsToken: () => string;
 
   constructor(options: {
     settings: RssDashboardSettings;
     isMobile: boolean;
     getPortableDataBundle?: () => PortableDataBundle;
     importPortableDataBundle?: (bundle: unknown) => Promise<void>;
+    importPublicSettingsBundle?: (settings: unknown) => Promise<void>;
+    getSafeDiagnosticsInput?: () => SafeDiagnosticsInput;
+    createDiagnosticsToken?: () => string;
     getLocale?: () => Locale;
     /** Legacy fixed-locale option retained for direct integration compatibility. */
     locale?: Locale;
@@ -32,6 +54,10 @@ export class ImportExportService {
     this.isMobile = options.isMobile;
     this.getPortableDataBundle = options.getPortableDataBundle;
     this.importPortableDataBundle = options.importPortableDataBundle;
+    this.importPublicSettingsBundle = options.importPublicSettingsBundle;
+    this.getSafeDiagnosticsInput = options.getSafeDiagnosticsInput;
+    this.createDiagnosticsToken =
+      options.createDiagnosticsToken ?? (() => activeWindow.crypto.randomUUID());
     this.getLocale = options.getLocale ?? (() => options.locale ?? "en");
   }
 
@@ -43,75 +69,97 @@ export class ImportExportService {
   }
 
   getUserSettingsJson(): string {
-    const {
-      feeds: _feeds,
-      folders: _folders,
-      availableTags: _availableTags,
-      ...settingsOnly
-    } = this.settings;
-    return JSON.stringify(settingsOnly, null, 2);
+    return JSON.stringify(
+      buildPublicSettingsExport(this.settings, { includeSources: false }),
+      null,
+      2,
+    );
   }
 
   async exportUserSettingsJson(): Promise<void> {
     const filename = "usersettings.json";
-    const blob = new Blob([this.getUserSettingsJson()], {
-      type: "application/json",
-    });
-    const result = await exportBlob({
-      blob,
-      filename,
-      isMobile: this.isMobile,
-    });
-    this.showExportNotice(result, filename);
+    try {
+      const blob = new Blob([this.getUserSettingsJson()], {
+        type: "application/json",
+      });
+      const result = await exportBlob({
+        blob,
+        filename,
+        isMobile: this.isMobile,
+      });
+      this.showExportNotice(result, filename);
+    } catch {
+      this.showExportNotice("failed", filename);
+    }
   }
 
   async exportDataJson(): Promise<void> {
     const filename = "data.json";
-    const blob = new Blob([JSON.stringify(this.settings, null, 2)], {
-      type: "application/json",
-    });
-    const result = await exportBlob({
-      blob,
-      filename,
-      isMobile: this.isMobile,
-    });
-    this.showExportNotice(result, filename);
+    try {
+      const snapshot = buildPublicSettingsExport(this.settings, {
+        includeSources: true,
+      });
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], {
+        type: "application/json",
+      });
+      const result = await exportBlob({
+        blob,
+        filename,
+        isMobile: this.isMobile,
+      });
+      this.showExportNotice(result, filename);
+    } catch {
+      this.showExportNotice("failed", filename);
+    }
   }
 
   async exportOpml(): Promise<void> {
-    const opmlContent = OpmlManager.generateOpml(
-      this.settings.feeds,
-      this.settings.folders,
-    );
     const filename = "feeds.opml";
-    const blob = new Blob([opmlContent], { type: "text/xml" });
-    const result = await exportBlob({
-      blob,
-      filename,
-      isMobile: this.isMobile,
-    });
-    this.showExportNotice(result, filename);
+    try {
+      const snapshot = buildPublicSettingsExport(this.settings, {
+        includeSources: true,
+      });
+      const opmlContent = OpmlManager.generateOpml(
+        snapshot.feeds as unknown as Feed[],
+        snapshot.folders as unknown as Folder[],
+      );
+      const blob = new Blob([opmlContent], { type: "text/xml" });
+      const result = await exportBlob({
+        blob,
+        filename,
+        isMobile: this.isMobile,
+      });
+      this.showExportNotice(result, filename);
+    } catch {
+      this.showExportNotice("failed", filename);
+    }
   }
 
   async exportPortableDataBundle(): Promise<void> {
     const filename = "rss-dashboard-portable-bundle.json";
-    const bundle = this.getPortableDataBundle?.();
-    const blob = new Blob(
-      [JSON.stringify(bundle ?? { settings: this.settings }, null, 2)],
-      {
+    try {
+      const bundle = this.getPortableDataBundle?.();
+      if (!bundle) throw new Error("missing-bundle");
+      const snapshot = buildPublicPortableBundleExport(bundle);
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], {
         type: "application/json",
-      },
-    );
-    const result = await exportBlob({
-      blob,
-      filename,
-      isMobile: this.isMobile,
-    });
-    this.showExportNotice(result, filename);
+      });
+      const result = await exportBlob({
+        blob,
+        filename,
+        isMobile: this.isMobile,
+      });
+      this.showExportNotice(result, filename);
+    } catch {
+      this.showExportNotice("failed", filename);
+    }
   }
 
   async importPortableDataBundleFromFile(file: File): Promise<void> {
     const text = await file.text();
+    if (text.length === 0 || text.length > MAX_PUBLIC_SETTINGS_JSON_CHARACTERS) {
+      throw new Error("Invalid safe configuration JSON");
+    }
     let parsed: unknown;
 
     try {
@@ -122,13 +170,23 @@ export class ImportExportService {
       );
     }
 
-    if (!this.importPortableDataBundle) {
+    if (!this.importPublicSettingsBundle && !this.importPortableDataBundle) {
       throw new Error(
         "Portable bundle import is not available in this context",
       );
     }
-
-    await this.importPortableDataBundle(parsed);
+    const bundle = buildPublicPortableBundleExport(parsed);
+    const importedSettings = preparePublicSettingsImport(bundle.metadata, {
+      includeSources: true,
+    });
+    if (this.importPublicSettingsBundle) {
+      await this.importPublicSettingsBundle(importedSettings);
+    } else {
+      await this.importPortableDataBundle?.({
+        ...bundle,
+        metadata: importedSettings,
+      });
+    }
     new Notice(this.t("service.import.portableImported"));
   }
 
@@ -150,26 +208,44 @@ export class ImportExportService {
 
   async copyDataJsonToClipboard(): Promise<void> {
     const filename = "data.json";
-    const result = await copyTextToClipboard(
-      JSON.stringify(this.settings, null, 2),
-    );
-    this.showCopyNotice(result, filename);
+    try {
+      const snapshot = buildPublicSettingsExport(this.settings, {
+        includeSources: true,
+      });
+      const result = await copyTextToClipboard(
+        JSON.stringify(snapshot, null, 2),
+      );
+      this.showCopyNotice(result, filename);
+    } catch {
+      this.showCopyNotice("failed", filename);
+    }
   }
 
   async copyUserSettingsJsonToClipboard(): Promise<void> {
     const filename = "usersettings.json";
-    const result = await copyTextToClipboard(this.getUserSettingsJson());
-    this.showCopyNotice(result, filename);
+    try {
+      const result = await copyTextToClipboard(this.getUserSettingsJson());
+      this.showCopyNotice(result, filename);
+    } catch {
+      this.showCopyNotice("failed", filename);
+    }
   }
 
   async copyOpmlToClipboard(): Promise<void> {
     const filename = "feeds.opml";
-    const opmlContent = OpmlManager.generateOpml(
-      this.settings.feeds,
-      this.settings.folders,
-    );
-    const result = await copyTextToClipboard(opmlContent);
-    this.showCopyNotice(result, filename);
+    try {
+      const snapshot = buildPublicSettingsExport(this.settings, {
+        includeSources: true,
+      });
+      const opmlContent = OpmlManager.generateOpml(
+        snapshot.feeds as unknown as Feed[],
+        snapshot.folders as unknown as Folder[],
+      );
+      const result = await copyTextToClipboard(opmlContent);
+      this.showCopyNotice(result, filename);
+    } catch {
+      this.showCopyNotice("failed", filename);
+    }
   }
 
   public showCopyNotice(result: "copied" | "failed", filename: string): void {
@@ -178,5 +254,47 @@ export class ImportExportService {
       return;
     }
     new Notice(this.t("service.import.copyFailed", { filename }));
+  }
+
+  createSafeDiagnosticsPreview(): Readonly<{ token: string; text: string }> {
+    if (!this.getSafeDiagnosticsInput) {
+      throw new Error("Safe diagnostics are unavailable.");
+    }
+    const text = stringifySafeDiagnostics(this.getSafeDiagnosticsInput());
+    const token = this.createDiagnosticsToken();
+    if (
+      typeof token !== "string" ||
+      token.length === 0 ||
+      token.length > 256 ||
+      this.trustedDiagnosticsPreviews.has(token)
+    ) {
+      throw new Error("Unable to create a diagnostics preview token.");
+    }
+    if (this.trustedDiagnosticsPreviews.size >= 32) {
+      const oldest = this.trustedDiagnosticsPreviews.keys().next().value;
+      if (oldest) this.trustedDiagnosticsPreviews.delete(oldest);
+    }
+    this.trustedDiagnosticsPreviews.set(token, text);
+    return Object.freeze({ token, text });
+  }
+
+  async copySafeDiagnosticsPreview(
+    token: string,
+    preview: string,
+  ): Promise<void> {
+    const trustedPreview = this.trustedDiagnosticsPreviews.get(token);
+    this.trustedDiagnosticsPreviews.delete(token);
+    if (trustedPreview === undefined || trustedPreview !== preview) {
+      new Notice(this.t("service.diagnostics.copyFailed"));
+      return;
+    }
+    const result = await copyTextToClipboard(preview);
+    new Notice(
+      this.t(
+        result === "copied"
+          ? "service.diagnostics.copied"
+          : "service.diagnostics.copyFailed",
+      ),
+    );
   }
 }

@@ -24,11 +24,20 @@ vi.mock("../../../src/services/opml-manager", () => ({
 }));
 
 import { ImportExportService } from "../../../src/services/import-export-service";
-import { exportBlob } from "../../../src/utils/export-utils";
+import { copyTextToClipboard, exportBlob } from "../../../src/utils/export-utils";
+import { OpmlManager } from "../../../src/services/opml-manager";
 
 function makeSettings(overrides?: object): RssDashboardSettings {
   return {
-    feeds: [{ url: "https://example.com/feed", name: "Test" }],
+    feeds: [
+      {
+        title: "Test",
+        url: "https://example.com/feed",
+        folder: "News",
+        items: [],
+        lastUpdated: 0,
+      },
+    ],
     folders: [{ name: "News", subfolders: [], createdAt: 0, modifiedAt: 0 }],
     availableTags: [{ name: "tech", color: "#fff" }],
     refreshInterval: 60,
@@ -170,11 +179,44 @@ describe("ImportExportService", () => {
         }),
       );
     });
+
+    it("fails before OPML generation when a subscription URL contains credentials", async () => {
+      const svc = new ImportExportService({
+        settings: makeSettings({
+          feeds: [
+            {
+              title: "Private",
+              url: "https://example.com/feed?token=PRIVATE_OPML_TOKEN_CANARY",
+              folder: "News",
+              items: [],
+              lastUpdated: 0,
+            },
+          ],
+        }),
+        isMobile: false,
+      });
+      await svc.exportOpml();
+      expect(OpmlManager.generateOpml).not.toHaveBeenCalled();
+      expect(exportBlob).not.toHaveBeenCalled();
+    });
   });
 
   describe("exportDataJson", () => {
-    it("calls exportBlob with an application/json blob containing full settings", async () => {
-      const settings = makeSettings();
+    it("exports only the public settings schema and never collected/private state", async () => {
+      const settings = makeSettings({
+        feeds: [
+          {
+            title: "Allowed feed",
+            url: "https://example.com/feed.xml",
+            folder: "News",
+            items: [{ content: "PRIVATE_EXPORT_BODY_CANARY" }],
+            lastUpdated: 123,
+            lastFetchError: "PRIVATE_EXPORT_ERROR_CANARY",
+          },
+        ],
+        apiKey: "PRIVATE_EXPORT_KEY_CANARY",
+        futureUnknown: "PRIVATE_FUTURE_FIELD_CANARY",
+      });
       const svc = new ImportExportService({ settings, isMobile: false });
       await svc.exportDataJson();
       expect(exportBlob).toHaveBeenCalledWith(
@@ -187,6 +229,25 @@ describe("ImportExportService", () => {
       const text = await call.blob.text();
       const parsed = JSON.parse(text) as Record<string, unknown>;
       expect(parsed).toHaveProperty("feeds");
+      expect(text).not.toContain("PRIVATE_EXPORT_BODY_CANARY");
+      expect(text).not.toContain("PRIVATE_EXPORT_ERROR_CANARY");
+      expect(text).not.toContain("PRIVATE_EXPORT_KEY_CANARY");
+      expect(text).not.toContain("PRIVATE_FUTURE_FIELD_CANARY");
+    });
+
+    it("does not download or copy a partial result when an allowed structure is invalid", async () => {
+      const settings = makeSettings();
+      const originalFeeds = settings.feeds;
+      const getter = vi.fn(() => originalFeeds);
+      Object.defineProperty(settings, "feeds", { enumerable: true, get: getter });
+      const svc = new ImportExportService({ settings, isMobile: false });
+
+      await svc.exportDataJson();
+      await svc.copyDataJsonToClipboard();
+
+      expect(getter).not.toHaveBeenCalled();
+      expect(exportBlob).not.toHaveBeenCalled();
+      expect(copyTextToClipboard).not.toHaveBeenCalled();
     });
   });
 
@@ -219,17 +280,18 @@ describe("ImportExportService", () => {
       const text = await call.blob.text();
       const parsed = JSON.parse(text) as Record<string, unknown>;
       expect(parsed.storageMode).toBe("vault-shards");
-      expect(parsed.markdownMirrorFallbackPlanned).toBe(true);
+      expect(parsed.shards).toEqual([]);
+      expect(JSON.stringify(parsed)).not.toContain("items");
     });
   });
 
   describe("importPortableDataBundleFromFile", () => {
     it("parses bundle JSON and passes it to the import callback", async () => {
-      const importPortableDataBundle = vi.fn().mockResolvedValue(undefined);
+      const importPublicSettingsBundle = vi.fn().mockResolvedValue(undefined);
       const svc = new ImportExportService({
         settings: makeSettings(),
         isMobile: false,
-        importPortableDataBundle,
+        importPublicSettingsBundle,
       });
 
       const file = new File(
@@ -238,7 +300,7 @@ describe("ImportExportService", () => {
             version: 1,
             exportedAt: 123,
             storageMode: "vault-shards",
-            metadata: { feeds: [] },
+            metadata: { ...makeSettings(), feeds: [] },
             shards: [],
             markdownMirrorFallbackPlanned: true,
           }),
@@ -249,11 +311,10 @@ describe("ImportExportService", () => {
 
       await svc.importPortableDataBundleFromFile(file);
 
-      expect(importPortableDataBundle).toHaveBeenCalledTimes(1);
-      expect(importPortableDataBundle).toHaveBeenCalledWith(
+      expect(importPublicSettingsBundle).toHaveBeenCalledTimes(1);
+      expect(importPublicSettingsBundle).toHaveBeenCalledWith(
         expect.objectContaining({
-          version: 1,
-          storageMode: "vault-shards",
+          feeds: [],
         }),
       );
       expect(getNoticeMessages(consoleLogSpy)).toContain(
@@ -275,6 +336,72 @@ describe("ImportExportService", () => {
       await expect(svc.importPortableDataBundleFromFile(file)).rejects.toThrow(
         "Invalid portable bundle JSON",
       );
+    });
+  });
+
+  describe("safe diagnostics", () => {
+    it("builds a token-bound preview without touching the clipboard and copies only the exact pair", async () => {
+      const tokens = ["preview-one", "preview-two"];
+      const svc = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        getSafeDiagnosticsInput: () => ({
+          pluginVersion: "0.1.0",
+          obsidianVersion: "1.8.7",
+          osName: "linux",
+          generatedAt: "2026-07-22T10:00:00.000Z",
+          sourceKinds: ["feed"],
+          statusCodes: ["ok"],
+          aggregateCounts: { failedSources: 0 },
+        }),
+        createDiagnosticsToken: () => tokens.shift()!,
+      });
+
+      const preview = svc.createSafeDiagnosticsPreview();
+      expect(copyTextToClipboard).not.toHaveBeenCalled();
+      await svc.copySafeDiagnosticsPreview(preview.token, preview.text);
+      expect(copyTextToClipboard).toHaveBeenCalledTimes(1);
+      expect(copyTextToClipboard).toHaveBeenCalledWith(preview.text);
+
+      await svc.copySafeDiagnosticsPreview(preview.token, preview.text);
+      expect(copyTextToClipboard).toHaveBeenCalledTimes(1);
+
+      const second = svc.createSafeDiagnosticsPreview();
+      expect(second.text).toBe(preview.text);
+      expect(second.token).not.toBe(preview.token);
+      await svc.copySafeDiagnosticsPreview(preview.token, second.text);
+      expect(copyTextToClipboard).toHaveBeenCalledTimes(1);
+      await svc.copySafeDiagnosticsPreview(second.token, second.text);
+      expect(copyTextToClipboard).toHaveBeenCalledTimes(2);
+    });
+
+    it("consumes the one-time token on clipboard failure and never logs diagnostic content", async () => {
+      vi.mocked(copyTextToClipboard).mockResolvedValueOnce("failed");
+      const svc = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        locale: "en",
+        getSafeDiagnosticsInput: () => ({
+          pluginVersion: "0.1.0",
+          obsidianVersion: "1.8.7",
+          osName: "linux",
+          generatedAt: "2026-07-22T10:00:00.000Z",
+          sourceKinds: [],
+          statusCodes: [],
+          aggregateCounts: {},
+        }),
+        createDiagnosticsToken: () => "failed-preview",
+      });
+      const preview = svc.createSafeDiagnosticsPreview();
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      await svc.copySafeDiagnosticsPreview(preview.token, preview.text);
+      await svc.copySafeDiagnosticsPreview(preview.token, preview.text);
+      expect(getNoticeMessages(consoleLogSpy)).toContain(
+        "Unable to copy diagnostics",
+      );
+      expect(copyTextToClipboard).toHaveBeenCalledTimes(1);
+      expect(consoleLogSpy.mock.calls.flat().join(" ")).not.toContain(preview.text);
+      expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(preview.text);
     });
   });
 });

@@ -9,6 +9,7 @@ import {
   TFile,
   type EventRef,
   type ObsidianProtocolData,
+  apiVersion,
 } from "obsidian";
 
 import { getSettingManager } from "./src/utils/settings-manager";
@@ -96,6 +97,10 @@ import type { CollectedItem } from "./src/collection/collected-item";
 import { createTranslator, type Translator } from "./src/i18n";
 import { isLocalizedView } from "./src/views/localized-view";
 import { DesktopSecretStore } from "./src/security/desktop-secret-store";
+import {
+  MAX_PUBLIC_SETTINGS_JSON_CHARACTERS,
+  preparePublicSettingsImport,
+} from "./src/security/public-settings-export";
 import { normalizeFeedItem } from "./src/collection/feed-normalizer";
 import { ContentRepository } from "./src/collection/content-repository";
 import { AiContentSelector } from "./src/ai/content/ai-content-selector";
@@ -873,7 +878,48 @@ export default class RssDashboardPlugin extends Plugin {
       getPortableDataBundle: () => this.getPortableDataBundle(),
       importPortableDataBundle: (bundle) =>
         this.applyPortableDataBundleImport(bundle),
+      importPublicSettingsBundle: (settings) =>
+        this.applyPublicSettingsImport(settings),
       getLocale: () => this.settings.locale,
+      getSafeDiagnosticsInput: () => {
+        const failedSources = this.settings.feeds.filter((feed) =>
+          Boolean(feed.lastFetchError),
+        ).length;
+        const lastRefresh = this.settings.lastRefreshTimestamp;
+        const lastRefreshAt =
+          Number.isFinite(lastRefresh) && lastRefresh > 0
+            ? new Date(lastRefresh).toISOString()
+            : undefined;
+        const osName = Platform.isMacOS
+          ? "macOS"
+          : Platform.isWin
+            ? "Windows"
+            : Platform.isLinux
+              ? "Linux"
+              : "other";
+        return {
+          pluginVersion: this.manifest.version,
+          obsidianVersion: apiVersion,
+          osName,
+          generatedAt: new Date().toISOString(),
+          ...(lastRefreshAt ? { lastRefreshAt } : {}),
+          sourceKinds: this.settings.feeds.map(
+            (feed) => feed.sourceKind ?? "feed",
+          ),
+          statusCodes: this.settings.feeds.map((feed) =>
+            feed.lastFetchError ? "source-failed" : "ok",
+          ),
+          aggregateCounts: {
+            enabledAiConnections: this.settings.ai.connections.filter(
+              (connection) => connection.enabled,
+            ).length,
+            failedSources,
+            enabledSources: this.settings.feeds.filter(
+              (feed) => !feed.excludeFromRefresh,
+            ).length,
+          },
+        };
+      },
     });
     this.backupService = new BackupService({
       settings: this.settings,
@@ -3171,20 +3217,38 @@ export default class RssDashboardPlugin extends Plugin {
   public async importUserSettingsJsonFromFile(file: File): Promise<void> {
     try {
       const text = await file.text();
-      const parsed = JSON.parse(text) as Partial<RssDashboardSettings>;
-      if (!parsed || typeof parsed !== "object") {
+      if (
+        text.length === 0 ||
+        text.length > MAX_PUBLIC_SETTINGS_JSON_CHARACTERS
+      ) {
+        throw new Error("Invalid usersettings.json");
+      }
+      const rawParsed = JSON.parse(text) as unknown;
+      if (!rawParsed || typeof rawParsed !== "object") {
         throw new Error("Invalid usersettings.json");
       }
 
-      const parsedWithCollections = parsed as Partial<RssDashboardSettings> & {
+      const rawCollections = rawParsed as Partial<RssDashboardSettings> & {
         feeds?: unknown;
         folders?: unknown;
         availableTags?: unknown;
       };
       const hasFeedCollections =
-        Array.isArray(parsedWithCollections.feeds) ||
-        Array.isArray(parsedWithCollections.folders) ||
-        Array.isArray(parsedWithCollections.availableTags);
+        Array.isArray(rawCollections.feeds) ||
+        Array.isArray(rawCollections.folders) ||
+        Array.isArray(rawCollections.availableTags);
+      const parsed = JSON.parse(
+        JSON.stringify(
+          preparePublicSettingsImport(rawParsed, {
+            includeSources: hasFeedCollections,
+          }),
+        ),
+      ) as Partial<RssDashboardSettings>;
+      const parsedWithCollections = parsed as Partial<RssDashboardSettings> & {
+        feeds?: unknown;
+        folders?: unknown;
+        availableTags?: unknown;
+      };
 
       if (hasFeedCollections) {
         this.settings = Object.assign(
@@ -3329,6 +3393,20 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
+  private async applyPublicSettingsImport(snapshot: unknown): Promise<void> {
+    const plainSnapshot = JSON.parse(
+      JSON.stringify(snapshot),
+    ) as Partial<RssDashboardSettings>;
+    this.settings = loadAndNormalizeSettings(
+      Object.assign({}, this.settings, plainSnapshot),
+    );
+    this.initializeSettingsBackedServices();
+    await this.saveSettings();
+    await this.refreshDashboardViews();
+    const discoverView = await this.getActiveDiscoverView();
+    discoverView?.render();
+  }
+
   public async exportUserSettingsJson(): Promise<void> {
     return this.importExportService.exportUserSettingsJson();
   }
@@ -3359,6 +3437,20 @@ export default class RssDashboardPlugin extends Plugin {
 
   public async copyOpmlToClipboard(): Promise<void> {
     return this.importExportService.copyOpmlToClipboard();
+  }
+
+  public createSafeDiagnosticsPreview(): Readonly<{
+    token: string;
+    text: string;
+  }> {
+    return this.importExportService.createSafeDiagnosticsPreview();
+  }
+
+  public async copySafeDiagnosticsPreview(
+    token: string,
+    preview: string,
+  ): Promise<void> {
+    return this.importExportService.copySafeDiagnosticsPreview(token, preview);
   }
 
   public getStorageStatus(): FeedStorageStatus {

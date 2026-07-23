@@ -8,6 +8,11 @@ node_modules
 data.json
 data.json.backup
 usersettings.json
+.rss-dashboard-data/
+信息收集/
+secrets.json
+*.local.json
+*.diagnostics.json
 main.js
 rss-dashboard.sqlite
 styles.css
@@ -38,6 +43,7 @@ eslint_test_report.json
 test_lint_backlog_ranked.json
 eslint_test_report_utf8.json
 lint_target.json
+test_files/fixtures/tikhub/raw/
 scratch/sum_errors_new.ps1
 eslint_test_report_new.json
 scratch/sum_errors.ps1
