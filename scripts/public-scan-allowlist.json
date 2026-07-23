@@ -584,118 +584,125 @@
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "credential-value",
     "line": 19,
-    "fingerprint": "sha256:c31ea77c87a71688dfffacfa98515aaaa11d870dc4f98c290acc5426486578cd",
+    "fingerprint": "sha256:d079f8e06095ce0c7122922be7e88b0c3668c076aa92f8d4225a2ad3fa6dc7e5",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "credential-value",
     "line": 23,
-    "fingerprint": "sha256:ac039d69597cbabbeb8a6969f41792f0f26eac0a1e1964ecec62c4a33ab07393",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
-    "rule": "credential-value",
-    "line": 25,
-    "fingerprint": "sha256:195ea94a8c4df4e0180a4000cef4632f58890ed854fbfa4699f2655ad5675099",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
-    "rule": "credential-value",
-    "line": 26,
-    "fingerprint": "sha256:edb2be7461206eb0241235bf3cbf34f06907d658d6ba20fb449a6bbbc1be2538",
+    "fingerprint": "sha256:c31ea77c87a71688dfffacfa98515aaaa11d870dc4f98c290acc5426486578cd",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "credential-value",
     "line": 27,
+    "fingerprint": "sha256:ac039d69597cbabbeb8a6969f41792f0f26eac0a1e1964ecec62c4a33ab07393",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
+    "rule": "credential-value",
+    "line": 29,
+    "fingerprint": "sha256:195ea94a8c4df4e0180a4000cef4632f58890ed854fbfa4699f2655ad5675099",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
+    "rule": "credential-value",
+    "line": 30,
+    "fingerprint": "sha256:edb2be7461206eb0241235bf3cbf34f06907d658d6ba20fb449a6bbbc1be2538",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
+    "rule": "credential-value",
+    "line": 31,
     "fingerprint": "sha256:0bb596c4dcdebe07833c43355dad6c3e2c53166332c9774e2bf234f93cf9a398",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "credential-url",
-    "line": 30,
+    "line": 34,
     "fingerprint": "sha256:d7c3ccf7d9eaee4da9e95222d3b57b1c7bfb7c787526b062529eaff0afe6410c",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "credential-url",
-    "line": 34,
+    "line": 38,
     "fingerprint": "sha256:0f489ad804240b4a4e80438f21122f608d7ebd71809c8abc895c3c5b3b9acd35",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "credential-url",
-    "line": 38,
+    "line": 42,
     "fingerprint": "sha256:290392b3f4e290d8a64fa6dd50920ffa25b0b071bc32d9280faf54cd527f9585",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "credential-url",
-    "line": 42,
+    "line": 46,
     "fingerprint": "sha256:3a69b5727e026ccb0a3fa2e717eda682c6b953cb56c110ecd6fce265a287e2ee",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "credential-url",
-    "line": 46,
+    "line": 50,
     "fingerprint": "sha256:12409941ba969c58e002dab2e5a7195548953b5a0555f41a93ad2aa25edec3fd",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 48,
+    "line": 52,
     "fingerprint": "sha256:f9aeb9b54035e0ed96fdb86109c7aa8d9df8651b2a510725c6422f3923c9da6d",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 49,
+    "line": 53,
     "fingerprint": "sha256:30ff2f51d9025d4a444b4ad5c82a6f2e8e25a6138509d4152c168d0772314839",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 50,
+    "line": 54,
     "fingerprint": "sha256:e95d7b195713953ba4f8743aee3b927452a4de946857fe37ff5936405345ba19",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 51,
+    "line": 55,
     "fingerprint": "sha256:afd6f4976ff6c500e921904a7052461418f7237cf6d06314367d06d8928df0a1",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 52,
+    "line": 56,
     "fingerprint": "sha256:c698bca2b413aa93a45cda89880d38eae6f53730b4fe44a4ee7fe708730626b9",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 55,
+    "line": 59,
     "fingerprint": "sha256:9091318795a47ce2832f652e990eb6308bf15f2e1db1696f82c9cfe8ca0c2d98",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 57,
+    "line": 61,
     "fingerprint": "sha256:e04b8cb383773ef23ba0bdffbc3a2e36e4506c5d3a5750e200b108d3fd27d61d",
     "reason": "Security test fixture intentionally exercises private path detection."
   },

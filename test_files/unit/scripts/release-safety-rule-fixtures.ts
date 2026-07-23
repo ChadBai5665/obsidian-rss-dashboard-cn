@@ -16,6 +16,10 @@ export const unsafeReleaseTextCases = [
   },
   {
     rule: "credential-value",
+    text: 'prefix;key="abcdefghijklmnop"',
+  },
+  {
+    rule: "credential-value",
     text: 'const options = { key: "abcdefghijklmnop" };',
   },
   {

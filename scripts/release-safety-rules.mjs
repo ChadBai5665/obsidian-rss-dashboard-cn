@@ -2,7 +2,7 @@ const SENSITIVE_KEY_SOURCE =
   String.raw`(?:api[\s_-]*key|access[\s_-]*(?:key|token)|client[\s_-]*secret|refresh[\s_-]*token|private[\s_-]*key|auth(?:orization|[\s_-]*token)?|token|secret|password|session(?:[\s_-]*(?:id|key|token))?|key)`;
 
 const ASSIGNMENT_PATTERN = new RegExp(
-  String.raw`(?:^|[\s,{])["']?(${SENSITIVE_KEY_SOURCE})["']?\s*(?::|=(?!=|>))\s*([^\r\n,;}]+)`,
+  String.raw`(?:^|[\s,{;])["']?(${SENSITIVE_KEY_SOURCE})["']?\s*(?::|=(?!=|>))\s*([^\r\n,;}]+)`,
   "gi",
 );
 const URL_CREDENTIAL_PATTERN = new RegExp(
