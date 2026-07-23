@@ -16,6 +16,7 @@ import type {
 } from "../../../src/types/types";
 import { DEFAULT_SETTINGS } from "../../../src/types/types";
 import { AddFeedModal } from "../../../src/modals/feed-manager/add-feed-modal";
+import { FeedStorageRollbackIncompleteError } from "../../../src/services/feed-storage-repository";
 
 // Mock functions for FeedParser - must be declared before mocks
 const mockParseFeed = vi.fn<(url: string) => Promise<Feed>>();
@@ -2628,18 +2629,19 @@ describe("transactional public settings imports", () => {
       shardWriteCount: number;
       shardDeleteCount: number;
     }>;
+    persistSettingsTransaction: <T>(
+      previousSettings: RssDashboardSettings,
+      candidateSettings: RssDashboardSettings,
+      saveData: (data: unknown) => Promise<void>,
+      afterPersist: () => Promise<T>,
+      options?: unknown,
+    ) => Promise<T>;
   };
 
   const cloneSettings = (
     settings: RssDashboardSettings,
   ): RssDashboardSettings =>
     JSON.parse(JSON.stringify(settings)) as RssDashboardSettings;
-
-  const result = {
-    metadataSaved: true,
-    shardWriteCount: 0,
-    shardDeleteCount: 0,
-  };
 
   const writeDurable = async (
     settings: RssDashboardSettings,
@@ -2655,6 +2657,41 @@ describe("transactional public settings imports", () => {
       await plugin.app.vault.adapter.read("data.json"),
     ) as RssDashboardSettings;
 
+  const publicFeed = (suffix: string) => ({
+    title: `Feed ${suffix}`,
+    url: `https://example.com/${suffix}.xml`,
+    folder: "",
+    sourceKind: "feed",
+    sourceConfig: { kind: "feed" },
+  });
+
+  const publicDataFile = (
+    overrides: Record<string, unknown>,
+  ): File =>
+    new File(
+      [
+        JSON.stringify({
+          ...overrides,
+          feeds: overrides.feeds ?? [],
+          folders: overrides.folders ?? [],
+          availableTags: overrides.availableTags ?? [],
+        }),
+      ],
+      "data.json",
+    );
+
+  const installPluginDataWriter = (
+    transform: (data: unknown) => string = (data) =>
+      JSON.stringify(data, null, 2),
+  ): void => {
+    plugin.saveData = vi.fn(async (data: unknown) => {
+      await plugin.app.vault.adapter.write(
+        "data.json",
+        transform(data),
+      );
+    });
+  };
+
   beforeEach(async () => {
     plugin = await createPluginInstance(createMockApp());
     previous = cloneSettings(DEFAULT_SETTINGS);
@@ -2667,6 +2704,7 @@ describe("transactional public settings imports", () => {
       }
     ).initializeSettingsBackedServices();
     await writeDurable(previous);
+    installPluginDataWriter();
     plugin.loadData = vi.fn(async () => {
       throw new Error("transaction verification must not call loadData");
     });
@@ -2688,15 +2726,9 @@ describe("transactional public settings imports", () => {
   });
 
   it("rolls back and rejects when persistence throws before writing", async () => {
-    let attempt = 0;
-    const persist = vi
-      .spyOn(repository, "persistSettings")
-      .mockImplementation(async (candidate) => {
-        attempt += 1;
-        if (attempt === 1) throw new Error("save-before-write");
-        await writeDurable(candidate);
-        return result;
-      });
+    const transaction = vi
+      .spyOn(repository, "persistSettingsTransaction")
+      .mockRejectedValue(new Error("save-before-write"));
 
     await expect(
       plugin.importUserSettingsJsonFromFile(
@@ -2707,20 +2739,20 @@ describe("transactional public settings imports", () => {
     expect(plugin.settings).toBe(previous);
     expect(plugin.feedParser).toBe(previousFeedParser);
     expect((await readDurable()).locale).toBe("zh-CN");
-    expect(persist).toHaveBeenCalledTimes(2);
+    expect(transaction).toHaveBeenCalledTimes(1);
     expect(plugin.loadData).not.toHaveBeenCalled();
   });
 
   it("compensates a commit-then-throw and verifies the previous durable state", async () => {
-    let attempt = 0;
-    const persist = vi
-      .spyOn(repository, "persistSettings")
-      .mockImplementation(async (candidate) => {
-        await writeDurable(candidate);
-        attempt += 1;
-        if (attempt === 1) throw new Error("commit-then-throw");
-        return result;
-      });
+    plugin.saveData = vi.fn(async (data: unknown) => {
+      await plugin.app.vault.adapter.write(
+        "data.json",
+        JSON.stringify(data),
+      );
+      if ((data as RssDashboardSettings).locale === "en") {
+        throw new Error("commit-then-throw");
+      }
+    });
 
     await expect(
       plugin.importUserSettingsJsonFromFile(
@@ -2731,22 +2763,21 @@ describe("transactional public settings imports", () => {
     expect(plugin.settings).toBe(previous);
     expect(plugin.feedParser).toBe(previousFeedParser);
     expect((await readDurable()).locale).toBe("zh-CN");
-    expect(persist).toHaveBeenCalledTimes(2);
     expect(plugin.loadData).not.toHaveBeenCalled();
   });
 
   it.each(["data", "portable"] as const)(
     "applies the same compensating transaction to the %s import entrypoint",
     async (entrypoint) => {
-      let attempt = 0;
-      const persist = vi
-        .spyOn(repository, "persistSettings")
-        .mockImplementation(async (candidate) => {
-          await writeDurable(candidate);
-          attempt += 1;
-          if (attempt === 1) throw new Error(`${entrypoint}-commit-then-throw`);
-          return result;
-        });
+      plugin.saveData = vi.fn(async (data: unknown) => {
+        await plugin.app.vault.adapter.write(
+          "data.json",
+          JSON.stringify(data),
+        );
+        if ((data as RssDashboardSettings).locale === "en") {
+          throw new Error(`${entrypoint}-commit-then-throw`);
+        }
+      });
       const imported = cloneSettings(previous);
       imported.locale = "en";
       const file =
@@ -2777,21 +2808,12 @@ describe("transactional public settings imports", () => {
       expect(plugin.settings).toBe(previous);
       expect(plugin.feedParser).toBe(previousFeedParser);
       expect((await readDurable()).locale).toBe("zh-CN");
-      expect(persist).toHaveBeenCalledTimes(2);
     },
   );
 
   it("reports rollback-incomplete without publishing a false success", async () => {
-    let attempt = 0;
-    vi.spyOn(repository, "persistSettings").mockImplementation(
-      async (candidate) => {
-        attempt += 1;
-        if (attempt === 1) {
-          await writeDurable(candidate);
-          throw new Error("commit-then-throw");
-        }
-        throw new Error("rollback-write-failed");
-      },
+    vi.spyOn(repository, "persistSettingsTransaction").mockRejectedValue(
+      new FeedStorageRollbackIncompleteError(),
     );
 
     await expect(
@@ -2806,12 +2828,6 @@ describe("transactional public settings imports", () => {
   });
 
   it("restores the exact prior service identity when rebuild throws", async () => {
-    const persist = vi
-      .spyOn(repository, "persistSettings")
-      .mockImplementation(async (candidate) => {
-        await writeDurable(candidate);
-        return result;
-      });
     vi.spyOn(
       plugin as unknown as {
         initializeSettingsBackedServices: () => void;
@@ -2833,16 +2849,9 @@ describe("transactional public settings imports", () => {
     expect(plugin.settings).toBe(previous);
     expect(plugin.feedParser).toBe(previousFeedParser);
     expect((await readDurable()).locale).toBe("zh-CN");
-    expect(persist).toHaveBeenCalledTimes(2);
   });
 
   it("rolls back when an after-save dashboard refresh fails", async () => {
-    const persist = vi
-      .spyOn(repository, "persistSettings")
-      .mockImplementation(async (candidate) => {
-        await writeDurable(candidate);
-        return result;
-      });
     vi.mocked(plugin.refreshDashboardViews).mockRejectedValueOnce(
       new Error("after-save-failed"),
     );
@@ -2856,24 +2865,21 @@ describe("transactional public settings imports", () => {
     expect(plugin.settings).toBe(previous);
     expect(plugin.feedParser).toBe(previousFeedParser);
     expect((await readDurable()).locale).toBe("zh-CN");
-    expect(persist).toHaveBeenCalledTimes(2);
   });
 
   it("serializes concurrent imports and builds the second candidate after the first commits", async () => {
     const firstWrite = createDeferred<void>();
     const events: string[] = [];
     let attempt = 0;
-    vi.spyOn(repository, "persistSettings").mockImplementation(
-      async (candidate) => {
-        attempt += 1;
-        const currentAttempt = attempt;
-        events.push(`start:${candidate.locale}`);
-        if (currentAttempt === 1) await firstWrite.promise;
-        await writeDurable(candidate);
-        events.push(`end:${candidate.locale}`);
-        return result;
-      },
-    );
+    plugin.saveData = vi.fn(async (data: unknown) => {
+      const candidate = data as RssDashboardSettings;
+      attempt += 1;
+      const currentAttempt = attempt;
+      events.push(`start:${candidate.locale}`);
+      if (currentAttempt === 1) await firstWrite.promise;
+      await writeDurable(candidate);
+      events.push(`end:${candidate.locale}`);
+    });
 
     const first = plugin.importUserSettingsJsonFromFile(
       new File([JSON.stringify({ locale: "en" })], "first.json"),
@@ -2900,19 +2906,15 @@ describe("transactional public settings imports", () => {
     const writeStarted = createDeferred<void>();
     const releaseWrite = createDeferred<void>();
     let attempt = 0;
-    const persist = vi
-      .spyOn(repository, "persistSettings")
-      .mockImplementation(async (candidate) => {
-        attempt += 1;
-        if (attempt === 1) {
-          await writeDurable(candidate);
-          writeStarted.resolve();
-          await releaseWrite.promise;
-          return result;
-        }
-        await writeDurable(candidate);
-        return result;
-      });
+    plugin.saveData = vi.fn(async (data: unknown) => {
+      const candidate = data as RssDashboardSettings;
+      attempt += 1;
+      await writeDurable(candidate);
+      if (attempt === 1) {
+        writeStarted.resolve();
+        await releaseWrite.promise;
+      }
+    });
 
     const operation = plugin.importUserSettingsJsonFromFile(
       new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
@@ -2925,17 +2927,10 @@ describe("transactional public settings imports", () => {
     expect(plugin.settings).toBe(previous);
     expect(plugin.feedParser).toBe(previousFeedParser);
     expect((await readDurable()).locale).toBe("zh-CN");
-    expect(persist).toHaveBeenCalledTimes(2);
   });
 
   it("cancels and compensates when unload happens during the final async view lookup", async () => {
     const discoverLookup = createDeferred<null>();
-    const persist = vi
-      .spyOn(repository, "persistSettings")
-      .mockImplementation(async (candidate) => {
-        await writeDurable(candidate);
-        return result;
-      });
     const getActiveDiscoverView = vi
       .spyOn(
         plugin as unknown as {
@@ -2958,6 +2953,304 @@ describe("transactional public settings imports", () => {
     expect(plugin.settings).toBe(previous);
     expect(plugin.feedParser).toBe(previousFeedParser);
     expect((await readDurable()).locale).toBe("zh-CN");
-    expect(persist).toHaveBeenCalledTimes(2);
+  });
+
+  it("removes legacy-to-shards files and empty folders when refresh fails after persistence", async () => {
+    previous.storageMode = "legacy-json";
+    previous.storageFolder = "Candidate Storage/Feeds";
+    previous.metadataStorageMode = "plugin-default";
+    previous.feeds = [];
+    plugin.settings = previous;
+    await writeDurable(previous);
+    installPluginDataWriter();
+    vi.mocked(plugin.refreshDashboardViews).mockRejectedValueOnce(
+      new Error("refresh-failed"),
+    );
+
+    await expect(
+      plugin.importDataJsonFromFile(
+        publicDataFile({
+          locale: "en",
+          storageMode: "vault-shards",
+          feeds: [publicFeed("candidate")],
+        }),
+      ),
+    ).rejects.toThrow("refresh-failed");
+
+    expect(plugin.settings).toBe(previous);
+    expect(
+      await plugin.app.vault.adapter.exists(
+        "Candidate Storage/Feeds",
+      ),
+    ).toBe(false);
+    expect(await plugin.app.vault.adapter.exists("Candidate Storage")).toBe(
+      false,
+    );
+    expect(await plugin.app.vault.adapter.read("data.json")).toBe(
+      JSON.stringify(previous),
+    );
+  });
+
+  it.each([
+    "missing",
+    "malformed",
+    "wrong-target",
+    "wrong-version",
+    "extra-key",
+  ] as const)(
+    "rejects a vault-location import when the plugin bootstrap is %s",
+    async (mode) => {
+      previous.storageMode = "legacy-json";
+      previous.metadataStorageMode = "plugin-default";
+      previous.metadataStorageFolder = "Vault Metadata";
+      previous.feeds = [];
+      plugin.settings = previous;
+      const previousBytes = JSON.stringify(previous);
+      await plugin.app.vault.adapter.write("data.json", previousBytes);
+      plugin.saveData = vi.fn(async (data: unknown) => {
+        if (mode === "missing") return;
+        await plugin.app.vault.adapter.write(
+          "data.json",
+          mode === "malformed"
+            ? "{"
+            : JSON.stringify({
+                ...(data as Record<string, unknown>),
+                ...(mode === "wrong-target"
+                  ? { metadataStorageFolder: "Wrong Metadata" }
+                  : {}),
+                ...(mode === "wrong-version"
+                  ? { metadataStorageSchemaVersion: 999 }
+                  : {}),
+                ...(mode === "extra-key"
+                  ? { unexpected: "not-bootstrap-schema" }
+                  : {}),
+              }),
+        );
+      });
+
+      await expect(
+        plugin.importUserSettingsJsonFromFile(
+          new File(
+            [
+              JSON.stringify({
+                locale: "en",
+                metadataStorageMode: "vault-location",
+              }),
+            ],
+            "usersettings.json",
+          ),
+        ),
+      ).rejects.toThrow("Settings import persistence verification failed");
+
+      expect(plugin.settings).toBe(previous);
+      expect(await plugin.app.vault.adapter.read("data.json")).toBe(
+        previousBytes,
+      );
+      expect(
+        await plugin.app.vault.adapter.exists(
+          "Vault Metadata/data.json",
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("rejects plugin-default success-with-wrong-data before publishing", async () => {
+    const previousBytes = JSON.stringify(previous);
+    plugin.saveData = vi.fn(async () => {
+      await plugin.app.vault.adapter.write(
+        "data.json",
+        previousBytes,
+      );
+    });
+
+    await expect(
+      plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      ),
+    ).rejects.toThrow("Settings import persistence verification failed");
+
+    expect(plugin.settings).toBe(previous);
+    expect(plugin.feedParser).toBe(previousFeedParser);
+    expect(await plugin.app.vault.adapter.read("data.json")).toBe(
+      previousBytes,
+    );
+  });
+
+  it("writes an exact vault bootstrap that resolves the full metadata on reopen", async () => {
+    previous.storageMode = "legacy-json";
+    previous.metadataStorageMode = "plugin-default";
+    previous.metadataStorageFolder = "Vault Metadata";
+    previous.feeds = [];
+    plugin.settings = previous;
+    await writeDurable(previous);
+    installPluginDataWriter();
+
+    await plugin.importUserSettingsJsonFromFile(
+      new File(
+        [
+          JSON.stringify({
+            locale: "en",
+            metadataStorageMode: "vault-location",
+          }),
+        ],
+        "usersettings.json",
+      ),
+    );
+
+    const bootstrap = JSON.parse(
+      await plugin.app.vault.adapter.read("data.json"),
+    ) as Record<string, unknown>;
+    expect(bootstrap).toEqual({
+      metadataStorageMode: "vault-location",
+      metadataStorageFolder: "Vault Metadata",
+      metadataStorageSchemaVersion: 1,
+    });
+    expect(
+      JSON.parse(
+        await plugin.app.vault.adapter.read(
+          "Vault Metadata/data.json",
+        ),
+      ),
+    ).toEqual(expect.objectContaining({ locale: "en" }));
+
+    const reopened = await createPluginInstance(
+      plugin.app as unknown as MockApp,
+    );
+    reopened.loadData = vi.fn().mockResolvedValue(bootstrap);
+    await reopened.loadSettings();
+    expect(reopened.settings.locale).toBe("en");
+    expect(reopened.settings.metadataStorageMode).toBe("vault-location");
+    expect(reopened.settings.metadataStorageFolder).toBe("Vault Metadata");
+  });
+
+  it("revokes an old diagnostics preview permanently before unload rollback", async () => {
+    const clipboardWrite = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    });
+    const preview = plugin.createSafeDiagnosticsPreview();
+    const discoverLookup = createDeferred<null>();
+    installPluginDataWriter();
+    vi.spyOn(
+      plugin as unknown as {
+        getActiveDiscoverView: () => Promise<null>;
+      },
+      "getActiveDiscoverView",
+    ).mockReturnValueOnce(discoverLookup.promise);
+
+    const operation = plugin.importUserSettingsJsonFromFile(
+      new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+    );
+    await vi.waitFor(() => {
+      expect(plugin.settings.locale).toBe("en");
+    });
+    plugin.onunload();
+    discoverLookup.resolve(null);
+    await expect(operation).rejects.toThrow("Settings import canceled");
+
+    await plugin.copySafeDiagnosticsPreview(preview.token, preview.text);
+    expect(clipboardWrite).not.toHaveBeenCalled();
+    expect(plugin.refreshDashboardViews).toHaveBeenCalledTimes(1);
+  });
+
+  it("revokes an old diagnostics preview on a normal import rollback", async () => {
+    const clipboardWrite = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    });
+    const preview = plugin.createSafeDiagnosticsPreview();
+    installPluginDataWriter();
+    vi.mocked(plugin.refreshDashboardViews).mockRejectedValueOnce(
+      new Error("refresh-failed"),
+    );
+
+    await expect(
+      plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      ),
+    ).rejects.toThrow("refresh-failed");
+
+    await plugin.copySafeDiagnosticsPreview(preview.token, preview.text);
+    expect(clipboardWrite).not.toHaveBeenCalled();
+  });
+
+  it("rerenders restored settings after a later dashboard view fails", async () => {
+    const refreshLocales: string[] = [];
+    installPluginDataWriter();
+    vi.mocked(plugin.refreshDashboardViews)
+      .mockImplementationOnce(async () => {
+        refreshLocales.push(plugin.settings.locale);
+        throw new Error("second-view-failed");
+      })
+      .mockImplementationOnce(async () => {
+        refreshLocales.push(plugin.settings.locale);
+      });
+
+    await expect(
+      plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      ),
+    ).rejects.toThrow("second-view-failed");
+
+    expect(refreshLocales).toEqual(["en", "zh-CN"]);
+    expect(plugin.settings).toBe(previous);
+    expect(plugin.feedParser).toBe(previousFeedParser);
+  });
+
+  it("reports rollback-incomplete when restored views cannot be rerendered", async () => {
+    const noticeLog = vi
+      .spyOn(console, "debug")
+      .mockImplementation(() => {});
+    installPluginDataWriter();
+    vi.mocked(plugin.refreshDashboardViews)
+      .mockRejectedValueOnce(new Error("second-view-failed"))
+      .mockRejectedValueOnce(new Error("old-view-refresh-failed"));
+
+    await expect(
+      plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      ),
+    ).rejects.toThrow("Settings import rollback incomplete");
+
+    expect(plugin.settings).toBe(previous);
+    expect(plugin.feedParser).toBe(previousFeedParser);
+    expect(noticeLog.mock.calls.flat().join(" ")).toContain(
+      "设置导入未能完整恢复",
+    );
+  });
+
+  it("queues a normal save behind import and persists the published candidate", async () => {
+    const firstWriteStarted = createDeferred<void>();
+    const releaseFirstWrite = createDeferred<void>();
+    const persistedLocales: string[] = [];
+    let writeCount = 0;
+    plugin.saveData = vi.fn(async (data: unknown) => {
+      const settings = data as RssDashboardSettings;
+      writeCount += 1;
+      persistedLocales.push(settings.locale);
+      if (writeCount === 1) {
+        firstWriteStarted.resolve();
+        await releaseFirstWrite.promise;
+      }
+      await plugin.app.vault.adapter.write(
+        "data.json",
+        JSON.stringify(data),
+      );
+    });
+
+    const importOperation = plugin.importUserSettingsJsonFromFile(
+      new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+    );
+    await firstWriteStarted.promise;
+    const normalSave = plugin.saveSettings({ forceMetadata: true });
+    await Promise.resolve();
+    expect(persistedLocales).toEqual(["en"]);
+
+    releaseFirstWrite.resolve();
+    await Promise.all([importOperation, normalSave]);
+    expect(persistedLocales).toEqual(["en", "en"]);
+    expect(plugin.settings.locale).toBe("en");
   });
 });

@@ -56,6 +56,7 @@ import {
   type FeedLocalStorageAddress,
   type PersistSettingsOptions,
   type FeedStorageStatus,
+  FeedStorageRollbackIncompleteError,
   ShardFolderDeletionError,
 } from "./src/services/feed-storage-repository";
 import { ImportExportService } from "./src/services/import-export-service";
@@ -288,6 +289,8 @@ class SettingsImportRollbackError extends Error {
 }
 
 const PERSISTENCE_SYNC_FIELDS = new Set(["_syncNonce", "_syncPad"]);
+const MAX_METADATA_TRANSACTION_SNAPSHOT_BYTES = 100_000_000;
+const MAX_PERSISTED_SETTINGS_VERIFICATION_BYTES = 6_000_000;
 
 const STATUS_JOURNAL_PHASES = new Set<StatusJournalPhase>([
   "prepared",
@@ -659,6 +662,16 @@ function getMetadataPath(settings: RssDashboardSettings): string | undefined {
   return folder;
 }
 
+function hasControlCharacters(value: string): boolean {
+  return Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0);
+    return (
+      codePoint !== undefined &&
+      (codePoint <= 31 || (codePoint >= 127 && codePoint <= 159))
+    );
+  });
+}
+
 /**
  * Loads metadata from the appropriate location based on mode.
  */
@@ -808,9 +821,18 @@ export default class RssDashboardPlugin extends Plugin {
     this.feedStorageRepository = new FeedStorageRepository(app, {
       writeWrapper: (fn) => this.writeWithWatcherSuppressed(fn),
       metadataTransaction: {
-        capture: () => this.captureMetadataPersistenceSnapshot(),
+        getTargetPaths: (settingsSnapshots) =>
+          this.getMetadataPersistenceFilePaths(...settingsSnapshots),
+        capture: (settingsSnapshots) =>
+          this.captureMetadataPersistenceSnapshot(
+            ...(settingsSnapshots ?? []),
+          ),
         restore: (snapshot) =>
           this.restoreMetadataPersistenceSnapshot(
+            snapshot as MetadataPersistenceSnapshot,
+          ),
+        verify: (snapshot) =>
+          this.verifyMetadataPersistenceSnapshot(
             snapshot as MetadataPersistenceSnapshot,
           ),
       },
@@ -821,39 +843,87 @@ export default class RssDashboardPlugin extends Plugin {
     ...settingsSnapshots: RssDashboardSettings[]
   ): string[] {
     const paths = new Set<string>();
-    const pluginDirectory = this.manifest.dir
-      ?.trim()
-      .replace(/^\/+|\/+$/g, "");
-    if (pluginDirectory) {
-      paths.add(
-        pluginDirectory === "."
-          ? "data.json"
-          : `${pluginDirectory}/data.json`,
-      );
-    }
+    const pluginDataPath = this.getPluginDataFilePath();
+    paths.add(pluginDataPath);
     for (const settings of settingsSnapshots.length > 0
       ? settingsSnapshots
       : [this.settings]) {
-      const vaultMetadataFolder = getMetadataPath(settings);
-      if (vaultMetadataFolder) {
-        paths.add(`${vaultMetadataFolder}/data.json`);
+      const vaultDataPath = this.getVaultMetadataDataFilePath(settings);
+      if (!vaultDataPath) continue;
+      if (vaultDataPath === pluginDataPath) {
+        throw new Error("Metadata persistence targets alias");
       }
+      paths.add(vaultDataPath);
     }
     return [...paths];
+  }
+
+  private getPluginDataFilePath(): string {
+    const directory = this.getControlledVaultFolder(
+      this.manifest.dir ?? ".",
+      { allowCurrentDirectory: true },
+    );
+    return directory === "." ? "data.json" : `${directory}/data.json`;
+  }
+
+  private getVaultMetadataDataFilePath(
+    settings: RssDashboardSettings,
+  ): string | undefined {
+    if (settings.metadataStorageMode === "plugin-default") {
+      return undefined;
+    }
+    const folder = this.getControlledVaultFolder(
+      settings.metadataStorageFolder || ".rss-dashboard-data",
+    );
+    return `${folder}/data.json`;
+  }
+
+  private getControlledVaultFolder(
+    input: string,
+    options: { allowCurrentDirectory?: boolean } = {},
+  ): string {
+    const trimmed = input.trim().replace(/\\/g, "/");
+    if (options.allowCurrentDirectory && trimmed === ".") return ".";
+    const folder = trimmed.replace(/^\/+|\/+$/g, "");
+    const segments = folder.split("/");
+    if (
+      folder.length === 0 ||
+      folder.length > 1_024 ||
+      segments.length > 32 ||
+      segments.some(
+        (segment) =>
+          segment.length === 0 ||
+          segment === "." ||
+          segment === ".." ||
+          /[:*?"<>|]/u.test(segment) ||
+          hasControlCharacters(segment),
+      )
+    ) {
+      throw new Error("Invalid metadata persistence path");
+    }
+    return folder;
   }
 
   private async captureMetadataPersistenceSnapshot(
     ...settingsSnapshots: RssDashboardSettings[]
   ): Promise<MetadataPersistenceSnapshot> {
     const snapshot: MetadataPersistenceSnapshot = [];
+    let totalBytes = 0;
     for (const path of this.getMetadataPersistenceFilePaths(
       ...settingsSnapshots,
     )) {
+      const contents = (await this.app.vault.adapter.exists(path))
+        ? await this.app.vault.adapter.read(path)
+        : null;
+      if (contents !== null) {
+        totalBytes += new TextEncoder().encode(contents).byteLength;
+        if (totalBytes > MAX_METADATA_TRANSACTION_SNAPSHOT_BYTES) {
+          throw new Error("Metadata transaction snapshot is too large");
+        }
+      }
       snapshot.push({
         path,
-        contents: (await this.app.vault.adapter.exists(path))
-          ? await this.app.vault.adapter.read(path)
-          : null,
+        contents,
       });
     }
     return snapshot;
@@ -3332,108 +3402,149 @@ export default class RssDashboardPlugin extends Plugin {
     return cloneStableOwnData(candidate);
   }
 
-  private getActiveMetadataPersistenceFilePath(
-    settings: RssDashboardSettings,
-  ): string {
-    const metadataPath = getMetadataPath(settings);
-    if (metadataPath) return `${metadataPath}/data.json`;
-    const pluginDirectory = this.manifest.dir
-      ?.trim()
-      .replace(/^\/+|\/+$/g, "");
-    if (!pluginDirectory || pluginDirectory === ".") return "data.json";
-    return `${pluginDirectory}/data.json`;
-  }
-
-  private async persistImportedSettingsSnapshot(
-    settings: RssDashboardSettings,
-  ): Promise<void> {
-    await this.feedStorageRepository.persistSettings(
-      settings,
-      this.getMetadataSaveCallbackFor(settings),
-      { forceAllShards: true, forceMetadata: true },
-    );
-  }
-
   private async verifyImportedSettingsPersistence(
     settings: RssDashboardSettings,
   ): Promise<void> {
-    const path = this.getActiveMetadataPersistenceFilePath(settings);
-    if (!(await this.app.vault.adapter.exists(path))) {
-      throw new Error("Settings import persistence verification failed");
-    }
-    const text = await this.app.vault.adapter.read(path);
-    let actual: unknown;
     try {
-      actual = JSON.parse(text) as unknown;
+      const expected =
+        this.feedStorageRepository.buildPersistedMetadataSnapshot(settings);
+      const pluginDataPath = this.getPluginDataFilePath();
+      const vaultDataPath = this.getVaultMetadataDataFilePath(settings);
+      if (!vaultDataPath) {
+        await this.verifyFullSettingsMetadataTarget(
+          pluginDataPath,
+          expected,
+        );
+        return;
+      }
+      if (vaultDataPath === pluginDataPath) {
+        throw new Error("Metadata persistence targets alias");
+      }
+      await this.verifyFullSettingsMetadataTarget(
+        vaultDataPath,
+        expected,
+      );
+      const actualBootstrap = await this.readOwnDataJson(pluginDataPath);
+      const expectedBootstrap = {
+        metadataStorageMode: "vault-location",
+        metadataStorageFolder: settings.metadataStorageFolder,
+        metadataStorageSchemaVersion:
+          settings.metadataStorageSchemaVersion,
+      };
+      if (
+        stableOwnDataJson(actualBootstrap) !==
+        stableOwnDataJson(expectedBootstrap)
+      ) {
+        throw new Error("Invalid metadata bootstrap");
+      }
     } catch {
       throw new Error("Settings import persistence verification failed");
     }
-    const expected =
-      this.feedStorageRepository.buildPersistedMetadataSnapshot(settings);
-    const actualCanonical = stableOwnDataJson(actual, {
-      omitRootKeys: PERSISTENCE_SYNC_FIELDS,
-    });
-    const expectedCanonical = stableOwnDataJson(expected);
-    if (actualCanonical !== expectedCanonical) {
-      throw new Error("Settings import persistence verification failed");
+  }
+
+  private async verifyFullSettingsMetadataTarget(
+    path: string,
+    expected: unknown,
+  ): Promise<void> {
+    const actual = await this.readOwnDataJson(path);
+    if (
+      stableOwnDataJson(actual, {
+        omitRootKeys: PERSISTENCE_SYNC_FIELDS,
+      }) !== stableOwnDataJson(expected)
+    ) {
+      throw new Error("Invalid persisted metadata");
     }
+  }
+
+  private async readOwnDataJson(path: string): Promise<unknown> {
+    if (!(await this.app.vault.adapter.exists(path))) {
+      throw new Error("Missing persisted metadata");
+    }
+    const text = await this.app.vault.adapter.read(path);
+    if (
+      text.length === 0 ||
+      text.length > MAX_PERSISTED_SETTINGS_VERIFICATION_BYTES ||
+      new TextEncoder().encode(text).byteLength >
+        MAX_PERSISTED_SETTINGS_VERIFICATION_BYTES
+    ) {
+      throw new Error("Persisted metadata is outside the safe budget");
+    }
+    return JSON.parse(text) as unknown;
   }
 
   private commitSettingsImport(
     buildCandidate: (previous: RssDashboardSettings) => RssDashboardSettings,
   ): Promise<void> {
-    const operation = this.settingsImportQueue.then(async () => {
+    return this.enqueueSettingsOperation(async () => {
       this.assertSettingsImportActive();
+      this.importExportService.revokeAllSafeDiagnosticsPreviews();
       const previousSettings = this.settings;
       const previousRuntime = this.captureSettingsBackedRuntime();
-      const rollbackSettings = cloneStableOwnData(previousSettings);
+      const previousPersistenceSettings =
+        cloneStableOwnData(previousSettings);
       const candidate = buildCandidate(previousSettings);
-      const metadataSnapshot = await this.captureMetadataPersistenceSnapshot(
-        rollbackSettings,
-        candidate,
-      );
-      let persistenceAttempted = false;
+      let candidatePublished = false;
 
       try {
-        persistenceAttempted = true;
-        await this.persistImportedSettingsSnapshot(candidate);
-        this.assertSettingsImportActive();
-        await this.verifyImportedSettingsPersistence(candidate);
-        this.assertSettingsImportActive();
+        await this.feedStorageRepository.persistSettingsTransaction(
+          previousPersistenceSettings,
+          candidate,
+          this.getMetadataSaveCallbackFor(candidate),
+          async () => {
+            this.assertSettingsImportActive();
+            await this.verifyImportedSettingsPersistence(candidate);
+            this.assertSettingsImportActive();
 
-        this.settings = candidate;
-        this.initializeSettingsBackedServices();
-        await this.refreshDashboardViews();
-        this.assertSettingsImportActive();
-        const discoverView = await this.getActiveDiscoverView();
-        this.assertSettingsImportActive();
-        discoverView?.render();
-        this.settingTab?.display();
+            this.settings = candidate;
+            candidatePublished = true;
+            this.initializeSettingsBackedServices();
+            await this.refreshDashboardViews();
+            this.assertSettingsImportActive();
+            const discoverView = await this.getActiveDiscoverView();
+            this.assertSettingsImportActive();
+            discoverView?.render();
+            this.settingTab?.display();
+          },
+          { forceAllShards: true, forceMetadata: true },
+        );
       } catch (error) {
         this.settings = previousSettings;
         this.restoreSettingsBackedRuntime(previousRuntime);
-        if (!persistenceAttempted) throw error;
-
-        try {
-          await this.persistImportedSettingsSnapshot(rollbackSettings);
-          await this.restoreMetadataPersistenceSnapshot(metadataSnapshot);
-          await this.verifyMetadataPersistenceSnapshot(metadataSnapshot);
-        } catch {
+        if (this.isUnloading) {
+          this.importExportService.revokeAllSafeDiagnosticsPreviews();
+        } else if (candidatePublished) {
           try {
-            await this.restoreMetadataPersistenceSnapshot(metadataSnapshot);
+            await this.refreshDashboardViews();
+            const discoverView = await this.getActiveDiscoverView();
+            if (!this.isUnloading) {
+              discoverView?.render();
+              this.settingTab?.display();
+            }
           } catch {
-            // The typed error below is the only safe outward result.
+            this.notify("plugin.settings.rollbackIncomplete");
+            throw new SettingsImportRollbackError();
+          }
+        }
+        if (error instanceof FeedStorageRollbackIncompleteError) {
+          if (!this.isUnloading) {
+            this.notify("plugin.settings.rollbackIncomplete");
           }
           throw new SettingsImportRollbackError();
         }
         throw error;
       }
     });
-    this.settingsImportQueue = operation.then(
+  }
+
+  private enqueueSettingsOperation<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const result = this.settingsImportQueue.then(operation);
+    this.settingsImportQueue = result.then(
       () => undefined,
       () => undefined,
     );
-    return operation;
+    return result;
   }
 
   private assertSettingsImportActive(): void {
@@ -4605,28 +4716,31 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   async saveSettings(options: PersistSettingsOptions = {}) {
-    storageLog("saveSettings invoked", {
-      mode: this.settings.storageMode,
-      folder: this.settings.storageFolder,
-      metadataMode: this.settings.metadataStorageMode,
-      feedCount: this.settings.feeds.length,
-    });
-
-    try {
-      const result = await this.feedStorageRepository.persistSettings(
-        this.settings,
-        this.getMetadataSaveCallback(),
-        options,
-      );
-      storageLog("saveSettings completed", result);
-    } catch (error) {
-      storageError("saveSettings failed", error, {
-        mode: this.settings.storageMode,
-        folder: this.settings.storageFolder,
-        metadataMode: this.settings.metadataStorageMode,
+    return this.enqueueSettingsOperation(async () => {
+      const settings = this.settings;
+      storageLog("saveSettings invoked", {
+        mode: settings.storageMode,
+        folder: settings.storageFolder,
+        metadataMode: settings.metadataStorageMode,
+        feedCount: settings.feeds.length,
       });
-      throw error;
-    }
+
+      try {
+        const result = await this.feedStorageRepository.persistSettings(
+          settings,
+          this.getMetadataSaveCallbackFor(settings),
+          options,
+        );
+        storageLog("saveSettings completed", result);
+      } catch (error) {
+        storageError("saveSettings failed", error, {
+          mode: settings.storageMode,
+          folder: settings.storageFolder,
+          metadataMode: settings.metadataStorageMode,
+        });
+        throw error;
+      }
+    });
   }
 
   /**

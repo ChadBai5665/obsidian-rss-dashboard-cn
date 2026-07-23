@@ -382,6 +382,7 @@ export const en = {
   "plugin.settings.dataImported": "Imported JSON with feeds and settings.",
   "plugin.settings.preferencesImported": "Imported usersettings.json.",
   "plugin.settings.preferencesInvalid": "The usersettings.json file is invalid.",
+  "plugin.settings.rollbackIncomplete": "The settings import could not be fully restored. Reload the plugin before continuing.",
   "plugin.settings.loadFailed": "Could not load plugin settings. Defaults were restored.",
   "plugin.storage.backupFailedProceeding": "Backup failed. Migration will continue.",
   "plugin.youtube.unresolved": "Could not determine a YouTube feed URL from that input.",

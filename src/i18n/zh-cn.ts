@@ -380,6 +380,7 @@ export const zhCN = {
   "plugin.settings.dataImported": "已导入包含订阅和设置的 JSON。",
   "plugin.settings.preferencesImported": "已导入 usersettings.json。",
   "plugin.settings.preferencesInvalid": "usersettings.json 文件无效。",
+  "plugin.settings.rollbackIncomplete": "设置导入未能完整恢复，请重新加载插件后再继续。",
   "plugin.settings.loadFailed": "无法加载插件设置，已恢复默认值。",
   "plugin.storage.backupFailedProceeding": "备份失败，将继续迁移。",
   "plugin.youtube.unresolved": "无法从输入内容确定 YouTube 订阅地址。",

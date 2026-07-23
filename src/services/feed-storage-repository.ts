@@ -34,8 +34,14 @@ export interface PersistSettingsOptions {
 }
 
 export interface FeedStorageMetadataTransaction {
-  capture(): Promise<unknown>;
+  getTargetPaths?(
+    settingsSnapshots: readonly RssDashboardSettings[],
+  ): readonly string[];
+  capture(
+    settingsSnapshots?: readonly RssDashboardSettings[],
+  ): Promise<unknown>;
   restore(snapshot: unknown): Promise<void>;
+  verify?(snapshot: unknown): Promise<void>;
 }
 
 export interface RevertToLegacyJsonOptions {
@@ -64,6 +70,34 @@ interface MigrationSnapshot {
   storageFolder: string;
   lastRepairResult: string;
 }
+
+interface SettingsPersistenceFileSnapshot {
+  path: string;
+  contents: string | null;
+}
+
+interface SettingsPersistenceDirectorySnapshot {
+  path: string;
+  existed: boolean;
+}
+
+interface SettingsPersistenceTransactionSnapshot {
+  metadata: unknown;
+  files: SettingsPersistenceFileSnapshot[];
+  directories: SettingsPersistenceDirectorySnapshot[];
+  lastPersistedMetadataJson: string | null;
+  lastPersistedShardJsonByFeedId: Map<string, string>;
+  lastStorageFolderPath: string | null;
+}
+
+interface ActiveSettingsPersistenceTransaction {
+  lastWrittenBytesByPath: Map<string, string>;
+}
+
+const MAX_SETTINGS_TRANSACTION_PATHS = 40_000;
+const MAX_SETTINGS_TRANSACTION_DEPTH = 32;
+const MAX_SETTINGS_TRANSACTION_SNAPSHOT_BYTES = 100_000_000;
+const MAX_SETTINGS_TRANSACTION_PATH_LENGTH = 1_024;
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -101,6 +135,16 @@ function normalizeFolderPath(path: string): string {
   }
 
   return normalizePath(trimmed.replace(/^\/+|\/+$/g, ""));
+}
+
+function hasControlCharacters(value: string): boolean {
+  return Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0);
+    return (
+      codePoint !== undefined &&
+      (codePoint <= 31 || (codePoint >= 127 && codePoint <= 159))
+    );
+  });
 }
 
 function getFeedShardPath(storageFolder: string, feedId: string): string {
@@ -201,6 +245,10 @@ export class FeedStorageRepository {
   private writeWrapper?: <T>(fn: () => Promise<T>) => Promise<T>;
   private metadataTransaction?: FeedStorageMetadataTransaction;
   private app: App;
+  private settingsPersistenceQueue: Promise<void> = Promise.resolve();
+  private activeSettingsPersistenceTransaction:
+    | ActiveSettingsPersistenceTransaction
+    | undefined;
 
   constructor(app: App, options?: {
     writeWrapper?: <T>(fn: () => Promise<T>) => Promise<T>;
@@ -389,6 +437,64 @@ export class FeedStorageRepository {
     shardWriteCount: number;
     shardDeleteCount: number;
   }> {
+    return this.enqueueSettingsPersistence(() =>
+      this.persistSettingsUnlocked(settings, saveData, options),
+    );
+  }
+
+  public async persistSettingsTransaction<T>(
+    previousSettings: RssDashboardSettings,
+    candidateSettings: RssDashboardSettings,
+    saveData: (data: unknown) => Promise<void>,
+    afterPersist: () => Promise<T>,
+    options: PersistSettingsOptions = {},
+  ): Promise<T> {
+    return this.enqueueSettingsPersistence(async () => {
+      this.assertNoDuplicateFeedIds(previousSettings);
+      this.assertNoDuplicateFeedIds(candidateSettings);
+      this.ensureFeedIds(candidateSettings);
+      const snapshot = await this.captureSettingsPersistenceTransaction(
+        previousSettings,
+        candidateSettings,
+      );
+      const activeTransaction: ActiveSettingsPersistenceTransaction = {
+        lastWrittenBytesByPath: new Map(),
+      };
+      this.activeSettingsPersistenceTransaction = activeTransaction;
+      try {
+        await this.persistSettingsUnlocked(
+          candidateSettings,
+          saveData,
+          options,
+        );
+        return await afterPersist();
+      } catch (error) {
+        try {
+          await this.restoreSettingsPersistenceTransaction(
+            snapshot,
+            activeTransaction,
+          );
+          await this.verifySettingsPersistenceTransaction(snapshot);
+        } catch {
+          this.clearPersistedStateCache();
+          throw new FeedStorageRollbackIncompleteError();
+        }
+        throw error;
+      } finally {
+        this.activeSettingsPersistenceTransaction = undefined;
+      }
+    });
+  }
+
+  private async persistSettingsUnlocked(
+    settings: RssDashboardSettings,
+    saveData: (data: unknown) => Promise<void>,
+    options: PersistSettingsOptions = {},
+  ): Promise<{
+    metadataSaved: boolean;
+    shardWriteCount: number;
+    shardDeleteCount: number;
+  }> {
     this.ensureFeedIds(settings);
     storageLog("Persisting settings", {
       mode: settings.storageMode,
@@ -402,7 +508,7 @@ export class FeedStorageRepository {
     const previousMetadataCache = this.lastPersistedMetadataJson;
     const previousStorageFolderCache = this.lastStorageFolderPath;
     const metadataSnapshot = this.metadataTransaction
-      ? await this.metadataTransaction.capture()
+      ? await this.metadataTransaction.capture([settings])
       : undefined;
 
     if (settings.storageMode !== "vault-shards" && settings.storageMode !== "vault-shards-v2") {
@@ -515,7 +621,7 @@ export class FeedStorageRepository {
           feed.feedId,
         );
         await captureRollbackFile(shardPath);
-        await this.app.vault.adapter.write(shardPath, shardJson);
+        await this.writeSettingsFile(shardPath, shardJson);
         this.lastPersistedShardJsonByFeedId.set(
           feed.feedId,
           currentComparableJson,
@@ -630,6 +736,402 @@ export class FeedStorageRepository {
       this.lastStorageFolderPath = previousStorageFolderCache;
       throw error;
     }
+  }
+
+  private enqueueSettingsPersistence<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const result = this.settingsPersistenceQueue.then(operation);
+    this.settingsPersistenceQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async captureSettingsPersistenceTransaction(
+    previousSettings: RssDashboardSettings,
+    candidateSettings: RssDashboardSettings,
+  ): Promise<SettingsPersistenceTransactionSnapshot> {
+    const filePaths = this.getSettingsPersistenceWriteSet(
+      previousSettings,
+      candidateSettings,
+    );
+    const metadataTargetPaths =
+      this.metadataTransaction?.getTargetPaths?.([
+        previousSettings,
+        candidateSettings,
+      ]) ?? [];
+    if (
+      metadataTargetPaths.some((path) => filePaths.includes(path)) ||
+      new Set(metadataTargetPaths).size !== metadataTargetPaths.length
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    const directoryPaths =
+      this.getSettingsPersistenceDirectorySet(
+        previousSettings,
+        candidateSettings,
+      );
+    if (
+      filePaths.length + directoryPaths.length >
+      MAX_SETTINGS_TRANSACTION_PATHS
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+
+    const files: SettingsPersistenceFileSnapshot[] = [];
+    let snapshotBytes = 0;
+    for (const path of filePaths) {
+      const exists = await this.app.vault.adapter.exists(path);
+      const contents = exists
+        ? await this.app.vault.adapter.read(path)
+        : null;
+      if (contents !== null) {
+        snapshotBytes += new TextEncoder().encode(contents).byteLength;
+        if (
+          snapshotBytes > MAX_SETTINGS_TRANSACTION_SNAPSHOT_BYTES
+        ) {
+          throw new FeedStorageRollbackIncompleteError();
+        }
+      }
+      files.push({ path, contents });
+    }
+
+    const directories: SettingsPersistenceDirectorySnapshot[] = [];
+    for (const path of directoryPaths) {
+      const existed = await this.app.vault.adapter.exists(path);
+      if (existed) this.assertKnownVaultFolder(path);
+      directories.push({ path, existed });
+    }
+
+    return {
+      metadata: this.metadataTransaction
+        ? await this.metadataTransaction.capture([
+            previousSettings,
+            candidateSettings,
+          ])
+        : undefined,
+      files,
+      directories,
+      lastPersistedMetadataJson: this.lastPersistedMetadataJson,
+      lastPersistedShardJsonByFeedId: new Map(
+        this.lastPersistedShardJsonByFeedId,
+      ),
+      lastStorageFolderPath: this.lastStorageFolderPath,
+    };
+  }
+
+  private async restoreSettingsPersistenceTransaction(
+    snapshot: SettingsPersistenceTransactionSnapshot,
+    activeTransaction: ActiveSettingsPersistenceTransaction,
+  ): Promise<void> {
+    const failures: unknown[] = [];
+
+    if (this.metadataTransaction) {
+      try {
+        await this.metadataTransaction.restore(snapshot.metadata);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+
+    for (const { path, contents } of [...snapshot.files].reverse()) {
+      try {
+        if (contents !== null) {
+          await this.app.vault.adapter.write(path, contents);
+          continue;
+        }
+        if (!(await this.app.vault.adapter.exists(path))) continue;
+        const expectedCandidateBytes =
+          activeTransaction.lastWrittenBytesByPath.get(path);
+        if (
+          expectedCandidateBytes === undefined ||
+          (await this.app.vault.adapter.read(path)) !==
+            expectedCandidateBytes
+        ) {
+          throw new Error("Unknown settings file replaced a rollback target");
+        }
+        await this.app.vault.adapter.remove(path);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+
+    for (const { path, existed } of snapshot.directories) {
+      if (!existed) continue;
+      try {
+        if (!(await this.app.vault.adapter.exists(path))) {
+          await this.app.vault.createFolder(path);
+        }
+        this.assertKnownVaultFolder(path);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+
+    for (const { path, existed } of [...snapshot.directories].reverse()) {
+      if (existed) continue;
+      try {
+        if (!(await this.app.vault.adapter.exists(path))) continue;
+        this.assertKnownVaultFolder(path);
+        const contents = await this.app.vault.adapter.list(path);
+        if (
+          contents.files.length > 0 ||
+          contents.folders.length > 0
+        ) {
+          throw new Error("Candidate-created settings folder is not empty");
+        }
+        await this.app.vault.adapter.rmdir(path, false);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+
+    this.lastPersistedMetadataJson =
+      snapshot.lastPersistedMetadataJson;
+    this.lastPersistedShardJsonByFeedId = new Map(
+      snapshot.lastPersistedShardJsonByFeedId,
+    );
+    this.lastStorageFolderPath = snapshot.lastStorageFolderPath;
+
+    if (failures.length > 0) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+  }
+
+  private async verifySettingsPersistenceTransaction(
+    snapshot: SettingsPersistenceTransactionSnapshot,
+  ): Promise<void> {
+    if (this.metadataTransaction?.verify) {
+      await this.metadataTransaction.verify(snapshot.metadata);
+    }
+    for (const { path, contents } of snapshot.files) {
+      const exists = await this.app.vault.adapter.exists(path);
+      if (contents === null) {
+        if (exists) throw new FeedStorageRollbackIncompleteError();
+        continue;
+      }
+      if (
+        !exists ||
+        (await this.app.vault.adapter.read(path)) !== contents
+      ) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+    }
+    for (const { path, existed } of snapshot.directories) {
+      const exists = await this.app.vault.adapter.exists(path);
+      if (exists !== existed) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      if (exists) this.assertKnownVaultFolder(path);
+    }
+  }
+
+  private getSettingsPersistenceWriteSet(
+    previousSettings: RssDashboardSettings,
+    candidateSettings: RssDashboardSettings,
+  ): string[] {
+    const paths = new Map<string, "shard" | "user-state">();
+    const addPath = (
+      path: string,
+      kind: "shard" | "user-state",
+    ): void => {
+      const previousKind = paths.get(path);
+      if (previousKind !== undefined && previousKind !== kind) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      paths.set(path, kind);
+    };
+    const roots = new Set<string>();
+    for (const settings of [previousSettings, candidateSettings]) {
+      if (
+        settings.storageMode === "vault-shards" ||
+        settings.storageMode === "vault-shards-v2"
+      ) {
+        roots.add(
+          this.getControlledFolderPath(
+            settings.storageFolder,
+            ".rss-dashboard-data/feeds",
+          ),
+        );
+      }
+    }
+    if (this.lastStorageFolderPath !== null) {
+      roots.add(
+        this.getControlledFolderPath(
+          this.lastStorageFolderPath,
+          ".rss-dashboard-data/feeds",
+        ),
+      );
+    }
+
+    const feedIds = new Set<string>();
+    for (const settings of [previousSettings, candidateSettings]) {
+      for (const feed of settings.feeds) {
+        if (!feed.feedId?.trim()) continue;
+        feedIds.add(this.getControlledFeedId(feed.feedId));
+      }
+    }
+    for (const feedId of this.lastPersistedShardJsonByFeedId.keys()) {
+      feedIds.add(this.getControlledFeedId(feedId));
+    }
+    for (const root of roots) {
+      for (const feedId of feedIds) {
+        addPath(
+          this.getControlledChildPath(root, `${feedId}.json`),
+          "shard",
+        );
+      }
+    }
+
+    for (const settings of [previousSettings, candidateSettings]) {
+      if (settings.storageMode === "vault-shards-v2") {
+        const metadataFolder = this.getControlledFolderPath(
+          settings.metadataStorageFolder,
+          ".rss-dashboard-data",
+        );
+        addPath(
+          this.getControlledChildPath(metadataFolder, "user-state.json"),
+          "user-state",
+        );
+      }
+    }
+    if (paths.size > MAX_SETTINGS_TRANSACTION_PATHS) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    return [...paths.keys()].sort();
+  }
+
+  private getSettingsPersistenceDirectorySet(
+    previousSettings: RssDashboardSettings,
+    candidateSettings: RssDashboardSettings,
+  ): string[] {
+    const directories = new Set<string>();
+    const addAncestors = (folder: string): void => {
+      const segments = folder.split("/");
+      if (segments.length > MAX_SETTINGS_TRANSACTION_DEPTH) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      for (let index = 1; index <= segments.length; index += 1) {
+        directories.add(segments.slice(0, index).join("/"));
+      }
+    };
+
+    for (const settings of [previousSettings, candidateSettings]) {
+      if (
+        settings.storageMode === "vault-shards" ||
+        settings.storageMode === "vault-shards-v2"
+      ) {
+        addAncestors(
+          this.getControlledFolderPath(
+            settings.storageFolder,
+            ".rss-dashboard-data/feeds",
+          ),
+        );
+      }
+      if (
+        settings.metadataStorageMode === "vault-location" ||
+        settings.storageMode === "vault-shards-v2"
+      ) {
+        addAncestors(
+          this.getControlledFolderPath(
+            settings.metadataStorageFolder,
+            ".rss-dashboard-data",
+          ),
+        );
+      }
+    }
+    return [...directories].sort(
+      (left, right) =>
+        left.split("/").length - right.split("/").length,
+    );
+  }
+
+  private getControlledFolderPath(
+    input: string,
+    fallback: string,
+  ): string {
+    const trimmed = input.trim().replace(/\\/g, "/");
+    const withoutEdgeSlashes = (trimmed || fallback).replace(
+      /^\/+|\/+$/g,
+      "",
+    );
+    const segments = withoutEdgeSlashes.split("/");
+    if (
+      withoutEdgeSlashes.length === 0 ||
+      withoutEdgeSlashes.length >
+        MAX_SETTINGS_TRANSACTION_PATH_LENGTH ||
+      segments.length > MAX_SETTINGS_TRANSACTION_DEPTH ||
+      segments.some(
+        (segment) =>
+          segment.length === 0 ||
+          segment === "." ||
+          segment === ".." ||
+          /[:*?"<>|]/u.test(segment) ||
+          hasControlCharacters(segment),
+      )
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    const normalized = normalizePath(withoutEdgeSlashes);
+    if (normalized !== withoutEdgeSlashes) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    return normalized;
+  }
+
+  private getControlledFeedId(feedId: string | undefined): string {
+    const value = feedId?.trim() ?? "";
+    if (
+      value.length === 0 ||
+      value.length > 256 ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value) ||
+      value === "." ||
+      value === ".."
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    return value;
+  }
+
+  private assertNoDuplicateFeedIds(
+    settings: RssDashboardSettings,
+  ): void {
+    const seen = new Set<string>();
+    for (const feed of settings.feeds) {
+      const raw = feed.feedId?.trim();
+      if (!raw) continue;
+      const feedId = this.getControlledFeedId(raw);
+      if (seen.has(feedId)) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      seen.add(feedId);
+    }
+  }
+
+  private getControlledChildPath(root: string, name: string): string {
+    const path = normalizePath(`${root}/${name}`);
+    if (
+      path.length > MAX_SETTINGS_TRANSACTION_PATH_LENGTH ||
+      !path.startsWith(`${root}/`)
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    return path;
+  }
+
+  private assertKnownVaultFolder(path: string): void {
+    const abstractFile = this.app.vault.getAbstractFileByPath(path);
+    if (!(abstractFile instanceof TFolder)) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+  }
+
+  private clearPersistedStateCache(): void {
+    this.lastPersistedShardJsonByFeedId.clear();
+    this.lastPersistedMetadataJson = null;
+    this.lastStorageFolderPath = null;
   }
 
   public async migrateToVaultShards(
@@ -1187,13 +1689,25 @@ export class FeedStorageRepository {
       }
     }
 
+    const userStateJson = JSON.stringify(userStateFile, null, 2);
     const writeUserState = () =>
-      this.app.vault.adapter.write(path, JSON.stringify(userStateFile, null, 2));
+      this.writeSettingsFile(path, userStateJson);
     if (this.writeWrapper) {
       await this.writeWrapper(writeUserState);
     } else {
       await writeUserState();
     }
     storageLog("Saved user-state.json with " + Object.keys(states).length + " entries.");
+  }
+
+  private async writeSettingsFile(
+    path: string,
+    contents: string,
+  ): Promise<void> {
+    this.activeSettingsPersistenceTransaction?.lastWrittenBytesByPath.set(
+      path,
+      contents,
+    );
+    await this.app.vault.adapter.write(path, contents);
   }
 }
