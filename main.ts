@@ -5,7 +5,6 @@ import {
   WorkspaceLeaf,
   Platform,
   requireApiVersion,
-  TFolder,
   TFile,
   type EventRef,
   type ObsidianProtocolData,
@@ -56,6 +55,7 @@ import {
   type FeedLocalStorageAddress,
   type PersistSettingsOptions,
   type FeedStorageStatus,
+  FeedStorageCandidateVerificationError,
   FeedStorageRollbackIncompleteError,
   ShardFolderDeletionError,
 } from "./src/services/feed-storage-repository";
@@ -699,57 +699,6 @@ async function loadMetadata(
       error,
     );
     return null; // Fall back to plugin-default
-  }
-}
-
-/**
- * Ensures metadata folder exists (idempotent).
- * - If folder exists and is a folder: returns success
- * - If folder doesn't exist: creates it
- * - If path is a file: throws error
- * - If createFolder race condition occurs: checks again and continues if now a folder
- */
-async function ensureMetadataFolderExists(
-  app: App,
-  settings: RssDashboardSettings,
-): Promise<void> {
-  const folderPath = getMetadataPath(settings);
-  if (!folderPath) {
-    return; // Plugin-default mode, no folder needed
-  }
-
-  const normalized = folderPath.replace(/^\/+|\/+$/g, "");
-
-  try {
-    // Check if path already exists in vault cache
-    const existing = app.vault.getAbstractFileByPath(normalized);
-    if (existing) {
-      if (existing instanceof TFolder) {
-        return; // Folder already exists, idempotent success
-      } else {
-        throw new Error(
-          `Metadata storage path points to a file, not a folder: ${normalized}`,
-        );
-      }
-    }
-
-    // Also check via adapter (covers folders not yet indexed in vault cache)
-    const existsOnDisk = await app.vault.adapter.exists(normalized);
-    if (existsOnDisk) {
-      return; // Folder exists on disk (cache lag), treat as success
-    }
-
-    // Folder doesn't exist, create it
-    await app.vault.createFolder(normalized);
-  } catch (error) {
-    // Handle race condition: createFolder throws "Folder already exists" or similar
-    if (
-      error instanceof Error &&
-      error.message.toLowerCase().includes("already exists")
-    ) {
-      return; // Folder exists (race condition or cache lag), treat as success
-    }
-    throw error;
   }
 }
 
@@ -3453,6 +3402,9 @@ export default class RssDashboardPlugin extends Plugin {
           }
           throw new SettingsImportRollbackError();
         }
+        if (error instanceof FeedStorageCandidateVerificationError) {
+          throw new Error("Settings import persistence verification failed");
+        }
         throw error;
       }
     });
@@ -3663,6 +3615,12 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   public async migrateToVaultStorage(): Promise<void> {
+    return this.enqueueSettingsOperation(() =>
+      this.migrateToVaultStorageUnlocked(),
+    );
+  }
+
+  private async migrateToVaultStorageUnlocked(): Promise<void> {
     storageLog("Plugin migration requested", {
       currentMode: this.settings.storageMode,
       folder: this.settings.storageFolder,
@@ -3672,7 +3630,7 @@ export default class RssDashboardPlugin extends Plugin {
     try {
       await this.feedStorageRepository.migrateToVaultShards(
         this.settings,
-        (data) => this.saveData(data),
+        this.getMetadataSaveCallbackFor(this.settings),
       );
       this.initializeSettingsBackedServices();
       await this.refreshDashboardViews();
@@ -3692,6 +3650,12 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   public async migrateToVaultShardsV2(): Promise<void> {
+    return this.enqueueSettingsOperation(() =>
+      this.migrateToVaultShardsV2Unlocked(),
+    );
+  }
+
+  private async migrateToVaultShardsV2Unlocked(): Promise<void> {
     storageLog("Plugin migration v2 requested", {
       currentMode: this.settings.storageMode,
       folder: this.settings.storageFolder,
@@ -3721,19 +3685,31 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   public async backupAndMigrateStorageToV2(): Promise<void> {
+    return this.enqueueSettingsOperation(() =>
+      this.backupAndMigrateStorageToV2Unlocked(),
+    );
+  }
+
+  private async backupAndMigrateStorageToV2Unlocked(): Promise<void> {
     storageLog("Running backup before migrating to vault-shards-v2");
     try {
-      await this.backupService.performAutoBackups();
+      await this.performAutoBackupsUnlocked();
     } catch (e) {
       storageError("Backup failed before migration", e);
       this.notify("plugin.storage.backupFailedProceeding");
     }
 
     this.settings.storageMigrationDismissedPermanently = true;
-    await this.migrateToVaultShardsV2();
+    await this.migrateToVaultShardsV2Unlocked();
   }
 
   public async repairVaultShards(): Promise<void> {
+    return this.enqueueSettingsOperation(() =>
+      this.repairVaultShardsUnlocked(),
+    );
+  }
+
+  private async repairVaultShardsUnlocked(): Promise<void> {
     storageLog("Plugin repair requested", {
       currentMode: this.settings.storageMode,
       folder: this.settings.storageFolder,
@@ -3743,7 +3719,7 @@ export default class RssDashboardPlugin extends Plugin {
     try {
       await this.feedStorageRepository.repairVaultShards(
         this.settings,
-        (data) => this.saveData(data),
+        this.getMetadataSaveCallbackFor(this.settings),
       );
       if (this.settingTab) {
         this.settingTab.display();
@@ -3770,6 +3746,14 @@ export default class RssDashboardPlugin extends Plugin {
   public async revertToLegacyJsonStorageWithOptions(options?: {
     deleteShardFolder?: boolean;
   }): Promise<void> {
+    return this.enqueueSettingsOperation(() =>
+      this.revertToLegacyJsonStorageWithOptionsUnlocked(options),
+    );
+  }
+
+  private async revertToLegacyJsonStorageWithOptionsUnlocked(options?: {
+    deleteShardFolder?: boolean;
+  }): Promise<void> {
     storageLog("Plugin revert requested", {
       currentMode: this.settings.storageMode,
       folder: this.settings.storageFolder,
@@ -3780,7 +3764,7 @@ export default class RssDashboardPlugin extends Plugin {
     try {
       await this.feedStorageRepository.revertToLegacyJson(
         this.settings,
-        (data) => this.saveData(data),
+        this.getMetadataSaveCallbackFor(this.settings),
         options,
       );
       this.initializeSettingsBackedServices();
@@ -4625,6 +4609,7 @@ export default class RssDashboardPlugin extends Plugin {
           const pluginDataPath = this.getPluginDataFilePath();
           await this.feedStorageRepository.writeMetadataCandidate(
             pluginDataPath,
+            JSON.stringify(bootstrap, null, 2),
             () => this.saveData(bootstrap),
             (actualBytes) =>
               this.isExpectedMetadataBytes(actualBytes, bootstrap),
@@ -4637,6 +4622,7 @@ export default class RssDashboardPlugin extends Plugin {
         const pluginDataPath = this.getPluginDataFilePath();
         await this.feedStorageRepository.writeMetadataCandidate(
           pluginDataPath,
+          JSON.stringify(settingsData, null, 2),
           () => this.saveData(settingsData),
           (actualBytes) =>
             this.isExpectedMetadataBytes(actualBytes, settingsData),
@@ -4696,11 +4682,8 @@ export default class RssDashboardPlugin extends Plugin {
 
   /**
    * Migrate metadata from plugin-default location to user-configured vault folder.
-   * Steps:
-   * 1. Ensure metadata folder exists (idempotent)
-   * 2. Write settings to new vault location
-   * 3. Update metadataStorageMode to "vault-location"
-   * 4. Persist updated settings
+   * The same queued, journaled commit path used by settings imports owns the
+   * target directory, full metadata file, and plugin bootstrap pointer.
    */
   async migrateMetadataToVaultLocation(): Promise<void> {
     if (this.settings.metadataStorageMode === "vault-location") {
@@ -4709,33 +4692,22 @@ export default class RssDashboardPlugin extends Plugin {
     }
 
     try {
-      // Resolve the target path using vault-location mode (before updating mode in settings)
-      const targetSettingsForPath: RssDashboardSettings = {
+      const metadataPath = getMetadataPath({
         ...this.settings,
         metadataStorageMode: "vault-location",
-      };
-      const metadataPath = getMetadataPath(targetSettingsForPath);
+      });
       if (!metadataPath) {
         throw new Error("Failed to resolve metadata storage path");
       }
-
-      // Ensure the target folder exists
-      await ensureMetadataFolderExists(this.app, targetSettingsForPath);
-
-      // Write current settings to vault location as JSON
-      const settingsJson = JSON.stringify(this.settings, null, 2);
-      const dataFilePath = `${metadataPath}/data.json`;
-      await this.app.vault.adapter.write(dataFilePath, settingsJson);
-
-      // Update mode and persist using the dual-mode save callback
-      this.settings.metadataStorageMode = "vault-location";
-      await this.saveSettings();
+      await this.commitSettingsImport((previous) => {
+        const candidate = cloneStableOwnData(previous);
+        candidate.metadataStorageMode = "vault-location";
+        return candidate;
+      });
 
       this.notify("plugin.metadata.migrated", { path: metadataPath });
     } catch (error) {
       storageError("Metadata migration failed", error);
-      // Revert mode on error (no partial state)
-      this.settings.metadataStorageMode = "plugin-default";
       this.notify("plugin.metadata.migrationFailed");
       throw error;
     }
@@ -4743,11 +4715,8 @@ export default class RssDashboardPlugin extends Plugin {
 
   /**
    * Revert metadata from vault-location back to plugin-default location.
-   * Steps:
-   * 1. Read settings from current vault location (already in memory)
-   * 2. Write back to plugin-default location via Plugin.saveData()
-   * 3. Update metadataStorageMode to "plugin-default"
-   * 4. Optionally clean up vault-location data.json
+   * The former vault copy is deliberately retained as a recovery copy. A
+   * separate, explicit cleanup can remove it without weakening this commit.
    */
   async revertMetadataToPluginDefault(): Promise<void> {
     if (this.settings.metadataStorageMode === "plugin-default") {
@@ -4756,38 +4725,14 @@ export default class RssDashboardPlugin extends Plugin {
     }
 
     try {
-      // Current settings are already in memory, just switch the mode
-      this.settings.metadataStorageMode = "plugin-default";
-
-      // Save using Plugin.saveData() (plugin-default location)
-      await this.saveData(this.settings);
-
-      // Optionally clean up the vault-location file
-      const oldMetadataPath = this.settings.metadataStorageFolder;
-      if (oldMetadataPath) {
-        try {
-          const dataFilePath = `${oldMetadataPath}/data.json`;
-          const file = this.app.vault.getAbstractFileByPath(dataFilePath);
-          if (file && !(file instanceof TFolder)) {
-            await this.app.fileManager.trashFile(file);
-            storageLog("Deleted old vault metadata file", {
-              path: dataFilePath,
-            });
-          }
-        } catch (cleanupError) {
-          storageLog(
-            "Cleanup of vault metadata file failed (non-fatal)",
-            cleanupError,
-          );
-        }
-      }
-
-      await this.saveSettings();
+      await this.commitSettingsImport((previous) => {
+        const candidate = cloneStableOwnData(previous);
+        candidate.metadataStorageMode = "plugin-default";
+        return candidate;
+      });
       this.notify("plugin.metadata.reverted");
     } catch (error) {
       storageError("Metadata revert failed", error);
-      // Restore mode on error (no partial state)
-      this.settings.metadataStorageMode = "vault-location";
       this.notify("plugin.metadata.revertFailed");
       throw error;
     }
@@ -5227,7 +5172,12 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   public async performAutoBackups(): Promise<void> {
-    // ✅ BackupService extracted — delegates to service
+    return this.enqueueSettingsOperation(() =>
+      this.performAutoBackupsUnlocked(),
+    );
+  }
+
+  private async performAutoBackupsUnlocked(): Promise<void> {
     await this.backupService.performAutoBackups();
   }
 
@@ -5251,7 +5201,7 @@ export default class RssDashboardPlugin extends Plugin {
     // committed or completed its rollback. This prevents an unload in the
     // candidate-published window from copying an uncommitted generation.
     void this.enqueueSettingsOperation(async () => {
-      await this.backupService.performAutoBackups();
+      await this.performAutoBackupsUnlocked();
     });
   }
 

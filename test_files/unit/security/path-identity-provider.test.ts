@@ -67,6 +67,23 @@ describe("VaultPathIdentityProvider", () => {
     ).rejects.toThrow();
   });
 
+  it("rejects a virtual target whose insensitive lookup succeeds but exact-case lookup fails", async () => {
+    const app = {
+      vault: {
+        adapter: {
+          exists: async (candidate: string, sensitive?: boolean) =>
+            candidate === "rss" || candidate === "rss/data.json"
+              ? sensitive !== true
+              : false,
+        },
+        getAbstractFileByPath: () => null,
+      },
+    } as unknown as App;
+    const provider = new VaultPathIdentityProvider(app);
+
+    await expect(provider.inspect("rss/data.json")).rejects.toThrow();
+  });
+
   it.each(["internal", "external"] as const)(
     "rejects an %s symlink below the trusted vault root",
     async (mode) => {

@@ -75,6 +75,10 @@ interface AsyncVaultAdapter {
   write(path: string, contents: string): Promise<void>;
   read(path: string): Promise<string>;
   exists(path: string): Promise<boolean>;
+  process(
+    path: string,
+    update: (contents: string) => string,
+  ): Promise<string>;
   rename?: (from: string, to: string) => Promise<void>;
 }
 
@@ -778,16 +782,21 @@ describe("refreshFeeds() pipeline behavior", () => {
     source.title = "Changed source";
     source.items[0].read = true;
     const adapter = plugin.app.vault.adapter as unknown as AsyncVaultAdapter;
-    const originalWrite = adapter.write.bind(adapter);
-    vi.spyOn(adapter, "write").mockImplementation(async (path, contents) => {
-      if (
-        path === "RSS Metadata/user-state.json" &&
-        !contents.includes('"states": {}')
-      ) {
-        throw new Error("late user-state failure");
-      }
-      await originalWrite(path, contents);
-    });
+    const originalProcess = adapter.process.bind(adapter);
+    vi.spyOn(adapter, "process").mockImplementation(
+      async (path, update) => {
+        if (path !== "RSS Metadata/user-state.json") {
+          return originalProcess(path, update);
+        }
+        return originalProcess(path, (contents) => {
+          const next = update(contents);
+          if (!next.includes('"states": {}')) {
+            throw new Error("late user-state failure");
+          }
+          return next;
+        });
+      },
+    );
 
     await expect(
       plugin.saveSettings({ forceAllShards: true, forceMetadata: true }),

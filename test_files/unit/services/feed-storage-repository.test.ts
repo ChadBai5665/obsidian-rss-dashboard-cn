@@ -1,4 +1,17 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  rmdir,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import nodePath from "node:path";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { App, TFile } from "obsidian";
 import {
   FeedStorageRepository,
@@ -15,6 +28,7 @@ import type {
   ControlledPathIdentity,
   PathIdentityProvider,
 } from "../../../src/security/path-identity-provider";
+import { VaultPathIdentityProvider } from "../../../src/security/path-identity-provider";
 
 interface VaultAdapterStub {
   exists(path: string): Promise<boolean>;
@@ -76,11 +90,20 @@ describe("FeedStorageRepository", () => {
   let app: App;
   let repository: FeedStorageRepository;
   let saveData: import("vitest").Mock<(...args: unknown[]) => Promise<void>>;
+  const temporaryRoots: string[] = [];
 
   beforeEach(() => {
     app = App.createMock();
     repository = new FeedStorageRepository(app);
     saveData = vi.fn<(...args: unknown[]) => Promise<void>>().mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    await Promise.all(
+      temporaryRoots.splice(0).map((root) =>
+        rm(root, { recursive: true, force: true }),
+      ),
+    );
   });
 
   it("hydrates every item with its owning feedId source identity before persistence", async () => {
@@ -212,7 +235,8 @@ describe("FeedStorageRepository", () => {
             : undefined,
       };
       delete shardItem.rssDashboardSourceId;
-      await vaultAdapter(app).write(
+      await app.vault.createFolder("RSS Data/Feeds");
+      await app.vault.create(
         "RSS Data/Feeds/durable-feed-id.json",
         JSON.stringify({
           version: 1,
@@ -223,7 +247,8 @@ describe("FeedStorageRepository", () => {
         }),
       );
       if (storageMode === "vault-shards-v2") {
-        await vaultAdapter(app).write(
+        await app.vault.createFolder("RSS Metadata");
+        await app.vault.create(
           "RSS Metadata/user-state.json",
           JSON.stringify({
             version: 1,
@@ -302,14 +327,14 @@ describe("FeedStorageRepository", () => {
       }),
     ];
 
-    const writeSpy = vi.spyOn(app.vault.adapter, "write");
+    const processSpy = vi.spyOn(vaultAdapter(app), "process");
 
     await repository.persistSettings(settings, saveData, {
       forceAllShards: true,
       forceMetadata: true,
     });
 
-    writeSpy.mockClear();
+    processSpy.mockClear();
     saveData.mockClear();
 
     settings.feeds[0].items[0].read = true;
@@ -317,10 +342,10 @@ describe("FeedStorageRepository", () => {
     const result = await repository.persistSettings(settings, saveData);
 
     expect(result.shardWriteCount).toBe(1);
-    expect(writeSpy).toHaveBeenCalledTimes(1);
-    expect(writeSpy).toHaveBeenCalledWith(
+    expect(processSpy).toHaveBeenCalledTimes(1);
+    expect(processSpy).toHaveBeenCalledWith(
       "RSS Data/Feeds/feed-1.json",
-      expect.any(String),
+      expect.any(Function),
     );
     expect(saveData).not.toHaveBeenCalled();
   });
@@ -369,6 +394,7 @@ describe("FeedStorageRepository", () => {
       const bytes = JSON.stringify(data);
       await repository.writeMetadataCandidate(
         metadataPath,
+        bytes,
         async () => {
           if (await app.vault.adapter.exists(metadataPath)) {
             await app.vault.adapter.write(metadataPath, bytes);
@@ -395,16 +421,21 @@ describe("FeedStorageRepository", () => {
     settings.feeds[0].title = "Changed title";
     settings.feeds[0].items[0].read = true;
     const adapter = vaultAdapter(app);
-    const originalWrite = adapter.write.bind(adapter);
-    vi.spyOn(adapter, "write").mockImplementation(async (path, contents) => {
-      if (
-        path === "RSS Metadata/user-state.json" &&
-        !contents.includes('"states": {}')
-      ) {
-        throw new Error("user state unavailable");
-      }
-      await originalWrite(path, contents);
-    });
+    const originalProcess = adapter.process.bind(adapter);
+    vi.spyOn(adapter, "process").mockImplementation(
+      async (path, update) => {
+        if (path !== "RSS Metadata/user-state.json") {
+          return originalProcess(path, update);
+        }
+        return originalProcess(path, (contents) => {
+          const next = update(contents);
+          if (!next.includes('"states": {}')) {
+            throw new Error("user state unavailable");
+          }
+          return next;
+        });
+      },
+    );
 
     await expect(
       repository.persistSettings(settings, transactionalSave, {
@@ -449,16 +480,20 @@ describe("FeedStorageRepository", () => {
     settings.feeds[1].items[0].read = true;
 
     const adapter = vaultAdapter(app);
-    const writeSpy = vi.spyOn(adapter, "write");
     const originalProcess = adapter.process.bind(adapter);
     let failSecondRestore = true;
     const attemptedRestores: string[] = [];
     vi.spyOn(adapter, "process").mockImplementation(async (path, update) => {
-      attemptedRestores.push(path);
-      if (path === secondPath && failSecondRestore) {
+      const current = await adapter.read(path);
+      const next = update(current);
+      const isRestore =
+        (path === firstPath && next === firstOld) ||
+        (path === secondPath && next === secondOld);
+      if (isRestore) attemptedRestores.push(path);
+      if (isRestore && path === secondPath && failSecondRestore) {
         throw new Error("restore unavailable");
       }
-      return originalProcess(path, update);
+      return originalProcess(path, () => next);
     });
     saveData.mockRejectedValueOnce(new Error("metadata unavailable"));
 
@@ -474,10 +509,11 @@ describe("FeedStorageRepository", () => {
 
     failSecondRestore = false;
     attemptedRestores.length = 0;
-    const writeCountBeforeRetry = writeSpy.mock.calls.length;
+    const processCountBeforeRetry =
+      vi.mocked(adapter.process).mock.calls.length;
     await repository.persistSettings(settings, saveData);
-    const retryWrites = writeSpy.mock.calls
-      .slice(writeCountBeforeRetry)
+    const retryWrites = vi.mocked(adapter.process).mock.calls
+      .slice(processCountBeforeRetry)
       .map(([path]) => path);
     expect(retryWrites).toEqual(expect.arrayContaining([firstPath, secondPath]));
   });
@@ -937,6 +973,7 @@ describe("FeedStorageRepository", () => {
       const bytes = JSON.stringify(data);
       await repository.writeMetadataCandidate(
         metadataPath,
+        bytes,
         () => app.vault.adapter.write(metadataPath, bytes),
         (actual) => actual === bytes,
       );
@@ -967,6 +1004,7 @@ describe("FeedStorageRepository", () => {
         const bytes = JSON.stringify(data);
         await repository.writeMetadataCandidate(
           metadataPath,
+          bytes,
           () => app.vault.adapter.write(metadataPath, bytes),
           (actual) => actual === bytes,
         );
@@ -977,6 +1015,123 @@ describe("FeedStorageRepository", () => {
     expect(await app.vault.adapter.read(metadataPath)).toBe(
       "EXTERNAL-METADATA",
     );
+  });
+
+  it("does not invoke a metadata candidate writer after the captured preimage was externally changed", async () => {
+    const metadataPath = "data.json";
+    await app.vault.create(metadataPath, "PREVIOUS");
+    repository = new FeedStorageRepository(app, {
+      metadataTransaction: {
+        getTargetPaths: () => [metadataPath],
+      },
+    });
+    const settings = cloneSettings();
+    settings.storageMode = "legacy-json";
+    const candidateWrite = vi.fn(async () => {
+      await app.vault.adapter.write(metadataPath, "CANDIDATE");
+    });
+
+    await expect(
+      repository.persistSettings(settings, async () => {
+        await app.vault.adapter.write(metadataPath, "EXTERNAL");
+        await repository.writeMetadataCandidate(
+          metadataPath,
+          "CANDIDATE",
+          candidateWrite,
+          (actual) => actual === "CANDIDATE",
+        );
+      }),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+
+    expect(candidateWrite).not.toHaveBeenCalled();
+    expect(await app.vault.adapter.read(metadataPath)).toBe("EXTERNAL");
+  });
+
+  it("rejects a file snapshot whose bytes drift between inspect-read-inspect", async () => {
+    const metadataPath = "data.json";
+    await app.vault.create(metadataPath, "PREVIOUS");
+    const baseProvider = new VaultPathIdentityProvider(app);
+    let targetInspections = 0;
+    const provider: PathIdentityProvider = {
+      inspect: async (path) => {
+        if (path === metadataPath) {
+          targetInspections += 1;
+          if (targetInspections === 2) {
+            await app.vault.adapter.write(path, "EXTERNAL");
+          }
+        }
+        return baseProvider.inspect(path);
+      },
+      assertSafePaths: (paths) => baseProvider.assertSafePaths(paths),
+      isSameIdentity: (expected, actual) =>
+        baseProvider.isSameIdentity(expected, actual),
+      createExclusive: (path, contents) =>
+        baseProvider.createExclusive(path, contents),
+      createOwnedDirectory: (path, markerName, markerContents) =>
+        baseProvider.createOwnedDirectory(
+          path,
+          markerName,
+          markerContents,
+        ),
+    };
+    repository = new FeedStorageRepository(app, {
+      metadataTransaction: {
+        getTargetPaths: () => [metadataPath],
+      },
+      pathIdentityProvider: provider,
+    });
+    const settings = cloneSettings();
+    settings.storageMode = "legacy-json";
+    const candidateWrite = vi.fn(async () => {
+      await app.vault.adapter.write(metadataPath, "CANDIDATE");
+    });
+
+    await expect(
+      repository.persistSettings(settings, async () => {
+        await repository.writeMetadataCandidate(
+          metadataPath,
+          "CANDIDATE",
+          candidateWrite,
+          (actual) => actual === "CANDIDATE",
+        );
+      }),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+
+    expect(candidateWrite).not.toHaveBeenCalled();
+    expect(await app.vault.adapter.read(metadataPath)).toBe("EXTERNAL");
+  });
+
+  it("does not invoke a metadata candidate writer after a same-byte pre-write ABA", async () => {
+    const metadataPath = "data.json";
+    const previousFile = await app.vault.create(metadataPath, "PREVIOUS");
+    repository = new FeedStorageRepository(app, {
+      metadataTransaction: {
+        getTargetPaths: () => [metadataPath],
+      },
+    });
+    const settings = cloneSettings();
+    settings.storageMode = "legacy-json";
+    let replacement: TFile | undefined;
+    const candidateWrite = vi.fn(async () => {
+      await app.vault.adapter.write(metadataPath, "CANDIDATE");
+    });
+
+    await expect(
+      repository.persistSettings(settings, async () => {
+        await app.vault.delete(previousFile);
+        replacement = await app.vault.create(metadataPath, "PREVIOUS");
+        await repository.writeMetadataCandidate(
+          metadataPath,
+          "CANDIDATE",
+          candidateWrite,
+          (actual) => actual === "CANDIDATE",
+        );
+      }),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+
+    expect(candidateWrite).not.toHaveBeenCalled();
+    expect(app.vault.getAbstractFileByPath(metadataPath)).toBe(replacement);
+    expect(await app.vault.adapter.read(metadataPath)).toBe("PREVIOUS");
   });
 
   it("preserves an external shard rewrite instead of restoring over it", async () => {
@@ -1012,6 +1167,168 @@ describe("FeedStorageRepository", () => {
       ),
     ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
     expect(await app.vault.adapter.read(shardPath)).toBe("EXTERNAL-SHARD");
+  });
+
+  it.each(["bytes", "same-byte-aba"] as const)(
+    "does not delete a removed shard after a pre-delete %s replacement",
+    async (mode) => {
+      const previous = cloneSettings();
+      previous.storageMode = "vault-shards";
+      previous.storageFolder = "RSS Data/Feeds";
+      previous.feeds = [makeFeed({ feedId: "removed-before-delete" })];
+      await repository.persistSettings(previous, saveData, {
+        forceAllShards: true,
+        forceMetadata: true,
+      });
+      const shardPath =
+        "RSS Data/Feeds/removed-before-delete.json";
+      const previousBytes = await app.vault.adapter.read(shardPath);
+      const previousFile =
+        app.vault.getAbstractFileByPath(shardPath);
+      if (!(previousFile instanceof TFile)) {
+        throw new Error("missing previous shard");
+      }
+      const originalGetAbstract =
+        app.vault.getAbstractFileByPath.bind(app.vault);
+      let targetLookups = 0;
+      let replacement: TFile | undefined;
+      vi.spyOn(app.vault, "getAbstractFileByPath").mockImplementation(
+        (path: string) => {
+          if (path === shardPath) {
+            targetLookups += 1;
+            if (targetLookups === 6) {
+              if (mode === "bytes") {
+                void app.vault.adapter.write(path, "EXTERNAL");
+              } else {
+                void app.vault.delete(previousFile);
+                void app.vault.create(path, previousBytes).then((file) => {
+                  replacement = file;
+                });
+              }
+            }
+          }
+          return originalGetAbstract(path);
+        },
+      );
+      const trashFile = vi.spyOn(app.fileManager, "trashFile");
+      const candidate = cloneSettings();
+      Object.assign(candidate, previous);
+      candidate.feeds = [];
+
+      await expect(
+        repository.persistSettingsTransaction(
+          previous,
+          candidate,
+          saveData,
+          async () => undefined,
+          { forceAllShards: true, forceMetadata: true },
+        ),
+      ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+
+      expect(trashFile).not.toHaveBeenCalled();
+      expect(await app.vault.adapter.read(shardPath)).toBe(
+        mode === "bytes" ? "EXTERNAL" : previousBytes,
+      );
+      if (mode === "same-byte-aba") {
+        expect(app.vault.getAbstractFileByPath(shardPath)).toBe(replacement);
+      }
+    },
+  );
+
+  it("does not claim a candidate-created file replaced before post-create verification", async () => {
+    const baseProvider = new VaultPathIdentityProvider(app);
+    let replacement: TFile | undefined;
+    const provider: PathIdentityProvider = {
+      inspect: (path) => baseProvider.inspect(path),
+      assertSafePaths: (paths) => baseProvider.assertSafePaths(paths),
+      isSameIdentity: (expected, actual) =>
+        baseProvider.isSameIdentity(expected, actual),
+      createExclusive: async (path, contents) => {
+        const createdIdentity =
+          await baseProvider.createExclusive(path, contents);
+        if (path.endsWith("/candidate-feed.json")) {
+          const created = app.vault.getAbstractFileByPath(path);
+          if (!(created instanceof TFile)) {
+            throw new Error("missing candidate file");
+          }
+          await app.vault.delete(created);
+          replacement = await app.vault.create(path, contents);
+        }
+        return createdIdentity;
+      },
+      createOwnedDirectory: (path, markerName, markerContents) =>
+        baseProvider.createOwnedDirectory(
+          path,
+          markerName,
+          markerContents,
+        ),
+    };
+    repository = new FeedStorageRepository(app, {
+      pathIdentityProvider: provider,
+    });
+    const previous = cloneSettings();
+    previous.storageMode = "legacy-json";
+    previous.feeds = [];
+    const candidate = cloneSettings();
+    candidate.storageMode = "vault-shards";
+    candidate.storageFolder = "Candidate/Feeds";
+    candidate.feeds = [makeFeed({ feedId: "candidate-feed" })];
+    const shardPath = "Candidate/Feeds/candidate-feed.json";
+
+    await expect(
+      repository.persistSettingsTransaction(
+        previous,
+        candidate,
+        saveData,
+        async () => {
+          throw new Error("publish failed");
+        },
+        { forceAllShards: true, forceMetadata: true },
+      ),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+
+    expect(app.vault.getAbstractFileByPath(shardPath)).toBe(replacement);
+    expect(await app.vault.adapter.exists(shardPath)).toBe(true);
+  });
+
+  it("does not claim a candidate-created directory replaced before ownership verification", async () => {
+    const originalCreateFolder =
+      app.vault.createFolder.bind(app.vault);
+    let replacement: unknown;
+    vi.spyOn(app.vault, "createFolder").mockImplementation(
+      async (path: string) => {
+        const created = await originalCreateFolder(path);
+        if (path === "Candidate/Feeds") {
+          await app.vault.adapter.rmdir(path, false);
+          replacement = await originalCreateFolder(path);
+        }
+        return created;
+      },
+    );
+    const previous = cloneSettings();
+    previous.storageMode = "legacy-json";
+    previous.feeds = [];
+    const candidate = cloneSettings();
+    candidate.storageMode = "vault-shards";
+    candidate.storageFolder = "Candidate/Feeds";
+    candidate.feeds = [];
+
+    await expect(
+      repository.persistSettingsTransaction(
+        previous,
+        candidate,
+        saveData,
+        async () => {
+          throw new Error("publish failed");
+        },
+        { forceAllShards: true, forceMetadata: true },
+      ),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+
+    expect(app.vault.getAbstractFileByPath("Candidate/Feeds")).toBe(
+      replacement,
+    );
+    expect(await app.vault.adapter.exists("Candidate/Feeds")).toBe(true);
   });
 
   it("does not delete a same-byte ABA replacement of a candidate-created shard", async () => {
@@ -1056,6 +1373,11 @@ describe("FeedStorageRepository", () => {
         candidate,
         saveData,
         async () => {
+          const contents =
+            await app.vault.adapter.list("Candidate/Feeds");
+          for (const markerPath of contents.files) {
+            await app.vault.adapter.remove(markerPath);
+          }
           await app.vault.adapter.rmdir("Candidate/Feeds", false);
           await app.vault.createFolder("Candidate/Feeds");
           throw new Error("publish failed");
@@ -1064,6 +1386,165 @@ describe("FeedStorageRepository", () => {
       ),
     ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
     expect(await app.vault.adapter.exists("Candidate/Feeds")).toBe(true);
+  });
+
+  it("rejects and rolls back a silently corrupted existing shard write", async () => {
+    const settings = cloneSettings();
+    settings.storageMode = "vault-shards";
+    settings.storageFolder = "RSS Data/Feeds";
+    settings.feeds = [makeFeed({ feedId: "corrupt-shard" })];
+    await repository.persistSettings(settings, saveData, {
+      forceAllShards: true,
+      forceMetadata: true,
+    });
+    const shardPath = "RSS Data/Feeds/corrupt-shard.json";
+    const previousBytes = await app.vault.adapter.read(shardPath);
+    settings.feeds[0].title = "Candidate title";
+    const adapter = vaultAdapter(app);
+    const originalWrite = adapter.write.bind(adapter);
+    const originalProcess = adapter.process.bind(adapter);
+    let corruptedShardWrite = false;
+    vi.spyOn(adapter, "write").mockImplementation(
+      async (path, contents) =>
+        originalWrite(
+          path,
+          path === shardPath && contents !== previousBytes
+            ? contents.slice(0, 40)
+            : contents,
+        ),
+    );
+    vi.spyOn(adapter, "process").mockImplementation(
+      async (path, update) =>
+        originalProcess(
+          path,
+          (contents) => {
+            const next = update(contents);
+            if (path === shardPath && !corruptedShardWrite) {
+              corruptedShardWrite = true;
+              return next.slice(0, 40);
+            }
+            return next;
+          },
+        ),
+    );
+
+    await expect(
+      repository.persistSettings(settings, saveData, {
+        forceAllShards: true,
+        forceMetadata: true,
+      }),
+    ).rejects.toThrow();
+    expect(await app.vault.adapter.read(shardPath)).toBe(previousBytes);
+  });
+
+  it("rejects and rolls back a silently corrupted user-state write", async () => {
+    const settings = cloneSettings();
+    settings.storageMode = "vault-shards-v2";
+    settings.storageFolder = "RSS Data/Feeds";
+    settings.metadataStorageFolder = "RSS Metadata";
+    settings.feeds = [makeFeed({ feedId: "corrupt-state" })];
+    await repository.persistSettings(settings, saveData, {
+      forceAllShards: true,
+      forceMetadata: true,
+    });
+    const statePath = "RSS Metadata/user-state.json";
+    const previousBytes = await app.vault.adapter.read(statePath);
+    settings.feeds[0].items[0].read = true;
+    const adapter = vaultAdapter(app);
+    const originalWrite = adapter.write.bind(adapter);
+    const originalProcess = adapter.process.bind(adapter);
+    vi.spyOn(adapter, "write").mockImplementation(
+      async (path, contents) =>
+        originalWrite(
+          path,
+          path === statePath && contents !== previousBytes
+            ? `${contents}CORRUPT`
+            : contents,
+        ),
+    );
+    vi.spyOn(adapter, "process").mockImplementation(
+      async (path, update) =>
+        originalProcess(
+          path,
+          (contents) => {
+            const next = update(contents);
+            return path === statePath && next !== previousBytes
+              ? `${next}CORRUPT`
+              : next;
+          },
+        ),
+    );
+
+    await expect(
+      repository.persistSettings(settings, saveData, {
+        forceAllShards: true,
+        forceMetadata: true,
+      }),
+    ).rejects.toThrow();
+    expect(await app.vault.adapter.read(statePath)).toBe(previousBytes);
+  });
+
+  it("rejects and rolls back metadata when the callback silently writes a non-candidate postimage", async () => {
+    const metadataPath = "data.json";
+    await app.vault.create(metadataPath, "PREVIOUS");
+    repository = new FeedStorageRepository(app, {
+      metadataTransaction: {
+        getTargetPaths: () => [metadataPath],
+      },
+    });
+    const settings = cloneSettings();
+    settings.storageMode = "legacy-json";
+
+    await expect(
+      repository.persistSettings(settings, async () => {
+        await repository.writeMetadataCandidate(
+          metadataPath,
+          "CANDIDATE",
+          () => app.vault.adapter.write(metadataPath, "TRUNCATED"),
+          (actual) => actual === "CANDIDATE",
+        );
+      }),
+    ).rejects.toThrow();
+    expect(await app.vault.adapter.read(metadataPath)).toBe("PREVIOUS");
+  });
+
+  it("verifies the complete candidate write-set before running the publish callback", async () => {
+    const previous = cloneSettings();
+    previous.storageMode = "vault-shards";
+    previous.storageFolder = "RSS Data/Feeds";
+    previous.feeds = [makeFeed({ feedId: "verify-before-publish" })];
+    await repository.persistSettings(previous, saveData, {
+      forceAllShards: true,
+      forceMetadata: true,
+    });
+    const candidate = cloneSettings();
+    Object.assign(candidate, previous);
+    candidate.feeds = [
+      makeFeed({
+        feedId: "verify-before-publish",
+        title: "Candidate",
+      }),
+    ];
+    const shardPath =
+      "RSS Data/Feeds/verify-before-publish.json";
+    const publish = vi.fn(async () => undefined);
+
+    await expect(
+      repository.persistSettingsTransaction(
+        previous,
+        candidate,
+        async () => {
+          await app.vault.adapter.write(shardPath, "EXTERNAL-AFTER-WRITE");
+        },
+        publish,
+        { forceAllShards: true, forceMetadata: true },
+      ),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+
+    expect(publish).not.toHaveBeenCalled();
+    expect(await app.vault.adapter.read(shardPath)).toBe(
+      "EXTERNAL-AFTER-WRITE",
+    );
   });
 
   it("does not overwrite an externally recreated deleted shard", async () => {
@@ -1112,8 +1593,12 @@ describe("FeedStorageRepository", () => {
     };
     delete adapter.getBasePath;
     delete adapter.getFullPath;
+    const originalCreate = app.vault.create.bind(app.vault);
     vi.spyOn(app.vault, "create").mockImplementation(
       async (path: string, contents: string) => {
+        if (path !== shardPath) {
+          return originalCreate(path, contents);
+        }
         await app.vault.adapter.write(path, contents);
         return new TFile(path);
       },
@@ -1133,6 +1618,45 @@ describe("FeedStorageRepository", () => {
     expect(await app.vault.adapter.exists(shardPath)).toBe(true);
   });
 
+  it("does not overwrite a symlink-like generic virtual target without trusted object-generation semantics", async () => {
+    const metadataPath = "Alias/data.json";
+    await app.vault.createFolder("Alias");
+    await app.vault.create(metadataPath, "PREVIOUS");
+    const adapter = app.vault.adapter as unknown as {
+      getBasePath?: () => string;
+      getFullPath?: (path: string) => string;
+    };
+    delete adapter.getBasePath;
+    delete adapter.getFullPath;
+    vi.spyOn(app.vault, "getAbstractFileByPath").mockImplementation(
+      () => null,
+    );
+    repository = new FeedStorageRepository(app, {
+      metadataTransaction: {
+        getTargetPaths: () => [metadataPath],
+      },
+    });
+    const settings = cloneSettings();
+    settings.storageMode = "legacy-json";
+    const candidateWrite = vi.fn(async () => {
+      await app.vault.adapter.write(metadataPath, "CANDIDATE");
+    });
+
+    await expect(
+      repository.persistSettings(settings, async () => {
+        await repository.writeMetadataCandidate(
+          metadataPath,
+          "CANDIDATE",
+          candidateWrite,
+          (actual) => actual === "CANDIDATE",
+        );
+      }),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
+
+    expect(candidateWrite).not.toHaveBeenCalled();
+    expect(await app.vault.adapter.read(metadataPath)).toBe("PREVIOUS");
+  });
+
   it("fails closed when an identity-less existing path was journaled even if its bytes match the preimage", async () => {
     const metadataPath = "data.json";
     await app.vault.adapter.write(metadataPath, "unchanged-bytes");
@@ -1148,6 +1672,7 @@ describe("FeedStorageRepository", () => {
       repository.persistSettings(settings, async () => {
         await repository.writeMetadataCandidate(
           metadataPath,
+          "unchanged-bytes",
           () =>
             app.vault.adapter.write(metadataPath, "unchanged-bytes"),
           (actual) => actual === "unchanged-bytes",
@@ -1204,6 +1729,29 @@ describe("FeedStorageRepository", () => {
         await app.vault.create(path, contents);
         return identityProvider.inspect(path);
       },
+      createOwnedDirectory: async (
+        path,
+        markerName,
+        markerContents,
+      ) => {
+        if (await app.vault.adapter.exists(path)) {
+          throw new Error("Path already exists");
+        }
+        await app.vault.createFolder(path);
+        const identity = await identityProvider.inspect(path);
+        const markerPath = `${path}/${markerName}`;
+        const markerIdentity =
+          await identityProvider.createExclusive(
+            markerPath,
+            markerContents,
+          );
+        return {
+          identity,
+          markerPath,
+          markerContents,
+          markerIdentity,
+        };
+      },
     };
     repository = new FeedStorageRepository(app, {
       pathIdentityProvider: identityProvider,
@@ -1239,6 +1787,129 @@ describe("FeedStorageRepository", () => {
 
     expect(remove).toHaveBeenCalledWith(shardPath);
     expect(await app.vault.adapter.exists(shardPath)).toBe(false);
+  });
+
+  it("uses real desktop identities for a cacheless create-write-delete cycle and removes ownership markers", async () => {
+    const root = await mkdtemp(
+      nodePath.join(tmpdir(), "rss-storage-desktop-"),
+    );
+    temporaryRoots.push(root);
+    const fullPath = (controlledPath: string): string =>
+      nodePath.join(root, controlledPath);
+    const exists = async (controlledPath: string): Promise<boolean> => {
+      try {
+        await stat(fullPath(controlledPath));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const adapter = {
+      getBasePath: () => root,
+      getFullPath: fullPath,
+      exists,
+      read: (controlledPath: string) =>
+        readFile(fullPath(controlledPath), "utf8"),
+      write: (controlledPath: string, contents: string) =>
+        writeFile(fullPath(controlledPath), contents, "utf8"),
+      process: async (
+        controlledPath: string,
+        update: (contents: string) => string,
+      ) => {
+        const current = await readFile(
+          fullPath(controlledPath),
+          "utf8",
+        );
+        const next = update(current);
+        await writeFile(fullPath(controlledPath), next, "utf8");
+        return next;
+      },
+      remove: (controlledPath: string) =>
+        unlink(fullPath(controlledPath)),
+      mkdir: (controlledPath: string) =>
+        mkdir(fullPath(controlledPath)),
+      list: async (controlledPath: string) => {
+        const entries = await readdir(fullPath(controlledPath), {
+          withFileTypes: true,
+        });
+        return {
+          files: entries
+            .filter((entry) => entry.isFile())
+            .map((entry) => `${controlledPath}/${entry.name}`),
+          folders: entries
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => `${controlledPath}/${entry.name}`),
+        };
+      },
+      rmdir: async (controlledPath: string, recursive: boolean) => {
+        if (recursive) {
+          await rm(fullPath(controlledPath), {
+            recursive: true,
+            force: false,
+          });
+          return;
+        }
+        await rmdir(fullPath(controlledPath));
+      },
+    };
+    const desktopApp = {
+      vault: {
+        adapter,
+        getAbstractFileByPath: () => null,
+        create: async () => {
+          throw new Error("Vault cache create must not be used");
+        },
+        createFolder: async () => {
+          throw new Error("Vault cache folder create must not be used");
+        },
+      },
+      fileManager: {
+        trashFile: async () => {
+          throw new Error("Cacheless delete must use the adapter");
+        },
+      },
+    } as unknown as App;
+    const desktopRepository =
+      new FeedStorageRepository(desktopApp);
+    const previous = cloneSettings();
+    previous.storageMode = "legacy-json";
+    previous.feeds = [];
+    const candidate = cloneSettings();
+    candidate.storageMode = "vault-shards";
+    candidate.storageFolder = "Desktop/Feeds";
+    candidate.feeds = [
+      makeFeed({ feedId: "desktop-cacheless" }),
+    ];
+    const shardPath = "Desktop/Feeds/desktop-cacheless.json";
+
+    await desktopRepository.persistSettingsTransaction(
+      previous,
+      candidate,
+      async () => undefined,
+      async () => undefined,
+      { forceAllShards: true, forceMetadata: true },
+    );
+
+    expect(await exists(shardPath)).toBe(true);
+    const createdEntries = await readdir(fullPath("Desktop/Feeds"));
+    expect(
+      createdEntries.some((entry) =>
+        entry.startsWith(".rss-dashboard-owner-"),
+      ),
+    ).toBe(false);
+
+    const removed = cloneSettings();
+    Object.assign(removed, candidate);
+    removed.feeds = [];
+    await desktopRepository.persistSettingsTransaction(
+      candidate,
+      removed,
+      async () => undefined,
+      async () => undefined,
+      { forceAllShards: true, forceMetadata: true },
+    );
+
+    expect(await exists(shardPath)).toBe(false);
   });
 
   it.each([
@@ -1330,7 +2001,7 @@ describe("FeedStorageRepository", () => {
     );
   });
 
-  it("continues migration when createFolder throws but the folder exists afterward", async () => {
+  it("fails closed when createFolder throws after creating an unowned folder", async () => {
     const settings = cloneSettings();
     settings.storageMode = "legacy-json";
     settings.storageFolder = "RSS Data/Feeds";
@@ -1344,13 +2015,14 @@ describe("FeedStorageRepository", () => {
         throw new Error("Folder already exists");
       });
 
-    await repository.migrateToVaultShards(settings, saveData);
+    await expect(
+      repository.migrateToVaultShards(settings, saveData),
+    ).rejects.toBeInstanceOf(FeedStorageRollbackIncompleteError);
 
-    expect(createFolderSpy).toHaveBeenCalledWith("RSS Data/Feeds");
-    expect(settings.storageMode).toBe("vault-shards");
-    expect(await vaultAdapter(app).read("RSS Data/Feeds/feed-1.json")).toContain(
-      "\"feedId\": \"feed-1\"",
-    );
+    expect(createFolderSpy).toHaveBeenCalledWith("RSS Data");
+    expect(settings.storageMode).toBe("legacy-json");
+    expect(await app.vault.adapter.exists("RSS Data")).toBe(true);
+    expect(saveData).not.toHaveBeenCalled();
   });
 
   it("fails closed when a virtual adapter sees a folder without object identity", async () => {
@@ -1555,6 +2227,63 @@ describe("FeedStorageRepository", () => {
     expect(
       await vaultAdapter(app).read("Imported Data/Feeds/feed-1.json"),
     ).toContain('"feedId": "feed-1"');
+  });
+
+  it("canonicalizes legacy portable settings exactly once before persistence", () => {
+    const current = cloneSettings();
+    const legacyMetadata = {
+      ...cloneSettings(),
+      feeds: [],
+      savePath: "Legacy Saved",
+      template: "# Legacy template",
+      addSavedTag: false,
+      filters: {
+        includeLogic: "OR",
+        bypassAll: true,
+        rules: [{ type: "include", text: "AI" }],
+      },
+      media: {
+        ...cloneSettings().media,
+        autoTagVideos: false,
+        defaultVideoTag: undefined,
+      },
+      display: {
+        ...cloneSettings().display,
+        useDomainFavicons: true,
+      },
+    };
+    const bundle = {
+      version: 1,
+      exportedAt: Date.now(),
+      storageMode: "legacy-json",
+      metadata: legacyMetadata,
+      shards: [],
+      markdownMirrorFallbackPlanned: true,
+    };
+
+    const candidate = repository.buildPortableDataBundleCandidate(
+      bundle,
+      current,
+    );
+    const candidateRecord =
+      candidate as unknown as Record<string, unknown>;
+
+    expect(candidateRecord).not.toHaveProperty("savePath");
+    expect(candidateRecord).not.toHaveProperty("template");
+    expect(candidateRecord).not.toHaveProperty("addSavedTag");
+    expect(candidateRecord).not.toHaveProperty("filters");
+    expect(candidate.articleSaving.defaultFolder).toBe("Legacy Saved");
+    expect(candidate.articleSaving.defaultTemplate).toBe(
+      "# Legacy template",
+    );
+    expect(candidate.articleSaving.addSavedTag).toBe(false);
+    expect(candidate.keywordRules.includeLogic).toBe("OR");
+    expect(candidate.keywordRules.bypassAll).toBe(true);
+    expect(candidate.media.defaultVideoTag).toBe("");
+    expect(candidate.display.useDomainIconsRss).toBe(true);
+    expect(
+      candidate.display as unknown as Record<string, unknown>,
+    ).not.toHaveProperty("useDomainFavicons");
   });
 
   it("rejects portable bundle imports with unsupported schema versions", async () => {

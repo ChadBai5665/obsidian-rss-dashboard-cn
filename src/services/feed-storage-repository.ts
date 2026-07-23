@@ -21,9 +21,11 @@ import { createTranslator } from "../i18n";
 import {
   assertControlledRelativePath,
   VaultPathIdentityProvider,
+  type ControlledDirectoryCreation,
   type ControlledPathIdentity,
   type PathIdentityProvider,
 } from "../security/path-identity-provider";
+import { migrateSettings } from "../utils/settings-loader";
 
 const SHARD_VERSION = 1;
 
@@ -73,6 +75,13 @@ export class FeedStorageRollbackIncompleteError extends Error {
   }
 }
 
+export class FeedStorageCandidateVerificationError extends Error {
+  constructor() {
+    super("Feed storage candidate postimage verification failed");
+    this.name = "FeedStorageCandidateVerificationError";
+  }
+}
+
 interface MigrationSnapshot {
   storageMode: RssDashboardSettings["storageMode"];
   storageFolder: string;
@@ -99,15 +108,20 @@ interface SettingsPersistenceTransactionSnapshot {
   lastStorageFolderPath: string | null;
 }
 
+interface SettingsPersistenceFileOperation {
+  operation: "write" | "delete";
+  intendedBytes: string | null;
+  actualPostBytes?: string | null;
+  creationIdentity?: ControlledPathIdentity;
+  postIdentity?: ControlledPathIdentity;
+  restoredIdentity?: ControlledPathIdentity;
+}
+
 interface ActiveSettingsPersistenceTransaction {
   snapshot: SettingsPersistenceTransactionSnapshot;
-  fileOperations: Map<string, {
-    operation: "write" | "delete";
-    intendedBytes: string | null;
-    postIdentity?: ControlledPathIdentity;
-    restoredIdentity?: ControlledPathIdentity;
-  }>;
-  createdDirectories: Map<string, ControlledPathIdentity>;
+  fileOperations: Map<string, SettingsPersistenceFileOperation>;
+  createdDirectories: Map<string, ControlledDirectoryCreation>;
+  ownershipNonce: string;
 }
 
 const MAX_SETTINGS_TRANSACTION_PATHS = 40_000;
@@ -142,6 +156,15 @@ function createFeedId(): string {
   }
 
   return `feed-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createOwnershipNonce(): string {
+  const randomUuid = window.crypto?.randomUUID?.();
+  if (randomUuid) return randomUuid;
+  syncNonceCounter += 1;
+  return `${Date.now()}-${syncNonceCounter}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
 }
 
 function normalizeFolderPath(path: string): string {
@@ -459,13 +482,26 @@ export class FeedStorageRepository {
   }> {
     return this.enqueueSettingsPersistence(async () => {
       this.ensureFeedIds(settings);
+      this.assertNoDuplicateFeedIds(settings);
       const snapshot = await this.captureSettingsPersistenceTransaction(
         settings,
         settings,
       );
       return this.runWithSettingsPersistenceJournal(
         snapshot,
-        () => this.persistSettingsUnlocked(settings, saveData, options),
+        async () => {
+          const result = await this.persistSettingsUnlocked(
+            settings,
+            saveData,
+            options,
+          );
+          const active = this.requireActiveSettingsTransaction();
+          await this.verifyCandidateSettingsPersistenceTransaction(
+            snapshot,
+            active,
+          );
+          return result;
+        },
       );
     });
   }
@@ -491,6 +527,11 @@ export class FeedStorageRepository {
           saveData,
           options,
         );
+        const active = this.requireActiveSettingsTransaction();
+        await this.verifyCandidateSettingsPersistenceTransaction(
+          snapshot,
+          active,
+        );
         return afterPersist();
       });
     });
@@ -504,10 +545,13 @@ export class FeedStorageRepository {
       snapshot,
       fileOperations: new Map(),
       createdDirectories: new Map(),
+      ownershipNonce: createOwnershipNonce(),
     };
     this.activeSettingsPersistenceTransaction = activeTransaction;
     try {
-      return await operation();
+      const result = await operation();
+      await this.finalizeSettingsDirectoryOwnership(activeTransaction);
+      return result;
     } catch (error) {
       try {
         await this.restoreSettingsPersistenceTransaction(
@@ -526,6 +570,62 @@ export class FeedStorageRepository {
     } finally {
       this.activeSettingsPersistenceTransaction = undefined;
     }
+  }
+
+  private async finalizeSettingsDirectoryOwnership(
+    activeTransaction: ActiveSettingsPersistenceTransaction,
+  ): Promise<void> {
+    for (const created of [...activeTransaction.createdDirectories.values()]
+      .reverse()) {
+      const directoryIdentity =
+        await this.pathIdentityProvider.inspect(created.identity.path);
+      const markerIdentity =
+        await this.pathIdentityProvider.inspect(created.markerPath);
+      if (
+        !this.pathIdentityProvider.isSameIdentity(
+          created.identity,
+          directoryIdentity,
+        ) ||
+        !this.pathIdentityProvider.isSameIdentity(
+          created.markerIdentity,
+          markerIdentity,
+        ) ||
+        (await this.app.vault.adapter.read(created.markerPath)) !==
+          created.markerContents
+      ) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      const markerFile =
+        this.app.vault.getAbstractFileByPath(created.markerPath);
+      const finalMarkerIdentity =
+        await this.pathIdentityProvider.inspect(created.markerPath);
+      if (
+        !this.pathIdentityProvider.isSameIdentity(
+          created.markerIdentity,
+          finalMarkerIdentity,
+        )
+      ) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      if (markerFile instanceof TFile) {
+        await this.app.fileManager.trashFile(markerFile);
+      } else {
+        await this.app.vault.adapter.remove(created.markerPath);
+      }
+      if (
+        (await this.pathIdentityProvider.inspect(created.markerPath)).kind !==
+        "missing"
+      ) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+    }
+  }
+
+  private requireActiveSettingsTransaction():
+    ActiveSettingsPersistenceTransaction {
+    const active = this.activeSettingsPersistenceTransaction;
+    if (!active) throw new FeedStorageRollbackIncompleteError();
+    return active;
   }
 
   private async persistSettingsUnlocked(
@@ -699,6 +799,7 @@ export class FeedStorageRepository {
 
   public async writeMetadataCandidate(
     path: string,
+    expectedCandidateBytes: string,
     write: () => Promise<void>,
     isExpectedCandidate: (actualBytes: string) => boolean,
   ): Promise<void> {
@@ -709,31 +810,21 @@ export class FeedStorageRepository {
     }
     const snapshot = active.snapshot.files.find((entry) => entry.path === path);
     if (!snapshot) throw new FeedStorageRollbackIncompleteError();
-    active.fileOperations.set(path, {
-      operation: "write",
-      intendedBytes: null,
-    });
+    await this.writeSettingsFile(path, expectedCandidateBytes);
+    let writeError: unknown;
     try {
       await write();
-    } finally {
-      const exists = await this.app.vault.adapter.exists(path);
-      const currentBytes = exists
-        ? await this.app.vault.adapter.read(path)
-        : null;
-      if (
-        currentBytes !== null &&
-        isExpectedCandidate(currentBytes)
-      ) {
-        const postIdentity =
-          await this.pathIdentityProvider.inspect(path);
-        const operation = active.fileOperations.get(path);
-        if (operation && postIdentity.kind === "file") {
-          operation.intendedBytes = currentBytes;
-          operation.postIdentity = postIdentity;
-        }
-      } else if (currentBytes === snapshot.contents) {
-        active.fileOperations.delete(path);
-      }
+    } catch (error) {
+      writeError = error;
+    }
+
+    await this.captureActualPostimage(
+      path,
+      (actualBytes) => isExpectedCandidate(actualBytes),
+    );
+    if (writeError !== undefined) {
+      if (writeError instanceof Error) throw writeError;
+      throw new Error("Metadata persistence callback failed");
     }
   }
 
@@ -793,10 +884,15 @@ export class FeedStorageRepository {
     const files: SettingsPersistenceFileSnapshot[] = [];
     let snapshotBytes = 0;
     for (const path of filePaths) {
-      const exists = await this.app.vault.adapter.exists(path);
-      const contents = exists
-        ? await this.app.vault.adapter.read(path)
-        : null;
+      const assertedIdentity = identities.get(path);
+      if (!assertedIdentity) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      const { contents, identity } =
+        await this.captureStableSettingsFile(
+          path,
+          assertedIdentity,
+        );
       if (contents !== null) {
         snapshotBytes += new TextEncoder().encode(contents).byteLength;
         if (
@@ -805,20 +901,20 @@ export class FeedStorageRepository {
           throw new FeedStorageRollbackIncompleteError();
         }
       }
-      const identity = identities.get(path);
-      if (!identity || (contents !== null && identity.kind !== "file")) {
-        throw new FeedStorageRollbackIncompleteError();
-      }
       files.push({ path, contents, identity });
     }
 
     const directories: SettingsPersistenceDirectorySnapshot[] = [];
     for (const path of directoryPaths) {
-      const existed = await this.app.vault.adapter.exists(path);
-      const identity = identities.get(path);
-      if (!identity || (existed && identity.kind !== "directory")) {
+      const assertedIdentity = identities.get(path);
+      if (!assertedIdentity) {
         throw new FeedStorageRollbackIncompleteError();
       }
+      const { existed, identity } =
+        await this.captureStableSettingsDirectory(
+          path,
+          assertedIdentity,
+        );
       directories.push({ path, existed, identity });
     }
 
@@ -831,6 +927,79 @@ export class FeedStorageRepository {
       ),
       lastStorageFolderPath: this.lastStorageFolderPath,
     };
+  }
+
+  private async captureStableSettingsFile(
+    path: string,
+    assertedIdentity: ControlledPathIdentity,
+  ): Promise<{
+    contents: string | null;
+    identity: ControlledPathIdentity;
+  }> {
+    const before = await this.pathIdentityProvider.inspect(path);
+    this.assertIdentityObservationStable(assertedIdentity, before);
+    const existsBefore = await this.app.vault.adapter.exists(path);
+    const contents = existsBefore
+      ? await this.app.vault.adapter.read(path)
+      : null;
+    const after = await this.pathIdentityProvider.inspect(path);
+    const existsAfter = await this.app.vault.adapter.exists(path);
+    if (
+      existsBefore !== existsAfter ||
+      (existsAfter && after.kind !== "file") ||
+      (!existsAfter && after.kind !== "missing")
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    this.assertIdentityObservationStable(before, after);
+    if (
+      existsAfter &&
+      (await this.app.vault.adapter.read(path)) !== contents
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    return { contents, identity: after };
+  }
+
+  private async captureStableSettingsDirectory(
+    path: string,
+    assertedIdentity: ControlledPathIdentity,
+  ): Promise<{
+    existed: boolean;
+    identity: ControlledPathIdentity;
+  }> {
+    const before = await this.pathIdentityProvider.inspect(path);
+    this.assertIdentityObservationStable(assertedIdentity, before);
+    const existed = await this.app.vault.adapter.exists(path);
+    const after = await this.pathIdentityProvider.inspect(path);
+    if (
+      existed !== (await this.app.vault.adapter.exists(path)) ||
+      (existed && after.kind !== "directory") ||
+      (!existed && after.kind !== "missing")
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    this.assertIdentityObservationStable(before, after);
+    return { existed, identity: after };
+  }
+
+  private assertIdentityObservationStable(
+    expected: ControlledPathIdentity,
+    actual: ControlledPathIdentity,
+  ): void {
+    if (
+      expected.path !== actual.path ||
+      expected.kind !== actual.kind ||
+      expected.namespaceKey !== actual.namespaceKey ||
+      expected.destructiveSafe !== actual.destructiveSafe ||
+      (
+        expected.kind !== "missing" &&
+        expected.destructiveSafe &&
+        !this.pathIdentityProvider.isSameIdentity(expected, actual)
+      )
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
   }
 
   private async restoreSettingsPersistenceTransaction(
@@ -878,13 +1047,13 @@ export class FeedStorageRepository {
             if (currentIdentity.kind !== "missing") {
               throw new Error("Deleted settings file was externally recreated");
             }
-            await this.createSettingsFileExclusively(path, contents);
             operation.restoredIdentity =
-              await this.pathIdentityProvider.inspect(path);
+              await this.createSettingsFileExclusively(path, contents);
             continue;
           }
           if (
-            operation.intendedBytes === null ||
+            operation.actualPostBytes === null ||
+            operation.actualPostBytes === undefined ||
             currentIdentity.kind !== "file" ||
             !operation.postIdentity ||
             !this.pathIdentityProvider.isSameIdentity(
@@ -892,14 +1061,15 @@ export class FeedStorageRepository {
               currentIdentity,
             ) ||
             (await this.app.vault.adapter.read(path)) !==
-              operation.intendedBytes
+              operation.actualPostBytes
           ) {
             throw new Error("Settings file changed after transaction write");
           }
           await this.compareAndSwapSettingsFile(
             path,
-            operation.intendedBytes,
+            operation.actualPostBytes,
             contents,
+            operation.postIdentity,
           );
           continue;
         }
@@ -909,21 +1079,34 @@ export class FeedStorageRepository {
         }
         if (currentIdentity.kind === "missing") continue;
         if (
-          operation.intendedBytes === null ||
+          operation.actualPostBytes === null ||
+          operation.actualPostBytes === undefined ||
           currentIdentity.kind !== "file" ||
           !currentIdentity.destructiveSafe ||
-          !operation.postIdentity ||
+          !operation.creationIdentity ||
           !this.pathIdentityProvider.isSameIdentity(
-            operation.postIdentity,
+            operation.creationIdentity,
             currentIdentity,
           ) ||
           (await this.app.vault.adapter.read(path)) !==
-            operation.intendedBytes
+            operation.actualPostBytes
         ) {
           throw new Error("Candidate-created settings file changed identity");
         }
         const abstractFile =
           this.app.vault.getAbstractFileByPath(path);
+        const finalIdentity =
+          await this.pathIdentityProvider.inspect(path);
+        const finalBytes = await this.app.vault.adapter.read(path);
+        if (
+          !this.pathIdentityProvider.isSameIdentity(
+            operation.creationIdentity,
+            finalIdentity,
+          ) ||
+          finalBytes !== operation.actualPostBytes
+        ) {
+          throw new Error("Candidate-created settings file changed before delete");
+        }
         if (abstractFile instanceof TFile) {
           await this.app.fileManager.trashFile(abstractFile);
         } else {
@@ -942,28 +1125,58 @@ export class FeedStorageRepository {
       if (rollbackConflict) break;
       if (existed) continue;
       try {
-        const createdIdentity =
+        const createdDirectory =
           activeTransaction.createdDirectories.get(path);
         const currentIdentity =
           await this.pathIdentityProvider.inspect(path);
         if (currentIdentity.kind === "missing") continue;
         if (
-          !createdIdentity ||
+          !createdDirectory ||
           currentIdentity.kind !== "directory" ||
           !currentIdentity.destructiveSafe ||
           !this.pathIdentityProvider.isSameIdentity(
-            createdIdentity,
+            createdDirectory.identity,
             currentIdentity,
           )
         ) {
           throw new Error("Candidate-created directory changed identity");
         }
         const contents = await this.app.vault.adapter.list(path);
+        const markerIdentity = await this.pathIdentityProvider.inspect(
+          createdDirectory.markerPath,
+        );
         if (
-          contents.files.length > 0 ||
-          contents.folders.length > 0
+          contents.files.length !== 1 ||
+          contents.files[0] !== createdDirectory.markerPath ||
+          contents.folders.length > 0 ||
+          !this.pathIdentityProvider.isSameIdentity(
+            createdDirectory.markerIdentity,
+            markerIdentity,
+          ) ||
+          (await this.app.vault.adapter.read(
+            createdDirectory.markerPath,
+          )) !== createdDirectory.markerContents
         ) {
-          throw new Error("Candidate-created settings folder is not empty");
+          throw new Error("Candidate-created settings folder ownership changed");
+        }
+        const markerFile = this.app.vault.getAbstractFileByPath(
+          createdDirectory.markerPath,
+        );
+        const finalMarkerIdentity = await this.pathIdentityProvider.inspect(
+          createdDirectory.markerPath,
+        );
+        if (
+          !this.pathIdentityProvider.isSameIdentity(
+            createdDirectory.markerIdentity,
+            finalMarkerIdentity,
+          )
+        ) {
+          throw new Error("Candidate-created marker changed before delete");
+        }
+        if (markerFile instanceof TFile) {
+          await this.app.fileManager.trashFile(markerFile);
+        } else {
+          await this.app.vault.adapter.remove(createdDirectory.markerPath);
         }
         await this.app.vault.adapter.rmdir(path, false);
         if ((await this.pathIdentityProvider.inspect(path)).kind !== "missing") {
@@ -991,6 +1204,11 @@ export class FeedStorageRepository {
     path: string,
     expected: string,
     replacement: string,
+    expectedIdentity: ControlledPathIdentity,
+    onObservedPostimage?: (
+      actualBytes: string,
+      actualIdentity: ControlledPathIdentity,
+    ) => void,
   ): Promise<void> {
     const adapter = this.app.vault.adapter as typeof this.app.vault.adapter & {
       process?: (
@@ -1001,13 +1219,43 @@ export class FeedStorageRepository {
     if (typeof adapter.process !== "function") {
       throw new Error("Adapter cannot provide conditional replacement");
     }
+    const beforeIdentity = await this.pathIdentityProvider.inspect(path);
+    if (
+      !expectedIdentity.destructiveSafe ||
+      beforeIdentity.kind !== "file" ||
+      !this.pathIdentityProvider.isSameIdentity(
+        expectedIdentity,
+        beforeIdentity,
+      ) ||
+      (await adapter.read(path)) !== expected
+    ) {
+      throw new Error("Conditional settings replacement lost its preimage");
+    }
     let matched = false;
     await adapter.process(path, (contents) => {
       if (contents !== expected) return contents;
       matched = true;
       return replacement;
     });
-    if (!matched || (await adapter.read(path)) !== replacement) {
+    const afterIdentity = await this.pathIdentityProvider.inspect(path);
+    const actualBytes = await adapter.read(path);
+    if (
+      matched &&
+      this.pathIdentityProvider.isSameIdentity(
+        expectedIdentity,
+        afterIdentity,
+      )
+    ) {
+      onObservedPostimage?.(actualBytes, afterIdentity);
+    }
+    if (
+      !matched ||
+      !this.pathIdentityProvider.isSameIdentity(
+        expectedIdentity,
+        afterIdentity,
+      ) ||
+      actualBytes !== replacement
+    ) {
       throw new Error("Conditional settings restore lost its comparison");
     }
   }
@@ -1015,14 +1263,22 @@ export class FeedStorageRepository {
   private async createSettingsFileExclusively(
     path: string,
     contents: string,
-  ): Promise<void> {
+  ): Promise<ControlledPathIdentity> {
     if (await this.app.vault.adapter.exists(path)) {
       throw new Error("Settings rollback target was externally recreated");
     }
-    await this.pathIdentityProvider.createExclusive(path, contents);
+    const identity =
+      await this.pathIdentityProvider.createExclusive(path, contents);
     if ((await this.app.vault.adapter.read(path)) !== contents) {
       throw new Error("Exclusive settings restore was not durable");
     }
+    const currentIdentity = await this.pathIdentityProvider.inspect(path);
+    if (
+      !this.pathIdentityProvider.isSameIdentity(identity, currentIdentity)
+    ) {
+      throw new Error("Exclusive settings restore changed identity");
+    }
+    return identity;
   }
 
   private async verifySettingsPersistenceTransaction(
@@ -1073,6 +1329,113 @@ export class FeedStorageRepository {
         ) {
           throw new FeedStorageRollbackIncompleteError();
         }
+      }
+    }
+  }
+
+  private async verifyCandidateSettingsPersistenceTransaction(
+    snapshot: SettingsPersistenceTransactionSnapshot,
+    activeTransaction: ActiveSettingsPersistenceTransaction,
+  ): Promise<void> {
+    for (const fileSnapshot of snapshot.files) {
+      const operation =
+        activeTransaction.fileOperations.get(fileSnapshot.path);
+      const currentIdentity =
+        await this.pathIdentityProvider.inspect(fileSnapshot.path);
+      const exists =
+        await this.app.vault.adapter.exists(fileSnapshot.path);
+      const currentBytes = exists
+        ? await this.app.vault.adapter.read(fileSnapshot.path)
+        : null;
+
+      if (!operation) {
+        if (currentBytes !== fileSnapshot.contents) {
+          throw new FeedStorageRollbackIncompleteError();
+        }
+        if (
+          fileSnapshot.contents !== null &&
+          (
+            !fileSnapshot.identity.destructiveSafe ||
+            !this.pathIdentityProvider.isSameIdentity(
+              fileSnapshot.identity,
+              currentIdentity,
+            )
+          )
+        ) {
+          throw new FeedStorageRollbackIncompleteError();
+        }
+        if (
+          fileSnapshot.contents === null &&
+          currentIdentity.kind !== "missing"
+        ) {
+          throw new FeedStorageRollbackIncompleteError();
+        }
+        continue;
+      }
+
+      if (operation.operation === "delete") {
+        if (currentBytes !== null || currentIdentity.kind !== "missing") {
+          throw new FeedStorageRollbackIncompleteError();
+        }
+        continue;
+      }
+
+      if (
+        operation.actualPostBytes === null ||
+        operation.actualPostBytes === undefined ||
+        currentBytes !== operation.actualPostBytes ||
+        !operation.postIdentity ||
+        !this.pathIdentityProvider.isSameIdentity(
+          operation.postIdentity,
+          currentIdentity,
+        )
+      ) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+    }
+
+    for (const directorySnapshot of snapshot.directories) {
+      const currentIdentity =
+        await this.pathIdentityProvider.inspect(directorySnapshot.path);
+      const created =
+        activeTransaction.createdDirectories.get(directorySnapshot.path);
+      if (directorySnapshot.existed) {
+        if (
+          currentIdentity.kind !== "directory" ||
+          (
+            directorySnapshot.identity.destructiveSafe &&
+            !this.pathIdentityProvider.isSameIdentity(
+              directorySnapshot.identity,
+              currentIdentity,
+            )
+          )
+        ) {
+          throw new FeedStorageRollbackIncompleteError();
+        }
+        continue;
+      }
+      if (!created) {
+        if (currentIdentity.kind !== "missing") {
+          throw new FeedStorageRollbackIncompleteError();
+        }
+        continue;
+      }
+      const markerIdentity =
+        await this.pathIdentityProvider.inspect(created.markerPath);
+      if (
+        !this.pathIdentityProvider.isSameIdentity(
+          created.identity,
+          currentIdentity,
+        ) ||
+        !this.pathIdentityProvider.isSameIdentity(
+          created.markerIdentity,
+          markerIdentity,
+        ) ||
+        !(await this.app.vault.adapter.exists(created.markerPath)) ||
+        (await this.app.vault.adapter.read(created.markerPath)) !==
+          created.markerContents
+      ) {
+        throw new FeedStorageRollbackIncompleteError();
       }
     }
   }
@@ -1492,7 +1855,7 @@ export class FeedStorageRepository {
         items: Array.isArray(feedItems) ? feedItems : [],
       };
     });
-    return {
+    const candidate = {
       ...settings,
       ...importedMetadata,
       storageMode: bundle.storageMode,
@@ -1503,6 +1866,8 @@ export class FeedStorageRepository {
         bundle.metadataStorageFolder ?? settings.metadataStorageFolder,
       feeds: importedFeeds,
     } as RssDashboardSettings;
+    migrateSettings(candidate);
+    return candidate;
   }
 
   public getStatus(settings: RssDashboardSettings): FeedStorageStatus {
@@ -1618,27 +1983,23 @@ export class FeedStorageRepository {
       if (active && (!snapshot || snapshot.existed)) {
         throw new FeedStorageRollbackIncompleteError();
       }
-      try {
+      if (!active) {
         await this.app.vault.createFolder(currentPath);
-      } catch (error) {
-        const racedIdentity =
-          await this.pathIdentityProvider.inspect(currentPath);
-        if (racedIdentity.kind === "directory") {
-          // A concurrent creator owns this directory. It is usable, but never
-          // eligible for this transaction's destructive cleanup.
-          continue;
-        }
-        throw error;
+        continue;
       }
-      const createdIdentity =
-        await this.pathIdentityProvider.inspect(currentPath);
-      if (
-        createdIdentity.kind !== "directory" ||
-        !createdIdentity.destructiveSafe
-      ) {
-        throw new FeedStorageRollbackIncompleteError();
-      }
-      active?.createdDirectories.set(currentPath, createdIdentity);
+      const markerName =
+        `.rss-dashboard-owner-${active.ownershipNonce}.json`;
+      const markerContents = JSON.stringify({
+        nonce: active.ownershipNonce,
+        path: currentPath,
+      });
+      const created =
+        await this.pathIdentityProvider.createOwnedDirectory(
+          currentPath,
+          markerName,
+          markerContents,
+        );
+      active.createdDirectories.set(currentPath, created);
     }
   }
 
@@ -1810,27 +2171,43 @@ export class FeedStorageRepository {
     const active = this.activeSettingsPersistenceTransaction;
     if (!active) {
       await this.app.vault.adapter.write(path, contents);
+      if (
+        !(await this.app.vault.adapter.exists(path)) ||
+        (await this.app.vault.adapter.read(path)) !== contents
+      ) {
+        throw new Error("Settings write did not persist exact bytes");
+      }
       return;
     }
     const snapshot = active.snapshot.files.find((entry) => entry.path === path);
     if (!snapshot) {
       throw new FeedStorageRollbackIncompleteError();
     }
-    active.fileOperations.set(path, {
+    const operation: SettingsPersistenceFileOperation = {
       operation: "write",
       intendedBytes: contents,
-    });
+    };
+    await this.assertSettingsFilePreimage(snapshot);
+    active.fileOperations.set(path, operation);
     if (snapshot.contents === null) {
-      await this.pathIdentityProvider.createExclusive(path, contents);
+      operation.creationIdentity =
+        await this.pathIdentityProvider.createExclusive(path, contents);
     } else {
-      await this.app.vault.adapter.write(path, contents);
+      await this.compareAndSwapSettingsFile(
+        path,
+        snapshot.contents,
+        contents,
+        snapshot.identity,
+        (actualBytes, actualIdentity) => {
+          operation.actualPostBytes = actualBytes;
+          operation.postIdentity = actualIdentity;
+        },
+      );
     }
-    const postIdentity = await this.pathIdentityProvider.inspect(path);
-    const operation = active.fileOperations.get(path);
-    if (!operation || postIdentity.kind !== "file") {
-      throw new FeedStorageRollbackIncompleteError();
-    }
-    operation.postIdentity = postIdentity;
+    await this.captureActualPostimage(
+      path,
+      (actualBytes) => actualBytes === contents,
+    );
   }
 
   private async deleteSettingsFile(
@@ -1852,17 +2229,104 @@ export class FeedStorageRepository {
     if (!snapshot || !snapshot.identity.destructiveSafe) {
       throw new FeedStorageRollbackIncompleteError();
     }
+    await this.assertSettingsFilePreimage(snapshot);
+    const currentFile = this.app.vault.getAbstractFileByPath(path);
+    await this.assertSettingsFilePreimage(snapshot);
     active.fileOperations.set(path, {
       operation: "delete",
       intendedBytes: null,
+      actualPostBytes: null,
     });
-    if (file) {
+    if (currentFile instanceof TFile) {
+      await this.app.fileManager.trashFile(currentFile);
+    } else if (file instanceof TFile) {
+      const fileIdentity = await this.pathIdentityProvider.inspect(path);
+      const expectedFileIdentity =
+        snapshot.identity.destructiveSafe &&
+        this.pathIdentityProvider.isSameIdentity(
+          snapshot.identity,
+          fileIdentity,
+        );
+      if (!expectedFileIdentity) {
+        throw new FeedStorageRollbackIncompleteError();
+      }
       await this.app.fileManager.trashFile(file);
     } else {
       await this.app.vault.adapter.remove(path);
     }
     if ((await this.pathIdentityProvider.inspect(path)).kind !== "missing") {
       throw new FeedStorageRollbackIncompleteError();
+    }
+  }
+
+  private async assertSettingsFilePreimage(
+    snapshot: SettingsPersistenceFileSnapshot,
+  ): Promise<void> {
+    const currentIdentity =
+      await this.pathIdentityProvider.inspect(snapshot.path);
+    const exists = await this.app.vault.adapter.exists(snapshot.path);
+    const currentBytes = exists
+      ? await this.app.vault.adapter.read(snapshot.path)
+      : null;
+    if (snapshot.contents === null) {
+      if (exists || currentIdentity.kind !== "missing") {
+        throw new FeedStorageRollbackIncompleteError();
+      }
+      return;
+    }
+    if (
+      !snapshot.identity.destructiveSafe ||
+      !exists ||
+      currentBytes !== snapshot.contents ||
+      currentIdentity.kind !== "file" ||
+      !this.pathIdentityProvider.isSameIdentity(
+        snapshot.identity,
+        currentIdentity,
+      )
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+  }
+
+  private async captureActualPostimage(
+    path: string,
+    isExpected: (actualBytes: string) => boolean,
+  ): Promise<void> {
+    const active = this.requireActiveSettingsTransaction();
+    const operation = active.fileOperations.get(path);
+    const snapshot = active.snapshot.files.find((entry) => entry.path === path);
+    if (!operation || operation.operation !== "write" || !snapshot) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    const currentIdentity = await this.pathIdentityProvider.inspect(path);
+    const exists = await this.app.vault.adapter.exists(path);
+    const actualBytes = exists
+      ? await this.app.vault.adapter.read(path)
+      : null;
+    operation.actualPostBytes = actualBytes;
+    if (
+      actualBytes === null ||
+      currentIdentity.kind !== "file"
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    const expectedIdentity =
+      snapshot.contents === null
+        ? operation.creationIdentity
+        : snapshot.identity;
+    if (
+      !expectedIdentity ||
+      !expectedIdentity.destructiveSafe ||
+      !this.pathIdentityProvider.isSameIdentity(
+        expectedIdentity,
+        currentIdentity,
+      )
+    ) {
+      throw new FeedStorageRollbackIncompleteError();
+    }
+    operation.postIdentity = currentIdentity;
+    if (!isExpected(actualBytes)) {
+      throw new FeedStorageCandidateVerificationError();
     }
   }
 }

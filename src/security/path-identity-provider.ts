@@ -1,4 +1,4 @@
-import { lstat, open, realpath } from "node:fs/promises";
+import { lstat, mkdir, open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { TFile, TFolder, type App } from "obsidian";
 
@@ -25,6 +25,18 @@ export interface PathIdentityProvider {
     controlledPath: string,
     contents: string,
   ): Promise<ControlledPathIdentity>;
+  createOwnedDirectory(
+    controlledPath: string,
+    markerName: string,
+    markerContents: string,
+  ): Promise<ControlledDirectoryCreation>;
+}
+
+export interface ControlledDirectoryCreation {
+  readonly identity: ControlledPathIdentity;
+  readonly markerPath: string;
+  readonly markerContents: string;
+  readonly markerIdentity: ControlledPathIdentity;
 }
 
 const WINDOWS_RESERVED_NAME =
@@ -106,6 +118,10 @@ function isMissingFile(error: unknown): boolean {
 type AdapterWithDesktopPaths = {
   getBasePath?: () => string;
   getFullPath?: (controlledPath: string) => string;
+  exists?: (
+    controlledPath: string,
+    sensitive?: boolean,
+  ) => Promise<boolean>;
 };
 
 type DesktopIdentityToken = {
@@ -223,25 +239,107 @@ export class VaultPathIdentityProvider implements PathIdentityProvider {
       const fullPath = adapter.getFullPath?.(safePath);
       if (!fullPath) throw new Error("Desktop path unavailable");
       const handle = await open(fullPath, "wx");
+      let identity: ControlledPathIdentity;
       try {
         await handle.writeFile(contents, { encoding: "utf8" });
         await handle.sync();
+        const stats = await handle.stat();
+        if (!stats.isFile() || stats.nlink > 1) {
+          throw new Error("Exclusive controlled file is not a unique file");
+        }
+        identity = this.desktopIdentity(safePath, "file", stats);
       } finally {
         await handle.close();
       }
+      return identity;
+    }
+
+    const created = await this.app.vault.create(safePath, contents);
+    return {
+      path: safePath,
+      namespaceKey: namespaceKey(safePath),
+      kind: "file",
+      token: {
+        type: "vault",
+        value: created,
+      } satisfies VaultIdentityToken,
+      destructiveSafe: true,
+    };
+  }
+
+  async createOwnedDirectory(
+    controlledPath: string,
+    markerName: string,
+    markerContents: string,
+  ): Promise<ControlledDirectoryCreation> {
+    const safePath = assertControlledRelativePath(controlledPath);
+    const safeMarkerName = assertControlledRelativePath(markerName);
+    if (safeMarkerName.includes("/")) {
+      throw new Error("Directory ownership marker must be a file name");
+    }
+    const markerPath = `${safePath}/${safeMarkerName}`;
+    let identity: ControlledPathIdentity;
+
+    if (this.desktopRoot) {
+      const before = await this.inspectDesktop(safePath);
+      if (before.kind !== "missing") {
+        throw new Error("Controlled directory already exists");
+      }
+      const adapter = this.app.vault.adapter as AdapterWithDesktopPaths;
+      const fullPath = adapter.getFullPath?.(safePath);
+      if (!fullPath) throw new Error("Desktop path unavailable");
+      await mkdir(fullPath);
+      const stats = await lstat(fullPath);
+      if (!stats.isDirectory()) {
+        throw new Error("Controlled directory creation did not create a directory");
+      }
+      identity = this.desktopIdentity(safePath, "directory", stats);
     } else {
-      await this.app.vault.create(safePath, contents);
+      const before = await this.inspectVirtual(safePath);
+      if (before.kind !== "missing") {
+        throw new Error("Controlled directory already exists");
+      }
+      const created = await this.app.vault.createFolder(safePath);
+      identity = {
+        path: safePath,
+        namespaceKey: namespaceKey(safePath),
+        kind: "directory",
+        token: {
+          type: "vault",
+          value: created,
+        } satisfies VaultIdentityToken,
+        destructiveSafe: true,
+      };
+      const observed = await this.inspectVirtual(safePath);
+      if (!this.isSameIdentity(identity, observed)) {
+        throw new Error("Controlled directory changed during creation");
+      }
     }
-    const identity = await this.inspect(safePath);
-    if (identity.kind !== "file" || !identity.destructiveSafe) {
-      throw new Error("Exclusive controlled file has no safe identity");
+
+    const markerIdentity = await this.createExclusive(
+      markerPath,
+      markerContents,
+    );
+    const observedDirectory = await this.inspect(safePath);
+    const observedMarker = await this.inspect(markerPath);
+    if (
+      !this.isSameIdentity(identity, observedDirectory) ||
+      !this.isSameIdentity(markerIdentity, observedMarker)
+    ) {
+      throw new Error("Controlled directory ownership could not be bound");
     }
-    return identity;
+    return {
+      identity,
+      markerPath,
+      markerContents,
+      markerIdentity,
+    };
   }
 
   private async inspectVirtual(
     controlledPath: string,
   ): Promise<ControlledPathIdentity> {
+    await this.assertVirtualExactPath(controlledPath);
     const abstractFile =
       this.app.vault.getAbstractFileByPath(controlledPath);
     if (abstractFile instanceof TFile) {
@@ -276,6 +374,22 @@ export class VaultPathIdentityProvider implements PathIdentityProvider {
       kind: "missing",
       destructiveSafe: false,
     };
+  }
+
+  private async assertVirtualExactPath(
+    controlledPath: string,
+  ): Promise<void> {
+    const adapter = this.app.vault.adapter as AdapterWithDesktopPaths;
+    if (typeof adapter.exists !== "function") return;
+    const segments = controlledPath.split("/");
+    for (let index = 1; index <= segments.length; index += 1) {
+      const currentPath = segments.slice(0, index).join("/");
+      const insensitive = await adapter.exists(currentPath);
+      const sensitive = await adapter.exists(currentPath, true);
+      if (insensitive && !sensitive) {
+        throw new Error("Virtual controlled path has a case alias");
+      }
+    }
   }
 
   private async inspectDesktop(
@@ -350,14 +464,26 @@ export class VaultPathIdentityProvider implements PathIdentityProvider {
     if (targetStats.isFile() && targetStats.nlink > 1) {
       throw new Error("Controlled file has a hardlink alias");
     }
+    return this.desktopIdentity(
+      controlledPath,
+      targetStats.isDirectory() ? "directory" : "file",
+      targetStats,
+    );
+  }
+
+  private desktopIdentity(
+    controlledPath: string,
+    kind: "file" | "directory",
+    stats: { dev: number | bigint; ino: number | bigint },
+  ): ControlledPathIdentity {
     return {
       path: controlledPath,
       namespaceKey: namespaceKey(controlledPath),
-      kind: targetStats.isDirectory() ? "directory" : "file",
+      kind,
       token: {
         type: "desktop",
-        dev: targetStats.dev,
-        ino: targetStats.ino,
+        dev: stats.dev,
+        ino: stats.ino,
       } satisfies DesktopIdentityToken,
       destructiveSafe: true,
     };

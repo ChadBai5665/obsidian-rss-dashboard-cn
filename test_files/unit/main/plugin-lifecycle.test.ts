@@ -1651,11 +1651,13 @@ describe("refreshFeedsInFolder()", () => {
       feeds: [
         {
           ...sampleFeed,
+          feedId: "feed-folder-one",
           url: "https://example.com/feed1.xml",
           folder: "News/Tech",
         },
         {
           ...sampleFeed,
+          feedId: "feed-folder-two",
           url: "https://example.com/feed2.xml",
           folder: "News/Sports",
         },
@@ -2516,6 +2518,122 @@ describe("storage transition orchestration", () => {
       displaySpy.mock.invocationCallOrder[0],
     );
   });
+
+  it("restores v1 migration metadata and shard files after plugin data commits then throws", async () => {
+    plugin.settings = {
+      ...DEFAULT_SETTINGS,
+      storageMode: "legacy-json",
+      storageFolder: "Migration/Feeds",
+      feeds: [{ ...sampleFeed, feedId: "migration-feed" }],
+    };
+    const previousBytes = JSON.stringify(plugin.settings);
+    await plugin.app.vault.create("data.json", previousBytes);
+    plugin.saveData = vi.fn(async (data: unknown) => {
+      await plugin.app.vault.adapter.write(
+        "data.json",
+        JSON.stringify(data),
+      );
+      if (
+        (data as RssDashboardSettings).storageMode === "vault-shards"
+      ) {
+        throw new Error("migration-commit-then-throw");
+      }
+    });
+
+    await expect(plugin.migrateToVaultStorage()).rejects.toThrow(
+      "migration-commit-then-throw",
+    );
+
+    expect(plugin.settings.storageMode).toBe("legacy-json");
+    expect(await plugin.app.vault.adapter.read("data.json")).toBe(
+      previousBytes,
+    );
+    expect(
+      await plugin.app.vault.adapter.exists(
+        "Migration/Feeds/migration-feed.json",
+      ),
+    ).toBe(false);
+  });
+
+  it("restores repair metadata, shards, and user state after a late user-state failure", async () => {
+    plugin.settings = {
+      ...DEFAULT_SETTINGS,
+      storageMode: "vault-shards-v2",
+      storageFolder: "Repair/Feeds",
+      metadataStorageMode: "plugin-default",
+      metadataStorageFolder: "Repair Metadata",
+      feeds: [{ ...sampleFeed, feedId: "repair-feed" }],
+    };
+    plugin.saveData = vi.fn(async (data: unknown) => {
+      const contents = JSON.stringify(data);
+      if (await plugin.app.vault.adapter.exists("data.json")) {
+        await plugin.app.vault.adapter.write("data.json", contents);
+      } else {
+        await plugin.app.vault.create("data.json", contents);
+      }
+    });
+    await plugin.saveSettings({
+      forceAllShards: true,
+      forceMetadata: true,
+    });
+    const paths = [
+      "Repair/Feeds/repair-feed.json",
+      "Repair Metadata/user-state.json",
+      "data.json",
+    ];
+    const previousBytes = new Map<string, string>();
+    for (const path of paths) {
+      previousBytes.set(
+        path,
+        await plugin.app.vault.adapter.read(path),
+      );
+    }
+    plugin.settings.feeds[0].title = "Changed";
+    plugin.settings.feeds[0].items[0].read = true;
+    const adapter = plugin.app.vault.adapter as unknown as {
+      write(path: string, contents: string): Promise<void>;
+      process?(
+        path: string,
+        update: (contents: string) => string,
+      ): Promise<string>;
+    };
+    const originalWrite = adapter.write.bind(adapter);
+    const originalProcess = adapter.process?.bind(adapter);
+    vi.spyOn(adapter, "write").mockImplementation(
+      async (path, contents) => {
+        if (
+          path === "Repair Metadata/user-state.json" &&
+          contents.includes('"read": true')
+        ) {
+          throw new Error("late-user-state-failure");
+        }
+        await originalWrite(path, contents);
+      },
+    );
+    if (originalProcess) {
+      vi.spyOn(adapter, "process").mockImplementation(
+        async (path, update) => {
+          if (path === "Repair Metadata/user-state.json") {
+            const current = await plugin.app.vault.adapter.read(path);
+            if (update(current).includes('"read": true')) {
+              throw new Error("late-user-state-failure");
+            }
+          }
+          return originalProcess(path, update);
+        },
+      );
+    }
+
+    await expect(plugin.repairVaultShards()).rejects.toThrow(
+      "late-user-state-failure",
+    );
+    for (const path of paths) {
+      expect(
+        await plugin.app.vault.adapter.read(path),
+        path,
+      ).toBe(previousBytes.get(path));
+    }
+  });
 });
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -2580,11 +2698,13 @@ describe("applyFeedLimitsToAllFeeds()", () => {
       feeds: [
         {
           ...sampleFeed,
+          feedId: "feed-limits-one",
           url: "https://example.com/feed1.xml",
           maxItemsLimit: 10,
         },
         {
           ...sampleFeed,
+          feedId: "feed-limits-two",
           url: "https://example.com/feed2.xml",
           maxItemsLimit: 20,
         },
@@ -3050,7 +3170,7 @@ describe("transactional public settings imports", () => {
     "wrong-version",
     "extra-key",
   ] as const)(
-    "rejects a vault-location import when the plugin bootstrap is %s",
+    "handles a vault-location import when the plugin callback bootstrap is %s",
     async (mode) => {
       previous.storageMode = "legacy-json";
       previous.metadataStorageMode = "plugin-default";
@@ -3080,37 +3200,43 @@ describe("transactional public settings imports", () => {
         );
       });
 
-      const expectedError =
-        mode === "missing"
-          ? "Settings import persistence verification failed"
-          : "Settings import rollback incomplete";
-      await expect(
-        plugin.importUserSettingsJsonFromFile(
-          new File(
-            [
-              JSON.stringify({
-                locale: "en",
-                metadataStorageMode: "vault-location",
-              }),
-            ],
-            "usersettings.json",
-          ),
+      const operation = plugin.importUserSettingsJsonFromFile(
+        new File(
+          [
+            JSON.stringify({
+              locale: "en",
+              metadataStorageMode: "vault-location",
+            }),
+          ],
+          "usersettings.json",
         ),
-      ).rejects.toThrow(expectedError);
+      );
+      if (mode === "missing") {
+        await expect(operation).resolves.toBeUndefined();
+      } else {
+        await expect(operation).rejects.toThrow(
+          "Settings import persistence verification failed",
+        );
+      }
 
-      expect(plugin.settings).toBe(previous);
       const durableBootstrap =
         await plugin.app.vault.adapter.read("data.json");
       if (mode === "missing") {
-        expect(durableBootstrap).toBe(previousBytes);
+        expect(plugin.settings.locale).toBe("en");
+        expect(JSON.parse(durableBootstrap)).toEqual({
+          metadataStorageMode: "vault-location",
+          metadataStorageFolder: "Vault Metadata",
+          metadataStorageSchemaVersion: 1,
+        });
       } else {
-        expect(durableBootstrap).not.toBe(previousBytes);
+        expect(plugin.settings).toBe(previous);
+        expect(durableBootstrap).toBe(previousBytes);
       }
       expect(
         await plugin.app.vault.adapter.exists(
           "Vault Metadata/data.json",
         ),
-      ).toBe(mode !== "missing");
+      ).toBe(mode === "missing");
     },
   );
 
@@ -3313,4 +3439,77 @@ describe("transactional public settings imports", () => {
     expect(persistedLocales).toEqual(["en", "en"]);
     expect(plugin.settings.locale).toBe("en");
   });
+
+  it.each(["migration", "repair", "backup"] as const)(
+    "queues %s behind a candidate-published import and observes only the restored generation",
+    async (operationKind) => {
+      installPluginDataWriter();
+      const releaseRefresh = createDeferred<void>();
+      vi.mocked(plugin.refreshDashboardViews)
+        .mockImplementationOnce(async () => {
+          await releaseRefresh.promise;
+          throw new Error("import-refresh-failed");
+        })
+        .mockResolvedValue(undefined);
+      const observedLocales: string[] = [];
+      const storageRepository = (
+        plugin as unknown as {
+          feedStorageRepository: {
+            migrateToVaultShards(
+              settings: RssDashboardSettings,
+              save: (data: unknown) => Promise<void>,
+            ): Promise<void>;
+            repairVaultShards(
+              settings: RssDashboardSettings,
+              save: (data: unknown) => Promise<void>,
+            ): Promise<void>;
+          };
+        }
+      ).feedStorageRepository;
+      const migrate = vi
+        .spyOn(storageRepository, "migrateToVaultShards")
+        .mockImplementation(async () => {
+          observedLocales.push(plugin.settings.locale);
+        });
+      const repair = vi
+        .spyOn(storageRepository, "repairVaultShards")
+        .mockImplementation(async () => {
+          observedLocales.push(plugin.settings.locale);
+        });
+      (
+        plugin as unknown as PluginPrivateAPI
+      ).backupService.performAutoBackups = vi.fn(async () => {
+        observedLocales.push(plugin.settings.locale);
+      });
+
+      const importOperation = plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      );
+      await vi.waitFor(() => {
+        expect(plugin.settings.locale).toBe("en");
+      });
+      const queuedOperation =
+        operationKind === "migration"
+          ? plugin.migrateToVaultStorage()
+          : operationKind === "repair"
+            ? plugin.repairVaultShards()
+            : plugin.performAutoBackups();
+      await Promise.resolve();
+
+      expect(observedLocales).toEqual([]);
+      releaseRefresh.resolve();
+      await expect(importOperation).rejects.toThrow(
+        "import-refresh-failed",
+      );
+      await queuedOperation;
+
+      expect(observedLocales).toEqual(["zh-CN"]);
+      expect(migrate).toHaveBeenCalledTimes(
+        operationKind === "migration" ? 1 : 0,
+      );
+      expect(repair).toHaveBeenCalledTimes(
+        operationKind === "repair" ? 1 : 0,
+      );
+    },
+  );
 });
