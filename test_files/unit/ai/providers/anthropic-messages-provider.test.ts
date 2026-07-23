@@ -87,7 +87,7 @@ describe("Anthropic-compatible provider", () => {
       url: expectedUrl,
       method: "POST",
       headers: {
-        ["x-api-key"]: API_KEY,
+        "x-api-key": API_KEY,
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
       },
