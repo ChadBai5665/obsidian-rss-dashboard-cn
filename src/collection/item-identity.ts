@@ -82,6 +82,24 @@ export function createXPostCollectedItemId(guid: string): string {
     .digest("hex");
 }
 
+/** Derives a feed item's canonical ID without reading or mutating a stored ID. */
+export function createCanonicalFeedItemId(input: {
+  sourceType: string;
+  sourceId: string;
+  item: Pick<FeedItem, "title" | "link" | "guid" | "author" | "pubDate">;
+}): string {
+  return input.sourceType === "x-account" || input.sourceType === "x-topic"
+    ? createXPostCollectedItemId(input.item.guid)
+    : createCollectedItemId({
+        sourceId: input.sourceId,
+        guid: input.item.guid,
+        url: input.item.link,
+        title: input.item.title,
+        author: input.item.author,
+        publishedAt: input.item.pubDate,
+      });
+}
+
 export function resolveFeedSourceId(
   feed: Pick<Feed, "feedId" | "url">,
 ): string {

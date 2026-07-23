@@ -428,11 +428,11 @@ describe("manual AI operation service", () => {
 
   it("maps unexpected selection/provider envelopes to static errors without leaking details", async () => {
     const select = vi.fn(async () => {
-      throw new Error("Authorization: Bearer external-secret; provider envelope");
+      throw new Error("Authorization header contained private-material");
     });
     const service = new AiOperationService({
       getAiSettings: () => ({ connections: [connection()] }),
-      secretStore: { get: vi.fn(async () => "external-secret") },
+      secretStore: { get: vi.fn(async () => "private-material") },
       contentSelector: { select } as Pick<AiContentSelector, "select">,
       providerFactory: vi.fn(async () => ({
         generate: vi.fn(async () => ({ text: "unused" })),
@@ -441,7 +441,7 @@ describe("manual AI operation service", () => {
 
     const error = await caught(service.run(runInput()));
     expect(error.code).toBe("selection-failed");
-    expect(String(error)).not.toContain("external-secret");
+    expect(String(error)).not.toContain("private-material");
     expect(String(error)).not.toContain("Authorization");
     expect(JSON.stringify(error)).not.toContain("provider envelope");
   });

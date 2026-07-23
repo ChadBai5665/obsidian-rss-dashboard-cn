@@ -104,6 +104,7 @@ import { AnalysisRepository } from "./src/ai/analysis-repository";
 import { AnalysisNoteInserter } from "./src/ai/analysis-note-inserter";
 import {
   cloneAiSourceItem,
+  revalidateAiSourceForSave,
   resolveAndSnapshotAiSource,
   type AiSourceSnapshot,
 } from "./src/ai/ai-source-snapshot";
@@ -164,43 +165,13 @@ interface AiArticleSaveSnapshot {
   savedTag: Tag;
 }
 
-function canWriteOwnDataValue(target: object, key: string): boolean {
+function canWriteOwnDataValues(target: object, keys: string[]): boolean {
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(target, key);
-    if (!descriptor) return Object.isExtensible(target);
-    if (descriptor.configurable) return true;
-    return "value" in descriptor && descriptor.writable === true;
-  } catch {
-    return false;
-  }
-}
-
-function canWriteAiSavedState(target: FeedItem): boolean {
-  return ["saved", "savedFilePath", "tags"].every((key) =>
-    canWriteOwnDataValue(target, key));
-}
-
-function writeOwnDataValue(
-  target: object,
-  key: string,
-  value: unknown,
-): boolean {
-  try {
-    if (!canWriteOwnDataValue(target, key)) return false;
-    const descriptor = Object.getOwnPropertyDescriptor(target, key);
-    Object.defineProperty(
-      target,
-      key,
-      descriptor && !descriptor.configurable
-        ? { value }
-        : {
-            configurable: true,
-            enumerable: true,
-            writable: true,
-            value,
-          },
-    );
-    return true;
+    return keys.every((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(target, key);
+      if (!descriptor) return Object.isExtensible(target);
+      return "value" in descriptor && descriptor.writable === true;
+    });
   } catch {
     return false;
   }
@@ -1515,14 +1486,6 @@ export default class RssDashboardPlugin extends Plugin {
             normalizationItem,
             new Date(),
           );
-          if (
-            source.originalTarget &&
-            !writeOwnDataValue(
-              source.originalTarget,
-              "rssDashboardId",
-              selectedItem.id,
-            )
-          ) throw new Error("Selected AI item identity cannot be bound safely");
           const saveSnapshot = this.createAiArticleSaveSnapshot(source);
           let savedNotePath = this.resolveExistingSavedNotePath(source.item);
           const dataRoot = this.settings.collection.dataFolder.trim();
@@ -1607,10 +1570,17 @@ export default class RssDashboardPlugin extends Plugin {
   private async saveArticleForAiInsertion(
     snapshot: AiArticleSaveSnapshot,
   ): Promise<string> {
-    const target = snapshot.source.originalTarget;
-    if (!target || !canWriteAiSavedState(target)) {
-      throw new Error("The original source item is no longer writable");
-    }
+    const target = revalidateAiSourceForSave(
+      this.settings.feeds,
+      snapshot.source,
+    );
+    if (
+      !target ||
+      !canWriteOwnDataValues(
+        target,
+        ["saved", "savedFilePath", "tags", "restrictedReason"],
+      )
+    ) throw new Error("The original source item is no longer trusted");
     const item = cloneAiSourceItem(snapshot.source.item);
     const file = snapshot.saveFullContent
       ? await this.articleSaver.saveArticleWithFullContent(
@@ -1625,24 +1595,38 @@ export default class RssDashboardPlugin extends Plugin {
         );
     if (!file) throw new Error("The source article could not be saved");
     const tags = this.createAiSavedTags(snapshot);
-    if (
-      !writeOwnDataValue(target, "saved", true) ||
-      !writeOwnDataValue(target, "savedFilePath", file.path) ||
-      !writeOwnDataValue(target, "tags", tags)
-    ) throw new Error("The original source item could not be updated safely");
-
     const updates = {
       saved: true,
       savedFilePath: file.path,
       tags,
+      restrictedReason: item.restrictedReason,
     };
-    await this.syncDashboardArticleUpdate(
-      snapshot.source.item.guid,
-      snapshot.source.feed.url,
-      updates,
-      false,
-    );
-    await this.syncReaderArticleUpdate(snapshot.source.item.guid, updates);
+    const outcome = await this.enqueueStatusTransaction(async () => {
+      const currentTarget = revalidateAiSourceForSave(
+        this.settings.feeds,
+        snapshot.source,
+      );
+      if (
+        currentTarget !== target ||
+        !canWriteOwnDataValues(currentTarget, Object.keys(updates))
+      ) return "failed" as const;
+      return await this.commitCollectionFlagTransaction(currentTarget, updates);
+    });
+    if (outcome === "failed") {
+      throw new Error("The saved source state could not be persisted");
+    }
+    if (outcome === "collection") this.emitCollectionFlagsUpdated();
+    try {
+      await this.syncDashboardArticleUpdate(
+        snapshot.source.item.guid,
+        snapshot.source.feed.url,
+        updates,
+        false,
+      );
+      await this.syncReaderArticleUpdate(snapshot.source.item.guid, updates);
+    } catch {
+      // UI observers are best-effort after the durable transaction commits.
+    }
     return file.path;
   }
 

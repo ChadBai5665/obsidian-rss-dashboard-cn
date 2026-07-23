@@ -19,8 +19,17 @@ vi.mock("../../../src/security/desktop-secret-store", () => ({
 import RssDashboardPlugin from "../../../main";
 import { AnalysisRepository } from "../../../src/ai/analysis-repository";
 import { createAiConnection } from "../../../src/ai/provider-presets";
+import {
+  cloneAiSourceItem,
+  resolveAndSnapshotAiSource,
+} from "../../../src/ai/ai-source-snapshot";
 import { ContentRepository } from "../../../src/collection/content-repository";
-import { createCollectedItemId } from "../../../src/collection/item-identity";
+import { CollectionRepository } from "../../../src/collection/collection-repository";
+import { normalizeFeedItem } from "../../../src/collection/feed-normalizer";
+import {
+  createCollectedItemId,
+  createXPostCollectedItemId,
+} from "../../../src/collection/item-identity";
 import {
   DEFAULT_SETTINGS,
   type Feed,
@@ -222,6 +231,22 @@ function installArticleSaver(
   return { saveArticle, saveArticleWithFullContent };
 }
 
+async function seedSelectedCollectionItem(test: ReturnType<typeof harness>) {
+  const clock = new Date("2026-07-23T02:00:00.000Z");
+  const repository = new CollectionRepository(
+    test.app.vault,
+    test.settings.collection.dataFolder,
+    () => clock,
+  );
+  const item = normalizeFeedItem(
+    test.selectedFeed,
+    structuredClone(test.selected),
+    clock,
+  );
+  await repository.upsertDaily([item], "2026-07-23");
+  return { repository, item };
+}
+
 async function seedHostileState(test: ReturnType<typeof harness>): Promise<void> {
   installAtomicAdapter(test.app);
   await test.app.vault.createFolder("Notes");
@@ -335,6 +360,244 @@ beforeEach(() => {
 });
 
 describe("AI privacy boundary", () => {
+  it("rejects a valid but unrelated cached-content ID before opening the modal", async () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    const unrelatedId = createCollectedItemId({
+      sourceId: "unrelated-feed-id",
+      guid: test.unrelated.guid,
+      url: test.unrelated.link,
+      title: test.unrelated.title,
+      publishedAt: test.unrelated.pubDate,
+    });
+    test.selected.rssDashboardId = unrelatedId;
+    await new ContentRepository(
+      test.app.vault,
+      test.settings.collection.dataFolder,
+      () => new Date("2026-07-23T02:00:00.000Z"),
+    ).write({
+      schemaVersion: 1,
+      itemId: unrelatedId,
+      sourceUrl: test.unrelated.link,
+      fetchedAt: "2026-07-23T02:00:00.000Z",
+      contentBasis: "full-text",
+      text: "UNRELATED_VALID_ID_CACHE_CANARY",
+    });
+    const requestUrl = vi.spyOn(obsidian, "requestUrl");
+    const saver = installArticleSaver(test);
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+    modal?.close();
+    expect(modal).toBeNull();
+    expect(requestUrl).not.toHaveBeenCalled();
+    expect(secretState.reads).toEqual([]);
+    expect(saver.saveArticle).not.toHaveBeenCalled();
+    expect(saver.saveArticleWithFullContent).not.toHaveBeenCalled();
+  });
+
+  it("derives a missing stable ID without mutating the source item", async () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    delete test.selected.rssDashboardId;
+    const requestUrl = vi.spyOn(obsidian, "requestUrl")
+      .mockResolvedValue(responseWithText("safe missing-id analysis"));
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      SELECTED_FEED_TITLE,
+    ));
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(requestUrl).toHaveBeenCalledTimes(1));
+
+    expect(test.selected.rssDashboardId).toBeUndefined();
+    expect(outboundUserPayload(requestUrl).title).toBe(
+      "SELECTED_ITEM_TITLE_CANARY",
+    );
+    modal?.close();
+  });
+
+  it("derives the canonical X post ID from the numeric post ID", async () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    (test.selectedFeed as Feed & { sourceType?: string }).sourceType = "x-account";
+    test.selected.guid = "1901234567890123456";
+    test.selected.link = "https://x.com/example/status/1901234567890123456";
+    delete test.selected.rssDashboardId;
+    const expectedId = createXPostCollectedItemId(test.selected.guid);
+    const requestUrl = vi.spyOn(obsidian, "requestUrl")
+      .mockResolvedValue(responseWithText("safe x analysis"));
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      SELECTED_FEED_TITLE,
+    ));
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(requestUrl).toHaveBeenCalledTimes(1));
+
+    expect(expectedId).toMatch(/^[a-f0-9]{64}$/u);
+    expect(test.selected.rssDashboardId).toBeUndefined();
+    expect(outboundUserPayload(requestUrl)).toMatchObject({
+      contentBasis: "x-post",
+      sourceUrl: "https://x.com/example/status/1901234567890123456",
+    });
+    modal?.close();
+  });
+
+  it("fails closed when two items in the owner have the same canonical identity", () => {
+    const test = harness();
+    const duplicate = structuredClone(test.selected);
+    delete duplicate.rssDashboardId;
+    test.selectedFeed.items.push(duplicate);
+    const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+    modal?.close();
+    expect(modal).toBeNull();
+    expect(requestUrl).not.toHaveBeenCalled();
+    expect(secretState.reads).toEqual([]);
+  });
+
+  it.each([
+    ["over-depth data", () => {
+      let value: Record<string, unknown> = { leaf: "safe" };
+      for (let depth = 0; depth < 65; depth += 1) value = { child: value };
+      return value;
+    }],
+    ["over-wide data", () => Object.fromEntries(
+      Array.from({ length: 20_001 }, (_, index) => [`field${index}`, index]),
+    )],
+    ["huge string data", () => ({ text: "x".repeat(2_000_001) })],
+    ["huge UTF-8 byte data", () => ({ text: "汉".repeat(1_400_000) })],
+    ["cyclic data", () => {
+      const value: Record<string, unknown> = {};
+      value.self = value;
+      return value;
+    }],
+  ] as const)("fails closed for %s before modal construction", (_name, create) => {
+    const test = harness();
+    (test.selected as FeedItem & { hostileShape?: unknown }).hostileShape = create();
+    const requestUrl = vi.spyOn(obsidian, "requestUrl");
+    const saver = installArticleSaver(test);
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+    modal?.close();
+    expect(modal).toBeNull();
+    expect(requestUrl).not.toHaveBeenCalled();
+    expect(secretState.reads).toEqual([]);
+    expect(saver.saveArticle).not.toHaveBeenCalled();
+  });
+
+  it("rejects a shared object graph instead of expanding it repeatedly", () => {
+    const test = harness();
+    const shared = { text: "shared" };
+    (test.selected as FeedItem & { hostileShape?: unknown }).hostileShape = {
+      left: shared,
+      right: shared,
+    };
+    const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+    modal?.close();
+    expect(modal).toBeNull();
+    expect(requestUrl).not.toHaveBeenCalled();
+    expect(secretState.reads).toEqual([]);
+  });
+
+  it("bounds total ownership comparisons across large unrelated item arrays", () => {
+    const test = harness();
+    let getterCalls = 0;
+    const unrelated = structuredClone(test.unrelated);
+    Object.defineProperty(unrelated, "neverRead", {
+      configurable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("ownership scan must not invoke item getters");
+      },
+    });
+    const firstItems = Array.from({ length: 60_000 }, () => unrelated);
+    const secondItems = Array.from({ length: 60_000 }, () => unrelated);
+    test.settings.feeds.unshift(
+      createFeed("large-one", "Large one", firstItems),
+      createFeed("large-two", "Large two", secondItems),
+    );
+    const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+    modal?.close();
+    expect(modal).toBeNull();
+    expect(getterCalls).toBe(0);
+    expect(requestUrl).not.toHaveBeenCalled();
+    expect(secretState.reads).toEqual([]);
+  });
+
+  it("accepts the documented feed-count boundary and rejects one feed over it", () => {
+    const atBoundary = harness();
+    atBoundary.settings.feeds = [
+      ...Array.from({ length: 4_095 }, (_, index) =>
+        createFeed(`empty-${index}`, `Empty ${index}`, [])),
+      atBoundary.selectedFeed,
+    ];
+
+    const accepted = atBoundary.plugin.openAiOperationForItem(
+      atBoundary.selected,
+      "summary",
+    );
+
+    expect(accepted).not.toBeNull();
+    accepted?.close();
+    expect(secretState.reads).toEqual([]);
+
+    const overBoundary = harness();
+    overBoundary.settings.feeds = [
+      ...Array.from({ length: 4_096 }, (_, index) =>
+        createFeed(`empty-over-${index}`, `Empty over ${index}`, [])),
+      overBoundary.selectedFeed,
+    ];
+
+    const rejected = overBoundary.plugin.openAiOperationForItem(
+      overBoundary.selected,
+      "summary",
+    );
+
+    rejected?.close();
+    expect(rejected).toBeNull();
+    expect(secretState.reads).toEqual([]);
+  });
+
+  it("deep-freezes an isolated snapshot and returns a fresh mutable save clone", () => {
+    const test = harness();
+    const nested = { labels: [{ name: "opening" }] };
+    (test.selected as FeedItem & { nested?: typeof nested }).nested = nested;
+
+    const snapshot = resolveAndSnapshotAiSource(
+      test.settings.feeds,
+      test.selected,
+    );
+    const snapshotNested = (snapshot?.item as FeedItem & {
+      nested?: typeof nested;
+    }).nested!;
+    const saveClone = cloneAiSourceItem(snapshot!.item) as FeedItem & {
+      nested?: typeof nested;
+    };
+
+    expect(snapshot).toBeDefined();
+    expect(Object.isFrozen(snapshot?.item)).toBe(true);
+    expect(Object.isFrozen(snapshotNested)).toBe(true);
+    expect(Object.isFrozen(snapshotNested.labels)).toBe(true);
+    expect(Object.isFrozen(snapshotNested.labels[0])).toBe(true);
+    expect(snapshotNested).not.toBe(nested);
+    expect(saveClone.nested).not.toBe(snapshotNested);
+    expect(Object.isFrozen(saveClone.nested)).toBe(false);
+    nested.labels[0].name = "mutated source";
+    saveClone.nested!.labels[0].name = "mutable save clone";
+    expect(snapshotNested.labels[0].name).toBe("opening");
+  });
+
   it("fails closed when a detached item source ID matches more than one feed", () => {
     const test = harness();
     const saver = installArticleSaver(test);
@@ -499,6 +762,7 @@ describe("AI privacy boundary", () => {
     "description",
     "feedUrl",
     "feedTitle",
+    "rssDashboardId",
   ] as const)(
     "fails closed without invoking an own selected-item %s accessor",
     (field) => {
@@ -530,6 +794,7 @@ describe("AI privacy boundary", () => {
     "description",
     "feedUrl",
     "feedTitle",
+    "rssDashboardId",
   ] as const)(
     "rejects inherited selected-item %s data",
     (field) => {
@@ -559,6 +824,7 @@ describe("AI privacy boundary", () => {
     "description",
     "feedUrl",
     "feedTitle",
+    "rssDashboardId",
   ] as const)(
     "rejects an inherited selected-item %s accessor without invoking it",
     (field) => {
@@ -640,7 +906,7 @@ describe("AI privacy boundary", () => {
     modal?.close();
   });
 
-  it("uses the immutable open-time source snapshot for AI and save-first", async () => {
+  it("uses the immutable AI snapshot but refuses save-first after source replacement", async () => {
     const test = harness();
     const detached = structuredClone(test.selected);
     detached.content = "SELECTED_ORIGINAL_CONTENT_CANARY";
@@ -706,30 +972,160 @@ describe("AI privacy boundary", () => {
       "先保存原文",
     ));
     button(modal!.contentEl, "先保存原文").click();
-    await vi.waitFor(() => expect(
-      saver.saveArticleWithFullContent,
-    ).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "无法保存原文",
+    ));
 
-    const [savedItem, savedFolder, savedTemplate] =
-      saver.saveArticleWithFullContent.mock.calls[0];
-    expect(savedItem).not.toBe(detached);
-    expect(savedItem).toMatchObject({
-      rssDashboardSourceId: "selected-feed-id",
-      guid: "selected-guid",
-      link: "https://articles.example.invalid/selected-guid",
-      title: "SELECTED_ITEM_TITLE_CANARY",
-      content: "SELECTED_ORIGINAL_CONTENT_CANARY",
-      description: "SELECTED_ITEM_TITLE_CANARY description",
-      feedUrl: DUPLICATE_FEED_URL,
-      feedTitle: "selected-feed-id",
-    });
-    expect(savedFolder).toBe("Notes/Snapshot Folder");
-    expect(savedTemplate).toBe("SELECTED_SAVE_TEMPLATE_CANARY");
     expect(requestUrl).toHaveBeenCalledTimes(1);
+    expect(saver.saveArticleWithFullContent).not.toHaveBeenCalled();
     expect(saver.saveArticle).not.toHaveBeenCalled();
-    expect(test.selected.saved).toBe(true);
-    expect(test.selected.savedFilePath).toBe(savedFile.path);
+    expect(test.selected.saved).toBe(false);
+    expect(test.selected.savedFilePath).toBeUndefined();
     expect(replacement.saved).toBe(false);
+    modal?.close();
+  });
+
+  it.each(["removed", "mutated", "ambiguous"] as const)(
+    "revalidates the exact save target before ArticleSaver: %s",
+    async (scenario) => {
+      const test = harness();
+      installAtomicAdapter(test.app);
+      await test.app.vault.createFolder("Notes");
+      const savedFile = await test.app.vault.create(
+        "Notes/revalidate-source.md",
+        "saved selected source",
+      );
+      const saver = installArticleSaver(test, savedFile);
+      const requestUrl = vi.spyOn(obsidian, "requestUrl")
+        .mockResolvedValue(responseWithText("safe revalidation analysis"));
+      const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+        SELECTED_FEED_TITLE,
+      ));
+      button(modal!.contentEl, "确认发送").click();
+      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+        "先保存原文",
+      ));
+
+      if (scenario === "removed") test.selectedFeed.items = [];
+      if (scenario === "mutated") test.selected.title = "MUTATED_TARGET_CANARY";
+      if (scenario === "ambiguous") {
+        test.selectedFeed.items.push(structuredClone(test.selected));
+      }
+      button(modal!.contentEl, "先保存原文").click();
+      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+        "无法保存原文",
+      ));
+
+      expect(saver.saveArticle).not.toHaveBeenCalled();
+      expect(saver.saveArticleWithFullContent).not.toHaveBeenCalled();
+      expect(test.selected.saved).toBe(false);
+      expect(requestUrl).toHaveBeenCalledTimes(1);
+      modal?.close();
+    },
+  );
+
+  it("persists the exact save target transactionally with restrictedReason", async () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    test.settings.storageMode = "legacy-json";
+    test.selected.content = "SELECTED_SAVE_CONTENT_CANARY";
+    await test.app.vault.createFolder("Notes");
+    const savedFile = await test.app.vault.create(
+      "Notes/persisted-source.md",
+      "saved selected source",
+    );
+    const saver = installArticleSaver(test, savedFile);
+    saver.saveArticleWithFullContent.mockImplementation(async (item) => {
+      item.restrictedReason = "RESTRICTED_SAVE_REASON_CANARY";
+      return savedFile;
+    });
+    const collection = await seedSelectedCollectionItem(test);
+    let persisted: RssDashboardSettings | undefined;
+    test.plugin.saveData = vi.fn(async (value: unknown) => {
+      persisted = structuredClone(value) as RssDashboardSettings;
+    });
+    const requestUrl = vi.spyOn(obsidian, "requestUrl")
+      .mockResolvedValue(responseWithText("safe persistent analysis"));
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      SELECTED_FEED_TITLE,
+    ));
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "先保存原文",
+    ));
+    button(modal!.contentEl, "先保存原文").click();
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "插入已保存原文",
+    ));
+
+    expect(saver.saveArticleWithFullContent).toHaveBeenCalledTimes(1);
+    expect(requestUrl).toHaveBeenCalledTimes(1);
+    const [savedItem] = saver.saveArticleWithFullContent.mock.calls[0];
+    expect(savedItem).not.toBe(test.selected);
+    expect(savedItem.content).toBe("SELECTED_SAVE_CONTENT_CANARY");
+    expect(test.selected).toMatchObject({
+      saved: true,
+      savedFilePath: savedFile.path,
+      restrictedReason: "RESTRICTED_SAVE_REASON_CANARY",
+    });
+    const reloaded = persisted?.feeds[1]?.items[0];
+    expect(reloaded).toMatchObject({
+      guid: test.selected.guid,
+      saved: true,
+      savedFilePath: savedFile.path,
+      restrictedReason: "RESTRICTED_SAVE_REASON_CANARY",
+    });
+    expect(test.settings.feeds[0].items[0].saved).toBe(false);
+    await expect(collection.repository.findById(collection.item.id)).resolves
+      .toMatchObject({ saved: true, savedNotePath: savedFile.path });
+    modal?.close();
+  });
+
+  it("rolls back feed state when persistence fails after note creation", async () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    test.settings.storageMode = "legacy-json";
+    await test.app.vault.createFolder("Notes");
+    const savedFile = await test.app.vault.create(
+      "Notes/recoverable-source.md",
+      "recoverable saved source",
+    );
+    const saver = installArticleSaver(test, savedFile);
+    const collection = await seedSelectedCollectionItem(test);
+    test.plugin.saveData = vi.fn().mockRejectedValue(
+      new Error("PERSISTENCE_FAILURE_CANARY"),
+    );
+    const requestUrl = vi.spyOn(obsidian, "requestUrl")
+      .mockResolvedValue(responseWithText("safe rollback analysis"));
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      SELECTED_FEED_TITLE,
+    ));
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "先保存原文",
+    ));
+    button(modal!.contentEl, "先保存原文").click();
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "无法保存原文",
+    ));
+
+    expect(saver.saveArticleWithFullContent).toHaveBeenCalledTimes(1);
+    expect(requestUrl).toHaveBeenCalledTimes(1);
+    expect(test.selected.saved).toBe(false);
+    expect(test.selected.savedFilePath).toBeUndefined();
+    expect(test.selected.tags).toEqual([]);
+    expect(test.settings.feeds[0].items[0].saved).toBe(false);
+    const rolledBackCollection = await collection.repository.findById(
+      collection.item.id,
+    );
+    expect(rolledBackCollection?.saved).toBe(false);
+    expect(rolledBackCollection?.savedNotePath).toBeUndefined();
+    expect(test.app.vault.getAbstractFileByPath(savedFile.path)).toBe(savedFile);
     modal?.close();
   });
 
@@ -762,7 +1158,7 @@ describe("AI privacy boundary", () => {
     const test = harness();
     installAtomicAdapter(test.app);
     const detached = structuredClone(test.selected);
-    detached.rssDashboardSourceId = "accessor-only-id";
+    detached.rssDashboardSourceId = "selected-feed-id";
     let getterCalls = 0;
     Object.defineProperty(test.settings.feeds[0], "feedId", {
       configurable: true,

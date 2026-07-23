@@ -187,7 +187,7 @@ describe("production AI operation wiring", () => {
     expect(secretState.constructed).toBe(1);
     expect(secretState.reads).toBe(0);
     expect(test.openSettingsToTab).not.toHaveBeenCalled();
-    expect(test.selected.rssDashboardId).toBe(selectedId);
+    expect(test.selected.rssDashboardId).toBeUndefined();
     expect(exists.mock.calls.flat().join("\n")).toContain(selectedId);
     expect(exists.mock.calls.flat().join("\n")).not.toContain(unrelatedId);
     expect(read).not.toHaveBeenCalled();
@@ -211,7 +211,13 @@ describe("production AI operation wiring", () => {
     await vi.waitFor(() => expect(
       button(modal!.contentEl, "确认发送").disabled,
     ).toBe(false));
-    const itemId = test.selected.rssDashboardId as string;
+    const itemId = createCollectedItemId({
+      sourceId: "feed-id",
+      guid: test.selected.guid,
+      url: test.selected.link,
+      title: test.selected.title,
+      publishedAt: test.selected.pubDate,
+    });
     const cachePath = `${test.settings.collection.dataFolder}/content/${itemId}.md`;
     await test.app.vault.adapter.write(cachePath, [
       "---",
