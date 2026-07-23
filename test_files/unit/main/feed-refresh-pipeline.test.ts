@@ -13,6 +13,7 @@ import type { SourceRegistry } from "../../../src/sources/source-registry";
 import type { FeedSourceConfig } from "../../../src/sources/source-config";
 import { createTranslator } from "../../../src/i18n";
 import { XTopicRefreshError } from "../../../src/sources/tikhub/x-topic-adapter";
+import { createXPostCollectedItemId } from "../../../src/collection/item-identity";
 
 let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
@@ -1814,6 +1815,56 @@ describe("refreshFeeds() pipeline behavior", () => {
     await plugin.replayStatusRepairJournalIfNeeded();
     expect(article.read).toBe(false);
     expect(clearSpy).toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.exists(path)).toBe(false);
+  });
+
+  it("replays a missing canonical X ID by explicit journal locator after restart", async () => {
+    const guid = "1901234567890123456";
+    const expectedId = createXPostCollectedItemId(guid);
+    const article = createItem({
+      guid,
+      link: `https://x.com/example/status/${guid}`,
+      saved: true,
+      savedFilePath: "Notes/interrupted-x.md",
+    });
+    delete article.rssDashboardId;
+    const source = createFeed({
+      feedId: "source-x-restart",
+      sourceType: "x-account",
+      items: [article],
+    } as Partial<Feed>);
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const path = ".rss-dashboard-data/state/status-repair.json";
+    await plugin.app.vault.adapter.write(path, JSON.stringify({
+      version: 1,
+      txId: "tx-15-xrestart",
+      phase: "feed-write-uncertain",
+      items: [{
+        feedIndex: 0,
+        itemIndex: 0,
+        sourceLocator: createTestSourceLocator("source-x-restart"),
+        stableId: expectedId,
+        previousFeed: [
+          { key: "rssDashboardId", exists: false },
+          { key: "saved", exists: true, value: false },
+          { key: "savedFilePath", exists: false },
+        ],
+      }],
+    }));
+
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(true);
+
+    expect(article.rssDashboardId).toBeUndefined();
+    expect(article.saved).toBe(false);
+    expect(article.savedFilePath).toBeUndefined();
+    expect(plugin.saveSettings).toHaveBeenCalledWith({
+      forceAllShards: true,
+      forceMetadata: true,
+    });
     expect(await plugin.app.vault.adapter.exists(path)).toBe(false);
   });
 

@@ -1084,6 +1084,196 @@ describe("AI privacy boundary", () => {
     modal?.close();
   });
 
+  it("persists one canonical X ID from saver input through reload", async () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    test.settings.storageMode = "legacy-json";
+    (test.selectedFeed as Feed & { sourceType?: string }).sourceType = "x-account";
+    test.selected.guid = "1901234567890123456";
+    test.selected.link = "https://x.com/example/status/1901234567890123456";
+    delete test.selected.rssDashboardId;
+    const expectedId = createXPostCollectedItemId(test.selected.guid);
+    const genericId = createCollectedItemId({
+      sourceId: "selected-feed-id",
+      guid: test.selected.guid,
+      url: test.selected.link,
+      title: test.selected.title,
+      publishedAt: test.selected.pubDate,
+    });
+    expect(genericId).not.toBe(expectedId);
+    await test.app.vault.createFolder("Notes");
+    const savedFile = await test.app.vault.create(
+      "Notes/canonical-x-source.md",
+      "pending",
+    );
+    const saver = installArticleSaver(test, savedFile);
+    saver.saveArticleWithFullContent.mockImplementation(async (item) => {
+      await test.app.vault.adapter.write(
+        savedFile.path,
+        `rssDashboardId: ${item.rssDashboardId}`,
+      );
+      return savedFile;
+    });
+    const collection = await seedSelectedCollectionItem(test);
+    let persisted: RssDashboardSettings | undefined;
+    test.plugin.saveData = vi.fn(async (value: unknown) => {
+      persisted = structuredClone(value) as RssDashboardSettings;
+    });
+    vi.spyOn(obsidian, "requestUrl")
+      .mockResolvedValue(responseWithText("safe canonical X analysis"));
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      SELECTED_FEED_TITLE,
+    ));
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "先保存原文",
+    ));
+    button(modal!.contentEl, "先保存原文").click();
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "插入已保存原文",
+    ));
+
+    const [savedItem] = saver.saveArticleWithFullContent.mock.calls[0];
+    expect(savedItem.rssDashboardId).toBe(expectedId);
+    expect(test.selected.rssDashboardId).toBe(expectedId);
+    expect(persisted?.feeds[1]?.items[0].rssDashboardId).toBe(expectedId);
+    expect(await test.app.vault.adapter.read(savedFile.path)).toContain(expectedId);
+    expect(await test.app.vault.adapter.read(savedFile.path)).not.toContain(genericId);
+    await expect(collection.repository.findById(expectedId)).resolves.toMatchObject({
+      id: expectedId,
+      saved: true,
+      savedNotePath: savedFile.path,
+    });
+
+    const reloadedSettings = structuredClone(persisted!);
+    test.plugin.settings = reloadedSettings;
+    const reloadedItem = reloadedSettings.feeds[1].items[0];
+    const reopened = test.plugin.openAiOperationForItem(reloadedItem, "summary");
+    expect(reopened).not.toBeNull();
+    expect(reloadedItem.rssDashboardId).toBe(expectedId);
+    reopened?.close();
+    modal?.close();
+  });
+
+  it("rolls a newly assigned canonical X ID back when settings persistence fails", async () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    test.settings.storageMode = "legacy-json";
+    (test.selectedFeed as Feed & { sourceType?: string }).sourceType = "x-account";
+    test.selected.guid = "1901234567890123456";
+    test.selected.link = "https://x.com/example/status/1901234567890123456";
+    delete test.selected.rssDashboardId;
+    const expectedId = createXPostCollectedItemId(test.selected.guid);
+    await test.app.vault.createFolder("Notes");
+    const savedFile = await test.app.vault.create(
+      "Notes/rollback-canonical-x-source.md",
+      "recoverable",
+    );
+    installArticleSaver(test, savedFile);
+    const collection = await seedSelectedCollectionItem(test);
+    test.plugin.saveData = vi.fn().mockRejectedValue(
+      new Error("X_ID_PERSISTENCE_FAILURE_CANARY"),
+    );
+    vi.spyOn(obsidian, "requestUrl")
+      .mockResolvedValue(responseWithText("safe canonical X rollback analysis"));
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      SELECTED_FEED_TITLE,
+    ));
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "先保存原文",
+    ));
+    button(modal!.contentEl, "先保存原文").click();
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "无法保存原文",
+    ));
+
+    expect(test.selected.rssDashboardId).toBeUndefined();
+    expect(test.selected.saved).toBe(false);
+    expect(test.selected.savedFilePath).toBeUndefined();
+    const rolledBackCollection = await collection.repository.findById(expectedId);
+    expect(rolledBackCollection).toMatchObject({ id: expectedId, saved: false });
+    expect(rolledBackCollection).not.toHaveProperty("savedNotePath");
+    expect(test.app.vault.getAbstractFileByPath(savedFile.path)).toBe(savedFile);
+    modal?.close();
+  });
+
+  it.each([
+    ["matching X", "x-account", "matching"],
+    ["missing non-X", "feed", "missing"],
+  ] as const)(
+    "keeps the authoritative ID for a %s save-first transaction",
+    async (_scenario, sourceType, initialId) => {
+      const test = harness();
+      installAtomicAdapter(test.app);
+      test.settings.storageMode = "legacy-json";
+      (test.selectedFeed as Feed & { sourceType?: string }).sourceType = sourceType;
+      if (sourceType === "x-account") {
+        test.selected.guid = "1901234567890123456";
+        test.selected.link = "https://x.com/example/status/1901234567890123456";
+      }
+      const expectedId = sourceType === "x-account"
+        ? createXPostCollectedItemId(test.selected.guid)
+        : createCollectedItemId({
+            sourceId: "selected-feed-id",
+            guid: test.selected.guid,
+            url: test.selected.link,
+            title: test.selected.title,
+            publishedAt: test.selected.pubDate,
+          });
+      if (initialId === "matching") test.selected.rssDashboardId = expectedId;
+      else delete test.selected.rssDashboardId;
+      await test.app.vault.createFolder("Notes");
+      const savedFile = await test.app.vault.create(
+        `Notes/${sourceType}-identity-source.md`,
+        "saved source",
+      );
+      installArticleSaver(test, savedFile);
+      test.plugin.saveData = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn(obsidian, "requestUrl")
+        .mockResolvedValue(responseWithText("safe identity analysis"));
+
+      const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+        SELECTED_FEED_TITLE,
+      ));
+      button(modal!.contentEl, "确认发送").click();
+      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+        "先保存原文",
+      ));
+      button(modal!.contentEl, "先保存原文").click();
+      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+        "插入已保存原文",
+      ));
+
+      expect(test.selected.rssDashboardId).toBe(expectedId);
+      expect(test.selected.savedFilePath).toBe(savedFile.path);
+      modal?.close();
+    },
+  );
+
+  it("fails closed for a present mismatching X ID", () => {
+    const test = harness();
+    (test.selectedFeed as Feed & { sourceType?: string }).sourceType = "x-account";
+    test.selected.guid = "1901234567890123456";
+    test.selected.link = "https://x.com/example/status/1901234567890123456";
+    const expectedId = createXPostCollectedItemId(test.selected.guid);
+    expect(test.selected.rssDashboardId).not.toBe(expectedId);
+    const saver = installArticleSaver(test);
+    const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+    expect(modal).toBeNull();
+    expect(requestUrl).not.toHaveBeenCalled();
+    expect(saver.saveArticle).not.toHaveBeenCalled();
+    expect(saver.saveArticleWithFullContent).not.toHaveBeenCalled();
+  });
+
   it("rolls back feed state when persistence fails after note creation", async () => {
     const test = harness();
     installAtomicAdapter(test.app);

@@ -278,6 +278,7 @@ const STATUS_JOURNAL_PHASES = new Set<StatusJournalPhase>([
   "feed-written",
 ]);
 const STATUS_JOURNAL_FEED_KEYS = new Set([
+  "rssDashboardId",
   "read",
   "starred",
   "saved",
@@ -327,6 +328,9 @@ function isJournalFlagState(value: unknown): value is CollectionFlagState {
 }
 
 function isJournalFeedValue(key: string, value: unknown): boolean {
+  if (key === "rssDashboardId") {
+    return typeof value === "string" && isStableItemId(value);
+  }
   if (key === "read" || key === "starred" || key === "saved") {
     return typeof value === "boolean";
   }
@@ -1578,7 +1582,13 @@ export default class RssDashboardPlugin extends Plugin {
       !target ||
       !canWriteOwnDataValues(
         target,
-        ["saved", "savedFilePath", "tags", "restrictedReason"],
+        [
+          "rssDashboardId",
+          "saved",
+          "savedFilePath",
+          "tags",
+          "restrictedReason",
+        ],
       )
     ) throw new Error("The original source item is no longer trusted");
     const item = cloneAiSourceItem(snapshot.source.item);
@@ -1596,6 +1606,7 @@ export default class RssDashboardPlugin extends Plugin {
     if (!file) throw new Error("The source article could not be saved");
     const tags = this.createAiSavedTags(snapshot);
     const updates = {
+      rssDashboardId: snapshot.source.expectedStableId,
       saved: true,
       savedFilePath: file.path,
       tags,
@@ -1610,7 +1621,11 @@ export default class RssDashboardPlugin extends Plugin {
         currentTarget !== target ||
         !canWriteOwnDataValues(currentTarget, Object.keys(updates))
       ) return "failed" as const;
-      return await this.commitCollectionFlagTransaction(currentTarget, updates);
+      return await this.commitCollectionFlagTransaction(
+        currentTarget,
+        updates,
+        snapshot.source.expectedStableId,
+      );
     });
     if (outcome === "failed") {
       throw new Error("The saved source state could not be persisted");
@@ -2698,9 +2713,16 @@ export default class RssDashboardPlugin extends Plugin {
   private async commitFeedOnlyArticleUpdate(
     article: FeedItem,
     updates: Partial<FeedItem>,
+    expectedStableId?: string,
   ): Promise<boolean> {
     const snapshot = captureArticleMutationSnapshot(article, updates);
-    const journal = await this.prepareStatusJournal(article, snapshot);
+    const journal = await this.prepareStatusJournal(
+      article,
+      snapshot,
+      undefined,
+      undefined,
+      expectedStableId,
+    );
     if (!journal) return false;
     Object.assign(article, updates);
     try {
@@ -2720,12 +2742,31 @@ export default class RssDashboardPlugin extends Plugin {
   private async commitCollectionFlagTransaction(
     article: FeedItem,
     updates: Partial<FeedItem>,
+    expectedStableId?: string,
   ): Promise<"failed" | "feed-only" | "collection"> {
-    const itemId = article.rssDashboardId;
+    if (
+      expectedStableId !== undefined &&
+      (!isStableItemId(expectedStableId) ||
+        (article.rssDashboardId !== undefined &&
+          article.rssDashboardId !== expectedStableId))
+    ) return "failed";
+    if (
+      expectedStableId !== undefined &&
+      updates.rssDashboardId !== undefined &&
+      updates.rssDashboardId !== expectedStableId
+    ) return "failed";
+    const transactionUpdates = expectedStableId === undefined
+      ? updates
+      : { ...updates, rssDashboardId: expectedStableId };
+    const itemId = expectedStableId ?? article.rssDashboardId;
     if (!itemId || !/^[a-f0-9]{64}$/.test(itemId)) {
       // Older feed-only entries remain supported, but are not represented as a
       // collection update and therefore deliberately emit no collection event.
-      return (await this.commitFeedOnlyArticleUpdate(article, updates))
+      return (await this.commitFeedOnlyArticleUpdate(
+        article,
+        transactionUpdates,
+        expectedStableId,
+      ))
         ? "feed-only"
         : "failed";
     }
@@ -2743,27 +2784,41 @@ export default class RssDashboardPlugin extends Plugin {
       return "failed";
     }
     if (!previous) {
-      return (await this.commitFeedOnlyArticleUpdate(article, updates))
+      return (await this.commitFeedOnlyArticleUpdate(
+        article,
+        transactionUpdates,
+        expectedStableId,
+      ))
         ? "feed-only"
         : "failed";
     }
 
     const previousCollectionState = collectionFlagsFromItem(previous);
     const desired = {
-      read: updates.read ?? article.read ?? false,
-      starred: updates.starred ?? article.starred ?? false,
-      saved: updates.saved ?? article.saved ?? false,
+      read: transactionUpdates.read ?? article.read ?? false,
+      starred: transactionUpdates.starred ?? article.starred ?? false,
+      saved: transactionUpdates.saved ?? article.saved ?? false,
       savedNotePath:
-        updates.saved === false
+        transactionUpdates.saved === false
           ? undefined
-          : updates.savedFilePath ?? article.savedFilePath ?? previous.savedNotePath,
+          : transactionUpdates.savedFilePath ??
+            article.savedFilePath ?? previous.savedNotePath,
     };
-    const feedSnapshot = captureArticleMutationSnapshot(article, updates);
+    if (
+      expectedStableId !== undefined &&
+      article.rssDashboardId !== undefined &&
+      article.rssDashboardId !== expectedStableId
+    ) return "failed";
+    const feedSnapshot = captureArticleMutationSnapshot(
+      article,
+      transactionUpdates,
+    );
     const journal = await this.prepareStatusJournal(
       article,
       feedSnapshot,
       previousCollectionState,
       desired,
+      expectedStableId,
     );
     if (!journal) return "failed";
     try {
@@ -2775,7 +2830,7 @@ export default class RssDashboardPlugin extends Plugin {
       return "failed";
     }
 
-    Object.assign(article, updates);
+    Object.assign(article, transactionUpdates);
     try {
       await this.updateStatusJournalPhase(journal, "feed-write-uncertain");
       await this.saveSettings();
@@ -2796,7 +2851,10 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  private getStatusJournalItemLocator(article: FeedItem): {
+  private getStatusJournalItemLocator(
+    article: FeedItem,
+    expectedStableId?: string,
+  ): {
     feedIndex: number;
     itemIndex: number;
     sourceLocator: string;
@@ -2808,11 +2866,17 @@ export default class RssDashboardPlugin extends Plugin {
       const itemIndex = feed.items.indexOf(article);
       if (itemIndex >= 0 && feed.feedId) {
         try {
+          if (
+            expectedStableId !== undefined &&
+            (!isStableItemId(expectedStableId) ||
+              (article.rssDashboardId !== undefined &&
+                article.rssDashboardId !== expectedStableId))
+          ) return null;
           const locator = {
             feedIndex,
             itemIndex,
             sourceLocator: createSourceLocator(feed.feedId),
-            stableId: resolveFeedItemStableId(article),
+            stableId: expectedStableId ?? resolveFeedItemStableId(article),
           };
           let matchCount = 0;
           for (const candidateFeed of this.settings.feeds) {
@@ -2821,7 +2885,16 @@ export default class RssDashboardPlugin extends Plugin {
               continue;
             }
             for (const candidateItem of candidateFeed.items) {
-              if (resolveFeedItemStableId(candidateItem) === locator.stableId) {
+              const candidateStableId =
+                expectedStableId !== undefined && candidateItem === article &&
+                  candidateItem.rssDashboardId === undefined
+                  ? expectedStableId
+                  : candidateItem.rssDashboardId !== undefined
+                    ? candidateItem.rssDashboardId
+                    : expectedStableId === undefined
+                      ? resolveFeedItemStableId(candidateItem)
+                      : undefined;
+              if (candidateStableId === locator.stableId) {
                 matchCount += 1;
               }
             }
@@ -2840,9 +2913,10 @@ export default class RssDashboardPlugin extends Plugin {
     snapshot: ArticleMutationSnapshot,
     previousCollection?: CollectionFlagState,
     desired?: CollectionFlagState,
+    expectedStableId?: string,
   ): Promise<StatusRepairJournal | null> {
     return await this.prepareStatusJournalEntries([
-      { article, snapshot, previousCollection, desired },
+      { article, snapshot, previousCollection, desired, expectedStableId },
     ]);
   }
 
@@ -2851,6 +2925,7 @@ export default class RssDashboardPlugin extends Plugin {
     snapshot: ArticleMutationSnapshot;
     previousCollection?: CollectionFlagState;
     desired?: CollectionFlagState;
+    expectedStableId?: string;
   }>): Promise<StatusRepairJournal | null> {
     if (!(await this.reconcileExistingStatusJournalBeforeMutation())) {
       this.notify("plugin.state.articleRepairRequired");
@@ -2858,7 +2933,10 @@ export default class RssDashboardPlugin extends Plugin {
     }
     const items: StatusJournalItem[] = [];
     for (const entry of entries) {
-      const locator = this.getStatusJournalItemLocator(entry.article);
+      const locator = this.getStatusJournalItemLocator(
+        entry.article,
+        entry.expectedStableId,
+      );
       if (!locator) {
         this.notify("plugin.state.articleSaveFailed");
         return null;
@@ -3869,19 +3947,33 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private resolveStatusJournalItem(entry: StatusJournalItem): FeedItem | null {
-    const matches: FeedItem[] = [];
+    const storedIdMatches: FeedItem[] = [];
     for (const feed of this.settings.feeds) {
       if (!feed.feedId ||
         createSourceLocator(feed.feedId) !== entry.sourceLocator) continue;
       for (const item of feed.items) {
-        try {
-          if (resolveFeedItemStableId(item) === entry.stableId) matches.push(item);
-        } catch {
-          // An unrelated malformed item cannot satisfy the stable locator.
-        }
+        if (item.rssDashboardId === entry.stableId) storedIdMatches.push(item);
       }
     }
-    return matches.length === 1 ? matches[0] : null;
+    if (storedIdMatches.length > 0) {
+      return storedIdMatches.length === 1 ? storedIdMatches[0] : null;
+    }
+
+    // A journal can be prepared before a newly-derived canonical ID reaches
+    // feed storage. In that one case the immutable source locator plus original
+    // storage position identifies the exact item without deriving a generic ID.
+    const identityWasMissing = entry.previousFeed.some(
+      (previous) =>
+        previous.key === "rssDashboardId" && previous.exists === false,
+    );
+    if (!identityWasMissing) return null;
+    const feed = this.settings.feeds[entry.feedIndex];
+    if (
+      !feed?.feedId ||
+      createSourceLocator(feed.feedId) !== entry.sourceLocator
+    ) return null;
+    const candidate = feed.items[entry.itemIndex];
+    return candidate?.rssDashboardId === undefined ? candidate : null;
   }
 
   private async replayStatusRepairJournalIfNeeded(): Promise<boolean> {
