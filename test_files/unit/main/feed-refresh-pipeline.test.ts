@@ -1422,6 +1422,45 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(getNoticeMessages(consoleLogSpy)).toEqual([]);
   });
 
+  it.each([
+    ["present A to B", true, { rssDashboardId: "b".repeat(64) }],
+    ["missing to arbitrary", false, { rssDashboardId: "b".repeat(64) }],
+    [
+      "identity combined with flags",
+      true,
+      { rssDashboardId: "b".repeat(64), read: true, starred: true },
+    ],
+  ] as const)(
+    "rejects public article identity mutation: %s",
+    async (_scenario, initiallyPresent, updates) => {
+      const originalId = "a".repeat(64);
+      const article = createItem({ read: false, starred: false });
+      if (initiallyPresent) article.rssDashboardId = originalId;
+      const source = createFeed({ feedId: "source-public-id", items: [article] });
+      const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+        updateArticle: (
+          guid: string,
+          url: string,
+          updates: Partial<FeedItem>,
+        ) => Promise<boolean>;
+      };
+
+      await expect(
+        plugin.updateArticle(article.guid, source.url, updates),
+      ).resolves.toBe(false);
+
+      expect(article.rssDashboardId).toBe(
+        initiallyPresent ? originalId : undefined,
+      );
+      expect(article.read).toBe(false);
+      expect(article.starred).toBe(false);
+      expect(plugin.saveData).not.toHaveBeenCalled();
+      expect(await plugin.app.vault.adapter.exists(
+        ".rss-dashboard-data/state/status-repair.json",
+      )).toBe(false);
+    },
+  );
+
   it("writes durable read/starred/saved cancellation flags by stable collection ID without a duplicate dashboard reload", async () => {
     const article = createItem({
       rssDashboardId: "a".repeat(64),
@@ -1840,7 +1879,7 @@ describe("refreshFeeds() pipeline behavior", () => {
     plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
     const path = ".rss-dashboard-data/state/status-repair.json";
     await plugin.app.vault.adapter.write(path, JSON.stringify({
-      version: 1,
+      version: 2,
       txId: "tx-15-xrestart",
       phase: "feed-write-uncertain",
       items: [{
@@ -1865,6 +1904,183 @@ describe("refreshFeeds() pipeline behavior", () => {
       forceAllShards: true,
       forceMetadata: true,
     });
+    expect(await plugin.app.vault.adapter.exists(path)).toBe(false);
+  });
+
+  it("rejects a journal that rewrites stable locator A to unrelated ID B", async () => {
+    const stableId = "a".repeat(64);
+    const unrelatedId = "b".repeat(64);
+    const target = createItem({
+      guid: "target-a",
+      rssDashboardId: stableId,
+      read: true,
+    });
+    const unrelated = createItem({
+      guid: "unrelated-b",
+      rssDashboardId: unrelatedId,
+      read: true,
+    });
+    const source = createFeed({
+      feedId: "source-hostile-identity",
+      items: [target, unrelated],
+    });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const path = ".rss-dashboard-data/state/status-repair.json";
+    await plugin.app.vault.adapter.write(path, JSON.stringify({
+      version: 2,
+      txId: "tx-16-hostile",
+      phase: "feed-write-uncertain",
+      items: [{
+        feedIndex: 0,
+        itemIndex: 0,
+        sourceLocator: createTestSourceLocator("source-hostile-identity"),
+        stableId,
+        previousFeed: [
+          { key: "rssDashboardId", exists: true, value: unrelatedId },
+          { key: "read", exists: true, value: false },
+        ],
+      }],
+    }));
+
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(false);
+
+    expect(target.rssDashboardId).toBe(stableId);
+    expect(target.read).toBe(true);
+    expect(unrelated.rssDashboardId).toBe(unrelatedId);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.exists(path)).toBe(true);
+  });
+
+  it.each([
+    [
+      "missing identity record",
+      [{ key: "read", exists: true, value: false }],
+    ],
+    [
+      "missing identity with a value",
+      [{ key: "rssDashboardId", exists: false, value: "a".repeat(64) }],
+    ],
+    [
+      "present identity without a value",
+      [{ key: "rssDashboardId", exists: true }],
+    ],
+    [
+      "duplicate identity records",
+      [
+        { key: "rssDashboardId", exists: true, value: "a".repeat(64) },
+        { key: "rssDashboardId", exists: true, value: "a".repeat(64) },
+      ],
+    ],
+  ] as const)("rejects malformed v2 journal identity: %s", async (
+    _scenario,
+    previousFeed,
+  ) => {
+    const stableId = "a".repeat(64);
+    const article = createItem({ rssDashboardId: stableId, read: true });
+    const source = createFeed({
+      feedId: "source-malformed-v2",
+      items: [article],
+    });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const path = ".rss-dashboard-data/state/status-repair.json";
+    await plugin.app.vault.adapter.write(path, JSON.stringify({
+      version: 2,
+      txId: "tx-17-malformed",
+      phase: "feed-write-uncertain",
+      items: [{
+        feedIndex: 0,
+        itemIndex: 0,
+        sourceLocator: createTestSourceLocator("source-malformed-v2"),
+        stableId,
+        previousFeed,
+      }],
+    }));
+
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(false);
+
+    expect(article.rssDashboardId).toBe(stableId);
+    expect(article.read).toBe(true);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.exists(path)).toBe(true);
+  });
+
+  it("does not position-fallback a v2 identity recorded as present", async () => {
+    const stableId = "a".repeat(64);
+    const article = createItem({ read: true });
+    delete article.rssDashboardId;
+    const source = createFeed({
+      feedId: "source-present-no-fallback",
+      items: [article],
+    });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const path = ".rss-dashboard-data/state/status-repair.json";
+    await plugin.app.vault.adapter.write(path, JSON.stringify({
+      version: 2,
+      txId: "tx-18-present",
+      phase: "feed-write-uncertain",
+      items: [{
+        feedIndex: 0,
+        itemIndex: 0,
+        sourceLocator: createTestSourceLocator("source-present-no-fallback"),
+        stableId,
+        previousFeed: [
+          { key: "rssDashboardId", exists: true, value: stableId },
+          { key: "read", exists: true, value: false },
+        ],
+      }],
+    }));
+
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(false);
+
+    expect(article.rssDashboardId).toBeUndefined();
+    expect(article.read).toBe(true);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.exists(path)).toBe(true);
+  });
+
+  it("replays a valid v2 present identity only through stable locator A", async () => {
+    const stableId = "a".repeat(64);
+    const article = createItem({ rssDashboardId: stableId, read: true });
+    const source = createFeed({ feedId: "source-valid-v2", items: [article] });
+    const plugin = createPluginWithSettings([source]) as unknown as TestPlugin & {
+      replayStatusRepairJournalIfNeeded: () => Promise<boolean>;
+      saveSettings: ReturnType<typeof vi.fn>;
+    };
+    plugin.saveSettings = vi.fn().mockResolvedValue(undefined);
+    const path = ".rss-dashboard-data/state/status-repair.json";
+    await plugin.app.vault.adapter.write(path, JSON.stringify({
+      version: 2,
+      txId: "tx-19-valid",
+      phase: "feed-write-uncertain",
+      items: [{
+        feedIndex: 99,
+        itemIndex: 99,
+        sourceLocator: createTestSourceLocator("source-valid-v2"),
+        stableId,
+        previousFeed: [
+          { key: "rssDashboardId", exists: true, value: stableId },
+          { key: "read", exists: true, value: false },
+        ],
+      }],
+    }));
+
+    await expect(plugin.replayStatusRepairJournalIfNeeded()).resolves.toBe(true);
+
+    expect(article.rssDashboardId).toBe(stableId);
+    expect(article.read).toBe(false);
+    expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
     expect(await plugin.app.vault.adapter.exists(path)).toBe(false);
   });
 

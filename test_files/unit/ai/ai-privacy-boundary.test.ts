@@ -1198,6 +1198,22 @@ describe("AI privacy boundary", () => {
     const rolledBackCollection = await collection.repository.findById(expectedId);
     expect(rolledBackCollection).toMatchObject({ id: expectedId, saved: false });
     expect(rolledBackCollection).not.toHaveProperty("savedNotePath");
+    const retainedJournal = JSON.parse(await test.app.vault.adapter.read(
+      ".rss-dashboard-data/state/status-repair.json",
+    )) as {
+      version: number;
+      items: Array<{
+        stableId: string;
+        previousFeed: Array<{ key: string; exists: boolean }>;
+      }>;
+    };
+    expect(retainedJournal.version).toBe(2);
+    expect(retainedJournal.items[0]).toMatchObject({
+      stableId: expectedId,
+      previousFeed: expect.arrayContaining([
+        { key: "rssDashboardId", exists: false },
+      ]),
+    });
     expect(test.app.vault.getAbstractFileByPath(savedFile.path)).toBe(savedFile);
     modal?.close();
   });

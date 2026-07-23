@@ -260,7 +260,7 @@ type StatusJournalItem = {
 };
 
 type StatusRepairJournal = {
-  version: 1;
+  version: 1 | 2;
   txId: string;
   phase: StatusJournalPhase;
   items: StatusJournalItem[];
@@ -363,7 +363,7 @@ function parseStatusRepairJournal(value: unknown): StatusRepairJournal | null {
     return null;
   }
   if (
-    value.version !== 1 ||
+    (value.version !== 1 && value.version !== 2) ||
     typeof value.txId !== "string" ||
     !/^tx-\d{1,16}-[a-z0-9]{1,16}$/.test(value.txId) ||
     typeof value.phase !== "string" ||
@@ -393,6 +393,7 @@ function parseStatusRepairJournal(value: unknown): StatusRepairJournal | null {
       rawItem.previousFeed.length > STATUS_JOURNAL_FEED_KEYS.size
     ) return null;
     const seenKeys = new Set<string>();
+    let identityRecord: Record<string, unknown> | undefined;
     for (const rawPrevious of rawItem.previousFeed) {
       if (!isRecord(rawPrevious)) return null;
       if (!hasOnlyKeys(rawPrevious, new Set([
@@ -405,6 +406,9 @@ function parseStatusRepairJournal(value: unknown): StatusRepairJournal | null {
         typeof rawPrevious.exists !== "boolean"
       ) return null;
       seenKeys.add(rawPrevious.key);
+      if (rawPrevious.key === "rssDashboardId") {
+        identityRecord = rawPrevious;
+      }
       const hasValue = Object.prototype.hasOwnProperty.call(rawPrevious, "value");
       if (rawPrevious.exists && rawPrevious.valueType === "undefined") {
         if (hasValue) return null;
@@ -414,6 +418,14 @@ function parseStatusRepairJournal(value: unknown): StatusRepairJournal | null {
       } else if (hasValue || rawPrevious.valueType !== undefined) {
         return null;
       }
+    }
+    if (value.version === 1 && identityRecord !== undefined) return null;
+    if (value.version === 2) {
+      if (identityRecord === undefined) return null;
+      if (
+        identityRecord.exists === true &&
+        identityRecord.value !== rawItem.stableId
+      ) return null;
     }
     if (rawItem.previousCollection !== undefined &&
       !isJournalFlagState(rawItem.previousCollection)) return null;
@@ -427,7 +439,7 @@ function parseStatusRepairJournal(value: unknown): StatusRepairJournal | null {
     locatorKeys.add(locatorKey);
   }
   return {
-    version: 1,
+    version: value.version,
     txId: value.txId,
     phase: value.phase as StatusJournalPhase,
     items,
@@ -2536,6 +2548,9 @@ export default class RssDashboardPlugin extends Plugin {
       forceCollectionPathSync?: boolean;
     },
   ): Promise<ArticleUpdateOutcome> {
+    if (Object.prototype.hasOwnProperty.call(updates, "rssDashboardId")) {
+      return "failed";
+    }
     const isCollectionFlagMutation =
       updates.read !== undefined ||
       updates.starred !== undefined ||
@@ -2715,6 +2730,15 @@ export default class RssDashboardPlugin extends Plugin {
     updates: Partial<FeedItem>,
     expectedStableId?: string,
   ): Promise<boolean> {
+    const hasIdentityUpdate = Object.prototype.hasOwnProperty.call(
+      updates,
+      "rssDashboardId",
+    );
+    if (
+      (expectedStableId === undefined && hasIdentityUpdate) ||
+      (expectedStableId !== undefined &&
+        (!hasIdentityUpdate || updates.rssDashboardId !== expectedStableId))
+    ) return false;
     const snapshot = captureArticleMutationSnapshot(article, updates);
     const journal = await this.prepareStatusJournal(
       article,
@@ -2744,6 +2768,11 @@ export default class RssDashboardPlugin extends Plugin {
     updates: Partial<FeedItem>,
     expectedStableId?: string,
   ): Promise<"failed" | "feed-only" | "collection"> {
+    const hasIdentityUpdate = Object.prototype.hasOwnProperty.call(
+      updates,
+      "rssDashboardId",
+    );
+    if (hasIdentityUpdate && expectedStableId === undefined) return "failed";
     if (
       expectedStableId !== undefined &&
       (!isStableItemId(expectedStableId) ||
@@ -2932,6 +2961,13 @@ export default class RssDashboardPlugin extends Plugin {
       return null;
     }
     const items: StatusJournalItem[] = [];
+    const hasExpectedIdentity = entries.some(
+      (entry) => entry.expectedStableId !== undefined,
+    );
+    if (
+      hasExpectedIdentity &&
+      entries.some((entry) => entry.expectedStableId === undefined)
+    ) return null;
     for (const entry of entries) {
       const locator = this.getStatusJournalItemLocator(
         entry.article,
@@ -2941,15 +2977,26 @@ export default class RssDashboardPlugin extends Plugin {
         this.notify("plugin.state.articleSaveFailed");
         return null;
       }
+      const previousFeed = serializeArticleMutationSnapshot(entry.snapshot);
+      const identityRecords = previousFeed.filter(
+        (previous) => previous.key === "rssDashboardId",
+      );
+      if (
+        entry.expectedStableId === undefined
+          ? identityRecords.length !== 0
+          : identityRecords.length !== 1 ||
+            (identityRecords[0].exists &&
+              identityRecords[0].value !== locator.stableId)
+      ) return null;
       items.push({
         ...locator,
-        previousFeed: serializeArticleMutationSnapshot(entry.snapshot),
+        previousFeed,
         previousCollection: entry.previousCollection,
         desired: entry.desired,
       });
     }
     const journal: StatusRepairJournal = {
-      version: 1,
+      version: hasExpectedIdentity ? 2 : 1,
       txId: `tx-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       phase: "prepared",
       items,
