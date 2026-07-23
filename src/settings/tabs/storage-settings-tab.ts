@@ -17,17 +17,12 @@ import { setCssProps } from "../../utils/platform-utils";
 import { DEFAULT_SETTINGS, type RssDashboardSettings } from "../../types/types";
 import {
   MetadataCleanupModal,
-  ShardDeletionFailureModal,
   StorageTransitionModal,
   type MetadataCleanupAction,
-  type ShardDeletionFailureAction,
   type StorageTransitionAction,
   type StorageTransitionOptions,
 } from "../modals/storage-settings-modals";
-import type {
-  FeedStorageStatus,
-  ShardFolderDeletionError,
-} from "../../services/feed-storage-repository";
+import type { FeedStorageStatus } from "../../services/feed-storage-repository";
 import { createTranslator, type Translator } from "../../i18n";
 
 interface StorageSettingsPlugin {
@@ -46,11 +41,7 @@ interface StorageSettingsPlugin {
   importPortableDataBundleFromFile(file: File): Promise<void>;
   exportPortableDataBundle(): Promise<void>;
   exportDataJson(): Promise<void>;
-  revertToLegacyJsonStorageWithOptions(options?: {
-    deleteShardFolder?: boolean;
-  }): Promise<void>;
-  isShardFolderDeletionError(error: unknown): error is ShardFolderDeletionError;
-  openStorageFolderInSystem(folderPath?: string): Promise<void>;
+  revertToLegacyJsonStorage(): Promise<void>;
   migrateMetadataToVaultLocation(): Promise<void>;
   revertMetadataToPluginDefault(): Promise<void>;
 }
@@ -169,35 +160,6 @@ export function renderStorageSettingsTab(
         result: formatStorageRepairResult(status.lastRepairResult, t),
       })}`,
     });
-  };
-
-  const runShardDeletionFailureFlow = async (
-    storageFolder: string,
-  ): Promise<"cancel" | "apply-anyway"> => {
-    while (true) {
-      const failureModal = new ShardDeletionFailureModal(
-        plugin.app,
-        storageFolder,
-        plugin.settings.locale,
-      );
-      failureModal.open();
-      const action: ShardDeletionFailureAction =
-        await failureModal.waitForClose();
-
-      if (action === "open-folder") {
-        try {
-          await plugin.openStorageFolderInSystem(storageFolder);
-        } catch (error) {
-          storageError("Open shard folder action failed", error, {
-            storageFolder,
-          });
-          new Notice(t("settings.storage.openFolderFailed"));
-        }
-        continue;
-      }
-
-      return action;
-    }
   };
 
   const pluginDefaultMetadataFilePath = `${plugin.app.vault.configDir}/plugins/rss-dashboard/data.json`;
@@ -471,32 +433,7 @@ export function renderStorageSettingsTab(
                   new Notice(t("settings.storage.v2MigrationComplete"));
                 }
               } else {
-                if (action === "apply-delete-shards") {
-                  try {
-                    await plugin.revertToLegacyJsonStorageWithOptions({
-                      deleteShardFolder: true,
-                    });
-                  } catch (error) {
-                    if (!plugin.isShardFolderDeletionError(error)) {
-                      throw error;
-                    }
-
-                    const followUpAction = await runShardDeletionFailureFlow(
-                      plugin.settings.storageFolder,
-                    );
-                    if (followUpAction === "cancel") {
-                      return;
-                    }
-
-                    await plugin.revertToLegacyJsonStorageWithOptions({
-                      deleteShardFolder: false,
-                    });
-                  }
-                } else {
-                  await plugin.revertToLegacyJsonStorageWithOptions({
-                    deleteShardFolder: false,
-                  });
-                }
+                await plugin.revertToLegacyJsonStorage();
                 if (folderChanged) {
                   new Notice(t("settings.storage.legacyEnabled"));
                 } else {

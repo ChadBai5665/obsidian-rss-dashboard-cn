@@ -6,14 +6,8 @@ import {
   renderStorageSettingsTab,
 } from "../../../src/settings/tabs/storage-settings-tab";
 import { createTranslator } from "../../../src/i18n";
-import {
-  ShardDeletionFailureModal,
-  StorageTransitionModal,
-} from "../../../src/settings/modals/storage-settings-modals";
-import {
-  ShardFolderDeletionError,
-  type FeedStorageStatus,
-} from "../../../src/services/feed-storage-repository";
+import { StorageTransitionModal } from "../../../src/settings/modals/storage-settings-modals";
+import type { FeedStorageStatus } from "../../../src/services/feed-storage-repository";
 import {
   DEFAULT_SETTINGS,
   type RssDashboardSettings,
@@ -75,12 +69,6 @@ function createPlugin() {
     ),
     migrateToVaultStorage: vi.fn(async () => {}),
     revertToLegacyJsonStorage: vi.fn(async () => {}),
-    revertToLegacyJsonStorageWithOptions: vi.fn(async () => {}),
-    isShardFolderDeletionError: (
-      error: unknown,
-    ): error is ShardFolderDeletionError =>
-      error instanceof ShardFolderDeletionError,
-    openStorageFolderInSystem: vi.fn(async () => {}),
     repairVaultStorage: vi.fn(async () => {}),
     importPortableDataBundleFromFile: vi.fn(async () => {}),
     exportDataJson: vi.fn(async () => {}),
@@ -185,6 +173,51 @@ describe("General settings storage section", () => {
     ).toBeTruthy();
   });
 
+  it.each([
+    [
+      "en" as const,
+      "After switching back to data.json, the shard folder \".rss-dashboard-data/feeds\" will always be retained as a recovery copy. The plugin never deletes it automatically.",
+      "If you later choose to clean it up, first confirm the folder path manually and delete it outside the plugin. Automatic cleanup is not currently available.",
+      "Switch and keep recovery copy",
+      "Delete shard folder",
+    ],
+    [
+      "zh-CN" as const,
+      "切换回 data.json 后，分片文件夹“.rss-dashboard-data/feeds”将始终保留为恢复副本。插件绝不会自动删除它。",
+      "如果之后想清理，请先手动确认文件夹路径，再到插件外自行删除。当前不提供自动清理。",
+      "切换并保留恢复副本",
+      "删除分片文件夹",
+    ],
+  ])(
+    "states in %s that shard recovery copies are always retained and offers no delete action",
+    (locale, warning, cleanupHelp, applyLabel, removedDeleteLabel) => {
+      const app = obsidian.App.createMock();
+      const modal = new StorageTransitionModal(
+        app,
+        {
+          currentMode: "vault-shards",
+          targetMode: "legacy-json",
+          storageFolder: ".rss-dashboard-data/feeds",
+        },
+        locale,
+      );
+
+      modal.open();
+
+      expect(modal.contentEl.textContent).toContain(warning);
+      expect(modal.contentEl.textContent).toContain(cleanupHelp);
+      const buttonLabels = Array.from(
+        modal.contentEl.querySelectorAll("button"),
+        (button) => button.textContent,
+      );
+      expect(buttonLabels).toEqual([
+        locale === "zh-CN" ? "取消" : "Cancel",
+        applyLabel,
+      ]);
+      expect(buttonLabels).not.toContain(removedDeleteLabel);
+    },
+  );
+
   it("applies the pending legacy-to-shards storage change through the modal", async () => {
     const containerEl = createTestContainer();
     const plugin = createPlugin();
@@ -287,7 +320,7 @@ describe("General settings storage section", () => {
     expect(plugin.migrateToVaultStorage).not.toHaveBeenCalled();
   });
 
-  it("passes the delete-shard-folder choice when applying a shards-to-legacy change", async () => {
+  it("reverts to legacy storage without a shard deletion option", async () => {
     const containerEl = createTestContainer();
     const plugin = createPlugin();
     plugin.settings.storageMode = "vault-shards";
@@ -305,7 +338,7 @@ describe("General settings storage section", () => {
     vi.spyOn(
       StorageTransitionModal.prototype,
       "waitForClose",
-    ).mockResolvedValue("apply-delete-shards");
+    ).mockResolvedValue("apply");
 
     renderStorageSettingsTab(containerEl, plugin as never);
 
@@ -323,135 +356,8 @@ describe("General settings storage section", () => {
     applyButton.click();
     await Promise.resolve();
 
-    expect(plugin.revertToLegacyJsonStorageWithOptions).toHaveBeenCalledWith({
-      deleteShardFolder: true,
-    });
-  });
-
-  it("pauses revert when shard deletion fails and can continue with apply anyway", async () => {
-    const containerEl = createTestContainer();
-    const plugin = createPlugin();
-    plugin.settings.storageMode = "vault-shards";
-    plugin.getStorageStatus = vi.fn(() => ({
-      mode: "vault-shards" as const,
-      folder: ".rss-dashboard-data/feeds",
-      shardCount: 3,
-      feedCount: 3,
-      migrationReady: false,
-      lastRepairResult: "Migration completed",
-    }));
-    plugin.revertToLegacyJsonStorageWithOptions = vi
-      .fn()
-      .mockRejectedValueOnce(
-        new ShardFolderDeletionError(
-          ".rss-dashboard-data/feeds",
-          "Shard folder still exists after delete attempt",
-        ),
-      )
-      .mockResolvedValueOnce(undefined);
-
-    vi.spyOn(StorageTransitionModal.prototype, "open").mockImplementation(
-      () => {},
-    );
-    vi.spyOn(
-      StorageTransitionModal.prototype,
-      "waitForClose",
-    ).mockResolvedValue("apply-delete-shards");
-    vi.spyOn(ShardDeletionFailureModal.prototype, "open").mockImplementation(
-      () => {},
-    );
-    vi.spyOn(
-      ShardDeletionFailureModal.prototype,
-      "waitForClose",
-    ).mockResolvedValue("apply-anyway");
-
-    renderStorageSettingsTab(containerEl, plugin as never);
-
-    const storageModeSetting = getSettingByName(containerEl, "Storage mode");
-    const select = storageModeSetting.querySelector(
-      "select",
-    ) as HTMLSelectElement;
-    select.value = "legacy-json";
-    select.dispatchEvent(new Event("change"));
-
-    const applyButton = Array.from(containerEl.querySelectorAll("button")).find(
-      (button) => button.textContent === "Apply",
-    ) as HTMLButtonElement;
-
-    applyButton.click();
-    await flushAsyncWork();
-
-    expect(plugin.revertToLegacyJsonStorageWithOptions).toHaveBeenNthCalledWith(
-      1,
-      {
-        deleteShardFolder: true,
-      },
-    );
-    expect(plugin.revertToLegacyJsonStorageWithOptions).toHaveBeenNthCalledWith(
-      2,
-      {
-        deleteShardFolder: false,
-      },
-    );
-  });
-
-  it("can open the shard folder after delete failure before the user decides", async () => {
-    const containerEl = createTestContainer();
-    const plugin = createPlugin();
-    plugin.settings.storageMode = "vault-shards";
-    plugin.getStorageStatus = vi.fn(() => ({
-      mode: "vault-shards" as const,
-      folder: ".rss-dashboard-data/feeds",
-      shardCount: 3,
-      feedCount: 3,
-      migrationReady: false,
-      lastRepairResult: "Migration completed",
-    }));
-    plugin.revertToLegacyJsonStorageWithOptions = vi
-      .fn()
-      .mockRejectedValueOnce(
-        new ShardFolderDeletionError(
-          ".rss-dashboard-data/feeds",
-          "Shard folder still exists after delete attempt",
-        ),
-      );
-
-    vi.spyOn(StorageTransitionModal.prototype, "open").mockImplementation(
-      () => {},
-    );
-    vi.spyOn(
-      StorageTransitionModal.prototype,
-      "waitForClose",
-    ).mockResolvedValue("apply-delete-shards");
-    vi.spyOn(ShardDeletionFailureModal.prototype, "open").mockImplementation(
-      () => {},
-    );
-    vi.spyOn(ShardDeletionFailureModal.prototype, "waitForClose")
-      .mockResolvedValueOnce("open-folder")
-      .mockResolvedValueOnce("cancel");
-
-    renderStorageSettingsTab(containerEl, plugin as never);
-
-    const storageModeSetting = getSettingByName(containerEl, "Storage mode");
-    const select = storageModeSetting.querySelector(
-      "select",
-    ) as HTMLSelectElement;
-    select.value = "legacy-json";
-    select.dispatchEvent(new Event("change"));
-
-    const applyButton = Array.from(containerEl.querySelectorAll("button")).find(
-      (button) => button.textContent === "Apply",
-    ) as HTMLButtonElement;
-
-    applyButton.click();
-    await flushAsyncWork();
-
-    expect(plugin.openStorageFolderInSystem).toHaveBeenCalledWith(
-      ".rss-dashboard-data/feeds",
-    );
-    expect(plugin.revertToLegacyJsonStorageWithOptions).toHaveBeenCalledTimes(
-      1,
-    );
+    expect(plugin.revertToLegacyJsonStorage).toHaveBeenCalledTimes(1);
+    expect(plugin.revertToLegacyJsonStorage).toHaveBeenCalledWith();
   });
 
   it("updates the storage folder setting through a standard text input", async () => {

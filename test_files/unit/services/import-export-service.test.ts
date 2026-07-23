@@ -339,11 +339,41 @@ describe("ImportExportService", () => {
       );
     });
 
+    it("rejects the obsolete portable callback route instead of bypassing the queued public import", async () => {
+      const importPortableDataBundle = vi.fn().mockResolvedValue(undefined);
+      const svc = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        importPortableDataBundle,
+      } as ConstructorParameters<typeof ImportExportService>[0] & {
+        importPortableDataBundle: (bundle: unknown) => Promise<void>;
+      });
+      const file = new File(
+        [
+          JSON.stringify({
+            version: 1,
+            exportedAt: 123,
+            storageMode: "vault-shards",
+            metadata: { ...makeSettings(), feeds: [] },
+            shards: [],
+            markdownMirrorFallbackPlanned: false,
+          }),
+        ],
+        "portable-bundle.json",
+        { type: "application/json" },
+      );
+
+      await expect(svc.importPortableDataBundleFromFile(file)).rejects.toThrow(
+        "Portable bundle import is not available in this context",
+      );
+      expect(importPortableDataBundle).not.toHaveBeenCalled();
+    });
+
     it("throws a helpful error when bundle JSON is invalid", async () => {
       const svc = new ImportExportService({
         settings: makeSettings(),
         isMobile: false,
-        importPortableDataBundle: vi.fn().mockResolvedValue(undefined),
+        importPublicSettingsBundle: vi.fn().mockResolvedValue(undefined),
       });
 
       const file = new File(["{bad json"], "portable-bundle.json", {

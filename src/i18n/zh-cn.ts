@@ -835,7 +835,6 @@ export const zhCN = {
   "settings.storage.metadataDeleted": "已删除之前的 metadata data.json 副本。",
   "settings.storage.metadataDeleteFailed": "无法删除之前的元数据副本。",
   "settings.storage.metadataUpdateFailed": "无法更新元数据存储。",
-  "settings.storage.openFolderFailed": "无法打开分片文件夹。",
   "settings.storage.foldersReset": "文件夹名称已恢复为默认值。",
   "settings.modal.applyMaxTitle": "将条目数量上限应用到全部订阅源？",
   "settings.modal.applyMaxDesc":
@@ -853,18 +852,11 @@ export const zhCN = {
   "settings.modal.shardWrittenTo": "分片文件将写入：{folder}",
   "settings.modal.exportData": "导出 data.json",
   "settings.modal.v1ToLegacy": "你将从分片存储 v1 切换回旧版 data.json 存储。",
-  "settings.modal.legacyDeleteWarning":
-    "全部订阅源将再次存入 data.json。如果选择清理，将删除分片文件夹“{folder}”。",
-  "settings.modal.keepShardBackup": "也可以保留分片文件夹，作为手动备份。",
-  "settings.modal.leaveShard": "保留分片文件夹",
-  "settings.modal.deleteShard": "删除分片文件夹",
-  "settings.modal.shardDeleteTitle": "无法删除分片文件夹",
-  "settings.modal.shardDeleteDesc":
-    "分片文件夹“{folder}”仍然存在，因此已暂停切回旧版 JSON。",
-  "settings.modal.shardDeleteHelp":
-    "你可以打开文件夹后手动删除；也可以继续应用并保留 data.json，或取消且不改变存储模式。",
-  "settings.modal.openShard": "打开分片文件夹",
-  "settings.modal.applyAnyway": "仍然应用",
+  "settings.modal.legacyRecoveryCopyNotice":
+    "切换回 data.json 后，分片文件夹“{folder}”将始终保留为恢复副本。插件绝不会自动删除它。",
+  "settings.modal.manualShardCleanupHelp":
+    "如果之后想清理，请先手动确认文件夹路径，再到插件外自行删除。当前不提供自动清理。",
+  "settings.modal.switchKeepRecoveryCopy": "切换并保留恢复副本",
   "settings.modal.deletePreviousMetadata": "删除之前的元数据副本？",
   "settings.modal.metadataMigrated": "元数据迁移已成功完成。",
   "settings.modal.previousMetadata": "之前的 data.json 副本仍位于：{path}",

@@ -867,7 +867,6 @@ export const en = {
   "settings.storage.metadataDeleteFailed":
     "Could not delete the previous metadata copy.",
   "settings.storage.metadataUpdateFailed": "Could not update metadata storage.",
-  "settings.storage.openFolderFailed": "Could not open the shard folder.",
   "settings.storage.foldersReset": "Folder names restored to defaults.",
   "settings.modal.applyMaxTitle": "Apply max item limit to all feeds?",
   "settings.modal.applyMaxDesc":
@@ -888,19 +887,11 @@ export const en = {
   "settings.modal.exportData": "Export data.json",
   "settings.modal.v1ToLegacy":
     "You are switching from shard storage v1 back to legacy data.json storage.",
-  "settings.modal.legacyDeleteWarning":
-    'All feeds will be stored in data.json again. If you choose cleanup, the shard folder "{folder}" will be deleted.',
-  "settings.modal.keepShardBackup":
-    "You can also leave the shard folder in place if you want to keep it as a manual backup.",
-  "settings.modal.leaveShard": "Leave shard folder",
-  "settings.modal.deleteShard": "Delete shard folder",
-  "settings.modal.shardDeleteTitle": "Shard folder could not be deleted",
-  "settings.modal.shardDeleteDesc":
-    'The shard folder "{folder}" still exists, so the switch back to legacy JSON has been paused.',
-  "settings.modal.shardDeleteHelp":
-    "You can open the folder and delete it manually, continue anyway and keep using data.json, or cancel without changing storage modes.",
-  "settings.modal.openShard": "Open shard folder",
-  "settings.modal.applyAnyway": "Apply anyway",
+  "settings.modal.legacyRecoveryCopyNotice":
+    'After switching back to data.json, the shard folder "{folder}" will always be retained as a recovery copy. The plugin never deletes it automatically.',
+  "settings.modal.manualShardCleanupHelp":
+    "If you later choose to clean it up, first confirm the folder path manually and delete it outside the plugin. Automatic cleanup is not currently available.",
+  "settings.modal.switchKeepRecoveryCopy": "Switch and keep recovery copy",
   "settings.modal.deletePreviousMetadata": "Delete previous metadata copy?",
   "settings.modal.metadataMigrated":
     "Metadata migration completed successfully.",

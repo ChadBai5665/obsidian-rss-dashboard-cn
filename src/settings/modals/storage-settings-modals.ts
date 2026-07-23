@@ -5,13 +5,7 @@ import { createTranslator, type Locale } from "../../i18n";
 export type StorageTransitionAction =
   | "cancel"
   | "export-data-json"
-  | "apply"
-  | "apply-delete-shards";
-
-export type ShardDeletionFailureAction =
-  | "cancel"
-  | "apply-anyway"
-  | "open-folder";
+  | "apply";
 
 export type MetadataCleanupAction = "keep" | "delete";
 
@@ -129,10 +123,12 @@ export class StorageTransitionModal extends Modal {
       text: t("settings.modal.v1ToLegacy"),
     });
     contentEl.createEl("p", {
-      text: t("settings.modal.legacyDeleteWarning", { folder: this.storageFolder }),
+      text: t("settings.modal.legacyRecoveryCopyNotice", {
+        folder: this.storageFolder,
+      }),
     });
     contentEl.createEl("p", {
-      text: t("settings.modal.keepShardBackup"),
+      text: t("settings.modal.manualShardCleanupHelp"),
     });
 
     const buttonsSetting = new Setting(contentEl);
@@ -146,90 +142,14 @@ export class StorageTransitionModal extends Modal {
         }),
       )
       .addButton((btn) =>
-        btn.setButtonText(t("settings.modal.leaveShard")).onClick(() => {
-          this.action = "apply";
-          this.close();
-        }),
-      )
-      .addButton((btn) =>
         btn
-          .setButtonText(t("settings.modal.deleteShard"))
-          .setWarning()
+          .setButtonText(t("settings.modal.switchKeepRecoveryCopy"))
+          .setCta()
           .onClick(() => {
-            this.action = "apply-delete-shards";
+            this.action = "apply";
             this.close();
           }),
       );
-  }
-}
-
-export class ShardDeletionFailureModal extends Modal {
-  private readonly storageFolder: string;
-  private action: ShardDeletionFailureAction = "cancel";
-  private resolvePromise: ((value: ShardDeletionFailureAction) => void) | null =
-    null;
-
-  constructor(
-    app: App,
-    storageFolder: string,
-    private readonly locale: Locale = "zh-CN",
-  ) {
-    super(app);
-    this.storageFolder = storageFolder;
-  }
-
-  onOpen(): void {
-    const t = createTranslator(this.locale);
-    const { contentEl } = this;
-    contentEl.empty();
-
-    this.modalEl.addClass("rss-dashboard-modal");
-    this.modalEl.addClass("rss-dashboard-modal-container");
-
-    contentEl.createEl("h2", { text: t("settings.modal.shardDeleteTitle") });
-    contentEl.createEl("p", {
-      text: t("settings.modal.shardDeleteDesc", { folder: this.storageFolder }),
-    });
-    contentEl.createEl("p", {
-      text: t("settings.modal.shardDeleteHelp"),
-    });
-
-    const buttonsSetting = new Setting(contentEl);
-    buttonsSetting.controlEl.addClass("rss-dashboard-modal-buttons");
-    buttonsSetting
-      .addButton((btn) =>
-        btn.setButtonText(t("common.cancel")).onClick(() => {
-          this.action = "cancel";
-          this.close();
-        }),
-      )
-      .addButton((btn) =>
-        btn.setButtonText(t("settings.modal.openShard")).onClick(() => {
-          this.action = "open-folder";
-          this.close();
-        }),
-      )
-      .addButton((btn) =>
-        btn
-          .setButtonText(t("settings.modal.applyAnyway"))
-          .setWarning()
-          .onClick(() => {
-            this.action = "apply-anyway";
-            this.close();
-          }),
-      );
-  }
-
-  onClose(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    this.resolvePromise?.(this.action);
-  }
-
-  waitForClose(): Promise<ShardDeletionFailureAction> {
-    return new Promise((resolve) => {
-      this.resolvePromise = resolve;
-    });
   }
 }
 

@@ -32,7 +32,6 @@ export class ImportExportService {
   private settings: RssDashboardSettings;
   private isMobile: boolean;
   private getPortableDataBundle?: () => PortableDataBundle;
-  private importPortableDataBundle?: (bundle: unknown) => Promise<void>;
   private importPublicSettingsBundle?: (settings: unknown) => Promise<void>;
   private readonly getSafeDiagnosticsInput?: () => SafeDiagnosticsInput;
   private readonly getLocale: () => Locale;
@@ -46,7 +45,6 @@ export class ImportExportService {
     settings: RssDashboardSettings;
     isMobile: boolean;
     getPortableDataBundle?: () => PortableDataBundle;
-    importPortableDataBundle?: (bundle: unknown) => Promise<void>;
     importPublicSettingsBundle?: (settings: unknown) => Promise<void>;
     getSafeDiagnosticsInput?: () => SafeDiagnosticsInput;
     createDiagnosticsToken?: () => string;
@@ -57,7 +55,6 @@ export class ImportExportService {
     this.settings = options.settings;
     this.isMobile = options.isMobile;
     this.getPortableDataBundle = options.getPortableDataBundle;
-    this.importPortableDataBundle = options.importPortableDataBundle;
     this.importPublicSettingsBundle = options.importPublicSettingsBundle;
     this.getSafeDiagnosticsInput = options.getSafeDiagnosticsInput;
     this.createDiagnosticsToken =
@@ -172,7 +169,7 @@ export class ImportExportService {
       );
     }
 
-    if (!this.importPublicSettingsBundle && !this.importPortableDataBundle) {
+    if (!this.importPublicSettingsBundle) {
       throw new Error(
         "Portable bundle import is not available in this context",
       );
@@ -181,14 +178,7 @@ export class ImportExportService {
     const importedSettings = preparePublicSettingsImport(bundle.metadata, {
       includeSources: true,
     });
-    if (this.importPublicSettingsBundle) {
-      await this.importPublicSettingsBundle(importedSettings);
-    } else {
-      await this.importPortableDataBundle?.({
-        ...bundle,
-        metadata: importedSettings,
-      });
-    }
+    await this.importPublicSettingsBundle(importedSettings);
     new Notice(this.t("service.import.portableImported"));
   }
 

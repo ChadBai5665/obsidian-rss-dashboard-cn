@@ -4,11 +4,11 @@
     "reason": "OPML is the standardized file format name and must remain unchanged in every locale."
   },
   {
-    "pattern": "src/settings/tabs/storage-settings-tab.ts:358:setPlaceholder:.rss-dashboard-data/feeds",
+    "pattern": "src/settings/tabs/storage-settings-tab.ts:320:setPlaceholder:.rss-dashboard-data/feeds",
     "reason": "This is a literal default vault-relative storage path, not interface prose."
   },
   {
-    "pattern": "src/settings/tabs/storage-settings-tab.ts:610:setPlaceholder:.rss-dashboard-data",
+    "pattern": "src/settings/tabs/storage-settings-tab.ts:547:setPlaceholder:.rss-dashboard-data",
     "reason": "This is a literal default vault-relative metadata path, not interface prose."
   },
   {

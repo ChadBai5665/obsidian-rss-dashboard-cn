@@ -58,7 +58,6 @@ import {
   type FeedStorageStatus,
   FeedStorageCandidateVerificationError,
   FeedStorageRollbackIncompleteError,
-  ShardFolderDeletionError,
 } from "./src/services/feed-storage-repository";
 import { ImportExportService } from "./src/services/import-export-service";
 import { BackgroundImportService } from "./src/services/background-import-service";
@@ -198,7 +197,6 @@ function storageError(
 ): void {}
 
 type DesktopRequire = (moduleName: string) => unknown;
-type DesktopShell = { openPath: (path: string) => Promise<string> };
 type PathModuleLike = { join: (...paths: string[]) => string };
 type VaultAdapterPathAccess = {
   getBasePath?: () => string;
@@ -610,10 +608,6 @@ function isLegacyPlaybackProgressEntry(
   );
 }
 
-function isDesktopShell(value: unknown): value is DesktopShell {
-  return isRecord(value) && typeof value.openPath === "function";
-}
-
 function isPathModuleLike(value: unknown): value is PathModuleLike {
   return isRecord(value) && typeof value.join === "function";
 }
@@ -623,14 +617,6 @@ function getRequireFunction(): DesktopRequire | undefined {
   return typeof desktopWindow.require === "function"
     ? desktopWindow.require
     : undefined;
-}
-
-function getShellFromModule(value: unknown): DesktopShell | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-
-  return isDesktopShell(value.shell) ? value.shell : undefined;
 }
 
 // Re-exported for backward compatibility with callers that import from main.ts
@@ -875,8 +861,6 @@ export default class RssDashboardPlugin extends Plugin {
       settings: this.settings,
       isMobile: Platform.isMobileApp,
       getPortableDataBundle: () => this.getPortableDataBundle(),
-      importPortableDataBundle: (bundle) =>
-        this.applyPortableDataBundleImport(bundle),
       importPublicSettingsBundle: (settings) =>
         this.applyPublicSettingsImport(settings),
       getLocale: () => this.settings.locale,
@@ -3461,35 +3445,6 @@ export default class RssDashboardPlugin extends Plugin {
     return this.feedStorageRepository.buildPortableDataBundle(this.settings);
   }
 
-  private async applyPortableDataBundleImport(bundle: unknown): Promise<void> {
-    storageLog("Plugin portable bundle import requested", {
-      currentMode: this.settings.storageMode,
-      folder: this.settings.storageFolder,
-      feedCount: this.settings.feeds.length,
-    });
-
-    try {
-      const candidate =
-        this.feedStorageRepository.buildPortableDataBundleCandidate(
-        bundle,
-        this.settings,
-      );
-      await this.commitSettingsImport(() => candidate);
-
-      storageLog("Plugin portable bundle import completed", {
-        currentMode: this.settings.storageMode,
-        folder: this.settings.storageFolder,
-        feedCount: this.settings.feeds.length,
-      });
-    } catch (error) {
-      storageError("Plugin portable bundle import failed", error, {
-        currentMode: this.settings.storageMode,
-        folder: this.settings.storageFolder,
-      });
-      throw error instanceof Error ? error : new Error(String(error));
-    }
-  }
-
   private async applyPublicSettingsImport(snapshot: unknown): Promise<void> {
     const imported = cloneStableOwnData(
       snapshot,
@@ -3732,29 +3687,19 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   public async revertToLegacyJsonStorage(): Promise<void> {
-    return this.revertToLegacyJsonStorageWithOptions();
-  }
-
-  public async revertToLegacyJsonStorageWithOptions(options?: {
-    deleteShardFolder?: boolean;
-  }): Promise<void> {
     return this.enqueueSettingsOperation(() =>
-      this.revertToLegacyJsonStorageWithOptionsUnlocked(options),
+      this.revertToLegacyJsonStorageUnlocked(),
     );
   }
 
-  private async revertToLegacyJsonStorageWithOptionsUnlocked(options?: {
-    deleteShardFolder?: boolean;
-  }): Promise<void> {
+  private async revertToLegacyJsonStorageUnlocked(): Promise<void> {
     storageLog("Plugin revert requested", {
       currentMode: this.settings.storageMode,
       folder: this.settings.storageFolder,
       feedCount: this.settings.feeds.length,
-      deleteShardFolder: Boolean(options?.deleteShardFolder),
     });
 
     try {
-      void options;
       await this.commitSettingsCandidateUnlocked((previous) =>
         this.feedStorageRepository.buildLegacyJsonCandidate(previous),
       );
@@ -3768,51 +3713,6 @@ export default class RssDashboardPlugin extends Plugin {
         folder: this.settings.storageFolder,
       });
       throw error;
-    }
-  }
-
-  // ✅ ImportExportService extracted — all 875 tests passing
-
-  // ✅ FolderService extracted — delegates to service
-  public isShardFolderDeletionError(
-    error: unknown,
-  ): error is ShardFolderDeletionError {
-    return error instanceof ShardFolderDeletionError;
-  }
-
-  public async openStorageFolderInSystem(folderPath?: string): Promise<void> {
-    const targetFolder = (folderPath ?? this.settings.storageFolder).trim();
-    if (!targetFolder) {
-      throw new Error("Storage folder path is empty.");
-    }
-
-    try {
-      const requireFn = getRequireFunction();
-      const shell =
-        getShellFromModule(requireFn?.("@electron/remote")) ??
-        getShellFromModule(requireFn?.("electron"));
-      const pathModule = requireFn?.("path");
-      const adapter = this.app.vault.adapter as VaultAdapterPathAccess;
-      const basePath =
-        typeof adapter.getBasePath === "function"
-          ? adapter.getBasePath()
-          : typeof adapter.getFullPath === "function"
-            ? adapter.getFullPath(".")
-            : "";
-
-      if (!shell || !isPathModuleLike(pathModule) || !basePath) {
-        throw new Error("Open folder is only available on desktop vaults.");
-      }
-
-      const fullPath = pathModule.join(basePath, targetFolder);
-      const openResult = await shell.openPath(fullPath);
-      if (typeof openResult === "string" && openResult.trim().length > 0) {
-        throw new Error(openResult);
-      }
-    } catch (error) {
-      throw error instanceof Error
-        ? error
-        : new Error("Failed to open shard folder.");
     }
   }
 

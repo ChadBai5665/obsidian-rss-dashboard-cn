@@ -62,16 +62,6 @@ export interface SettingsMetadataTargets {
   readonly vaultDataPath?: string;
 }
 
-export class ShardFolderDeletionError extends Error {
-  public readonly folderPath: string;
-
-  constructor(folderPath: string, message?: string) {
-    super(message ?? `Failed to delete shard folder: ${folderPath}`);
-    this.name = "ShardFolderDeletionError";
-    this.folderPath = folderPath;
-  }
-}
-
 export class FeedStorageRollbackIncompleteError extends Error {
   constructor() {
     super("Feed storage rollback incomplete");

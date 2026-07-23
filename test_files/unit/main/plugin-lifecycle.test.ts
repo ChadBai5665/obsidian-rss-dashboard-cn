@@ -2448,7 +2448,7 @@ describe("storage transition orchestration", () => {
     });
   }
 
-  it("revertToLegacyJsonStorageWithOptions refreshes dashboards before settings redisplay", async () => {
+  it("revertToLegacyJsonStorage refreshes dashboards before settings redisplay", async () => {
     const displaySpy = vi.fn();
     (plugin as unknown as { settingTab: { display: () => void } }).settingTab =
       {
@@ -2480,9 +2480,7 @@ describe("storage transition orchestration", () => {
       .spyOn(plugin, "refreshDashboardViews")
       .mockResolvedValue(undefined);
 
-    await plugin.revertToLegacyJsonStorageWithOptions({
-      deleteShardFolder: false,
-    });
+    await plugin.revertToLegacyJsonStorage();
 
     expect(repoSpy).toHaveBeenCalledTimes(1);
     expect(initSpy).toHaveBeenCalledTimes(1);
@@ -2686,9 +2684,7 @@ describe("storage transition orchestration", () => {
     );
 
     await expect(
-      plugin.revertToLegacyJsonStorageWithOptions({
-        deleteShardFolder: true,
-      }),
+      plugin.revertToLegacyJsonStorage(),
     ).rejects.toThrow("revert-metadata-failure");
 
     expect(plugin.settings).toBe(previousSettings);
@@ -2721,9 +2717,7 @@ describe("storage transition orchestration", () => {
     );
 
     await expect(
-      plugin.revertToLegacyJsonStorageWithOptions({
-        deleteShardFolder: true,
-      }),
+      plugin.revertToLegacyJsonStorage(),
     ).rejects.toThrow("revert-refresh-failure");
 
     expect(plugin.settings).toBe(previousSettings);
@@ -2752,9 +2746,7 @@ describe("storage transition orchestration", () => {
       "FOREIGN",
     );
 
-    await plugin.revertToLegacyJsonStorageWithOptions({
-      deleteShardFolder: true,
-    });
+    await plugin.revertToLegacyJsonStorage();
 
     expect(plugin.settings.storageMode).toBe("legacy-json");
     expect(
