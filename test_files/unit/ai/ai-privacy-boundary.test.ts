@@ -19,6 +19,7 @@ vi.mock("../../../src/security/desktop-secret-store", () => ({
 import RssDashboardPlugin from "../../../main";
 import { AnalysisRepository } from "../../../src/ai/analysis-repository";
 import { createAiConnection } from "../../../src/ai/provider-presets";
+import { ContentRepository } from "../../../src/collection/content-repository";
 import { createCollectedItemId } from "../../../src/collection/item-identity";
 import {
   DEFAULT_SETTINGS,
@@ -50,6 +51,7 @@ const UNRELATED_CANARIES = [
   "UNRELATED_ITEM_AUTHOR_CANARY",
   "UNRELATED_ITEM_DESCRIPTION_CANARY",
   "UNRELATED_ITEM_FULL_TEXT_CANARY",
+  "UNRELATED_CONTENT_REPOSITORY_CANARY",
   UNRELATED_FEED_TITLE,
   "UNRELATED_SOURCE_FOLDER_CANARY",
   "UNRELATED_GLOBAL_FOLDER_CANARY",
@@ -207,6 +209,19 @@ function harness() {
   return { app, plugin, settings, selected, selectedFeed, unrelated };
 }
 
+function installArticleSaver(
+  test: ReturnType<typeof harness>,
+  savedFile?: Awaited<ReturnType<App["vault"]["create"]>>,
+) {
+  const saveArticle = vi.fn(async () => savedFile ?? null);
+  const saveArticleWithFullContent = vi.fn(async () => savedFile ?? null);
+  test.plugin.articleSaver = {
+    saveArticle,
+    saveArticleWithFullContent,
+  } as unknown as RssDashboardPlugin["articleSaver"];
+  return { saveArticle, saveArticleWithFullContent };
+}
+
 async function seedHostileState(test: ReturnType<typeof harness>): Promise<void> {
   installAtomicAdapter(test.app);
   await test.app.vault.createFolder("Notes");
@@ -237,6 +252,26 @@ async function seedHostileState(test: ReturnType<typeof harness>): Promise<void>
     "https://articles.example.invalid/UNRELATED_ITEM_URL_CANARY";
   test.unrelated.author = "UNRELATED_ITEM_AUTHOR_CANARY";
   test.unrelated.description = "UNRELATED_ITEM_DESCRIPTION_CANARY";
+  const unrelatedId = createCollectedItemId({
+    sourceId: "unrelated-feed-id",
+    guid: test.unrelated.guid,
+    url: test.unrelated.link,
+    title: test.unrelated.title,
+    author: test.unrelated.author,
+    publishedAt: test.unrelated.pubDate,
+  });
+  await new ContentRepository(
+    test.app.vault,
+    test.settings.collection.dataFolder,
+    () => new Date("2026-07-23T02:00:00.000Z"),
+  ).write({
+    schemaVersion: 1,
+    itemId: unrelatedId,
+    sourceUrl: test.unrelated.link,
+    fetchedAt: "2026-07-23T02:00:00.000Z",
+    contentBasis: "full-text",
+    text: "UNRELATED_CONTENT_REPOSITORY_CANARY",
+  });
   test.settings.folders = [{
     name: "UNRELATED_GLOBAL_FOLDER_CANARY",
     subfolders: [],
@@ -300,6 +335,184 @@ beforeEach(() => {
 });
 
 describe("AI privacy boundary", () => {
+  it("fails closed when a detached item source ID matches more than one feed", () => {
+    const test = harness();
+    const saver = installArticleSaver(test);
+    const detached = structuredClone(test.selected);
+    test.settings.feeds[0].feedId = "selected-feed-id";
+    const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+    const modal = test.plugin.openAiOperationForItem(detached, "summary");
+
+    expect(modal).toBeNull();
+    expect(requestUrl).not.toHaveBeenCalled();
+    expect(secretState.reads).toEqual([]);
+    expect(saver.saveArticle).not.toHaveBeenCalled();
+    expect(saver.saveArticleWithFullContent).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the same FeedItem object is held by more than one feed", () => {
+    const test = harness();
+    const saver = installArticleSaver(test);
+    test.settings.feeds[0].items.push(test.selected);
+    const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+
+    expect(modal).toBeNull();
+    expect(requestUrl).not.toHaveBeenCalled();
+    expect(secretState.reads).toEqual([]);
+    expect(saver.saveArticle).not.toHaveBeenCalled();
+    expect(saver.saveArticleWithFullContent).not.toHaveBeenCalled();
+  });
+
+  it.each(["reference", "source-id", "url"] as const)(
+    "sends the selected source only when the %s identity is unique",
+    async (identity) => {
+      const test = harness();
+      installAtomicAdapter(test.app);
+      let selected = test.selected;
+      if (identity !== "reference") selected = structuredClone(test.selected);
+      if (identity === "url") {
+        delete selected.rssDashboardSourceId;
+        test.settings.feeds[0].url =
+          "https://feeds.example.invalid/unrelated-only.xml";
+      }
+      const requestUrl = vi.spyOn(obsidian, "requestUrl")
+        .mockResolvedValue(responseWithText(`safe ${identity} analysis`));
+
+      const modal = test.plugin.openAiOperationForItem(selected, "summary");
+      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+        SELECTED_FEED_TITLE,
+      ));
+      button(modal!.contentEl, "确认发送").click();
+      await vi.waitFor(() => expect(requestUrl).toHaveBeenCalledTimes(1));
+
+      expect(outboundUserPayload(requestUrl)).toMatchObject({
+        title: "SELECTED_ITEM_TITLE_CANARY",
+        sourceName: SELECTED_FEED_TITLE,
+        content: "SELECTED_ITEM_TITLE_CANARY description",
+      });
+      expect(requestUrl.mock.calls[0]?.[0].body).not.toContain(
+        UNRELATED_FEED_TITLE,
+      );
+      modal?.close();
+    },
+  );
+
+  it("keeps save-first bound to the feed resolved when the AI modal opened", async () => {
+    const test = harness();
+    const detached = structuredClone(test.selected);
+    installAtomicAdapter(test.app);
+    await test.app.vault.createFolder("Notes");
+    const savedFile = await test.app.vault.create(
+      "Notes/selected-source.md",
+      "saved selected source",
+    );
+    test.settings.feeds[0].customTemplate = "unrelated-template";
+    test.selectedFeed.customTemplate = "selected-template";
+    test.settings.articleSaving.savedTemplates = [
+      {
+        id: "unrelated-template",
+        name: "Unrelated template",
+        template: "UNRELATED_SAVE_TEMPLATE_CANARY",
+      },
+      {
+        id: "selected-template",
+        name: "Selected template",
+        template: "SELECTED_SAVE_TEMPLATE_CANARY",
+      },
+    ];
+    const saver = installArticleSaver(test, savedFile);
+    const requestUrl = vi.spyOn(obsidian, "requestUrl")
+      .mockResolvedValue(responseWithText("safe save-first analysis"));
+
+    const modal = test.plugin.openAiOperationForItem(detached, "summary");
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      SELECTED_FEED_TITLE,
+    ));
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "先保存原文",
+    ));
+    detached.feedUrl = "";
+    button(modal!.contentEl, "先保存原文").click();
+    await vi.waitFor(() => expect(
+      saver.saveArticleWithFullContent,
+    ).toHaveBeenCalledTimes(1));
+
+    expect(saver.saveArticleWithFullContent).toHaveBeenCalledWith(
+      detached,
+      undefined,
+      "SELECTED_SAVE_TEMPLATE_CANARY",
+    );
+    expect(requestUrl).toHaveBeenCalledTimes(1);
+    expect(saver.saveArticle).not.toHaveBeenCalled();
+    expect(test.selected.saved).toBe(true);
+    expect(test.selected.savedFilePath).toBe(savedFile.path);
+    modal?.close();
+  });
+
+  it("never invokes an own source-identity accessor and fails closed", () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    const detached = structuredClone(test.selected);
+    delete detached.rssDashboardSourceId;
+    test.settings.feeds[0].url =
+      "https://feeds.example.invalid/unrelated-only.xml";
+    let getterCalls = 0;
+    Object.defineProperty(detached, "rssDashboardSourceId", {
+      configurable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("source identity getter must not run");
+      },
+    });
+    const requestUrl = vi.spyOn(obsidian, "requestUrl");
+
+    const modal = test.plugin.openAiOperationForItem(detached, "summary");
+
+    expect(modal).toBeNull();
+    expect(getterCalls).toBe(0);
+    expect(requestUrl).not.toHaveBeenCalled();
+    expect(secretState.reads).toEqual([]);
+  });
+
+  it("never invokes candidate feed identity accessors", async () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    const detached = structuredClone(test.selected);
+    detached.rssDashboardSourceId = "accessor-only-id";
+    let getterCalls = 0;
+    Object.defineProperty(test.settings.feeds[0], "feedId", {
+      configurable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("candidate feed ID getter must not run");
+      },
+    });
+    Object.defineProperty(test.settings.feeds[0], "url", {
+      configurable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("candidate feed URL getter must not run");
+      },
+    });
+    const requestUrl = vi.spyOn(obsidian, "requestUrl")
+      .mockResolvedValue(responseWithText("safe candidate-accessor analysis"));
+
+    const modal = test.plugin.openAiOperationForItem(detached, "summary");
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      SELECTED_FEED_TITLE,
+    ));
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(requestUrl).toHaveBeenCalledTimes(1));
+
+    expect(getterCalls).toBe(0);
+    expect(outboundUserPayload(requestUrl).sourceName).toBe(SELECTED_FEED_TITLE);
+    modal?.close();
+  });
+
   it("fails closed for an unbound detached item when duplicate feed URLs are ambiguous", () => {
     const test = harness();
     const detached = structuredClone(test.selected);

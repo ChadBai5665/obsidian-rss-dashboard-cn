@@ -153,17 +153,23 @@ export interface FiltersUpdatedEventPayload {
  * first source and leak its metadata into an AI request.
  */
 function resolveAiOwningFeed(feeds: Feed[], item: FeedItem): Feed | undefined {
-  const referenceMatch = feeds.find((candidate) =>
-    candidate.items.includes(item));
-  if (referenceMatch) return referenceMatch;
+  if (hasOwnAccessor(item, "rssDashboardSourceId")) return undefined;
+  const referenceMatches = feeds.filter((candidate) =>
+    feedContainsItemReference(candidate, item));
+  if (referenceMatches.length > 0) {
+    return referenceMatches.length === 1 ? referenceMatches[0] : undefined;
+  }
 
   const sourceId = ownStringData(item, "rssDashboardSourceId")?.trim();
   if (sourceId) {
-    return feeds.find((candidate) => {
+    const sourceMatches = feeds.filter((candidate) => {
       const feedId = ownStringData(candidate, "feedId")?.trim();
       const feedUrl = ownStringData(candidate, "url")?.trim();
       return (feedId || feedUrl) === sourceId;
     });
+    if (sourceMatches.length > 0) {
+      return sourceMatches.length === 1 ? sourceMatches[0] : undefined;
+    }
   }
 
   const itemFeedUrl = ownStringData(item, "feedUrl");
@@ -171,6 +177,27 @@ function resolveAiOwningFeed(feeds: Feed[], item: FeedItem): Feed | undefined {
   const urlMatches = feeds.filter((candidate) =>
     ownStringData(candidate, "url") === itemFeedUrl);
   return urlMatches.length === 1 ? urlMatches[0] : undefined;
+}
+
+function feedContainsItemReference(feed: Feed, item: FeedItem): boolean {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(feed, "items");
+    return Boolean(
+      descriptor && "value" in descriptor && Array.isArray(descriptor.value) &&
+      Array.prototype.includes.call(descriptor.value, item),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasOwnAccessor(value: object, key: string): boolean {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return Boolean(descriptor && !("value" in descriptor));
+  } catch {
+    return true;
+  }
 }
 
 function ownStringData(value: object, key: string): string | undefined {
@@ -1545,7 +1572,7 @@ export default class RssDashboardPlugin extends Plugin {
               await this.openAiVaultFile(notePath, marker);
             },
             saveArticleFirst: options.saveArticleFirst ?? (() =>
-              this.saveArticleForAiInsertion(item)),
+              this.saveArticleForAiInsertion(item, feed)),
           });
         },
       });
@@ -1564,11 +1591,11 @@ export default class RssDashboardPlugin extends Plugin {
       : undefined;
   }
 
-  private async saveArticleForAiInsertion(item: FeedItem): Promise<void> {
-    const feed = this.settings.feeds.find(
-      (candidate) => candidate.url === item.feedUrl,
-    );
-    const template = feed?.customTemplate
+  private async saveArticleForAiInsertion(
+    item: FeedItem,
+    feed: Feed,
+  ): Promise<void> {
+    const template = feed.customTemplate
       ? this.settings.articleSaving.savedTemplates.find(
           ({ id }) => id === feed.customTemplate,
         )?.template
@@ -1583,7 +1610,7 @@ export default class RssDashboardPlugin extends Plugin {
     if (!file) throw new Error("The source article could not be saved");
     item.saved = true;
     item.savedFilePath = file.path;
-    await this.onArticleSaved(item);
+    await this.onArticleSaved(item, feed);
   }
 
   private async openAiVaultFile(path: string, marker?: string): Promise<void> {
@@ -2056,53 +2083,57 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  private async onArticleSaved(item: FeedItem): Promise<void> {
-    if (item.feedUrl) {
-      const feed = this.settings.feeds.find((f) => f.url === item.feedUrl);
-      if (feed) {
-        const originalItem = feed.items.find((i) => i.guid === item.guid);
-        if (originalItem) {
-          originalItem.saved = true;
-          originalItem.savedFilePath = item.savedFilePath;
+  private async onArticleSaved(
+    item: FeedItem,
+    resolvedFeed?: Feed,
+  ): Promise<void> {
+    const feed = resolvedFeed ?? (item.feedUrl
+      ? this.settings.feeds.find(
+          (candidate) => candidate.url === item.feedUrl,
+        )
+      : undefined);
+    if (!feed) return;
+    const originalItem = feed.items.find((i) => i.guid === item.guid);
+    if (originalItem) {
+      originalItem.saved = true;
+      originalItem.savedFilePath = item.savedFilePath;
 
-          if (this.settings.articleSaving.addSavedTag) {
-            if (!originalItem.tags) {
-              originalItem.tags = [];
-            }
+      if (this.settings.articleSaving.addSavedTag) {
+        if (!originalItem.tags) {
+          originalItem.tags = [];
+        }
 
-            if (
-              !originalItem.tags.some((t) => t.name.toLowerCase() === "saved")
-            ) {
-              const savedTag = this.settings.availableTags.find(
-                (t) => t.name.toLowerCase() === "saved",
-              );
-              if (savedTag) {
-                originalItem.tags.push({ ...savedTag });
-              } else {
-                originalItem.tags.push({ name: "saved", color: "#3498db" });
-              }
-            }
-          }
-
-          await this.saveSettings();
-
-          await this.syncDashboardArticleUpdate(
-            item.guid,
-            item.feedUrl,
-            {
-              saved: true,
-              savedFilePath: originalItem.savedFilePath,
-              tags: originalItem.tags ? [...originalItem.tags] : [],
-            },
-            false,
+        if (
+          !originalItem.tags.some((t) => t.name.toLowerCase() === "saved")
+        ) {
+          const savedTag = this.settings.availableTags.find(
+            (t) => t.name.toLowerCase() === "saved",
           );
-          await this.syncReaderArticleUpdate(item.guid, {
-            saved: true,
-            savedFilePath: originalItem.savedFilePath,
-            tags: originalItem.tags ? [...originalItem.tags] : [],
-          });
+          if (savedTag) {
+            originalItem.tags.push({ ...savedTag });
+          } else {
+            originalItem.tags.push({ name: "saved", color: "#3498db" });
+          }
         }
       }
+
+      await this.saveSettings();
+
+      await this.syncDashboardArticleUpdate(
+        item.guid,
+        feed.url,
+        {
+          saved: true,
+          savedFilePath: originalItem.savedFilePath,
+          tags: originalItem.tags ? [...originalItem.tags] : [],
+        },
+        false,
+      );
+      await this.syncReaderArticleUpdate(item.guid, {
+        saved: true,
+        savedFilePath: originalItem.savedFilePath,
+        tags: originalItem.tags ? [...originalItem.tags] : [],
+      });
     }
   }
 
