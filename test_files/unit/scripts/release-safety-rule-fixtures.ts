@@ -5,6 +5,23 @@ export const unsafeReleaseTextCases = [
   { rule: "credential-value", text: "access-key: abcdefghijklmnop" },
   { rule: "credential-value", text: 'key = "plain-secret-value"' },
   { rule: "credential-value", text: 'key = "abcdefghijklmnop"' },
+  {
+    line: 2,
+    rule: "credential-value",
+    text: 'prefix\nkey = "abcdefghijklmnop"',
+  },
+  {
+    rule: "credential-value",
+    text: 'prefix; key = "abcdefghijklmnop"',
+  },
+  {
+    rule: "credential-value",
+    text: 'const options = { key: "abcdefghijklmnop" };',
+  },
+  {
+    rule: "credential-value",
+    text: "const options = { key: abcdefghijklmnop };",
+  },
   { rule: "credential-value", text: "CLIENT-SECRET: abcdefghijklmnop" },
   { rule: "credential-value", text: "refresh token=abcdefghijklmnop" },
   { rule: "credential-value", text: "Private_Key = abcdefghijklmnop" },
@@ -48,4 +65,6 @@ export const safeReleaseTextCases = [
   "headers.Authorization = `Bearer ${apiKey}`;",
   "The key idea is ordinary prose, not an assignment.",
   "Map key ordering remains stable.",
+  "interface Options { key: string; }",
+  'const options = { key: "id" };',
 ] as const;

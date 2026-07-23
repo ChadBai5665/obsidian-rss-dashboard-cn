@@ -39,6 +39,9 @@ export function decodePercentLayers(value) {
 }
 
 function hasCredentialAssignment(value) {
+  if (/[\r\n]/.test(value)) {
+    return value.split(/\r\n?|\n/).some(hasCredentialAssignment);
+  }
   if (
     /\bauthorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+(?!\$\{)[A-Za-z0-9._~+/-]{4,}/i.test(
       value,
@@ -60,25 +63,37 @@ function hasCredentialAssignment(value) {
       (raw.startsWith("'") && raw.includes("'", 1));
     const normalized = raw
       .replace(/^["'`]/, "")
-      .replace(/["'`)\]]+$/, "")
+      .replace(/["'`)]+$/, "")
       .trim();
     if (normalized.length < 4) continue;
     if (
       !quoted &&
       (/^[A-Za-z_$][\w$]*\.[\w$.]+$/.test(normalized) ||
         SAFE_RUNTIME_IDENTIFIERS.has(normalized.toLowerCase()) ||
+        /^(?:string|number|boolean|unknown|PropertyKey|TranslationKey)(?:\s*\|\s*(?:undefined|null))*\b/.test(
+          normalized,
+        ) ||
         /^(?:await\s+)?[A-Za-z_$][\w$]*\s*\(/.test(normalized) ||
-        /^[A-Za-z_$][\w$]*(?:\.[\w$]+)+\s*\(/.test(normalized) ||
+        /^(?:await\s+)?[A-Za-z_$][\w$]*(?:\.[\w$]+)+\s*\(/.test(
+          normalized,
+        ) ||
+        /^[A-Za-z_$][\w$]*\s+as\s+[A-Za-z_$][\w$]*$/.test(normalized) ||
+        /^[A-Za-z_$][\w$]*(?:\[[^\]]+\])+(?:\.[\w$]+)*$/.test(
+          normalized,
+        ) ||
+        /^typeof\s+/.test(normalized) ||
+        /^[A-Za-z_$][\w$]*(?:\?\.[\w$]+|\.[\w$]+)+(?:\s*\?\?.*)?$/.test(
+          normalized,
+        ) ||
         /^[{[(]/.test(normalized))
     ) {
       continue;
     }
     if (isBareKey) {
-      const directAssignment =
-        /^\s*(?:(?:const|let|var)\s+)?["']?key["']?\s*[:=]/i.test(value);
       const credentialShaped =
-        !/\s/.test(normalized) && /[-_\d]/.test(normalized);
-      if (!directAssignment && !credentialShaped) continue;
+        /^[a-z0-9_-]{12,}$/.test(normalized) ||
+        /^[A-Za-z0-9+/_=-]{24,}$/.test(normalized);
+      if (!credentialShaped) continue;
     }
     return true;
   }

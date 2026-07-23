@@ -384,11 +384,9 @@ describe("public repository scanner", () => {
 
   it("uses the shared adversarial sensitive-content rules without header false positives", async () => {
     const repository = await temporaryRepository();
-    await track(
-      repository,
-      "unsafe.txt",
-      unsafeReleaseTextCases.map(({ text }) => text).join("\n"),
-    );
+    for (const [index, { text }] of unsafeReleaseTextCases.entries()) {
+      await track(repository, `unsafe/${index}.txt`, text);
+    }
     await track(repository, "safe.txt", safeReleaseTextCases.join("\n"));
 
     const result = await scanPublicRepository({
@@ -396,8 +394,10 @@ describe("public repository scanner", () => {
       allowlistPath: await writeAllowlist(repository, []),
     });
 
-    for (const [index, { rule }] of unsafeReleaseTextCases.entries()) {
-      expect(result.output).toContain(`${rule} unsafe.txt:${index + 1}`);
+    for (const [index, fixture] of unsafeReleaseTextCases.entries()) {
+      expect(result.output).toContain(
+        `${fixture.rule} unsafe/${index}.txt:${"line" in fixture ? fixture.line : 1}`,
+      );
     }
     expect(result.output).not.toMatch(/(?:^|\s)safe\.txt:/);
   });
@@ -510,5 +510,14 @@ describe("public repository scanner", () => {
         .filter((entry) => entry.path.startsWith("docs/"))
         .every((entry) => !/\btest fixture\b/i.test(entry.reason)),
     ).toBe(true);
+    expect(
+      entries.filter(
+        (entry) =>
+          /(?:^|\/)(?:src\/i18n\/|[^/]*(?:shortcut|tag-utils|filter-title)[^/]*)/i.test(
+            entry.path,
+          ) &&
+          /\bcredential\b/i.test(entry.reason),
+      ),
+    ).toEqual([]);
   });
 });
