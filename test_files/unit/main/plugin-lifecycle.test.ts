@@ -1576,7 +1576,7 @@ describe("refreshFeeds()", () => {
     await plugin.refreshFeeds();
 
     // Then: saveSettings should be called
-    expect(plugin.saveData).toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.exists("data.json")).toBe(true);
   });
 
   it("handles refresh errors gracefully", async () => {
@@ -2136,7 +2136,7 @@ describe("addFeed()", () => {
     await plugin.addFeed("Save Test Feed", newUrl, "Uncategorized");
 
     // Then: saveSettings should be called
-    expect(plugin.saveData).toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.exists("data.json")).toBe(true);
   });
 
   it("handles parse errors gracefully", async () => {
@@ -2214,7 +2214,7 @@ describe("ingestFeedsForBackgroundImport()", () => {
       (f) => f.url === "https://example.com/new.xml",
     );
     expect(addedFeed?.items).toEqual([]);
-    expect(plugin.saveData).toHaveBeenCalledTimes(1);
+    expect(await plugin.app.vault.adapter.exists("data.json")).toBe(true);
     expect(plugin.ensureFolderExists).toHaveBeenCalledWith("Research", {
       saveSettings: false,
       refreshView: false,
@@ -2433,6 +2433,21 @@ describe("storage transition orchestration", () => {
     vi.clearAllMocks();
   });
 
+  async function initializeDurableSettings(
+    settings: RssDashboardSettings,
+  ): Promise<void> {
+    plugin.settings = settings;
+    (
+      plugin as unknown as {
+        initializeSettingsBackedServices: () => void;
+      }
+    ).initializeSettingsBackedServices();
+    await plugin.saveSettings({
+      forceAllShards: true,
+      forceMetadata: true,
+    });
+  }
+
   it("revertToLegacyJsonStorageWithOptions refreshes dashboards before settings redisplay", async () => {
     const displaySpy = vi.fn();
     (plugin as unknown as { settingTab: { display: () => void } }).settingTab =
@@ -2445,13 +2460,14 @@ describe("storage transition orchestration", () => {
         (
           plugin as unknown as {
             feedStorageRepository: {
-              revertToLegacyJson: (...args: unknown[]) => Promise<void>;
+              buildLegacyJsonCandidate: (
+                settings: RssDashboardSettings,
+              ) => RssDashboardSettings;
             };
           }
         ).feedStorageRepository,
-        "revertToLegacyJson",
-      )
-      .mockResolvedValue(undefined);
+        "buildLegacyJsonCandidate",
+      );
     const initSpy = vi
       .spyOn(
         plugin as unknown as {
@@ -2489,13 +2505,14 @@ describe("storage transition orchestration", () => {
         (
           plugin as unknown as {
             feedStorageRepository: {
-              migrateToVaultShards: (...args: unknown[]) => Promise<void>;
+              buildVaultShardsCandidate: (
+                settings: RssDashboardSettings,
+              ) => RssDashboardSettings;
             };
           }
         ).feedStorageRepository,
-        "migrateToVaultShards",
-      )
-      .mockResolvedValue(undefined);
+        "buildVaultShardsCandidate",
+      );
     const initSpy = vi
       .spyOn(
         plugin as unknown as {
@@ -2519,7 +2536,7 @@ describe("storage transition orchestration", () => {
     );
   });
 
-  it("restores v1 migration metadata and shard files after plugin data commits then throws", async () => {
+  it("restores v1 migration metadata and shard files after publish fails", async () => {
     plugin.settings = {
       ...DEFAULT_SETTINGS,
       storageMode: "legacy-json",
@@ -2528,20 +2545,12 @@ describe("storage transition orchestration", () => {
     };
     const previousBytes = JSON.stringify(plugin.settings);
     await plugin.app.vault.create("data.json", previousBytes);
-    plugin.saveData = vi.fn(async (data: unknown) => {
-      await plugin.app.vault.adapter.write(
-        "data.json",
-        JSON.stringify(data),
-      );
-      if (
-        (data as RssDashboardSettings).storageMode === "vault-shards"
-      ) {
-        throw new Error("migration-commit-then-throw");
-      }
-    });
+    vi.spyOn(plugin, "refreshDashboardViews").mockRejectedValueOnce(
+      new Error("migration-publish-failure"),
+    );
 
     await expect(plugin.migrateToVaultStorage()).rejects.toThrow(
-      "migration-commit-then-throw",
+      "migration-publish-failure",
     );
 
     expect(plugin.settings.storageMode).toBe("legacy-json");
@@ -2564,14 +2573,6 @@ describe("storage transition orchestration", () => {
       metadataStorageFolder: "Repair Metadata",
       feeds: [{ ...sampleFeed, feedId: "repair-feed" }],
     };
-    plugin.saveData = vi.fn(async (data: unknown) => {
-      const contents = JSON.stringify(data);
-      if (await plugin.app.vault.adapter.exists("data.json")) {
-        await plugin.app.vault.adapter.write("data.json", contents);
-      } else {
-        await plugin.app.vault.create("data.json", contents);
-      }
-    });
     await plugin.saveSettings({
       forceAllShards: true,
       forceMetadata: true,
@@ -2634,6 +2635,223 @@ describe("storage transition orchestration", () => {
       ).toBe(previousBytes.get(path));
     }
   });
+
+  it("revert keeps live settings, metadata, and all shards when metadata persistence fails", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      storageMode: "vault-shards" as const,
+      storageFolder: "Revert/Feeds",
+      feeds: [{ ...sampleFeed, feedId: "revert-owned" }],
+    };
+    await initializeDurableSettings(settings);
+    await plugin.app.vault.create(
+      "Revert/Feeds/foreign.json",
+      "FOREIGN",
+    );
+    const previousSettings = plugin.settings;
+    const previousJson = JSON.stringify(previousSettings);
+    const paths = [
+      "data.json",
+      "Revert/Feeds/revert-owned.json",
+      "Revert/Feeds/foreign.json",
+    ];
+    const previousBytes = new Map<string, string>();
+    for (const path of paths) {
+      previousBytes.set(
+        path,
+        await plugin.app.vault.adapter.read(path),
+      );
+    }
+    const adapter = plugin.app.vault.adapter as unknown as {
+      process(
+        path: string,
+        update: (contents: string) => string,
+      ): Promise<string>;
+    };
+    const originalProcess = adapter.process.bind(adapter);
+    vi.spyOn(adapter, "process").mockImplementation(
+      async (path, update) => {
+        if (path === "data.json") {
+          const current = await plugin.app.vault.adapter.read(path);
+          const next = update(current);
+          if (
+            (JSON.parse(next) as RssDashboardSettings).storageMode ===
+            "legacy-json"
+          ) {
+            throw new Error("revert-metadata-failure");
+          }
+        }
+        return originalProcess(path, update);
+      },
+    );
+
+    await expect(
+      plugin.revertToLegacyJsonStorageWithOptions({
+        deleteShardFolder: true,
+      }),
+    ).rejects.toThrow("revert-metadata-failure");
+
+    expect(plugin.settings).toBe(previousSettings);
+    expect(JSON.stringify(plugin.settings)).toBe(previousJson);
+    for (const path of paths) {
+      expect(
+        await plugin.app.vault.adapter.read(path),
+        path,
+      ).toBe(previousBytes.get(path));
+    }
+  });
+
+  it("revert rolls durable and live settings back when the publish refresh fails", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      storageMode: "vault-shards" as const,
+      storageFolder: "Revert Refresh/Feeds",
+      feeds: [{ ...sampleFeed, feedId: "revert-refresh" }],
+    };
+    await initializeDurableSettings(settings);
+    const previousSettings = plugin.settings;
+    const previousMetadata =
+      await plugin.app.vault.adapter.read("data.json");
+    const shardPath =
+      "Revert Refresh/Feeds/revert-refresh.json";
+    const previousShard =
+      await plugin.app.vault.adapter.read(shardPath);
+    vi.spyOn(plugin, "refreshDashboardViews").mockRejectedValueOnce(
+      new Error("revert-refresh-failure"),
+    );
+
+    await expect(
+      plugin.revertToLegacyJsonStorageWithOptions({
+        deleteShardFolder: true,
+      }),
+    ).rejects.toThrow("revert-refresh-failure");
+
+    expect(plugin.settings).toBe(previousSettings);
+    expect(await plugin.app.vault.adapter.read("data.json")).toBe(
+      previousMetadata,
+    );
+    expect(await plugin.app.vault.adapter.read(shardPath)).toBe(
+      previousShard,
+    );
+  });
+
+  it("revert publishes one legacy candidate and retains owned and foreign shards as recovery copies", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      storageMode: "vault-shards" as const,
+      storageFolder: "Revert Success/Feeds",
+      feeds: [{ ...sampleFeed, feedId: "revert-success" }],
+    };
+    await initializeDurableSettings(settings);
+    const ownedPath =
+      "Revert Success/Feeds/revert-success.json";
+    const ownedBytes =
+      await plugin.app.vault.adapter.read(ownedPath);
+    await plugin.app.vault.create(
+      "Revert Success/Feeds/foreign.json",
+      "FOREIGN",
+    );
+
+    await plugin.revertToLegacyJsonStorageWithOptions({
+      deleteShardFolder: true,
+    });
+
+    expect(plugin.settings.storageMode).toBe("legacy-json");
+    expect(
+      (
+        JSON.parse(
+          await plugin.app.vault.adapter.read("data.json"),
+        ) as RssDashboardSettings
+      ).storageMode,
+    ).toBe("legacy-json");
+    expect(await plugin.app.vault.adapter.read(ownedPath)).toBe(
+      ownedBytes,
+    );
+    expect(
+      await plugin.app.vault.adapter.read(
+        "Revert Success/Feeds/foreign.json",
+      ),
+    ).toBe("FOREIGN");
+  });
+
+  it("v2 migration restores the exact legacy generation when publish refresh fails", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      storageMode: "legacy-json" as const,
+      storageFolder: "V2 Refresh/Feeds",
+      metadataStorageMode: "plugin-default" as const,
+      metadataStorageFolder: "Legacy Metadata",
+      storageSchemaVersion: 1,
+      storageMigrationDismissedPermanently: false,
+      feeds: [{ ...sampleFeed, feedId: "v2-refresh" }],
+    };
+    await initializeDurableSettings(settings);
+    const previousSettings = plugin.settings;
+    const previousJson = JSON.stringify(previousSettings);
+    const previousMetadata =
+      await plugin.app.vault.adapter.read("data.json");
+    vi.spyOn(plugin, "refreshDashboardViews").mockRejectedValueOnce(
+      new Error("v2-refresh-failure"),
+    );
+
+    await expect(plugin.migrateToVaultShardsV2()).rejects.toThrow(
+      "v2-refresh-failure",
+    );
+
+    expect(plugin.settings).toBe(previousSettings);
+    expect(JSON.stringify(plugin.settings)).toBe(previousJson);
+    expect(await plugin.app.vault.adapter.read("data.json")).toBe(
+      previousMetadata,
+    );
+    expect(
+      await plugin.app.vault.adapter.exists(
+        "V2 Refresh/Feeds/v2-refresh.json",
+      ),
+    ).toBe(false);
+  });
+
+  it("backup-and-v2 migration does not leak the dismissed flag or metadata fields after a late state failure", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      storageMode: "legacy-json" as const,
+      storageFolder: "V2 Failure/Feeds",
+      metadataStorageMode: "plugin-default" as const,
+      metadataStorageFolder: "Original Metadata",
+      metadataStorageSchemaVersion: 1,
+      storageSchemaVersion: 1,
+      storageMigrationDismissedPermanently: false,
+      feeds: [{ ...sampleFeed, feedId: "v2-failure" }],
+    };
+    await initializeDurableSettings(settings);
+    const previousSettings = plugin.settings;
+    const previousJson = JSON.stringify(previousSettings);
+    const previousMetadata =
+      await plugin.app.vault.adapter.read("data.json");
+    const originalCreate = plugin.app.vault.create.bind(plugin.app.vault);
+    vi.spyOn(plugin.app.vault, "create").mockImplementation(
+      async (path, contents) => {
+        if (path.endsWith("/user-state.json")) {
+          throw new Error("v2-late-state-failure");
+        }
+        return originalCreate(path, contents);
+      },
+    );
+
+    await expect(
+      plugin.backupAndMigrateStorageToV2(),
+    ).rejects.toThrow("v2-late-state-failure");
+
+    expect(plugin.settings).toBe(previousSettings);
+    expect(JSON.stringify(plugin.settings)).toBe(previousJson);
+    expect(await plugin.app.vault.adapter.read("data.json")).toBe(
+      previousMetadata,
+    );
+    expect(
+      await plugin.app.vault.adapter.exists(
+        "V2 Failure/Feeds/v2-failure.json",
+      ),
+    ).toBe(false);
+  });
 });
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -2655,29 +2873,34 @@ describe("saveSettings()", () => {
     vi.clearAllMocks();
   });
 
-  it("calls saveData with current settings", async () => {
-    // When: saveSettings is called
+  it("persists current settings without invoking the legacy saveData writer", async () => {
     await plugin.saveSettings();
 
-    // Then: saveData should be called with settings
-    expect(plugin.saveData).toHaveBeenCalledWith(
-      expect.objectContaining(plugin.settings),
-    );
+    expect(plugin.saveData).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(await plugin.app.vault.adapter.read("data.json")),
+    ).toEqual(expect.objectContaining({
+      storageMode: plugin.settings.storageMode,
+      locale: plugin.settings.locale,
+    }));
   });
 
-  it("saves modified settings", async () => {
-    // Given: Modified settings
+  it("persists modified settings without allowing an old writer to overwrite the journal", async () => {
+    plugin.settings.storageMode = "legacy-json";
     plugin.settings.refreshInterval = 120;
+    plugin.saveData = vi.fn(async () => {
+      await plugin.app.vault.adapter.write(
+        "data.json",
+        "EXTERNAL-LEGACY-WRITER",
+      );
+    });
 
-    // When: saveSettings is called
     await plugin.saveSettings();
 
-    // Then: saveData should be called with modified settings
-    expect(plugin.saveData).toHaveBeenCalledWith(
-      expect.objectContaining({
-        refreshInterval: 120,
-      }),
-    );
+    expect(plugin.saveData).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(await plugin.app.vault.adapter.read("data.json")),
+    ).toEqual(expect.objectContaining({ refreshInterval: 120 }));
   });
 });
 
@@ -2724,7 +2947,7 @@ describe("applyFeedLimitsToAllFeeds()", () => {
     await plugin.applyFeedLimitsToAllFeeds();
 
     // Then: settings should be saved
-    expect(plugin.saveData).toHaveBeenCalled();
+    expect(await plugin.app.vault.adapter.exists("data.json")).toBe(true);
   });
 
   it("shows notice after applying limits", async () => {
@@ -2867,7 +3090,7 @@ describe("transactional public settings imports", () => {
     expect(plugin.loadData).not.toHaveBeenCalled();
   });
 
-  it("compensates a commit-then-throw and verifies the previous durable state", async () => {
+  it("ignores a legacy writer that commits then throws", async () => {
     plugin.saveData = vi.fn(async (data: unknown) => {
       await plugin.app.vault.adapter.write(
         "data.json",
@@ -2882,16 +3105,15 @@ describe("transactional public settings imports", () => {
       plugin.importUserSettingsJsonFromFile(
         new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
       ),
-    ).rejects.toThrow("commit-then-throw");
+    ).resolves.toBeUndefined();
 
-    expect(plugin.settings).toBe(previous);
-    expect(plugin.feedParser).toBe(previousFeedParser);
-    expect((await readDurable()).locale).toBe("zh-CN");
+    expect(plugin.settings.locale).toBe("en");
+    expect((await readDurable()).locale).toBe("en");
     expect(plugin.loadData).not.toHaveBeenCalled();
   });
 
   it.each(["data", "portable"] as const)(
-    "applies the same compensating transaction to the %s import entrypoint",
+    "keeps the %s import independent from the legacy writer",
     async (entrypoint) => {
       plugin.saveData = vi.fn(async (data: unknown) => {
         await plugin.app.vault.adapter.write(
@@ -2925,13 +3147,10 @@ describe("transactional public settings imports", () => {
         entrypoint === "data"
           ? plugin.importDataJsonFromFile(file)
           : plugin.importPortableDataBundleFromFile(file);
-      await expect(operation).rejects.toThrow(
-        `${entrypoint}-commit-then-throw`,
-      );
+      await expect(operation).resolves.toBeUndefined();
 
-      expect(plugin.settings).toBe(previous);
-      expect(plugin.feedParser).toBe(previousFeedParser);
-      expect((await readDurable()).locale).toBe("zh-CN");
+      expect(plugin.settings.locale).toBe("en");
+      expect((await readDurable()).locale).toBe("en");
     },
   );
 
@@ -2995,15 +3214,28 @@ describe("transactional public settings imports", () => {
     const firstWrite = createDeferred<void>();
     const events: string[] = [];
     let attempt = 0;
-    plugin.saveData = vi.fn(async (data: unknown) => {
-      const candidate = data as RssDashboardSettings;
-      attempt += 1;
-      const currentAttempt = attempt;
-      events.push(`start:${candidate.locale}`);
-      if (currentAttempt === 1) await firstWrite.promise;
-      await writeDurable(candidate);
-      events.push(`end:${candidate.locale}`);
-    });
+    const adapter = plugin.app.vault.adapter as unknown as {
+      process(
+        path: string,
+        update: (contents: string) => string,
+      ): Promise<string>;
+    };
+    const originalProcess = adapter.process.bind(adapter);
+    vi.spyOn(adapter, "process").mockImplementation(
+      async (path, update) => {
+        if (path !== "data.json") return originalProcess(path, update);
+        const candidate = JSON.parse(
+          update(await plugin.app.vault.adapter.read(path)),
+        ) as RssDashboardSettings;
+        attempt += 1;
+        const currentAttempt = attempt;
+        events.push(`start:${candidate.locale}`);
+        if (currentAttempt === 1) await firstWrite.promise;
+        const result = await originalProcess(path, update);
+        events.push(`end:${candidate.locale}`);
+        return result;
+      },
+    );
 
     const first = plugin.importUserSettingsJsonFromFile(
       new File([JSON.stringify({ locale: "en" })], "first.json"),
@@ -3030,15 +3262,25 @@ describe("transactional public settings imports", () => {
     const writeStarted = createDeferred<void>();
     const releaseWrite = createDeferred<void>();
     let attempt = 0;
-    plugin.saveData = vi.fn(async (data: unknown) => {
-      const candidate = data as RssDashboardSettings;
-      attempt += 1;
-      await writeDurable(candidate);
-      if (attempt === 1) {
-        writeStarted.resolve();
-        await releaseWrite.promise;
-      }
-    });
+    const adapter = plugin.app.vault.adapter as unknown as {
+      process(
+        path: string,
+        update: (contents: string) => string,
+      ): Promise<string>;
+    };
+    const originalProcess = adapter.process.bind(adapter);
+    vi.spyOn(adapter, "process").mockImplementation(
+      async (path, update) => {
+        if (path !== "data.json") return originalProcess(path, update);
+        attempt += 1;
+        const result = await originalProcess(path, update);
+        if (attempt === 1) {
+          writeStarted.resolve();
+          await releaseWrite.promise;
+        }
+        return result;
+      },
+    );
 
     const backupLocales: string[] = [];
     (
@@ -3138,7 +3380,6 @@ describe("transactional public settings imports", () => {
     vi.mocked(plugin.refreshDashboardViews).mockRejectedValueOnce(
       new Error("refresh-failed"),
     );
-
     await expect(
       plugin.importDataJsonFromFile(
         publicDataFile({
@@ -3170,15 +3411,17 @@ describe("transactional public settings imports", () => {
     "wrong-version",
     "extra-key",
   ] as const)(
-    "handles a vault-location import when the plugin callback bootstrap is %s",
+    "keeps a vault-location import independent from legacy writer corruption: %s",
     async (mode) => {
       previous.storageMode = "legacy-json";
       previous.metadataStorageMode = "plugin-default";
       previous.metadataStorageFolder = "Vault Metadata";
       previous.feeds = [];
       plugin.settings = previous;
-      const previousBytes = JSON.stringify(previous);
-      await plugin.app.vault.adapter.write("data.json", previousBytes);
+      await plugin.app.vault.adapter.write(
+        "data.json",
+        JSON.stringify(previous),
+      );
       plugin.saveData = vi.fn(async (data: unknown) => {
         if (mode === "missing") return;
         await plugin.app.vault.adapter.write(
@@ -3211,36 +3454,25 @@ describe("transactional public settings imports", () => {
           "usersettings.json",
         ),
       );
-      if (mode === "missing") {
-        await expect(operation).resolves.toBeUndefined();
-      } else {
-        await expect(operation).rejects.toThrow(
-          "Settings import persistence verification failed",
-        );
-      }
+      await expect(operation).resolves.toBeUndefined();
 
       const durableBootstrap =
         await plugin.app.vault.adapter.read("data.json");
-      if (mode === "missing") {
-        expect(plugin.settings.locale).toBe("en");
-        expect(JSON.parse(durableBootstrap)).toEqual({
-          metadataStorageMode: "vault-location",
-          metadataStorageFolder: "Vault Metadata",
-          metadataStorageSchemaVersion: 1,
-        });
-      } else {
-        expect(plugin.settings).toBe(previous);
-        expect(durableBootstrap).toBe(previousBytes);
-      }
+      expect(plugin.settings.locale).toBe("en");
+      expect(JSON.parse(durableBootstrap)).toEqual({
+        metadataStorageMode: "vault-location",
+        metadataStorageFolder: "Vault Metadata",
+        metadataStorageSchemaVersion: 1,
+      });
       expect(
         await plugin.app.vault.adapter.exists(
           "Vault Metadata/data.json",
         ),
-      ).toBe(mode === "missing");
+      ).toBe(true);
     },
   );
 
-  it("rejects plugin-default success-with-wrong-data before publishing", async () => {
+  it("does not let a legacy writer replace plugin-default metadata", async () => {
     const previousBytes = JSON.stringify(previous);
     plugin.saveData = vi.fn(async () => {
       await plugin.app.vault.adapter.write(
@@ -3253,12 +3485,13 @@ describe("transactional public settings imports", () => {
       plugin.importUserSettingsJsonFromFile(
         new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
       ),
-    ).rejects.toThrow("Settings import persistence verification failed");
+    ).resolves.toBeUndefined();
 
-    expect(plugin.settings).toBe(previous);
-    expect(plugin.feedParser).toBe(previousFeedParser);
-    expect(await plugin.app.vault.adapter.read("data.json")).toBe(
-      previousBytes,
+    expect(plugin.settings.locale).toBe("en");
+    expect(
+      JSON.parse(await plugin.app.vault.adapter.read("data.json")),
+    ).toEqual(
+      expect.objectContaining({ locale: "en" }),
     );
   });
 
@@ -3412,19 +3645,28 @@ describe("transactional public settings imports", () => {
     const releaseFirstWrite = createDeferred<void>();
     const persistedLocales: string[] = [];
     let writeCount = 0;
-    plugin.saveData = vi.fn(async (data: unknown) => {
-      const settings = data as RssDashboardSettings;
-      writeCount += 1;
-      persistedLocales.push(settings.locale);
-      if (writeCount === 1) {
-        firstWriteStarted.resolve();
-        await releaseFirstWrite.promise;
-      }
-      await plugin.app.vault.adapter.write(
-        "data.json",
-        JSON.stringify(data),
-      );
-    });
+    const adapter = plugin.app.vault.adapter as unknown as {
+      process(
+        path: string,
+        update: (contents: string) => string,
+      ): Promise<string>;
+    };
+    const originalProcess = adapter.process.bind(adapter);
+    vi.spyOn(adapter, "process").mockImplementation(
+      async (path, update) => {
+        if (path !== "data.json") return originalProcess(path, update);
+        const settings = JSON.parse(
+          update(await plugin.app.vault.adapter.read(path)),
+        ) as RssDashboardSettings;
+        writeCount += 1;
+        persistedLocales.push(settings.locale);
+        if (writeCount === 1) {
+          firstWriteStarted.resolve();
+          await releaseFirstWrite.promise;
+        }
+        return originalProcess(path, update);
+      },
+    );
 
     const importOperation = plugin.importUserSettingsJsonFromFile(
       new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
@@ -3455,26 +3697,30 @@ describe("transactional public settings imports", () => {
       const storageRepository = (
         plugin as unknown as {
           feedStorageRepository: {
-            migrateToVaultShards(
+            buildVaultShardsCandidate(
               settings: RssDashboardSettings,
-              save: (data: unknown) => Promise<void>,
-            ): Promise<void>;
-            repairVaultShards(
+            ): RssDashboardSettings;
+            buildRepairCandidate(
               settings: RssDashboardSettings,
-              save: (data: unknown) => Promise<void>,
-            ): Promise<void>;
+            ): RssDashboardSettings;
           };
         }
       ).feedStorageRepository;
+      const originalMigrate =
+        storageRepository.buildVaultShardsCandidate.bind(storageRepository);
       const migrate = vi
-        .spyOn(storageRepository, "migrateToVaultShards")
-        .mockImplementation(async () => {
+        .spyOn(storageRepository, "buildVaultShardsCandidate")
+        .mockImplementation((settings) => {
           observedLocales.push(plugin.settings.locale);
+          return originalMigrate(settings);
         });
+      const originalRepair =
+        storageRepository.buildRepairCandidate.bind(storageRepository);
       const repair = vi
-        .spyOn(storageRepository, "repairVaultShards")
-        .mockImplementation(async () => {
+        .spyOn(storageRepository, "buildRepairCandidate")
+        .mockImplementation((settings) => {
           observedLocales.push(plugin.settings.locale);
+          return originalRepair(settings);
         });
       (
         plugin as unknown as PluginPrivateAPI

@@ -9,8 +9,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import type { App } from "obsidian";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { App, TFile } from "obsidian";
 import {
   VaultPathIdentityProvider,
 } from "../../../src/security/path-identity-provider";
@@ -145,5 +145,87 @@ describe("VaultPathIdentityProvider", () => {
     expect(
       await readFile(path.join(root, "RSS", "restored.json"), "utf8"),
     ).toBe("RESTORED");
+  });
+
+  it("removes the exact directory when ownership marker creation fails", async () => {
+    const app = App.createMock();
+    const provider = new VaultPathIdentityProvider(app);
+    vi.spyOn(app.vault, "create").mockRejectedValueOnce(
+      new Error("marker-create-failure"),
+    );
+
+    await expect(
+      provider.createOwnedDirectory(
+        "Candidate",
+        ".owner.json",
+        "TOKEN",
+      ),
+    ).rejects.toThrow("marker-create-failure");
+
+    expect(await app.vault.adapter.exists("Candidate")).toBe(false);
+  });
+
+  it("removes the exact marker and directory when ownership binding fails", async () => {
+    const app = App.createMock();
+    const provider = new VaultPathIdentityProvider(app);
+    const inspect = provider.inspect.bind(provider);
+    let markerObservations = 0;
+    vi.spyOn(provider, "inspect").mockImplementation(async (candidate) => {
+      if (candidate === "Candidate/.owner.json") {
+        markerObservations += 1;
+        if (markerObservations === 1) {
+          return {
+            path: candidate,
+            namespaceKey: candidate.toLowerCase(),
+            kind: "missing",
+            destructiveSafe: false,
+          };
+        }
+      }
+      return inspect(candidate);
+    });
+
+    await expect(
+      provider.createOwnedDirectory(
+        "Candidate",
+        ".owner.json",
+        "TOKEN",
+      ),
+    ).rejects.toThrow("ownership could not be bound");
+
+    expect(await app.vault.adapter.exists("Candidate/.owner.json")).toBe(false);
+    expect(await app.vault.adapter.exists("Candidate")).toBe(false);
+  });
+
+  it("preserves a replacement marker and reports typed incomplete cleanup", async () => {
+    const app = App.createMock();
+    const provider = new VaultPathIdentityProvider(app);
+    const originalCreate = app.vault.create.bind(app.vault);
+    vi.spyOn(app.vault, "create").mockImplementation(
+      async (candidate, contents) => {
+        const created = await originalCreate(candidate, contents);
+        if (candidate === "Candidate/.owner.json") {
+          await app.vault.adapter.remove(candidate);
+          await originalCreate(candidate, contents);
+        }
+        return created;
+      },
+    );
+
+    await expect(
+      provider.createOwnedDirectory(
+        "Candidate",
+        ".owner.json",
+        "TOKEN",
+      ),
+    ).rejects.toMatchObject({
+      name: "ControlledPathCleanupIncompleteError",
+    });
+
+    expect(
+      app.vault.getAbstractFileByPath("Candidate/.owner.json"),
+    ).toBeInstanceOf(TFile);
+    expect(await app.vault.adapter.read("Candidate/.owner.json")).toBe("TOKEN");
+    expect(await app.vault.adapter.exists("Candidate")).toBe(true);
   });
 });

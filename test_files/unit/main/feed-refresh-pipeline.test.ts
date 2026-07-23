@@ -1289,7 +1289,7 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(validateSpy).toHaveBeenCalledWith({
       suppressCollectionBroadcast: true,
     });
-    expect(plugin.saveData).toHaveBeenCalledTimes(1);
+    expect(await plugin.app.vault.adapter.exists("data.json")).toBe(true);
     expect(sidebarRefreshSpy).toHaveBeenCalledTimes(2);
     expect(viewRefreshSpy).toHaveBeenCalledTimes(0);
     expect(refreshAllDashboards).toHaveBeenCalledTimes(1);
@@ -1334,7 +1334,7 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.validateSavedArticles).toHaveBeenCalledWith({
       suppressCollectionBroadcast: true,
     });
-    expect(plugin.saveData).toHaveBeenCalledTimes(1);
+    expect(await plugin.app.vault.adapter.exists("data.json")).toBe(true);
     expect(refreshAllDashboards).toHaveBeenCalledTimes(1);
 
     const notices = getNoticeMessages(consoleLogSpy);
@@ -1383,7 +1383,7 @@ describe("refreshFeeds() pipeline behavior", () => {
 
     expect(plugin.settings.feeds[0].lastUpdated).toBe(100);
     expect(plugin.settings.feeds[1].lastUpdated).toBe(777);
-    expect(plugin.saveData).toHaveBeenCalledTimes(1);
+    expect(await plugin.app.vault.adapter.exists("data.json")).toBe(true);
     expect(sidebarRefreshSpy).toHaveBeenCalledTimes(1);
     expect(viewRefreshSpy).toHaveBeenCalledTimes(0);
     expect(refreshAllDashboards).toHaveBeenCalledTimes(1);
@@ -1671,7 +1671,7 @@ describe("refreshFeeds() pipeline behavior", () => {
     ], true)).resolves.toBe(true);
 
     expect(article.read).toBe(true);
-    expect(plugin.saveData).toHaveBeenCalledTimes(1);
+    expect(await plugin.app.vault.adapter.exists("data.json")).toBe(true);
     expect(collectionEvent).not.toHaveBeenCalled();
   });
 

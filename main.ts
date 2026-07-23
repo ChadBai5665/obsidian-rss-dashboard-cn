@@ -54,6 +54,7 @@ import {
   FeedStorageRepository,
   type FeedLocalStorageAddress,
   type PersistSettingsOptions,
+  type SettingsMetadataWritePlan,
   type FeedStorageStatus,
   FeedStorageCandidateVerificationError,
   FeedStorageRollbackIncompleteError,
@@ -640,12 +641,12 @@ export type {
 
 /**
  * Resolves the full vault path for metadata storage based on current mode.
- * - "plugin-default": returns undefined (uses Plugin.saveData())
+ * - "plugin-default": returns undefined (the repository writes plugin data.json)
  * - "vault-location": returns normalized vault folder path
  */
 function getMetadataPath(settings: RssDashboardSettings): string | undefined {
   if (settings.metadataStorageMode === "plugin-default") {
-    return undefined; // Use Plugin.saveData()
+    return undefined;
   }
 
   // Normalize path: remove leading/trailing slashes, default to .rss-dashboard-data if empty
@@ -764,30 +765,18 @@ export default class RssDashboardPlugin extends Plugin {
     super(app, manifest);
     this.feedStorageRepository = new FeedStorageRepository(app, {
       writeWrapper: (fn) => this.writeWithWatcherSuppressed(fn),
-      metadataTransaction: {
-        getTargetPaths: (settingsSnapshots) =>
-          this.getMetadataPersistenceFilePaths(...settingsSnapshots),
-      },
     });
   }
 
-  private getMetadataPersistenceFilePaths(
-    ...settingsSnapshots: RssDashboardSettings[]
-  ): string[] {
-    const paths = new Set<string>();
+  private getMetadataWritePlanFor(
+    settings: RssDashboardSettings,
+  ): SettingsMetadataWritePlan {
     const pluginDataPath = this.getPluginDataFilePath();
-    paths.add(pluginDataPath);
-    for (const settings of settingsSnapshots.length > 0
-      ? settingsSnapshots
-      : [this.settings]) {
-      const vaultDataPath = this.getVaultMetadataDataFilePath(settings);
-      if (!vaultDataPath) continue;
-      if (vaultDataPath === pluginDataPath) {
-        throw new Error("Metadata persistence targets alias");
-      }
-      paths.add(vaultDataPath);
-    }
-    return [...paths];
+    const vaultDataPath = this.getVaultMetadataDataFilePath(settings);
+    return this.feedStorageRepository.buildSettingsMetadataWritePlan(
+      settings,
+      { pluginDataPath, vaultDataPath },
+    );
   }
 
   private getPluginDataFilePath(): string {
@@ -3343,71 +3332,83 @@ export default class RssDashboardPlugin extends Plugin {
     return JSON.parse(text) as unknown;
   }
 
+  private commitSettingsCandidate(
+    buildCandidate: (previous: RssDashboardSettings) => RssDashboardSettings,
+  ): Promise<void> {
+    return this.enqueueSettingsOperation(() =>
+      this.commitSettingsCandidateUnlocked(buildCandidate),
+    );
+  }
+
+  private async commitSettingsCandidateUnlocked(
+    buildCandidate: (previous: RssDashboardSettings) => RssDashboardSettings,
+  ): Promise<void> {
+    this.assertSettingsImportActive();
+    this.importExportService?.revokeAllSafeDiagnosticsPreviews();
+    const previousSettings = this.settings;
+    const previousRuntime = this.captureSettingsBackedRuntime();
+    const previousPersistenceSettings =
+      cloneStableOwnData(previousSettings);
+    const candidate = buildCandidate(previousSettings);
+    let candidatePublished = false;
+
+    try {
+      await this.feedStorageRepository.persistSettingsTransaction(
+        previousPersistenceSettings,
+        candidate,
+        this.getMetadataWritePlanFor(candidate),
+        async () => {
+          this.assertSettingsImportActive();
+          await this.verifyImportedSettingsPersistence(candidate);
+          this.assertSettingsImportActive();
+
+          this.settings = candidate;
+          candidatePublished = true;
+          this.initializeSettingsBackedServices();
+          await this.refreshDashboardViews();
+          this.assertSettingsImportActive();
+          const discoverView = await this.getActiveDiscoverView();
+          this.assertSettingsImportActive();
+          discoverView?.render();
+          this.settingTab?.display();
+        },
+        { forceAllShards: true, forceMetadata: true },
+      );
+    } catch (error) {
+      this.settings = previousSettings;
+      this.restoreSettingsBackedRuntime(previousRuntime);
+      if (this.isUnloading) {
+        this.importExportService?.revokeAllSafeDiagnosticsPreviews();
+      } else if (candidatePublished) {
+        try {
+          await this.refreshDashboardViews();
+          const discoverView = await this.getActiveDiscoverView();
+          if (!this.isUnloading) {
+            discoverView?.render();
+            this.settingTab?.display();
+          }
+        } catch {
+          this.notify("plugin.settings.rollbackIncomplete");
+          throw new SettingsImportRollbackError();
+        }
+      }
+      if (error instanceof FeedStorageRollbackIncompleteError) {
+        if (!this.isUnloading) {
+          this.notify("plugin.settings.rollbackIncomplete");
+        }
+        throw new SettingsImportRollbackError();
+      }
+      if (error instanceof FeedStorageCandidateVerificationError) {
+        throw new Error("Settings import persistence verification failed");
+      }
+      throw error;
+    }
+  }
+
   private commitSettingsImport(
     buildCandidate: (previous: RssDashboardSettings) => RssDashboardSettings,
   ): Promise<void> {
-    return this.enqueueSettingsOperation(async () => {
-      this.assertSettingsImportActive();
-      this.importExportService.revokeAllSafeDiagnosticsPreviews();
-      const previousSettings = this.settings;
-      const previousRuntime = this.captureSettingsBackedRuntime();
-      const previousPersistenceSettings =
-        cloneStableOwnData(previousSettings);
-      const candidate = buildCandidate(previousSettings);
-      let candidatePublished = false;
-
-      try {
-        await this.feedStorageRepository.persistSettingsTransaction(
-          previousPersistenceSettings,
-          candidate,
-          this.getMetadataSaveCallbackFor(candidate),
-          async () => {
-            this.assertSettingsImportActive();
-            await this.verifyImportedSettingsPersistence(candidate);
-            this.assertSettingsImportActive();
-
-            this.settings = candidate;
-            candidatePublished = true;
-            this.initializeSettingsBackedServices();
-            await this.refreshDashboardViews();
-            this.assertSettingsImportActive();
-            const discoverView = await this.getActiveDiscoverView();
-            this.assertSettingsImportActive();
-            discoverView?.render();
-            this.settingTab?.display();
-          },
-          { forceAllShards: true, forceMetadata: true },
-        );
-      } catch (error) {
-        this.settings = previousSettings;
-        this.restoreSettingsBackedRuntime(previousRuntime);
-        if (this.isUnloading) {
-          this.importExportService.revokeAllSafeDiagnosticsPreviews();
-        } else if (candidatePublished) {
-          try {
-            await this.refreshDashboardViews();
-            const discoverView = await this.getActiveDiscoverView();
-            if (!this.isUnloading) {
-              discoverView?.render();
-              this.settingTab?.display();
-            }
-          } catch {
-            this.notify("plugin.settings.rollbackIncomplete");
-            throw new SettingsImportRollbackError();
-          }
-        }
-        if (error instanceof FeedStorageRollbackIncompleteError) {
-          if (!this.isUnloading) {
-            this.notify("plugin.settings.rollbackIncomplete");
-          }
-          throw new SettingsImportRollbackError();
-        }
-        if (error instanceof FeedStorageCandidateVerificationError) {
-          throw new Error("Settings import persistence verification failed");
-        }
-        throw error;
-      }
-    });
+    return this.commitSettingsCandidate(buildCandidate);
   }
 
   private enqueueSettingsOperation<T>(
@@ -3628,15 +3629,10 @@ export default class RssDashboardPlugin extends Plugin {
     });
 
     try {
-      await this.feedStorageRepository.migrateToVaultShards(
-        this.settings,
-        this.getMetadataSaveCallbackFor(this.settings),
+      await this.commitSettingsCandidateUnlocked((previous) =>
+        this.feedStorageRepository.buildVaultShardsCandidate(previous),
       );
-      this.initializeSettingsBackedServices();
-      await this.refreshDashboardViews();
-      if (this.settingTab) {
-        this.settingTab.display();
-      }
+      this.feedStorageRepository.markStorageOperationCompleted("migration");
       storageLog("Plugin migration completed", {
         currentMode: this.settings.storageMode,
       });
@@ -3651,11 +3647,13 @@ export default class RssDashboardPlugin extends Plugin {
 
   public async migrateToVaultShardsV2(): Promise<void> {
     return this.enqueueSettingsOperation(() =>
-      this.migrateToVaultShardsV2Unlocked(),
+      this.migrateToVaultShardsV2Unlocked(false),
     );
   }
 
-  private async migrateToVaultShardsV2Unlocked(): Promise<void> {
+  private async migrateToVaultShardsV2Unlocked(
+    dismissMigration: boolean,
+  ): Promise<void> {
     storageLog("Plugin migration v2 requested", {
       currentMode: this.settings.storageMode,
       folder: this.settings.storageFolder,
@@ -3663,15 +3661,13 @@ export default class RssDashboardPlugin extends Plugin {
     });
 
     try {
-      await this.feedStorageRepository.migrateToVaultShardsV2(
-        this.settings,
-        this.getMetadataSaveCallback(),
+      await this.commitSettingsCandidateUnlocked((previous) =>
+        this.feedStorageRepository.buildVaultShardsV2Candidate(
+          previous,
+          { dismissMigration },
+        ),
       );
-      this.initializeSettingsBackedServices();
-      await this.refreshDashboardViews();
-      if (this.settingTab) {
-        this.settingTab.display();
-      }
+      this.feedStorageRepository.markStorageOperationCompleted("migration-v2");
       storageLog("Plugin migration v2 completed", {
         currentMode: this.settings.storageMode,
       });
@@ -3699,8 +3695,7 @@ export default class RssDashboardPlugin extends Plugin {
       this.notify("plugin.storage.backupFailedProceeding");
     }
 
-    this.settings.storageMigrationDismissedPermanently = true;
-    await this.migrateToVaultShardsV2Unlocked();
+    await this.migrateToVaultShardsV2Unlocked(true);
   }
 
   public async repairVaultShards(): Promise<void> {
@@ -3717,13 +3712,10 @@ export default class RssDashboardPlugin extends Plugin {
     });
 
     try {
-      await this.feedStorageRepository.repairVaultShards(
-        this.settings,
-        this.getMetadataSaveCallbackFor(this.settings),
+      await this.commitSettingsCandidateUnlocked((previous) =>
+        this.feedStorageRepository.buildRepairCandidate(previous),
       );
-      if (this.settingTab) {
-        this.settingTab.display();
-      }
+      this.feedStorageRepository.markStorageOperationCompleted("repair");
       storageLog("Plugin repair completed");
     } catch (error) {
       storageError("Plugin repair failed", error, {
@@ -3762,16 +3754,11 @@ export default class RssDashboardPlugin extends Plugin {
     });
 
     try {
-      await this.feedStorageRepository.revertToLegacyJson(
-        this.settings,
-        this.getMetadataSaveCallbackFor(this.settings),
-        options,
+      void options;
+      await this.commitSettingsCandidateUnlocked((previous) =>
+        this.feedStorageRepository.buildLegacyJsonCandidate(previous),
       );
-      this.initializeSettingsBackedServices();
-      await this.refreshDashboardViews();
-      if (this.settingTab) {
-        this.settingTab.display();
-      }
+      this.feedStorageRepository.markStorageOperationCompleted("revert");
       storageLog("Plugin revert completed", {
         currentMode: this.settings.storageMode,
       });
@@ -4569,89 +4556,6 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  /**
-   * Creates a save callback that persists metadata to the appropriate location
-   * based on the current metadataStorageMode.
-   */
-  public getMetadataSaveCallback(): (data: unknown) => Promise<void> {
-    return this.getMetadataSaveCallbackFor(this.settings);
-  }
-
-  private getMetadataSaveCallbackFor(
-    settings: RssDashboardSettings,
-  ): (data: unknown) => Promise<void> {
-    return async (data: unknown): Promise<void> => {
-      const settingsData = data as RssDashboardSettings;
-      const metadataPath = getMetadataPath(settings);
-      if (metadataPath) {
-        try {
-          await this.feedStorageRepository.ensureMetadataDirectory(
-            metadataPath,
-          );
-          const dataFilePath = `${metadataPath}/data.json`;
-          const jsonContent = JSON.stringify(settingsData, null, 2);
-          await this.feedStorageRepository.writeMetadataBytes(
-            dataFilePath,
-            jsonContent,
-          );
-          storageLog("Metadata saved to vault location", {
-            path: dataFilePath,
-          });
-          // Bootstrap pointer only — just enough for loadSettings to
-          // find the vault data.json on restart. Does NOT write full
-          // settings to .obsidian, preventing the stale-read bug on mobile.
-          const bootstrap = {
-            metadataStorageMode: settings.metadataStorageMode,
-            metadataStorageFolder: settings.metadataStorageFolder,
-            metadataStorageSchemaVersion:
-              settings.metadataStorageSchemaVersion,
-          };
-          const pluginDataPath = this.getPluginDataFilePath();
-          await this.feedStorageRepository.writeMetadataCandidate(
-            pluginDataPath,
-            JSON.stringify(bootstrap, null, 2),
-            () => this.saveData(bootstrap),
-            (actualBytes) =>
-              this.isExpectedMetadataBytes(actualBytes, bootstrap),
-          );
-        } catch (error) {
-          storageError("Failed to save metadata to vault location", error);
-          throw error;
-        }
-      } else {
-        const pluginDataPath = this.getPluginDataFilePath();
-        await this.feedStorageRepository.writeMetadataCandidate(
-          pluginDataPath,
-          JSON.stringify(settingsData, null, 2),
-          () => this.saveData(settingsData),
-          (actualBytes) =>
-            this.isExpectedMetadataBytes(actualBytes, settingsData),
-        );
-        storageLog("Metadata saved to plugin default location");
-      }
-    };
-  }
-
-  private isExpectedMetadataBytes(
-    actualBytes: string,
-    expected: unknown,
-  ): boolean {
-    if (
-      actualBytes.length === 0 ||
-      actualBytes.length > MAX_PERSISTED_SETTINGS_VERIFICATION_BYTES ||
-      new TextEncoder().encode(actualBytes).byteLength >
-        MAX_PERSISTED_SETTINGS_VERIFICATION_BYTES
-    ) {
-      return false;
-    }
-    try {
-      return stableOwnDataJson(JSON.parse(actualBytes) as unknown) ===
-        stableOwnDataJson(expected);
-    } catch {
-      return false;
-    }
-  }
-
   async saveSettings(options: PersistSettingsOptions = {}) {
     return this.enqueueSettingsOperation(async () => {
       const settings = this.settings;
@@ -4665,7 +4569,7 @@ export default class RssDashboardPlugin extends Plugin {
       try {
         const result = await this.feedStorageRepository.persistSettings(
           settings,
-          this.getMetadataSaveCallbackFor(settings),
+          this.getMetadataWritePlanFor(settings),
           options,
         );
         storageLog("saveSettings completed", result);

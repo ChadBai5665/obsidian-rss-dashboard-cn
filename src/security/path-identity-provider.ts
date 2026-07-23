@@ -39,6 +39,13 @@ export interface ControlledDirectoryCreation {
   readonly markerIdentity: ControlledPathIdentity;
 }
 
+export class ControlledPathCleanupIncompleteError extends Error {
+  constructor() {
+    super("Controlled path cleanup incomplete");
+    this.name = "ControlledPathCleanupIncompleteError";
+  }
+}
+
 const WINDOWS_RESERVED_NAME =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
 const INVALID_WINDOWS_CHARACTER = /[:*?"<>|]/u;
@@ -316,24 +323,81 @@ export class VaultPathIdentityProvider implements PathIdentityProvider {
       }
     }
 
-    const markerIdentity = await this.createExclusive(
-      markerPath,
-      markerContents,
-    );
-    const observedDirectory = await this.inspect(safePath);
-    const observedMarker = await this.inspect(markerPath);
-    if (
-      !this.isSameIdentity(identity, observedDirectory) ||
-      !this.isSameIdentity(markerIdentity, observedMarker)
-    ) {
-      throw new Error("Controlled directory ownership could not be bound");
+    let markerIdentity: ControlledPathIdentity | undefined;
+    try {
+      markerIdentity = await this.createExclusive(
+        markerPath,
+        markerContents,
+      );
+      const observedDirectory = await this.inspect(safePath);
+      const observedMarker = await this.inspect(markerPath);
+      if (
+        !this.isSameIdentity(identity, observedDirectory) ||
+        !this.isSameIdentity(markerIdentity, observedMarker)
+      ) {
+        throw new Error("Controlled directory ownership could not be bound");
+      }
+      return {
+        identity,
+        markerPath,
+        markerContents,
+        markerIdentity,
+      };
+    } catch (error) {
+      try {
+        await this.cleanupIncompleteOwnedDirectory(
+          safePath,
+          identity,
+          markerPath,
+          markerContents,
+          markerIdentity,
+        );
+      } catch {
+        throw new ControlledPathCleanupIncompleteError();
+      }
+      throw error;
     }
-    return {
-      identity,
-      markerPath,
-      markerContents,
-      markerIdentity,
-    };
+  }
+
+  private async cleanupIncompleteOwnedDirectory(
+    directoryPath: string,
+    directoryIdentity: ControlledPathIdentity,
+    markerPath: string,
+    markerContents: string,
+    markerIdentity: ControlledPathIdentity | undefined,
+  ): Promise<void> {
+    const observedMarker = await this.inspect(markerPath);
+    if (markerIdentity) {
+      if (
+        !markerIdentity.destructiveSafe ||
+        !this.isSameIdentity(markerIdentity, observedMarker) ||
+        (await this.app.vault.adapter.read(markerPath)) !== markerContents
+      ) {
+        throw new ControlledPathCleanupIncompleteError();
+      }
+      await this.app.vault.adapter.remove(markerPath);
+      if (await this.app.vault.adapter.exists(markerPath)) {
+        throw new ControlledPathCleanupIncompleteError();
+      }
+    } else if (observedMarker.kind !== "missing") {
+      throw new ControlledPathCleanupIncompleteError();
+    }
+
+    const observedDirectory = await this.inspect(directoryPath);
+    if (
+      !directoryIdentity.destructiveSafe ||
+      !this.isSameIdentity(directoryIdentity, observedDirectory)
+    ) {
+      throw new ControlledPathCleanupIncompleteError();
+    }
+    const contents = await this.app.vault.adapter.list(directoryPath);
+    if (contents.files.length > 0 || contents.folders.length > 0) {
+      throw new ControlledPathCleanupIncompleteError();
+    }
+    await this.app.vault.adapter.rmdir(directoryPath, false);
+    if (await this.app.vault.adapter.exists(directoryPath)) {
+      throw new ControlledPathCleanupIncompleteError();
+    }
   }
 
   private async inspectVirtual(

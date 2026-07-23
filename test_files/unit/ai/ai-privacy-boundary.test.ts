@@ -1041,10 +1041,6 @@ describe("AI privacy boundary", () => {
       return savedFile;
     });
     const collection = await seedSelectedCollectionItem(test);
-    let persisted: RssDashboardSettings | undefined;
-    test.plugin.saveData = vi.fn(async (value: unknown) => {
-      persisted = structuredClone(value) as RssDashboardSettings;
-    });
     const requestUrl = vi.spyOn(obsidian, "requestUrl")
       .mockResolvedValue(responseWithText("safe persistent analysis"));
 
@@ -1071,7 +1067,10 @@ describe("AI privacy boundary", () => {
       savedFilePath: savedFile.path,
       restrictedReason: "RESTRICTED_SAVE_REASON_CANARY",
     });
-    const reloaded = persisted?.feeds[1]?.items[0];
+    const persisted = JSON.parse(
+      await test.app.vault.adapter.read("data.json"),
+    ) as RssDashboardSettings;
+    const reloaded = persisted.feeds[1]?.items[0];
     expect(reloaded).toMatchObject({
       guid: test.selected.guid,
       saved: true,
@@ -1115,10 +1114,6 @@ describe("AI privacy boundary", () => {
       return savedFile;
     });
     const collection = await seedSelectedCollectionItem(test);
-    let persisted: RssDashboardSettings | undefined;
-    test.plugin.saveData = vi.fn(async (value: unknown) => {
-      persisted = structuredClone(value) as RssDashboardSettings;
-    });
     vi.spyOn(obsidian, "requestUrl")
       .mockResolvedValue(responseWithText("safe canonical X analysis"));
 
@@ -1138,7 +1133,10 @@ describe("AI privacy boundary", () => {
     const [savedItem] = saver.saveArticleWithFullContent.mock.calls[0];
     expect(savedItem.rssDashboardId).toBe(expectedId);
     expect(test.selected.rssDashboardId).toBe(expectedId);
-    expect(persisted?.feeds[1]?.items[0].rssDashboardId).toBe(expectedId);
+    const persisted = JSON.parse(
+      await test.app.vault.adapter.read("data.json"),
+    ) as RssDashboardSettings;
+    expect(persisted.feeds[1]?.items[0].rssDashboardId).toBe(expectedId);
     expect(await test.app.vault.adapter.read(savedFile.path)).toContain(expectedId);
     expect(await test.app.vault.adapter.read(savedFile.path)).not.toContain(genericId);
     await expect(collection.repository.findById(expectedId)).resolves.toMatchObject({
@@ -1147,7 +1145,7 @@ describe("AI privacy boundary", () => {
       savedNotePath: savedFile.path,
     });
 
-    const reloadedSettings = structuredClone(persisted!);
+    const reloadedSettings = structuredClone(persisted);
     test.plugin.settings = reloadedSettings;
     const reloadedItem = reloadedSettings.feeds[1].items[0];
     const reopened = test.plugin.openAiOperationForItem(reloadedItem, "summary");
@@ -1173,8 +1171,14 @@ describe("AI privacy boundary", () => {
     );
     installArticleSaver(test, savedFile);
     const collection = await seedSelectedCollectionItem(test);
-    test.plugin.saveData = vi.fn().mockRejectedValue(
-      new Error("X_ID_PERSISTENCE_FAILURE_CANARY"),
+    const originalCreate = test.app.vault.create.bind(test.app.vault);
+    vi.spyOn(test.app.vault, "create").mockImplementation(
+      async (path, contents) => {
+        if (path === "data.json") {
+          throw new Error("X_ID_PERSISTENCE_FAILURE_CANARY");
+        }
+        return originalCreate(path, contents);
+      },
     );
     vi.spyOn(obsidian, "requestUrl")
       .mockResolvedValue(responseWithText("safe canonical X rollback analysis"));
@@ -1301,8 +1305,14 @@ describe("AI privacy boundary", () => {
     );
     const saver = installArticleSaver(test, savedFile);
     const collection = await seedSelectedCollectionItem(test);
-    test.plugin.saveData = vi.fn().mockRejectedValue(
-      new Error("PERSISTENCE_FAILURE_CANARY"),
+    const originalCreate = test.app.vault.create.bind(test.app.vault);
+    vi.spyOn(test.app.vault, "create").mockImplementation(
+      async (path, contents) => {
+        if (path === "data.json") {
+          throw new Error("PERSISTENCE_FAILURE_CANARY");
+        }
+        return originalCreate(path, contents);
+      },
     );
     const requestUrl = vi.spyOn(obsidian, "requestUrl")
       .mockResolvedValue(responseWithText("safe rollback analysis"));

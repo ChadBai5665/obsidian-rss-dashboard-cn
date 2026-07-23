@@ -256,8 +256,10 @@ describe("background import orchestration", () => {
         (BACKGROUND_IMPORT_TIMEOUT_RETRY_COUNT + 1),
     );
     await vi.waitFor(
-      () => {
-        expect(plugin.saveData).toHaveBeenCalled();
+      async () => {
+        expect(
+          await plugin.app.vault.adapter.exists("data.json"),
+        ).toBe(true);
       },
       { timeout: 3000 },
     );
@@ -350,4 +352,3 @@ describe("background import orchestration", () => {
     expect(savedModes).toEqual(["legacy-json"]);
   });
 });
-
