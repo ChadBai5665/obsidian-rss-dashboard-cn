@@ -72,7 +72,7 @@ export class AnthropicMessagesProvider implements TextGenerationProvider {
         url: anthropicMessagesUrl(state.baseUrl),
         method: "POST",
         headers: {
-          "x-api-key": state.apiKey,
+          ["x-api-key"]: state.apiKey,
           "anthropic-version": "2023-06-01",
           "Content-Type": "application/json",
         },
