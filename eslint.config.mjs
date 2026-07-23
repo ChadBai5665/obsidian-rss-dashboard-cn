@@ -9,6 +9,7 @@ export default defineConfig([
     ignores: [
       "node_modules/**",
       "coverage/**",
+      "release/**",
       "main.js",
       "*.mjs",
       "scripts/**/*.js",

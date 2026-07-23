@@ -1,0 +1,793 @@
+[
+  {
+    "path": "test_files/unit/ai/ai-privacy-boundary.test.ts",
+    "rule": "home-path",
+    "line": 50,
+    "fingerprint": "sha256:3d06c0b2dceff914a7d86a3d2497565a87fca29a4aff8a101de837e3d30a56fc",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/ai-privacy-boundary.test.ts",
+    "rule": "vault-secret-path",
+    "line": 50,
+    "fingerprint": "sha256:8db052535934579cdb704637247f491b9e0b5416c22115bdd592bd8d0a267adf",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/analysis-markdown.test.ts",
+    "rule": "credential-value",
+    "line": 91,
+    "fingerprint": "sha256:8c65c86ce11dbad12269ef1265dc56e2301dcd3922be5e19edcbee71a74e5bf9",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/analysis-markdown.test.ts",
+    "rule": "home-path",
+    "line": 132,
+    "fingerprint": "sha256:5beadea37d0480582c19f89e0fbc974ecee182dddd13badb270a55b365047c14",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/analysis-markdown.test.ts",
+    "rule": "credential-url",
+    "line": 133,
+    "fingerprint": "sha256:b9bc2327c28d30850f536014cdab6d2e2869326ac003acd12c3df7c484e498a4",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/connection-validation.test.ts",
+    "rule": "credential-url",
+    "line": 38,
+    "fingerprint": "sha256:2ca409e93888c03197732ffb3e950e6fb0377851210693915d69f55b9761025c",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/connection-validation.test.ts",
+    "rule": "credential-url",
+    "line": 39,
+    "fingerprint": "sha256:a4e2a49d04f710a4c245c3b6c7cda058c2afd43fabe39210307f8a9eb99ca090",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/connection-validation.test.ts",
+    "rule": "credential-value",
+    "line": 160,
+    "fingerprint": "sha256:38b0d02a59bc0b91d6b92c362ea19b1d9f401a5636257c543b17c3f5be501680",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/providers/anthropic-messages-provider.test.ts",
+    "rule": "credential-value",
+    "line": 10,
+    "fingerprint": "sha256:93fc409eecffaaea87d68c63342e14121cb70a33e998b00280256a1335f3a9e7",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
+    "rule": "credential-value",
+    "line": 15,
+    "fingerprint": "sha256:52fdc7ea68a6789880c4f20e7a0540bf6de5fa9fc208865f0d538b29828158a0",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/providers/provider-factory.test.ts",
+    "rule": "credential-value",
+    "line": 11,
+    "fingerprint": "sha256:9eac646e0f71e6da92dcf4979a92ee70d2e9d9acd36f54a8ad2c3e130846e606",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/components/sidebar-feed-error-badge.test.ts",
+    "rule": "credential-url",
+    "line": 215,
+    "fingerprint": "sha256:44e8158ea27ed29a27aae4fac72ec11589eef10bbc68c535473d2f514ae92c96",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/components/sidebar-feed-error-badge.test.ts",
+    "rule": "credential-value",
+    "line": 215,
+    "fingerprint": "sha256:2b07e52a53da8e6f7a8a4e985eb251705bc70a5630f0e02670c9e47ab3d28e35",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
+    "rule": "credential-url",
+    "line": 902,
+    "fingerprint": "sha256:4d2e5ef68db3d853eebe3983cdad472a48d205952c81953351f8702bef60d1a5",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
+    "rule": "credential-value",
+    "line": 902,
+    "fingerprint": "sha256:e19e55222f0d13c1b5be8316c66a326c178e38393b15027140abe9044adefb14",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
+    "rule": "credential-url",
+    "line": 1066,
+    "fingerprint": "sha256:ecc323dd74e14e832dd1befb800cbeebb36193fc4827ae902560cdfd1d4f7c23",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
+    "rule": "credential-value",
+    "line": 1066,
+    "fingerprint": "sha256:4387d03415d55d6c5d9de428bfc314ee09f7c7e3fb2ac919b2414a8973f36231",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
+    "rule": "credential-url",
+    "line": 2552,
+    "fingerprint": "sha256:fafe96732b83901a5e132f5a460ecd27542c492358cbd67f2c04e044a693ab83",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/refresh/source-refresh-ledger.test.ts",
+    "rule": "credential-url",
+    "line": 134,
+    "fingerprint": "sha256:7a48da45b9653da5aaba67580d53b592ff2f2bbdcf8f1a664ef233e2aaf92823",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-public-repo.test.ts",
+    "rule": "home-path",
+    "line": 71,
+    "fingerprint": "sha256:c82c8e2240c3d6cdaff64235507820b4415a5a20c11c6f8420f3eb5cc44be475",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-public-repo.test.ts",
+    "rule": "credential-value",
+    "line": 72,
+    "fingerprint": "sha256:3f77e7168ca45829b852965add0ee6d5f8ff849f8788b88a93b1b31ca06843af",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-public-repo.test.ts",
+    "rule": "credential-url",
+    "line": 73,
+    "fingerprint": "sha256:efcfbfbb9de1f36057d9f8920055cc5a54335345f54219b8c8bc29fdf3808ed2",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-public-repo.test.ts",
+    "rule": "credential-url",
+    "line": 74,
+    "fingerprint": "sha256:96858b8e9e4471a15ccff891610b80c741b67cee6c15c75cecd48648e64f2b4c",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-public-repo.test.ts",
+    "rule": "credential-url",
+    "line": 75,
+    "fingerprint": "sha256:d3ef14cdba85fd951b0d5271d1e95b0f97d2b85a261e8552379b97e20c452aa3",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-public-repo.test.ts",
+    "rule": "credential-value",
+    "line": 81,
+    "fingerprint": "sha256:e68a3f0995f5921e70adcdae0f93ed9b9e01228318603dc2865db9ed37f1e3be",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-public-repo.test.ts",
+    "rule": "home-path",
+    "line": 121,
+    "fingerprint": "sha256:fb536adc6e7412bb2216a634592893e3261359d0f20e0a8b258634ca2e53ecac",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-public-repo.test.ts",
+    "rule": "credential-value",
+    "line": 191,
+    "fingerprint": "sha256:4e46be04c9cdf9149dd75d6ed74663b16c7e9357753146f3b4b6fd40c80237b9",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-public-repo.test.ts",
+    "rule": "credential-value",
+    "line": 250,
+    "fingerprint": "sha256:65d6e486602cd101534ec91f80dfc15e9eedf5df05867c3efdeae90433be44f3",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-public-repo.test.ts",
+    "rule": "credential-value",
+    "line": 294,
+    "fingerprint": "sha256:3e44b4602a444c2deb3358674263d4fec424b927833d815e1a53aa7f8ef1ebe2",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-release-artifacts.test.ts",
+    "rule": "home-path",
+    "line": 113,
+    "fingerprint": "sha256:2fbde56fe61d13be433996c4a241a54621f4a009885fbe24e35169001c299d68",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-release-artifacts.test.ts",
+    "rule": "home-path",
+    "line": 114,
+    "fingerprint": "sha256:f4d50af2f5f242537b9f334196e20958653fa0487fd676ae5f2b4ed444eed934",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-release-artifacts.test.ts",
+    "rule": "credential-value",
+    "line": 115,
+    "fingerprint": "sha256:75b1f0ae7b77720ba3df301177106c98a1c6cfdb5a407c2a87ec24b9ebe5080f",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-release-artifacts.test.ts",
+    "rule": "credential-value",
+    "line": 116,
+    "fingerprint": "sha256:2499feee9a8e218ae45802b02e1db08bbc57dbd9f3556fcf68bbdcc976c575dc",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/check-release-artifacts.test.ts",
+    "rule": "credential-value",
+    "line": 141,
+    "fingerprint": "sha256:8fe213101285b1ea3c76afb3eb6c202bd8d266ace2c2ea077ed2e26165cd6ec6",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 86,
+    "fingerprint": "sha256:97358cb44444b5746ba3796db0a62310867c733c2e87a6031477aa8974f7eaa6",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 87,
+    "fingerprint": "sha256:08dbb611a3609269f0920241e2c4c01276560934ac17b009f1853c9f50df9bcf",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 88,
+    "fingerprint": "sha256:bcd792cb4dbf4d22d32a0d5eef41a09aa836d35ab7af4ed95b02838cf53e077a",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 91,
+    "fingerprint": "sha256:afd3b27c2c786997632e7004ec0c80a6ff2bff615e51197c07b91c23b4634a65",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 92,
+    "fingerprint": "sha256:509ceddf58abbdd9d0d68ccee7226683ce5f26cd0d0b4ca0a1dddd7da843d8b2",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 172,
+    "fingerprint": "sha256:133e6bbb1593e75255853e750d229e144aa6e5ea19bb6a8d4a70d059f4a25d68",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 185,
+    "fingerprint": "sha256:f4031345c3153b35d75e48c18b81c4064a7e3dea275ddd76645444ee949a5541",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 306,
+    "fingerprint": "sha256:5c6b1f3624a8f902c9cfa5b352430eaacf9c4f81e45a531ed1cbbc856d17cf92",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 370,
+    "fingerprint": "sha256:5c6b1f3624a8f902c9cfa5b352430eaacf9c4f81e45a531ed1cbbc856d17cf92",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 400,
+    "fingerprint": "sha256:a92bd1e664e87a758ffe9137f6993b666b7f9b3a21bd1b110ef8fcd8f6cc3751",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 420,
+    "fingerprint": "sha256:a92bd1e664e87a758ffe9137f6993b666b7f9b3a21bd1b110ef8fcd8f6cc3751",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 456,
+    "fingerprint": "sha256:a92bd1e664e87a758ffe9137f6993b666b7f9b3a21bd1b110ef8fcd8f6cc3751",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 479,
+    "fingerprint": "sha256:a92bd1e664e87a758ffe9137f6993b666b7f9b3a21bd1b110ef8fcd8f6cc3751",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 504,
+    "fingerprint": "sha256:a92bd1e664e87a758ffe9137f6993b666b7f9b3a21bd1b110ef8fcd8f6cc3751",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 522,
+    "fingerprint": "sha256:2e5d7f5d7932d075089d0a6fd52a3e32ee12aed5e6c97907c3d704e02c593adf",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
+    "line": 528,
+    "fingerprint": "sha256:5c6b1f3624a8f902c9cfa5b352430eaacf9c4f81e45a531ed1cbbc856d17cf92",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/desktop-secret-store-real-fs.test.ts",
+    "rule": "credential-value",
+    "line": 84,
+    "fingerprint": "sha256:4ba1337f07cc67570da2944e9dee337ce955e33e422ba6c9d1a60a393f2035ed",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/desktop-secret-store-real-fs.test.ts",
+    "rule": "credential-value",
+    "line": 102,
+    "fingerprint": "sha256:a49b484a32b726628a5020a488b6a268d9edcd88725c227f1b70171a6c184de1",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/desktop-secret-store-real-fs.test.ts",
+    "rule": "credential-value",
+    "line": 106,
+    "fingerprint": "sha256:53640b3d26890383a2d0eabd746ee3acad544ceaeaf4eb6fd6f7b7e7b6dff8af",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/desktop-secret-store-real-fs.test.ts",
+    "rule": "credential-value",
+    "line": 135,
+    "fingerprint": "sha256:45ab3fc22be9a51e9e02a9b4cc2606cbf388ee0ef7ba8b18245519f25a91712b",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/desktop-secret-store-real-fs.test.ts",
+    "rule": "credential-value",
+    "line": 145,
+    "fingerprint": "sha256:1e28b22788609d50940ec544976cfea81491c81f5efcd4d355bdc918d131a75a",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/desktop-secret-store-real-fs.test.ts",
+    "rule": "credential-value",
+    "line": 168,
+    "fingerprint": "sha256:15dab146cc826806755ab5a3427bb1af9621b1215047012473676268fe99d6c5",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/desktop-secret-store-real-fs.test.ts",
+    "rule": "credential-value",
+    "line": 193,
+    "fingerprint": "sha256:607595c52e90b83f43d6170bc998d0eae8433ea17cf8a6d1fb7fcefe908d6167",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/desktop-secret-store-real-fs.test.ts",
+    "rule": "credential-value",
+    "line": 197,
+    "fingerprint": "sha256:ec1696334ac9e78b256ab8f2b8f7cc40d17e64d150aed6a7e788d099669e83a4",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/desktop-secret-store.test.ts",
+    "rule": "credential-value",
+    "line": 194,
+    "fingerprint": "sha256:f5e47f4720d8da6282d8018d50488cb54dbb8600291bdefe057634757697cbf2",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/public-settings-export.test.ts",
+    "rule": "home-path",
+    "line": 43,
+    "fingerprint": "sha256:6da86232203b2a5ac56776fd6ae31e80977d794edadd06421f99388eb922cc43",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/public-settings-export.test.ts",
+    "rule": "credential-url",
+    "line": 48,
+    "fingerprint": "sha256:677912a636d697e51fddb1c20e2f076754682be73582e8016d2b9e7ba7521201",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/public-settings-export.test.ts",
+    "rule": "credential-value",
+    "line": 86,
+    "fingerprint": "sha256:8378a9c1b63b838ff8cdf5a4a909fc47baf5d46f67e60ac11a14098720e654e9",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/public-settings-export.test.ts",
+    "rule": "credential-value",
+    "line": 87,
+    "fingerprint": "sha256:f5a2130d67f60626fdbaa57333ffe8eebae2a179e20da08badd4adb3d4bd9a18",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/public-settings-export.test.ts",
+    "rule": "home-path",
+    "line": 95,
+    "fingerprint": "sha256:9c93e693876b82bb683fe7e00d5bcfdd9bf90001a453f4862eed30d854b0fdf8",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/public-settings-export.test.ts",
+    "rule": "credential-value",
+    "line": 97,
+    "fingerprint": "sha256:3c27fd5652f00c47c8469bebdc670f315bc43afcb4105b2f9743322d3a0414b5",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/public-settings-export.test.ts",
+    "rule": "credential-url",
+    "line": 265,
+    "fingerprint": "sha256:39ddcb54851f4efb8608ff6430eb720a49352d3c0d851ad0f53fd37973d11b9b",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/public-settings-export.test.ts",
+    "rule": "credential-url",
+    "line": 266,
+    "fingerprint": "sha256:f211a2fc8e78aa1dc98fe66cb753a2cd6464b73827e8a8bd7d49a0bfae11ad16",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/public-settings-export.test.ts",
+    "rule": "credential-url",
+    "line": 267,
+    "fingerprint": "sha256:3585278164560014ae3a240b6d1d6649e7c3ec254551aa2a3457c5e35d84c4eb",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/public-settings-export.test.ts",
+    "rule": "credential-value",
+    "line": 307,
+    "fingerprint": "sha256:c41b03de75ecdfa13697cfd0cbd58c47fc2f71cac09ae1187bdad9c697a0cd46",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/redaction.test.ts",
+    "rule": "credential-value",
+    "line": 10,
+    "fingerprint": "sha256:06ad05385a63dfa2f55069192c49dea813d010915b2f89a82e8a37c65b20b0a6",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/redaction.test.ts",
+    "rule": "credential-url",
+    "line": 21,
+    "fingerprint": "sha256:ff1fd51e7af5e03eb91ab758a5f76bde91c484224e203b67134938c4724cdad1",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/redaction.test.ts",
+    "rule": "credential-value",
+    "line": 33,
+    "fingerprint": "sha256:0e8b97adfd9e953ef4b322c4702d9a8b9c9ba38dc88e9ff08f5c4e23e35e7a5e",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/redaction.test.ts",
+    "rule": "credential-value",
+    "line": 34,
+    "fingerprint": "sha256:03f72261d047d7c160abb169bcaa1894dac505ceb6fc8c972ca947502d5b2b0a",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/redaction.test.ts",
+    "rule": "credential-value",
+    "line": 47,
+    "fingerprint": "sha256:dfd807b0622b3336d1c3fb644d73b12631502575c4dffe21a555a0d583eebd84",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/redaction.test.ts",
+    "rule": "credential-value",
+    "line": 48,
+    "fingerprint": "sha256:06b01c0a69fe6858b2a8ad78e057c935192098aa924ccfaa6c939a6ecf38ec19",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/redaction.test.ts",
+    "rule": "credential-value",
+    "line": 49,
+    "fingerprint": "sha256:b2642d7b134096ac747e4539432648db00702e0efb93af4530a2e096b4a5a3e0",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/redaction.test.ts",
+    "rule": "credential-url",
+    "line": 71,
+    "fingerprint": "sha256:e6c0667ed7a31fadecb91493c7fb4e63f2d6c0cb6dbcb2e800d906c8e745ecc0",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/safe-diagnostics.test.ts",
+    "rule": "credential-url",
+    "line": 22,
+    "fingerprint": "sha256:df5b87023c317fc1ab85d64c0817d44c1c8223a2416af3fa9f6e52065e7c53d0",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/safe-diagnostics.test.ts",
+    "rule": "home-path",
+    "line": 25,
+    "fingerprint": "sha256:59c271624646544da5b8bd966134fcad0234a225c26d72579515518434c0d219",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/safe-diagnostics.test.ts",
+    "rule": "home-path",
+    "line": 30,
+    "fingerprint": "sha256:f09f8a5b9bedf090cdff63a1f8bfad6c8d74934826dd5809563ff91cb5136edb",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/safe-diagnostics.test.ts",
+    "rule": "home-path",
+    "line": 120,
+    "fingerprint": "sha256:5faa10c6d30fc241cee24ad1b9ee84caddcac831c4f1234e73fdfc81f53e2046",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "home-path",
+    "line": 12,
+    "fingerprint": "sha256:a0816adcc7fc5c7ddce6fccc296f3206aa9e1b12657f6dac7ec9182ef3503568",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "vault-secret-path",
+    "line": 12,
+    "fingerprint": "sha256:ab5dd6bcbbe953b6573a1ef187dc5646bf03029236a34466cd60efc3d5adc465",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "home-path",
+    "line": 20,
+    "fingerprint": "sha256:22494f6dfec33c54f16b273826318d0bc477fe40723424ffb312476ab0ae02ab",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "home-path",
+    "line": 22,
+    "fingerprint": "sha256:efa216ebf41abc4bd4a22b0c01065122970f3e91fe71ec8edc9d35595e6ade98",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "home-path",
+    "line": 30,
+    "fingerprint": "sha256:729182dbbc4e8ee4801b38c6ec5299b87ba364e3a5d460a9e2315319e021eea7",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "home-path",
+    "line": 32,
+    "fingerprint": "sha256:41ebb13a1f4b2fcfbae0dd81127e02e65dccb79ccdd9a456d701afa955f2b8e0",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "home-path",
+    "line": 42,
+    "fingerprint": "sha256:13132046ffc91f1161fa06726b263325fa1dee708b019bd9d016b0350c67d8cf",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "vault-secret-path",
+    "line": 42,
+    "fingerprint": "sha256:6f9876a0b70fb1bea25446bcb82ac2ab83c1360d4c1aace5fc1843f737731b63",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "home-path",
+    "line": 52,
+    "fingerprint": "sha256:efa216ebf41abc4bd4a22b0c01065122970f3e91fe71ec8edc9d35595e6ade98",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "home-path",
+    "line": 62,
+    "fingerprint": "sha256:efa216ebf41abc4bd4a22b0c01065122970f3e91fe71ec8edc9d35595e6ade98",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "home-path",
+    "line": 72,
+    "fingerprint": "sha256:13132046ffc91f1161fa06726b263325fa1dee708b019bd9d016b0350c67d8cf",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/secret-path.test.ts",
+    "rule": "vault-secret-path",
+    "line": 72,
+    "fingerprint": "sha256:6f9876a0b70fb1bea25446bcb82ac2ab83c1360d4c1aace5fc1843f737731b63",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/services/feed-parser/feed-errors.test.ts",
+    "rule": "credential-url",
+    "line": 27,
+    "fingerprint": "sha256:1aca9fc6e455f5f8230e723eca2bcb8406a5cf9be800ea7e0c4f7762b7b35122",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/services/feed-parser/feed-errors.test.ts",
+    "rule": "credential-value",
+    "line": 27,
+    "fingerprint": "sha256:06adf476d18519c278dd4b83e9afb9cf7e83711aac7b3c42b17a1e22aeed48fc",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/services/feed-parser/feed-parser-class.test.ts",
+    "rule": "credential-url",
+    "line": 763,
+    "fingerprint": "sha256:f6fa0c51e57acca10531212e7627ad470d4aa95fcd73dca90c36749d6efe2aba",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/services/feed-parser/feed-parser-class.test.ts",
+    "rule": "credential-value",
+    "line": 769,
+    "fingerprint": "sha256:45bf084535244be7d0b43b8cec41b6fa3faf4460e903f143d72abb1fa6a1da55",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/services/fetch-helpers.test.ts",
+    "rule": "credential-url",
+    "line": 260,
+    "fingerprint": "sha256:063937249e4a759ef19d7e739ecda6f7472000384b50777e40c0e93456e3f7e4",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/services/fetch-helpers.test.ts",
+    "rule": "credential-url",
+    "line": 261,
+    "fingerprint": "sha256:49383afdd32c4aa4478468790a64267f3ccec6acc24d639e30c085839474a9cf",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/services/import-export-service.test.ts",
+    "rule": "credential-url",
+    "line": 189,
+    "fingerprint": "sha256:41408adaf70940c9c8fd3d70262f0b04131799a11c0e3f842d5b06da9b4dfeee",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/services/import-export-service.test.ts",
+    "rule": "credential-value",
+    "line": 217,
+    "fingerprint": "sha256:78de72e2eed267512551d1951467a860254bdeb4e927e23e68ed320db713a0b3",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/linked-page-grouper.test.ts",
+    "rule": "credential-url",
+    "line": 61,
+    "fingerprint": "sha256:9df9cfe549044a8f13ffe80d569332622074077db6e1f61e48c4ac4ceec7a7f5",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 13,
+    "fingerprint": "sha256:3b7c3411cd47ce0b73e5e3a27fc0fba7a82661507c723584ea55ce0747fb09db",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-url",
+    "line": 624,
+    "fingerprint": "sha256:4747f5106c0cdc05c4cc0078805aaa7240179dd21f760e9de8da4811c3285689",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 709,
+    "fingerprint": "sha256:1dcbaa8921d05c0f34bdee077d01a53946cfc7608c2ab57d913a2d551d185db8",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 712,
+    "fingerprint": "sha256:4a2a9fd38c5716c447eda6a7892b05521c99afce56bdbbb093d173f06d9ac3fc",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 713,
+    "fingerprint": "sha256:a4b02675d617d0a0e246d52512d4b2ea1cf9bd3bb16f1e4b8a6e78ddb892bba1",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/x-account-adapter.test.ts",
+    "rule": "credential-value",
+    "line": 27,
+    "fingerprint": "sha256:50f3910b7b9d88a83bfea961155fb8f2da5495bf4212dbc9a33e7baae7ef32c4",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/x-topic-adapter.test.ts",
+    "rule": "credential-value",
+    "line": 18,
+    "fingerprint": "sha256:50f3910b7b9d88a83bfea961155fb8f2da5495bf4212dbc9a33e7baae7ef32c4",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/utils/settings-loader.test.ts",
+    "rule": "credential-value",
+    "line": 140,
+    "fingerprint": "sha256:5dd84215756fbac25647ad32ae7e914ade73af7beec88b6a84da22afac1afab8",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/utils/settings-loader.test.ts",
+    "rule": "credential-value",
+    "line": 184,
+    "fingerprint": "sha256:9a909f48d7a8170e05f66975c86376d5dd6f666eba11186d4d0e1a260d4d0d3b",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/utils/settings-loader.test.ts",
+    "rule": "credential-value",
+    "line": 245,
+    "fingerprint": "sha256:b1d137e136672b05b7adaec00059c71d3955c2e2313a9047eac497caaf03dda8",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  },
+  {
+    "path": "test_files/unit/utils/settings-loader.test.ts",
+    "rule": "credential-value",
+    "line": 261,
+    "fingerprint": "sha256:7dbf987940c2ca522a7d9c4a21a364c3c86cb278f83f44455b4eb866623c662b",
+    "reason": "Synthetic literal verifies privacy or redaction behavior."
+  }
+]
