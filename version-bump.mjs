@@ -186,6 +186,7 @@ export async function bumpVersion({
   let versionsBackupPresent = false;
   let preserveManifestBackup = false;
   let preserveVersionsBackup = false;
+  let primaryError;
   const ops = { lstat, rename, rm, writeFile, ...operations };
   try {
     await ops.writeFile(manifestTemp, serializeJson(nextManifest), {
@@ -246,6 +247,7 @@ export async function bumpVersion({
       minAppVersion: installedManifest.parsed.minAppVersion,
     };
   } catch (error) {
+    primaryError = error;
     if (
       error instanceof Error &&
       error.message.startsWith("version-recovery-required:")
@@ -274,20 +276,46 @@ export async function bumpVersion({
       }
     }
     if (recoveryPaths.length > 0) {
-      throw new Error(`version-recovery-required:${recoveryPaths.join(",")}`);
+      primaryError = new Error(
+        `version-recovery-required:${recoveryPaths.join(",")}`,
+      );
+      throw primaryError;
     }
     throw error;
   } finally {
-    await Promise.allSettled([
-      ops.rm(manifestTemp, { force: true }),
-      ops.rm(versionsTemp, { force: true }),
-      manifestBackupPresent && !preserveManifestBackup
-        ? ops.rm(manifestBackup, { force: true })
-        : Promise.resolve(),
-      versionsBackupPresent && !preserveVersionsBackup
-        ? ops.rm(versionsBackup, { force: true })
-        : Promise.resolve(),
-    ]);
+    const cleanupTargets = [
+      { path: manifestTemp, operation: ops.rm(manifestTemp, { force: true }) },
+      { path: versionsTemp, operation: ops.rm(versionsTemp, { force: true }) },
+      {
+        path: manifestBackup,
+        operation:
+          manifestBackupPresent && !preserveManifestBackup
+            ? ops.rm(manifestBackup, { force: true })
+            : Promise.resolve(),
+      },
+      {
+        path: versionsBackup,
+        operation:
+          versionsBackupPresent && !preserveVersionsBackup
+            ? ops.rm(versionsBackup, { force: true })
+            : Promise.resolve(),
+      },
+    ];
+    const cleanup = await Promise.allSettled(
+      cleanupTargets.map((target) => target.operation),
+    );
+    const recoveryPaths = cleanupTargets
+      .filter((_, index) => cleanup[index].status === "rejected")
+      .map((target) => target.path);
+    if (recoveryPaths.length > 0) {
+      const primaryMessage =
+        primaryError instanceof Error
+          ? primaryError.message
+          : "version-bump-cleanup-failed";
+      throw new Error(
+        `version-operation-failed:${primaryMessage};version-recovery-required:${recoveryPaths.join(",")}`,
+      );
+    }
   }
 }
 

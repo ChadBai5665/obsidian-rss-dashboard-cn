@@ -1,8 +1,8 @@
 const SENSITIVE_KEY_SOURCE =
-  String.raw`(?:api[\s_-]*key|access[\s_-]*(?:key|token)|auth(?:orization|[\s_-]*token)?|token|secret|password|session(?:[\s_-]*(?:id|key|token))?)`;
+  String.raw`(?:api[\s_-]*key|access[\s_-]*(?:key|token)|client[\s_-]*secret|refresh[\s_-]*token|private[\s_-]*key|auth(?:orization|[\s_-]*token)?|token|secret|password|session(?:[\s_-]*(?:id|key|token))?|key)`;
 
 const ASSIGNMENT_PATTERN = new RegExp(
-  String.raw`(?:^|[\s,{])["']?(${SENSITIVE_KEY_SOURCE})["']?\s*[:=]\s*([^\r\n,;}]+)`,
+  String.raw`(?:^|[\s,{])["']?(${SENSITIVE_KEY_SOURCE})["']?\s*(?::|=(?!=|>))\s*([^\r\n,;}]+)`,
   "gi",
 );
 const URL_CREDENTIAL_PATTERN = new RegExp(
@@ -49,6 +49,10 @@ function hasCredentialAssignment(value) {
   }
   ASSIGNMENT_PATTERN.lastIndex = 0;
   for (const match of value.matchAll(ASSIGNMENT_PATTERN)) {
+    const normalizedName = match[1]
+      .toLowerCase()
+      .replace(/[\s_-]+/g, "");
+    const isBareKey = normalizedName === "key";
     const raw = match[2].trim();
     if (raw.includes("${") || raw.length < 4) continue;
     const quoted =
@@ -64,9 +68,17 @@ function hasCredentialAssignment(value) {
       (/^[A-Za-z_$][\w$]*\.[\w$.]+$/.test(normalized) ||
         SAFE_RUNTIME_IDENTIFIERS.has(normalized.toLowerCase()) ||
         /^(?:await\s+)?[A-Za-z_$][\w$]*\s*\(/.test(normalized) ||
+        /^[A-Za-z_$][\w$]*(?:\.[\w$]+)+\s*\(/.test(normalized) ||
         /^[{[(]/.test(normalized))
     ) {
       continue;
+    }
+    if (isBareKey) {
+      const directAssignment =
+        /^\s*(?:(?:const|let|var)\s+)?["']?key["']?\s*[:=]/i.test(value);
+      const credentialShaped =
+        !/\s/.test(normalized) && /[-_\d]/.test(normalized);
+      if (!directAssignment && !credentialShaped) continue;
     }
     return true;
   }
@@ -85,10 +97,10 @@ function hasPrivatePath(value) {
     /(?:file:\/\/\/|\/)(?:Users\/[^/\s"'<>]+|home\/[^/\s"'<>]+|root)(?:[\\/]|$)/.test(
       value,
     ) ||
-    /\b[A-Za-z]:[\\/](?:[^\\/\r\n"'<>]+[\\/])+[^\\/\r\n"'<>]*/.test(
+    /\b[A-Za-z]:[\\/][^\\/\r\n"'<>]+(?:[\\/][^\\/\r\n"'<>]+)*/.test(
       value,
     ) ||
-    /\\\\[A-Za-z0-9._$-]{1,64}\\[A-Za-z0-9._$-]{1,64}(?:\\[^\\\r\n"'<>]+)+/.test(
+    /\\\\[A-Za-z0-9._$-]{1,64}\\[A-Za-z0-9._$-]{1,64}(?:\\[^\\\r\n"'<>]+)*/.test(
       value,
     )
   );

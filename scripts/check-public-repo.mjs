@@ -11,7 +11,7 @@ export const PUBLIC_SCAN_LIMITS = Object.freeze({
   maxTotalBytes: 64 * 1024 * 1024,
   maxLineBytes: 512 * 1024,
   maxAllowlistBytes: 256 * 1024,
-  maxAllowlistEntries: 256,
+  maxAllowlistEntries: 512,
   maxPrivateTerms: 256,
   maxFindings: 512,
 });

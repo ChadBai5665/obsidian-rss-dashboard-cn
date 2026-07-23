@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const VERSION_FILE_MAX_BYTES = 1024 * 1024;
-const EXPECTED_PACKAGE_NAME = "rss-dashboard-cn";
+const EXPECTED_PACKAGE_NAME = "obsidian-rss-dashboard-cn";
 const EXPECTED_PLUGIN_AUTHOR = "ChadBai";
 const SEMVER_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;

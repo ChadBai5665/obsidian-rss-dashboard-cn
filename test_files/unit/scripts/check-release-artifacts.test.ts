@@ -252,6 +252,40 @@ describe("release artifact validator", () => {
     );
   });
 
+  it("reports the primary failure and retained stage path when stage cleanup fails", async () => {
+    const root = await temporaryRoot();
+    await stageReleaseArtifacts({ root });
+    await writeFile(join(root, "main.js"), "console.log('replacement');\n");
+
+    await expect(
+      stageReleaseArtifacts({
+        root,
+        hooks: {
+          afterBackup() {
+            throw new Error("simulated-primary-stage-failure");
+          },
+        },
+        operations: {
+          rm: async (
+            path: string,
+            options?: Parameters<typeof rm>[1],
+          ) => {
+            if (path.includes(".release-stage-")) {
+              throw new Error("simulated-stage-cleanup-failure");
+            }
+            await rm(path, options);
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      /release-operation-failed:simulated-primary-stage-failure;release-recovery-required:.*\.release-stage-/,
+    );
+
+    expect(
+      (await readdir(root)).some((name) => name.startsWith(".release-stage-")),
+    ).toBe(true);
+  });
+
   it("rejects root artifact symlinks without following them", async () => {
     const root = await temporaryRoot();
     const outside = join(root, "outside.js");

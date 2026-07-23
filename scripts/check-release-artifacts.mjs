@@ -267,6 +267,7 @@ export async function stageReleaseArtifacts({
   let priorMoved = false;
   let installed = false;
   let preserveBackup = false;
+  let primaryError;
   const rootBefore = await ops.lstat(resolvedRoot);
   const rootRealpath = await ops.realpath(resolvedRoot);
   const assertRootIdentity = async () => {
@@ -346,11 +347,17 @@ export async function stageReleaseArtifacts({
       }
     }
     return { ok: true, files: await expectedReleaseFiles(resolvedRoot) };
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
+    let stageCleanupFailed = false;
     if (!installed) {
-      await ops.rm(stageDirectory, { recursive: true, force: true }).catch(
-        () => undefined,
-      );
+      try {
+        await ops.rm(stageDirectory, { recursive: true, force: true });
+      } catch {
+        stageCleanupFailed = true;
+      }
     }
     if (priorMoved && !preserveBackup) {
       const releasePresent = await lstatIfPresent(releaseDirectory);
@@ -362,6 +369,15 @@ export async function stageReleaseArtifacts({
           preserveBackup = true;
         }
       }
+    }
+    if (stageCleanupFailed) {
+      const primaryMessage =
+        primaryError instanceof Error
+          ? primaryError.message
+          : "release-stage-cleanup-failed";
+      throw new Error(
+        `release-operation-failed:${primaryMessage};release-recovery-required:${stageDirectory}`,
+      );
     }
   }
 }

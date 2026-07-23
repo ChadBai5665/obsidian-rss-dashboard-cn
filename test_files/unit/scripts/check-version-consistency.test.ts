@@ -25,7 +25,7 @@ async function fixtureRepository(version = "0.1.0"): Promise<string> {
   await writeFile(
     join(repository, "package.json"),
     `${JSON.stringify({
-      name: "rss-dashboard-cn",
+      name: "obsidian-rss-dashboard-cn",
       version,
       author: "ChadBai",
     }, null, 2)}\n`,
@@ -44,12 +44,12 @@ async function fixtureRepository(version = "0.1.0"): Promise<string> {
   await writeFile(
     join(repository, "package-lock.json"),
     `${JSON.stringify({
-      name: "rss-dashboard-cn",
+      name: "obsidian-rss-dashboard-cn",
       version,
       lockfileVersion: 3,
       packages: {
         "": {
-          name: "rss-dashboard-cn",
+          name: "obsidian-rss-dashboard-cn",
           version,
         },
       },
@@ -83,6 +83,16 @@ describe("version consistency validator", () => {
     await expect(
       checkVersionConsistency({ repository, tag: "0.1.0-beta.1" }),
     ).resolves.toMatchObject({ ok: true, errors: [] });
+    const packageJson = JSON.parse(
+      await readFile(join(repository, "package.json"), "utf8"),
+    );
+    const manifest = JSON.parse(
+      await readFile(join(repository, "manifest.json"), "utf8"),
+    );
+    expect(packageJson.name).toBe("obsidian-rss-dashboard-cn");
+    expect(manifest.id).toBe("rss-dashboard-cn");
+    expect(packageJson.name).not.toBe(manifest.id);
+    expect(packageJson.author).toBe(manifest.author);
   });
 
   it("rejects mismatches, invalid SemVer, and a non-current versions tail", async () => {
@@ -487,6 +497,48 @@ describe("version bump", () => {
     expect(
       names.some(
         (name) => name.startsWith(".versions-") && name.endsWith(".backup"),
+      ),
+    ).toBe(true);
+  });
+
+  it("reports the primary failure and retained temp path when temp cleanup fails", async () => {
+    const repository = await fixtureRepository();
+    await prepareNpmVersionLifecycle(repository);
+
+    await expect(
+      bumpVersion({
+        repository,
+        environment: lifecycleEnvironment,
+        hooks: {
+          beforeVersionsInstall() {
+            throw new Error("simulated-primary-version-failure");
+          },
+        },
+        operations: {
+          rm: async (
+            path: string,
+            options?: Parameters<typeof rm>[1],
+          ) => {
+            if (
+              path.includes(".versions-") &&
+              path.endsWith(".tmp")
+            ) {
+              throw new Error("simulated-temp-cleanup-failure");
+            }
+            await rm(path, options);
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      /version-operation-failed:simulated-primary-version-failure;version-recovery-required:.*\.versions-.*\.tmp/,
+    );
+
+    const names = await import("node:fs/promises").then(({ readdir }) =>
+      readdir(repository),
+    );
+    expect(
+      names.some(
+        (name) => name.startsWith(".versions-") && name.endsWith(".tmp"),
       ),
     ).toBe(true);
   });

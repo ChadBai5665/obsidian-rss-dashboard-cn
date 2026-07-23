@@ -175,6 +175,13 @@
     "reason": "Implementation documentation uses a synthetic credential-shaped configuration example."
   },
   {
+    "path": "main.ts",
+    "rule": "credential-value",
+    "line": 743,
+    "fingerprint": "sha256:812ca4b633ad362cf6869c40277abbdb1fa73cf1e701761f48333491144d6437",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
     "path": "scripts/audit-i18n.mjs",
     "rule": "credential-value",
     "line": 91,
@@ -203,6 +210,13 @@
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
+    "path": "scripts/release-safety-rules.mjs",
+    "rule": "home-path",
+    "line": 103,
+    "fingerprint": "sha256:026b4ed9b829fb375b75a6591d83b315dc03cda5f37f0867f1c3d47b2f0580c5",
+    "reason": "Source code contains a path pattern required for privacy enforcement."
+  },
+  {
     "path": "scripts/sanitize-tikhub-fixture.mjs",
     "rule": "credential-value",
     "line": 119,
@@ -210,24 +224,10 @@
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
-    "path": "scripts/sanitize-tikhub-fixture.mjs",
-    "rule": "credential-value",
-    "line": 147,
-    "fingerprint": "sha256:e6c7b213bb078665b13e9b7f8405656e26bbe3174183fed1b02cab6eb9993f37",
-    "reason": "Source code names a credential field while handling runtime supplied values."
-  },
-  {
     "path": "src/ai/analysis-note-inserter.ts",
     "rule": "credential-value",
     "line": 232,
     "fingerprint": "sha256:c55c128251870102b412d4fcc90cdffda1c47bc06ff8e2bb255592391d7491ba",
-    "reason": "Source code names a credential field while handling runtime supplied values."
-  },
-  {
-    "path": "src/ai/content/ai-content-selector.ts",
-    "rule": "credential-value",
-    "line": 612,
-    "fingerprint": "sha256:8a4eb92e665d9cf1890e54b3817cfb05e861ea12446358af9c9aba40c1d6148b",
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
@@ -266,10 +266,234 @@
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
+    "path": "src/components/article-header-menu.ts",
+    "rule": "credential-value",
+    "line": 38,
+    "fingerprint": "sha256:103be58411c34e07136a8119498f81c764ced5fb5da2c92063b3123a6c4d4b95",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/components/article-header.ts",
+    "rule": "credential-value",
+    "line": 55,
+    "fingerprint": "sha256:103be58411c34e07136a8119498f81c764ced5fb5da2c92063b3123a6c4d4b95",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/components/article-list/utils/article-grouping.ts",
+    "rule": "credential-value",
+    "line": 20,
+    "fingerprint": "sha256:c7b2ca4bc852c0854724b25b7df883b26ddccaf23a323f16692eecc67448b4d4",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/components/article-renderer.ts",
+    "rule": "credential-value",
+    "line": 85,
+    "fingerprint": "sha256:103be58411c34e07136a8119498f81c764ced5fb5da2c92063b3123a6c4d4b95",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/components/sidebar.ts",
+    "rule": "credential-value",
+    "line": 305,
+    "fingerprint": "sha256:103be58411c34e07136a8119498f81c764ced5fb5da2c92063b3123a6c4d4b95",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/i18n/index.ts",
+    "rule": "credential-value",
+    "line": 76,
+    "fingerprint": "sha256:2cf7535369db70c8acd01687c0b04fa2ab323b2d57b6cd06495c12ff43aab459",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/i18n/index.ts",
+    "rule": "credential-value",
+    "line": 119,
+    "fingerprint": "sha256:2cf7535369db70c8acd01687c0b04fa2ab323b2d57b6cd06495c12ff43aab459",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/i18n/types.ts",
+    "rule": "credential-value",
+    "line": 10,
+    "fingerprint": "sha256:2cf7535369db70c8acd01687c0b04fa2ab323b2d57b6cd06495c12ff43aab459",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
     "path": "src/modals/ai-connection-modal.ts",
     "rule": "credential-value",
     "line": 40,
     "fingerprint": "sha256:e9e8984b7669ab242478b454622eac0b8265ffc724ea8755c1b96847e6a54749",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/feed-manager/add-feed-modal.ts",
+    "rule": "credential-value",
+    "line": 113,
+    "fingerprint": "sha256:103be58411c34e07136a8119498f81c764ced5fb5da2c92063b3123a6c4d4b95",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/feed-manager/edit-feed-modal.ts",
+    "rule": "credential-value",
+    "line": 117,
+    "fingerprint": "sha256:103be58411c34e07136a8119498f81c764ced5fb5da2c92063b3123a6c4d4b95",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/feed-manager/feed-title-validation.ts",
+    "rule": "credential-value",
+    "line": 21,
+    "fingerprint": "sha256:2dc8bbca2424089d5b7e3dea224da7b47e0e110672b43d1cd1e43391c349b4c0",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/import-opml-modal.ts",
+    "rule": "credential-value",
+    "line": 58,
+    "fingerprint": "sha256:103be58411c34e07136a8119498f81c764ced5fb5da2c92063b3123a6c4d4b95",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 33,
+    "fingerprint": "sha256:f8837dcda31b201d6c021782103a927813c48e63a4c536961fb9ebc32f534709",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 37,
+    "fingerprint": "sha256:7f9a0ef5ce1c6e633161a1b4eb2d8272104b0e71ed8a9873f424a911d235317a",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 42,
+    "fingerprint": "sha256:794d13a254055493d7287a0b23d4041613a72a4465c99906df9b877d78762b9d",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 55,
+    "fingerprint": "sha256:974d004d1dd2a2e92b3d45b10d70163d142b497542c09b4d12d2cec801c2c619",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 59,
+    "fingerprint": "sha256:f8837dcda31b201d6c021782103a927813c48e63a4c536961fb9ebc32f534709",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 63,
+    "fingerprint": "sha256:7f9a0ef5ce1c6e633161a1b4eb2d8272104b0e71ed8a9873f424a911d235317a",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 67,
+    "fingerprint": "sha256:85cfc06878c441fddabd0bc7c8dbd894733b9a0ee2b41a65bc68b2717201aadc",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 71,
+    "fingerprint": "sha256:9cd07b2b232fc3ec8dc8ffb77e38139d42d00da7dedbc24a1b13472f7110c394",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 75,
+    "fingerprint": "sha256:cb51580b9ac7f19341a6acd55460b5f1192255a9e22d31ae8e45267f18412789",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 79,
+    "fingerprint": "sha256:6e6b29edb0bdc920690990384ff6c15aeda957c2932c7cd87060d20a4e9024d0",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 91,
+    "fingerprint": "sha256:4edeb1225871577f45f09958f14c027bd719837bf0a43010e90f3d2fcfd5e716",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 95,
+    "fingerprint": "sha256:76d91f51fc7906ad6339b57b05669fa54b3dd76f9d339bb790a1df4123c85a02",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 104,
+    "fingerprint": "sha256:7690eba0b55d243b4a76c7be0972b2d97fc73d16688bee856470ba713f5ce78d",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 117,
+    "fingerprint": "sha256:a08c01f230b589a44e37acdaeb78b3a4f51025fb5de50d415d38d57d52c804ca",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 121,
+    "fingerprint": "sha256:85cfc06878c441fddabd0bc7c8dbd894733b9a0ee2b41a65bc68b2717201aadc",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 125,
+    "fingerprint": "sha256:9cd07b2b232fc3ec8dc8ffb77e38139d42d00da7dedbc24a1b13472f7110c394",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 129,
+    "fingerprint": "sha256:a682c454e83ebba9dbf927ca0b7559e2ce514aa08eb3f53492c81d2f7db3e8bd",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 133,
+    "fingerprint": "sha256:70a735071b638f52abc828be8e219502eb5c5628096d1340385c080da5cfdf5b",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 137,
+    "fingerprint": "sha256:974d004d1dd2a2e92b3d45b10d70163d142b497542c09b4d12d2cec801c2c619",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/modals/shortcut-help-modal.ts",
+    "rule": "credential-value",
+    "line": 141,
+    "fingerprint": "sha256:7f9a0ef5ce1c6e633161a1b4eb2d8272104b0e71ed8a9873f424a911d235317a",
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
@@ -280,17 +504,31 @@
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
-    "path": "src/security/path-identity-provider.ts",
+    "path": "src/services/article-saver.ts",
     "rule": "credential-value",
-    "line": 190,
-    "fingerprint": "sha256:a948062ca42f8aca0325d5784dced32edef9fb487415dbb38c85c35c75152d11",
+    "line": 130,
+    "fingerprint": "sha256:812ca4b633ad362cf6869c40277abbdb1fa73cf1e701761f48333491144d6437",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/services/background-import-service.ts",
+    "rule": "credential-value",
+    "line": 85,
+    "fingerprint": "sha256:812ca4b633ad362cf6869c40277abbdb1fa73cf1e701761f48333491144d6437",
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
     "path": "src/services/import-export-service.ts",
     "rule": "credential-value",
-    "line": 257,
-    "fingerprint": "sha256:da6dbf1a086f25f743ebc6cdfd3c5f9dc0b1c9d3ca2d350367319e0635a5cc6e",
+    "line": 66,
+    "fingerprint": "sha256:812ca4b633ad362cf6869c40277abbdb1fa73cf1e701761f48333491144d6437",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/services/web-viewer-integration.ts",
+    "rule": "credential-value",
+    "line": 42,
+    "fingerprint": "sha256:812ca4b633ad362cf6869c40277abbdb1fa73cf1e701761f48333491144d6437",
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
@@ -298,6 +536,27 @@
     "rule": "credential-value",
     "line": 42,
     "fingerprint": "sha256:e9e8984b7669ab242478b454622eac0b8265ffc724ea8755c1b96847e6a54749",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/settings/tabs/ai-settings-tab.ts",
+    "rule": "credential-value",
+    "line": 765,
+    "fingerprint": "sha256:5af452c3e68b734e7bd4481efc04ac671d4ebb98a4ff31c39f52205bc5fa17c4",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/settings/tabs/highlights-settings-tab.ts",
+    "rule": "credential-value",
+    "line": 153,
+    "fingerprint": "sha256:c0b50002df06155f31d6b204d136a66d18ba564e4ffccfc78d0a2df3fdeade3e",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/settings/tabs/storage-settings-tab.ts",
+    "rule": "credential-value",
+    "line": 110,
+    "fingerprint": "sha256:e8f0bc829ada2e819c394050233cd2052cb1412e390ec29e7df9bf86785fad0f",
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
@@ -329,10 +588,10 @@
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
-    "path": "src/sources/tikhub/tikhub-client.ts",
+    "path": "src/sources/source-config.ts",
     "rule": "credential-value",
-    "line": 188,
-    "fingerprint": "sha256:7a9c12354cbbdbd3749c726f572635977fd26e3e9d59b1b1c86a1f2e8a31002f",
+    "line": 114,
+    "fingerprint": "sha256:87078aa2e790fe947dafa974397862b79235d1184edd61123b78ade5407b1be1",
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
@@ -364,6 +623,13 @@
     "reason": "Source code names a credential field while handling runtime supplied values."
   },
   {
+    "path": "src/sources/tikhub/x-search-query.ts",
+    "rule": "credential-value",
+    "line": 83,
+    "fingerprint": "sha256:0e1a7099889f5d4cb5980e1e91e9a92e6832fc0014c92f4b9720885963e33867",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
     "path": "src/sources/tikhub/x-topic-adapter.ts",
     "rule": "credential-value",
     "line": 97,
@@ -383,6 +649,118 @@
     "line": 126,
     "fingerprint": "sha256:b53f82a632a13ce4885b41ece83bb78b4fd4ee149e10b76482dbeb43c1b3466e",
     "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/utils/filter-title-format.ts",
+    "rule": "credential-value",
+    "line": 77,
+    "fingerprint": "sha256:1265bd8aa5567aec79039a9b498e732e1fdd589c7b78fab9f95e8e7ca64a42d0",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/utils/filter-title-format.ts",
+    "rule": "credential-value",
+    "line": 134,
+    "fingerprint": "sha256:1265bd8aa5567aec79039a9b498e732e1fdd589c7b78fab9f95e8e7ca64a42d0",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/utils/filter-title-format.ts",
+    "rule": "credential-value",
+    "line": 181,
+    "fingerprint": "sha256:1265bd8aa5567aec79039a9b498e732e1fdd589c7b78fab9f95e8e7ca64a42d0",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/views/dashboard-view.ts",
+    "rule": "credential-value",
+    "line": 227,
+    "fingerprint": "sha256:103be58411c34e07136a8119498f81c764ced5fb5da2c92063b3123a6c4d4b95",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/views/podcast-player.ts",
+    "rule": "credential-value",
+    "line": 14,
+    "fingerprint": "sha256:fe1ca68cdb1f4103dc1cf87c0984830ca79f000cb4c293a9bd079da3f049a692",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/views/podcast-player.ts",
+    "rule": "credential-value",
+    "line": 119,
+    "fingerprint": "sha256:d8327628c28fb10dfd260a5e906902d74fe705c8090a8c87791b8aee74b7d873",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/views/podcast-player.ts",
+    "rule": "credential-value",
+    "line": 165,
+    "fingerprint": "sha256:80ec6c64890097055ce49b7b9e2a00becdbf64707679b52e61a6433850c5a069",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/views/reader-view.ts",
+    "rule": "credential-value",
+    "line": 75,
+    "fingerprint": "sha256:fe1ca68cdb1f4103dc1cf87c0984830ca79f000cb4c293a9bd079da3f049a692",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/views/reader-view.ts",
+    "rule": "credential-value",
+    "line": 794,
+    "fingerprint": "sha256:103be58411c34e07136a8119498f81c764ced5fb5da2c92063b3123a6c4d4b95",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/views/reader-view.ts",
+    "rule": "credential-value",
+    "line": 1131,
+    "fingerprint": "sha256:80ec6c64890097055ce49b7b9e2a00becdbf64707679b52e61a6433850c5a069",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/views/reader-view.ts",
+    "rule": "credential-value",
+    "line": 1141,
+    "fingerprint": "sha256:80ec6c64890097055ce49b7b9e2a00becdbf64707679b52e61a6433850c5a069",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "src/views/reader-view.ts",
+    "rule": "credential-value",
+    "line": 2658,
+    "fingerprint": "sha256:008bc4eef2b80f345e81d6e4628f55f61d298b141f183be0a403ee1e482afe9f",
+    "reason": "Source code names a credential field while handling runtime supplied values."
+  },
+  {
+    "path": "test_files/stubs/obsidian.ts",
+    "rule": "credential-value",
+    "line": 1163,
+    "fingerprint": "sha256:ff6239f8ae03693aed27cb82136168f50270afcbdb71c6cfdc548660cea5ad1d",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/stubs/obsidian.ts",
+    "rule": "credential-value",
+    "line": 1169,
+    "fingerprint": "sha256:b1077c7e46e8067e40a4c3b4679df2b7958ee64e5a738fadc8b3d022b262c7b2",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/stubs/obsidian.ts",
+    "rule": "credential-value",
+    "line": 1178,
+    "fingerprint": "sha256:ff6239f8ae03693aed27cb82136168f50270afcbdb71c6cfdc548660cea5ad1d",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/ai-operation-service.test.ts",
+    "rule": "credential-value",
+    "line": 103,
+    "fingerprint": "sha256:126f7fc2a439a9a8c982f27febbb16a0bc4fcae1d9c0b7e4e1b48a47d10d9671",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/ai-privacy-boundary.test.ts",
@@ -504,6 +882,13 @@
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
+    "path": "test_files/unit/collection/daily-index-service.test.ts",
+    "rule": "home-path",
+    "line": 142,
+    "fingerprint": "sha256:81b535a88709c754113746a603c48bfeecc140719622b6b5c6b3ae19fbb77c52",
+    "reason": "Security test fixture intentionally exercises private path detection."
+  },
+  {
     "path": "test_files/unit/components/sidebar-feed-error-badge.test.ts",
     "rule": "credential-url",
     "line": 215,
@@ -557,6 +942,13 @@
     "rule": "credential-url",
     "line": 1688,
     "fingerprint": "sha256:cf576975fd00db77635470d6ca7012d2b4cd905e30bd5cfa030c03a4c0001b9a",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
+    "rule": "credential-value",
+    "line": 2387,
+    "fingerprint": "sha256:108ee016dc020c3ee661535c3220388ea4533ecf3cbcec3211812098d1ea7bad",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
@@ -723,7 +1115,7 @@
   {
     "path": "test_files/unit/scripts/check-version-consistency.test.ts",
     "rule": "credential-value",
-    "line": 367,
+    "line": 377,
     "fingerprint": "sha256:7e102f72c1c78ce91d8eaf5d416072b76d1c2681800efbf390484cf6ad4f79a1",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
@@ -757,65 +1149,114 @@
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
-    "rule": "credential-url",
+    "rule": "credential-value",
+    "line": 6,
+    "fingerprint": "sha256:2d57b7249c58f418dfdbed5afc1331721058e7b28fed8829c8c9ddbe2da64d10",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
+    "rule": "credential-value",
     "line": 8,
+    "fingerprint": "sha256:195ea94a8c4df4e0180a4000cef4632f58890ed854fbfa4699f2655ad5675099",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
+    "rule": "credential-value",
+    "line": 9,
+    "fingerprint": "sha256:edb2be7461206eb0241235bf3cbf34f06907d658d6ba20fb449a6bbbc1be2538",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
+    "rule": "credential-value",
+    "line": 10,
+    "fingerprint": "sha256:0bb596c4dcdebe07833c43355dad6c3e2c53166332c9774e2bf234f93cf9a398",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
+    "rule": "credential-url",
+    "line": 13,
     "fingerprint": "sha256:d7c3ccf7d9eaee4da9e95222d3b57b1c7bfb7c787526b062529eaff0afe6410c",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "credential-url",
-    "line": 12,
+    "line": 17,
+    "fingerprint": "sha256:0f489ad804240b4a4e80438f21122f608d7ebd71809c8abc895c3c5b3b9acd35",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
+    "rule": "credential-url",
+    "line": 21,
     "fingerprint": "sha256:290392b3f4e290d8a64fa6dd50920ffa25b0b071bc32d9280faf54cd527f9585",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "credential-url",
-    "line": 16,
+    "line": 25,
     "fingerprint": "sha256:3a69b5727e026ccb0a3fa2e717eda682c6b953cb56c110ecd6fce265a287e2ee",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "credential-url",
-    "line": 20,
+    "line": 29,
     "fingerprint": "sha256:12409941ba969c58e002dab2e5a7195548953b5a0555f41a93ad2aa25edec3fd",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 22,
+    "line": 31,
     "fingerprint": "sha256:f9aeb9b54035e0ed96fdb86109c7aa8d9df8651b2a510725c6422f3923c9da6d",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 23,
+    "line": 32,
     "fingerprint": "sha256:30ff2f51d9025d4a444b4ad5c82a6f2e8e25a6138509d4152c168d0772314839",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 24,
+    "line": 33,
     "fingerprint": "sha256:e95d7b195713953ba4f8743aee3b927452a4de946857fe37ff5936405345ba19",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 25,
+    "line": 34,
     "fingerprint": "sha256:afd6f4976ff6c500e921904a7052461418f7237cf6d06314367d06d8928df0a1",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
     "rule": "home-path",
-    "line": 28,
+    "line": 35,
+    "fingerprint": "sha256:c698bca2b413aa93a45cda89880d38eae6f53730b4fe44a4ee7fe708730626b9",
+    "reason": "Security test fixture intentionally exercises private path detection."
+  },
+  {
+    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
+    "rule": "home-path",
+    "line": 38,
     "fingerprint": "sha256:9091318795a47ce2832f652e990eb6308bf15f2e1db1696f82c9cfe8ca0c2d98",
+    "reason": "Security test fixture intentionally exercises private path detection."
+  },
+  {
+    "path": "test_files/unit/scripts/release-safety-rule-fixtures.ts",
+    "rule": "home-path",
+    "line": 40,
+    "fingerprint": "sha256:e04b8cb383773ef23ba0bdffbc3a2e36e4506c5d3a5750e200b108d3fd27d61d",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
@@ -856,6 +1297,13 @@
   {
     "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
     "rule": "credential-value",
+    "line": 92,
+    "fingerprint": "sha256:509ceddf58abbdd9d0d68ccee7226683ce5f26cd0d0b4ca0a1dddd7da843d8b2",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
+    "rule": "credential-value",
     "line": 172,
     "fingerprint": "sha256:133e6bbb1593e75255853e750d229e144aa6e5ea19bb6a8d4a70d059f4a25d68",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
@@ -879,13 +1327,6 @@
     "rule": "credential-value",
     "line": 306,
     "fingerprint": "sha256:5c6b1f3624a8f902c9cfa5b352430eaacf9c4f81e45a531ed1cbbc856d17cf92",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/scripts/tikhub-fixture-scripts.test.ts",
-    "rule": "credential-value",
-    "line": 328,
-    "fingerprint": "sha256:b58aeec0434cc479b05d637199bad0189d8b44002eb6eb819769ba5d2fd815b1",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
@@ -1163,6 +1604,13 @@
   },
   {
     "path": "test_files/unit/security/redaction.test.ts",
+    "rule": "credential-url",
+    "line": 46,
+    "fingerprint": "sha256:2d069678224516576a664157aa533ddf60280c295129af21d9b0bec6ba83afc2",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/security/redaction.test.ts",
     "rule": "credential-value",
     "line": 47,
     "fingerprint": "sha256:dfd807b0622b3336d1c3fb644d73b12631502575c4dffe21a555a0d583eebd84",
@@ -1262,6 +1710,13 @@
   {
     "path": "test_files/unit/services/article-saver.test.ts",
     "rule": "home-path",
+    "line": 371,
+    "fingerprint": "sha256:3e6f5b6185bf2d3b672c9a18b2e0602dff82735bd01a034aa2d8f7797ac21f36",
+    "reason": "Security test fixture intentionally exercises private path detection."
+  },
+  {
+    "path": "test_files/unit/services/article-saver.test.ts",
+    "rule": "home-path",
     "line": 893,
     "fingerprint": "sha256:81428a61142dff2050b4f86e9b3781a0dca7b72b21c6a6e5097d1296c29fd8a1",
     "reason": "Security test fixture intentionally exercises private path detection."
@@ -1292,13 +1747,6 @@
     "rule": "credential-value",
     "line": 769,
     "fingerprint": "sha256:45bf084535244be7d0b43b8cec41b6fa3faf4460e903f143d72abb1fa6a1da55",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/services/feed-storage-repository.test.ts",
-    "rule": "credential-value",
-    "line": 1690,
-    "fingerprint": "sha256:7ad19a04b65adb0e15ae04767d587e9dba2d9ffa78a31a0cb3340d0367e73a2d",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
@@ -1673,13 +2121,6 @@
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
-    "path": "test_files/unit/sources/tikhub/x-topic-adapter.test.ts",
-    "rule": "credential-value",
-    "line": 126,
-    "fingerprint": "sha256:98a7a2147780f2dcb5e72b18824fc5aa7630b40d0afe6a53bda49a0ce0045d3e",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
     "path": "test_files/unit/utils/settings-loader.test.ts",
     "rule": "credential-value",
     "line": 140,
@@ -1712,6 +2153,13 @@
     "rule": "credential-value",
     "line": 261,
     "fingerprint": "sha256:7dbf987940c2ca522a7d9c4a21a364c3c86cb278f83f44455b4eb866623c662b",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/views/reader-hotkeys.test.ts",
+    "rule": "credential-value",
+    "line": 34,
+    "fingerprint": "sha256:f11a838f8a87a60f4319d362af997b04f2d9f4e2f5bf662a3dac52383d6d5e94",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   }
 ]
