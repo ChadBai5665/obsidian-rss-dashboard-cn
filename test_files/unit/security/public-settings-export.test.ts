@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS, type RssDashboardSettings } from "../../../src/types/types";
 import {
   buildPublicSettingsExport,
+  MAX_PUBLIC_SETTINGS_JSON_CHARACTERS,
+  parsePublicSettingsImportJson,
   preparePublicSettingsImport,
   PublicSettingsExportError,
 } from "../../../src/security/public-settings-export";
@@ -269,5 +271,174 @@ describe("buildPublicSettingsExport", () => {
     expect(() =>
       buildPublicSettingsExport(settings, { includeSources: true }),
     ).toThrow(PublicSettingsExportError);
+  });
+
+  it.each([
+    "x-api-key",
+    "X_API_KEY",
+    "x%2Dapi%2Dkey",
+    "auth_token",
+    "AUTH-TOKEN",
+    "api-key",
+    "access_token",
+    "Access.Token",
+    "X-Amz-Credential",
+    "X-Amz-Signature",
+    "X-Amz-Security-Token",
+    "accesskey",
+    "signature",
+    "sig",
+    "password",
+    "session",
+    "session_id",
+    "token",
+  ])("rejects separator, casing, and encoded credential query key %s", (key) => {
+    const settings = settingsFixture();
+    settings.feeds[0].url =
+      `https://example.com/feed.xml?${key}=PRIVATE_CREDENTIAL_VALUE`;
+    expect(() =>
+      buildPublicSettingsExport(settings, { includeSources: true }),
+    ).toThrow(PublicSettingsExportError);
+  });
+
+  it.each([
+    "https://example.com/feed.xml?value=AIzaSyDUMMYDUMMYDUMMYDUMMYDUMMYDUMMY",
+    "https://example.com/feed.xml?value=AKIAIOSFODNN7EXAMPLE",
+    "https://example.com/feed.xml?value=sk-privatecredentialmaterial",
+    "https://example.com/feed.xml#token=PRIVATE_FRAGMENT_TOKEN",
+  ])("rejects credential-like query or fragment material without echoing it: %s", (url) => {
+    const settings = settingsFixture();
+    settings.feeds[0].url = url;
+    let thrown: unknown;
+    try {
+      buildPublicSettingsExport(settings, { includeSources: true });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(PublicSettingsExportError);
+    expect(String(thrown)).not.toContain("PRIVATE_");
+    expect(String(thrown)).not.toContain("AIza");
+    expect(String(thrown)).not.toContain("AKIA");
+    expect(String(thrown)).not.toContain("sk-private");
+  });
+
+  it("keeps ordinary topic, page, and utm parameters unchanged", () => {
+    const settings = settingsFixture();
+    settings.feeds[0].url =
+      "https://example.com/feed.xml?topic=ai&page=2&utm_source=reader";
+    const exported = buildPublicSettingsExport(settings, {
+      includeSources: true,
+    });
+    expect((exported.feeds as Array<Record<string, unknown>>)[0].url).toBe(
+      "https://example.com/feed.xml?topic=ai&page=2&utm_source=reader",
+    );
+  });
+
+  it.each(["feed", "site", "tikhub", "ai"])(
+    "fails the whole export when the %s URL contains credentials",
+    (field) => {
+      const settings = settingsFixture();
+      const credentialUrl =
+        "https://example.com/resource?x-api-key=PRIVATE_BASE_URL_KEY";
+      if (field === "feed") settings.feeds[0].url = credentialUrl;
+      if (field === "site") settings.feeds[0].siteUrl = credentialUrl;
+      if (field === "tikhub") settings.tikhub.baseUrl = credentialUrl;
+      if (field === "ai") settings.ai.connections[0].baseUrl = credentialUrl;
+      expect(() =>
+        buildPublicSettingsExport(settings, { includeSources: true }),
+      ).toThrow(PublicSettingsExportError);
+    },
+  );
+
+  it("rejects a serialized public export just over the shared character budget", () => {
+    const settings = settingsFixture();
+    const longTitle = "x".repeat(4_096);
+    settings.feeds = Array.from({ length: 1_300 }, (_, index) => ({
+      ...settings.feeds[0],
+      title: `${longTitle.slice(0, -String(index).length)}${index}`,
+      items: [],
+    }));
+
+    expect(() =>
+      buildPublicSettingsExport(settings, { includeSources: true }),
+    ).toThrow(PublicSettingsExportError);
+  });
+
+  it("rejects a serialized public export just over the shared UTF-8 byte budget", () => {
+    const settings = settingsFixture();
+    settings.feeds = Array.from({ length: 410 }, (_, index) => ({
+      ...settings.feeds[0],
+      title: `${"中".repeat(4_092)}${String(index).padStart(4, "0")}`,
+      items: [],
+    }));
+
+    expect(() =>
+      buildPublicSettingsExport(settings, { includeSources: true }),
+    ).toThrow(PublicSettingsExportError);
+  });
+
+  it("shares one collection-entry budget across feeds, folders, tags, and connections", () => {
+    const settings = settingsFixture();
+    settings.feeds = Array.from({ length: 1_700 }, () => ({
+      ...settings.feeds[0],
+      items: [],
+    }));
+    settings.folders = Array.from({ length: 1_601 }, () => ({
+      name: "Folder",
+      subfolders: [],
+      createdAt: 0,
+      modifiedAt: 0,
+    }));
+    settings.availableTags = Array.from({ length: 1_700 }, () => ({
+      name: "tag",
+      color: "#fff",
+    }));
+
+    expect(() =>
+      buildPublicSettingsExport(settings, { includeSources: true }),
+    ).toThrow(PublicSettingsExportError);
+  });
+
+  it("counts repeated shared input nodes per output occurrence and invokes zero accessors", () => {
+    const settings = settingsFixture();
+    const sharedFeed = settings.feeds[0];
+    const getter = vi.fn(() => "PRIVATE_SHARED_DAG_GETTER");
+    Object.defineProperty(sharedFeed, "futureSecret", {
+      enumerable: true,
+      get: getter,
+    });
+    settings.feeds = Array.from({ length: 2_600 }, () => sharedFeed);
+    settings.availableTags = Array.from({ length: 2_401 }, () => ({
+      name: "tag",
+      color: "#fff",
+    }));
+
+    expect(() =>
+      buildPublicSettingsExport(settings, { includeSources: true }),
+    ).toThrow(PublicSettingsExportError);
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it("emits a near-boundary snapshot that remains acceptable to its own JSON importer", () => {
+    const settings = settingsFixture();
+    settings.feeds = Array.from({ length: 1_100 }, (_, index) => ({
+      ...settings.feeds[0],
+      title: `${"x".repeat(3_990)}${String(index).padStart(4, "0")}`,
+      items: [],
+    }));
+    const exported = buildPublicSettingsExport(settings, {
+      includeSources: true,
+    });
+    const text = JSON.stringify(exported);
+
+    expect(text.length).toBeLessThanOrEqual(
+      MAX_PUBLIC_SETTINGS_JSON_CHARACTERS,
+    );
+    expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(
+      MAX_PUBLIC_SETTINGS_JSON_CHARACTERS,
+    );
+    expect(() =>
+      parsePublicSettingsImportJson(text, { includeSources: true }),
+    ).not.toThrow();
   });
 });

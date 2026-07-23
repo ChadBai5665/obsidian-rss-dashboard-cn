@@ -772,6 +772,18 @@ export class FeedStorageRepository {
     };
   }
 
+  public buildPersistedMetadataSnapshot(
+    settings: RssDashboardSettings,
+  ): RssDashboardSettings | PersistedRssDashboardSettings {
+    if (
+      settings.storageMode !== "vault-shards" &&
+      settings.storageMode !== "vault-shards-v2"
+    ) {
+      return cloneJson(settings);
+    }
+    return this.createPersistedSettings(settings);
+  }
+
   public validatePortableDataBundle(input: unknown): PortableDataBundle {
     return parsePortableDataBundle(input);
   }

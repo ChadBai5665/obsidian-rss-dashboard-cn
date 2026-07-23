@@ -2613,3 +2613,351 @@ describe("applyFeedLimitsToAllFeeds()", () => {
     expect(plugin.settings).toBeDefined();
   });
 });
+
+describe("transactional public settings imports", () => {
+  let plugin: RssDashboardPlugin;
+  let previous: RssDashboardSettings;
+  let previousFeedParser: RssDashboardPlugin["feedParser"];
+  let repository: {
+    persistSettings: (
+      settings: RssDashboardSettings,
+      saveData: (data: unknown) => Promise<void>,
+      options?: unknown,
+    ) => Promise<{
+      metadataSaved: boolean;
+      shardWriteCount: number;
+      shardDeleteCount: number;
+    }>;
+  };
+
+  const cloneSettings = (
+    settings: RssDashboardSettings,
+  ): RssDashboardSettings =>
+    JSON.parse(JSON.stringify(settings)) as RssDashboardSettings;
+
+  const result = {
+    metadataSaved: true,
+    shardWriteCount: 0,
+    shardDeleteCount: 0,
+  };
+
+  const writeDurable = async (
+    settings: RssDashboardSettings,
+  ): Promise<void> => {
+    await plugin.app.vault.adapter.write(
+      "data.json",
+      JSON.stringify(settings),
+    );
+  };
+
+  const readDurable = async (): Promise<RssDashboardSettings> =>
+    JSON.parse(
+      await plugin.app.vault.adapter.read("data.json"),
+    ) as RssDashboardSettings;
+
+  beforeEach(async () => {
+    plugin = await createPluginInstance(createMockApp());
+    previous = cloneSettings(DEFAULT_SETTINGS);
+    previous.locale = "zh-CN";
+    previous.feeds = [];
+    plugin.settings = previous;
+    (
+      plugin as unknown as {
+        initializeSettingsBackedServices: () => void;
+      }
+    ).initializeSettingsBackedServices();
+    await writeDurable(previous);
+    plugin.loadData = vi.fn(async () => {
+      throw new Error("transaction verification must not call loadData");
+    });
+    previousFeedParser = { identity: "previous-parser" } as unknown as RssDashboardPlugin["feedParser"];
+    plugin.feedParser = previousFeedParser;
+    repository = (
+      plugin as unknown as {
+        feedStorageRepository: typeof repository;
+      }
+    ).feedStorageRepository;
+    vi.spyOn(plugin, "refreshDashboardViews").mockResolvedValue(undefined);
+    vi.spyOn(
+      plugin as unknown as {
+        getActiveDiscoverView: () => Promise<null>;
+      },
+      "getActiveDiscoverView",
+    ).mockResolvedValue(null);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  it("rolls back and rejects when persistence throws before writing", async () => {
+    let attempt = 0;
+    const persist = vi
+      .spyOn(repository, "persistSettings")
+      .mockImplementation(async (candidate) => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("save-before-write");
+        await writeDurable(candidate);
+        return result;
+      });
+
+    await expect(
+      plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      ),
+    ).rejects.toThrow("save-before-write");
+
+    expect(plugin.settings).toBe(previous);
+    expect(plugin.feedParser).toBe(previousFeedParser);
+    expect((await readDurable()).locale).toBe("zh-CN");
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(plugin.loadData).not.toHaveBeenCalled();
+  });
+
+  it("compensates a commit-then-throw and verifies the previous durable state", async () => {
+    let attempt = 0;
+    const persist = vi
+      .spyOn(repository, "persistSettings")
+      .mockImplementation(async (candidate) => {
+        await writeDurable(candidate);
+        attempt += 1;
+        if (attempt === 1) throw new Error("commit-then-throw");
+        return result;
+      });
+
+    await expect(
+      plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      ),
+    ).rejects.toThrow("commit-then-throw");
+
+    expect(plugin.settings).toBe(previous);
+    expect(plugin.feedParser).toBe(previousFeedParser);
+    expect((await readDurable()).locale).toBe("zh-CN");
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(plugin.loadData).not.toHaveBeenCalled();
+  });
+
+  it.each(["data", "portable"] as const)(
+    "applies the same compensating transaction to the %s import entrypoint",
+    async (entrypoint) => {
+      let attempt = 0;
+      const persist = vi
+        .spyOn(repository, "persistSettings")
+        .mockImplementation(async (candidate) => {
+          await writeDurable(candidate);
+          attempt += 1;
+          if (attempt === 1) throw new Error(`${entrypoint}-commit-then-throw`);
+          return result;
+        });
+      const imported = cloneSettings(previous);
+      imported.locale = "en";
+      const file =
+        entrypoint === "data"
+          ? new File([JSON.stringify({ locale: "en" })], "data.json")
+          : new File(
+              [
+                JSON.stringify({
+                  version: 1,
+                  exportedAt: 123,
+                  storageMode: imported.storageMode,
+                  metadata: imported,
+                  shards: [],
+                  markdownMirrorFallbackPlanned: false,
+                }),
+              ],
+              "portable.json",
+            );
+
+      const operation =
+        entrypoint === "data"
+          ? plugin.importDataJsonFromFile(file)
+          : plugin.importPortableDataBundleFromFile(file);
+      await expect(operation).rejects.toThrow(
+        `${entrypoint}-commit-then-throw`,
+      );
+
+      expect(plugin.settings).toBe(previous);
+      expect(plugin.feedParser).toBe(previousFeedParser);
+      expect((await readDurable()).locale).toBe("zh-CN");
+      expect(persist).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("reports rollback-incomplete without publishing a false success", async () => {
+    let attempt = 0;
+    vi.spyOn(repository, "persistSettings").mockImplementation(
+      async (candidate) => {
+        attempt += 1;
+        if (attempt === 1) {
+          await writeDurable(candidate);
+          throw new Error("commit-then-throw");
+        }
+        throw new Error("rollback-write-failed");
+      },
+    );
+
+    await expect(
+      plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      ),
+    ).rejects.toThrow("Settings import rollback incomplete");
+
+    expect(plugin.settings).toBe(previous);
+    expect(plugin.feedParser).toBe(previousFeedParser);
+    expect((await readDurable()).locale).toBe("zh-CN");
+  });
+
+  it("restores the exact prior service identity when rebuild throws", async () => {
+    const persist = vi
+      .spyOn(repository, "persistSettings")
+      .mockImplementation(async (candidate) => {
+        await writeDurable(candidate);
+        return result;
+      });
+    vi.spyOn(
+      plugin as unknown as {
+        initializeSettingsBackedServices: () => void;
+      },
+      "initializeSettingsBackedServices",
+    ).mockImplementationOnce(() => {
+      plugin.feedParser = {
+        identity: "partial-candidate-parser",
+      } as unknown as RssDashboardPlugin["feedParser"];
+      throw new Error("rebuild-failed");
+    });
+
+    await expect(
+      plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      ),
+    ).rejects.toThrow("rebuild-failed");
+
+    expect(plugin.settings).toBe(previous);
+    expect(plugin.feedParser).toBe(previousFeedParser);
+    expect((await readDurable()).locale).toBe("zh-CN");
+    expect(persist).toHaveBeenCalledTimes(2);
+  });
+
+  it("rolls back when an after-save dashboard refresh fails", async () => {
+    const persist = vi
+      .spyOn(repository, "persistSettings")
+      .mockImplementation(async (candidate) => {
+        await writeDurable(candidate);
+        return result;
+      });
+    vi.mocked(plugin.refreshDashboardViews).mockRejectedValueOnce(
+      new Error("after-save-failed"),
+    );
+
+    await expect(
+      plugin.importUserSettingsJsonFromFile(
+        new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+      ),
+    ).rejects.toThrow("after-save-failed");
+
+    expect(plugin.settings).toBe(previous);
+    expect(plugin.feedParser).toBe(previousFeedParser);
+    expect((await readDurable()).locale).toBe("zh-CN");
+    expect(persist).toHaveBeenCalledTimes(2);
+  });
+
+  it("serializes concurrent imports and builds the second candidate after the first commits", async () => {
+    const firstWrite = createDeferred<void>();
+    const events: string[] = [];
+    let attempt = 0;
+    vi.spyOn(repository, "persistSettings").mockImplementation(
+      async (candidate) => {
+        attempt += 1;
+        const currentAttempt = attempt;
+        events.push(`start:${candidate.locale}`);
+        if (currentAttempt === 1) await firstWrite.promise;
+        await writeDurable(candidate);
+        events.push(`end:${candidate.locale}`);
+        return result;
+      },
+    );
+
+    const first = plugin.importUserSettingsJsonFromFile(
+      new File([JSON.stringify({ locale: "en" })], "first.json"),
+    );
+    const second = plugin.importUserSettingsJsonFromFile(
+      new File([JSON.stringify({ locale: "zh-CN" })], "second.json"),
+    );
+    await vi.waitFor(() => {
+      expect(events).toEqual(["start:en"]);
+    });
+    firstWrite.resolve();
+    await Promise.all([first, second]);
+
+    expect(events).toEqual([
+      "start:en",
+      "end:en",
+      "start:zh-CN",
+      "end:zh-CN",
+    ]);
+    expect(plugin.settings.locale).toBe("zh-CN");
+  });
+
+  it("cancels and compensates an in-flight import during plugin unload", async () => {
+    const writeStarted = createDeferred<void>();
+    const releaseWrite = createDeferred<void>();
+    let attempt = 0;
+    const persist = vi
+      .spyOn(repository, "persistSettings")
+      .mockImplementation(async (candidate) => {
+        attempt += 1;
+        if (attempt === 1) {
+          await writeDurable(candidate);
+          writeStarted.resolve();
+          await releaseWrite.promise;
+          return result;
+        }
+        await writeDurable(candidate);
+        return result;
+      });
+
+    const operation = plugin.importUserSettingsJsonFromFile(
+      new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+    );
+    await writeStarted.promise;
+    plugin.onunload();
+    releaseWrite.resolve();
+
+    await expect(operation).rejects.toThrow("Settings import canceled");
+    expect(plugin.settings).toBe(previous);
+    expect(plugin.feedParser).toBe(previousFeedParser);
+    expect((await readDurable()).locale).toBe("zh-CN");
+    expect(persist).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels and compensates when unload happens during the final async view lookup", async () => {
+    const discoverLookup = createDeferred<null>();
+    const persist = vi
+      .spyOn(repository, "persistSettings")
+      .mockImplementation(async (candidate) => {
+        await writeDurable(candidate);
+        return result;
+      });
+    const getActiveDiscoverView = vi
+      .spyOn(
+        plugin as unknown as {
+          getActiveDiscoverView: () => Promise<null>;
+        },
+        "getActiveDiscoverView",
+      )
+      .mockReturnValueOnce(discoverLookup.promise);
+
+    const operation = plugin.importUserSettingsJsonFromFile(
+      new File([JSON.stringify({ locale: "en" })], "usersettings.json"),
+    );
+    await vi.waitFor(() => {
+      expect(getActiveDiscoverView).toHaveBeenCalledTimes(1);
+    });
+    plugin.onunload();
+    discoverLookup.resolve(null);
+
+    await expect(operation).rejects.toThrow("Settings import canceled");
+    expect(plugin.settings).toBe(previous);
+    expect(plugin.feedParser).toBe(previousFeedParser);
+    expect((await readDurable()).locale).toBe("zh-CN");
+    expect(persist).toHaveBeenCalledTimes(2);
+  });
+});

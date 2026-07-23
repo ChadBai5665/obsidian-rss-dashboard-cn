@@ -98,9 +98,13 @@ import { createTranslator, type Translator } from "./src/i18n";
 import { isLocalizedView } from "./src/views/localized-view";
 import { DesktopSecretStore } from "./src/security/desktop-secret-store";
 import {
-  MAX_PUBLIC_SETTINGS_JSON_CHARACTERS,
+  assertPublicSettingsJsonTextBudget,
   preparePublicSettingsImport,
 } from "./src/security/public-settings-export";
+import {
+  cloneStableOwnData,
+  stableOwnDataJson,
+} from "./src/security/stable-own-data-json";
 import { normalizeFeedItem } from "./src/collection/feed-normalizer";
 import { ContentRepository } from "./src/collection/content-repository";
 import { AiContentSelector } from "./src/ai/content/ai-content-selector";
@@ -275,6 +279,15 @@ type MetadataPersistenceSnapshot = Array<{
   path: string;
   contents: string | null;
 }>;
+
+class SettingsImportRollbackError extends Error {
+  constructor() {
+    super("Settings import rollback incomplete");
+    this.name = "SettingsImportRollbackError";
+  }
+}
+
+const PERSISTENCE_SYNC_FIELDS = new Set(["_syncNonce", "_syncPad"]);
 
 const STATUS_JOURNAL_PHASES = new Set<StatusJournalPhase>([
   "prepared",
@@ -770,6 +783,8 @@ export default class RssDashboardPlugin extends Plugin {
   // queue keeps their read/modify/write cycle serial, so read/star clicks cannot
   // overwrite one another while either backing store is slow.
   private statusTransactionQueue: Promise<void> = Promise.resolve();
+  private settingsImportQueue: Promise<void> = Promise.resolve();
+  private isUnloading = false;
   private static readonly FEED_REFRESH_RENDER_THROTTLE_MS = 250;
   private readonly feedStorageRepository: FeedStorageRepository;
   /** Commands are registered once by Obsidian, so this translator is frozen at load. */
@@ -802,7 +817,9 @@ export default class RssDashboardPlugin extends Plugin {
     });
   }
 
-  private getMetadataPersistenceFilePaths(): string[] {
+  private getMetadataPersistenceFilePaths(
+    ...settingsSnapshots: RssDashboardSettings[]
+  ): string[] {
     const paths = new Set<string>();
     const pluginDirectory = this.manifest.dir
       ?.trim()
@@ -814,16 +831,24 @@ export default class RssDashboardPlugin extends Plugin {
           : `${pluginDirectory}/data.json`,
       );
     }
-    const vaultMetadataFolder = getMetadataPath(this.settings);
-    if (vaultMetadataFolder) {
-      paths.add(`${vaultMetadataFolder}/data.json`);
+    for (const settings of settingsSnapshots.length > 0
+      ? settingsSnapshots
+      : [this.settings]) {
+      const vaultMetadataFolder = getMetadataPath(settings);
+      if (vaultMetadataFolder) {
+        paths.add(`${vaultMetadataFolder}/data.json`);
+      }
     }
     return [...paths];
   }
 
-  private async captureMetadataPersistenceSnapshot(): Promise<MetadataPersistenceSnapshot> {
+  private async captureMetadataPersistenceSnapshot(
+    ...settingsSnapshots: RssDashboardSettings[]
+  ): Promise<MetadataPersistenceSnapshot> {
     const snapshot: MetadataPersistenceSnapshot = [];
-    for (const path of this.getMetadataPersistenceFilePaths()) {
+    for (const path of this.getMetadataPersistenceFilePaths(
+      ...settingsSnapshots,
+    )) {
       snapshot.push({
         path,
         contents: (await this.app.vault.adapter.exists(path))
@@ -854,6 +879,50 @@ export default class RssDashboardPlugin extends Plugin {
     if (failures.length > 0) {
       throw new Error("Metadata rollback incomplete");
     }
+  }
+
+  private async verifyMetadataPersistenceSnapshot(
+    snapshot: MetadataPersistenceSnapshot,
+  ): Promise<void> {
+    for (const { path, contents } of snapshot) {
+      const exists = await this.app.vault.adapter.exists(path);
+      if (contents === null) {
+        if (exists) throw new Error("Metadata rollback verification failed");
+        continue;
+      }
+      if (
+        !exists ||
+        (await this.app.vault.adapter.read(path)) !== contents
+      ) {
+        throw new Error("Metadata rollback verification failed");
+      }
+    }
+  }
+
+  private captureSettingsBackedRuntime() {
+    return {
+      feedParser: this.feedParser,
+      articleSaver: this.articleSaver,
+      backupService: this.backupService,
+      folderService: this.folderService,
+      importExportService: this.importExportService,
+      backgroundImportService: this.backgroundImportService,
+      sourceRegistry: this.sourceRegistry,
+    };
+  }
+
+  private restoreSettingsBackedRuntime(
+    snapshot: ReturnType<
+      RssDashboardPlugin["captureSettingsBackedRuntime"]
+    >,
+  ): void {
+    this.feedParser = snapshot.feedParser;
+    this.articleSaver = snapshot.articleSaver;
+    this.backupService = snapshot.backupService;
+    this.folderService = snapshot.folderService;
+    this.importExportService = snapshot.importExportService;
+    this.backgroundImportService = snapshot.backgroundImportService;
+    this.sourceRegistry = snapshot.sourceRegistry;
   }
 
   private initializeSettingsBackedServices(): void {
@@ -1770,6 +1839,7 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   async onload() {
+    this.isUnloading = false;
     const adapter = this.app.vault.adapter as unknown as VaultAdapterPathAccess;
     if (typeof adapter.getBasePath === "function") {
       this.vaultAbsolutePath = adapter.getBasePath();
@@ -3208,141 +3278,191 @@ export default class RssDashboardPlugin extends Plugin {
     input.onchange = () => {
       const file = input.files?.[0];
       if (!file) return;
-      void this.importUserSettingsJsonFromFile(file);
+      void this.importUserSettingsJsonFromFile(file).catch((error) => {
+        console.error("[RSS Dashboard] usersettings.json import failed:", error);
+        this.notify("plugin.settings.preferencesInvalid");
+      });
     };
 
     input.click();
   }
 
-  public async importUserSettingsJsonFromFile(file: File): Promise<void> {
+  private async parsePublicSettingsFile(file: File): Promise<{
+    settings: Readonly<Record<string, unknown>>;
+    includeSources: boolean;
+  }> {
+    const text = await file.text();
+    assertPublicSettingsJsonTextBudget(text);
+    const rawParsed = JSON.parse(text) as unknown;
+    if (
+      typeof rawParsed !== "object" ||
+      rawParsed === null ||
+      Array.isArray(rawParsed)
+    ) {
+      throw new Error("Invalid public settings JSON");
+    }
+    const sourceFields = ["feeds", "folders", "availableTags"] as const;
+    const presentSourceFields = sourceFields.filter((field) =>
+      Object.prototype.hasOwnProperty.call(rawParsed, field),
+    );
+    if (
+      presentSourceFields.length > 0 &&
+      presentSourceFields.length !== sourceFields.length
+    ) {
+      throw new Error("Incomplete public source configuration");
+    }
+    const includeSources =
+      presentSourceFields.length === sourceFields.length;
+    return {
+      settings: preparePublicSettingsImport(rawParsed, { includeSources }),
+      includeSources,
+    };
+  }
+
+  private buildImportedSettingsCandidate(
+    previous: RssDashboardSettings,
+    imported: Readonly<Record<string, unknown>>,
+  ): RssDashboardSettings {
+    const previousClone = cloneStableOwnData(previous);
+    const importedClone = cloneStableOwnData(imported);
+    const candidate = loadAndNormalizeSettings(
+      Object.assign(previousClone, importedClone),
+    );
+    migrateSettings(candidate);
+    return cloneStableOwnData(candidate);
+  }
+
+  private getActiveMetadataPersistenceFilePath(
+    settings: RssDashboardSettings,
+  ): string {
+    const metadataPath = getMetadataPath(settings);
+    if (metadataPath) return `${metadataPath}/data.json`;
+    const pluginDirectory = this.manifest.dir
+      ?.trim()
+      .replace(/^\/+|\/+$/g, "");
+    if (!pluginDirectory || pluginDirectory === ".") return "data.json";
+    return `${pluginDirectory}/data.json`;
+  }
+
+  private async persistImportedSettingsSnapshot(
+    settings: RssDashboardSettings,
+  ): Promise<void> {
+    await this.feedStorageRepository.persistSettings(
+      settings,
+      this.getMetadataSaveCallbackFor(settings),
+      { forceAllShards: true, forceMetadata: true },
+    );
+  }
+
+  private async verifyImportedSettingsPersistence(
+    settings: RssDashboardSettings,
+  ): Promise<void> {
+    const path = this.getActiveMetadataPersistenceFilePath(settings);
+    if (!(await this.app.vault.adapter.exists(path))) {
+      throw new Error("Settings import persistence verification failed");
+    }
+    const text = await this.app.vault.adapter.read(path);
+    let actual: unknown;
     try {
-      const text = await file.text();
-      if (
-        text.length === 0 ||
-        text.length > MAX_PUBLIC_SETTINGS_JSON_CHARACTERS
-      ) {
-        throw new Error("Invalid usersettings.json");
-      }
-      const rawParsed = JSON.parse(text) as unknown;
-      if (!rawParsed || typeof rawParsed !== "object") {
-        throw new Error("Invalid usersettings.json");
-      }
+      actual = JSON.parse(text) as unknown;
+    } catch {
+      throw new Error("Settings import persistence verification failed");
+    }
+    const expected =
+      this.feedStorageRepository.buildPersistedMetadataSnapshot(settings);
+    const actualCanonical = stableOwnDataJson(actual, {
+      omitRootKeys: PERSISTENCE_SYNC_FIELDS,
+    });
+    const expectedCanonical = stableOwnDataJson(expected);
+    if (actualCanonical !== expectedCanonical) {
+      throw new Error("Settings import persistence verification failed");
+    }
+  }
 
-      const rawCollections = rawParsed as Partial<RssDashboardSettings> & {
-        feeds?: unknown;
-        folders?: unknown;
-        availableTags?: unknown;
-      };
-      const hasFeedCollections =
-        Array.isArray(rawCollections.feeds) ||
-        Array.isArray(rawCollections.folders) ||
-        Array.isArray(rawCollections.availableTags);
-      const parsed = JSON.parse(
-        JSON.stringify(
-          preparePublicSettingsImport(rawParsed, {
-            includeSources: hasFeedCollections,
-          }),
-        ),
-      ) as Partial<RssDashboardSettings>;
-      const parsedWithCollections = parsed as Partial<RssDashboardSettings> & {
-        feeds?: unknown;
-        folders?: unknown;
-        availableTags?: unknown;
-      };
+  private commitSettingsImport(
+    buildCandidate: (previous: RssDashboardSettings) => RssDashboardSettings,
+  ): Promise<void> {
+    const operation = this.settingsImportQueue.then(async () => {
+      this.assertSettingsImportActive();
+      const previousSettings = this.settings;
+      const previousRuntime = this.captureSettingsBackedRuntime();
+      const rollbackSettings = cloneStableOwnData(previousSettings);
+      const candidate = buildCandidate(previousSettings);
+      const metadataSnapshot = await this.captureMetadataPersistenceSnapshot(
+        rollbackSettings,
+        candidate,
+      );
+      let persistenceAttempted = false;
 
-      if (hasFeedCollections) {
-        this.settings = Object.assign(
-          {},
-          DEFAULT_SETTINGS,
-          this.settings,
-          parsed,
-        );
-        this.settings.feeds = Array.isArray(parsedWithCollections.feeds)
-          ? parsedWithCollections.feeds
-          : [];
-        this.settings.folders = Array.isArray(parsedWithCollections.folders)
-          ? parsedWithCollections.folders
-          : this.settings.folders;
-        this.settings.availableTags = Array.isArray(
-          parsedWithCollections.availableTags,
-        )
-          ? parsedWithCollections.availableTags
-          : this.settings.availableTags;
+      try {
+        persistenceAttempted = true;
+        await this.persistImportedSettingsSnapshot(candidate);
+        this.assertSettingsImportActive();
+        await this.verifyImportedSettingsPersistence(candidate);
+        this.assertSettingsImportActive();
 
-        this.migrateLegacySettings();
-        for (const feed of this.settings.feeds) {
-          if (!feed.keywordRules) {
-            feed.keywordRules = {
-              overrideGlobalRules: false,
-              includeLogic: "AND",
-              rules: [],
-            };
-            continue;
-          }
-          feed.keywordRules = Object.assign(
-            {},
-            {
-              overrideGlobalRules: false,
-              includeLogic: "AND",
-              rules: [],
-            },
-            feed.keywordRules,
-          );
-
-          // Migrate legacy feeds: apply default auto-delete and maxItems if not set
-          // This ensures feeds imported before the fix will respect the global defaults
-          if (typeof feed.autoDeleteDuration !== "number") {
-            feed.autoDeleteDuration = this.settings.defaultAutoDeleteDuration;
-          }
-          if (typeof feed.maxItemsLimit !== "number") {
-            feed.maxItemsLimit = this.settings.maxItems;
-          }
-        }
-
+        this.settings = candidate;
         this.initializeSettingsBackedServices();
-        await this.saveSettings();
         await this.refreshDashboardViews();
+        this.assertSettingsImportActive();
         const discoverView = await this.getActiveDiscoverView();
+        this.assertSettingsImportActive();
         discoverView?.render();
+        this.settingTab?.display();
+      } catch (error) {
+        this.settings = previousSettings;
+        this.restoreSettingsBackedRuntime(previousRuntime);
+        if (!persistenceAttempted) throw error;
 
+        try {
+          await this.persistImportedSettingsSnapshot(rollbackSettings);
+          await this.restoreMetadataPersistenceSnapshot(metadataSnapshot);
+          await this.verifyMetadataPersistenceSnapshot(metadataSnapshot);
+        } catch {
+          try {
+            await this.restoreMetadataPersistenceSnapshot(metadataSnapshot);
+          } catch {
+            // The typed error below is the only safe outward result.
+          }
+          throw new SettingsImportRollbackError();
+        }
+        throw error;
+      }
+    });
+    this.settingsImportQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private assertSettingsImportActive(): void {
+    if (this.isUnloading) {
+      throw new Error("Settings import canceled");
+    }
+  }
+
+  public async importDataJsonFromFile(file: File): Promise<void> {
+    const imported = await this.parsePublicSettingsFile(file);
+    await this.commitSettingsImport((previous) =>
+      this.buildImportedSettingsCandidate(previous, imported.settings),
+    );
+  }
+
+  public async importUserSettingsJsonFromFile(file: File): Promise<void> {
+    const imported = await this.parsePublicSettingsFile(file);
+    try {
+      await this.commitSettingsImport((previous) =>
+        this.buildImportedSettingsCandidate(previous, imported.settings),
+      );
+      if (imported.includeSources) {
         this.notify("plugin.settings.dataImported");
         return;
       }
-
-      const {
-        feeds: _feeds,
-        folders: _folders,
-        availableTags: _availableTags,
-        ...settingsOnly
-      } = parsed as Partial<RssDashboardSettings> & {
-        feeds?: unknown;
-        folders?: unknown;
-        availableTags?: unknown;
-      };
-      void _feeds;
-      void _folders;
-      void _availableTags;
-
-      this.settings = Object.assign(
-        {},
-        DEFAULT_SETTINGS,
-        this.settings,
-        settingsOnly,
-      );
-
-      // Keep legacy keys and nested defaults normalized after import.
-      this.migrateLegacySettings();
-
-      this.initializeSettingsBackedServices();
-      await this.saveSettings();
-      await this.refreshDashboardViews();
-      const discoverView = await this.getActiveDiscoverView();
-      discoverView?.render();
-
       this.notify("plugin.settings.preferencesImported");
     } catch (error) {
       console.error("[RSS Dashboard] usersettings.json import failed:", error);
-      this.notify("plugin.settings.preferencesInvalid");
+      throw error;
     }
   }
 
@@ -3394,17 +3514,12 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private async applyPublicSettingsImport(snapshot: unknown): Promise<void> {
-    const plainSnapshot = JSON.parse(
-      JSON.stringify(snapshot),
-    ) as Partial<RssDashboardSettings>;
-    this.settings = loadAndNormalizeSettings(
-      Object.assign({}, this.settings, plainSnapshot),
+    const imported = cloneStableOwnData(
+      snapshot,
+    ) as Readonly<Record<string, unknown>>;
+    await this.commitSettingsImport((previous) =>
+      this.buildImportedSettingsCandidate(previous, imported),
     );
-    this.initializeSettingsBackedServices();
-    await this.saveSettings();
-    await this.refreshDashboardViews();
-    const discoverView = await this.getActiveDiscoverView();
-    discoverView?.render();
   }
 
   public async exportUserSettingsJson(): Promise<void> {
@@ -3451,6 +3566,14 @@ export default class RssDashboardPlugin extends Plugin {
     preview: string,
   ): Promise<void> {
     return this.importExportService.copySafeDiagnosticsPreview(token, preview);
+  }
+
+  public revokeSafeDiagnosticsPreview(token: string): void {
+    this.importExportService.revokeSafeDiagnosticsPreview(token);
+  }
+
+  public revokeAllSafeDiagnosticsPreviews(): void {
+    this.importExportService.revokeAllSafeDiagnosticsPreviews();
   }
 
   public getStorageStatus(): FeedStorageStatus {
@@ -4443,12 +4566,18 @@ export default class RssDashboardPlugin extends Plugin {
    * based on the current metadataStorageMode.
    */
   public getMetadataSaveCallback(): (data: unknown) => Promise<void> {
+    return this.getMetadataSaveCallbackFor(this.settings);
+  }
+
+  private getMetadataSaveCallbackFor(
+    settings: RssDashboardSettings,
+  ): (data: unknown) => Promise<void> {
     return async (data: unknown): Promise<void> => {
       const settingsData = data as RssDashboardSettings;
-      const metadataPath = getMetadataPath(this.settings);
+      const metadataPath = getMetadataPath(settings);
       if (metadataPath) {
         try {
-          await ensureMetadataFolderExists(this.app, this.settings);
+          await ensureMetadataFolderExists(this.app, settings);
           const dataFilePath = `${metadataPath}/data.json`;
           const jsonContent = JSON.stringify(settingsData, null, 2);
           await this.app.vault.adapter.write(dataFilePath, jsonContent);
@@ -4459,10 +4588,10 @@ export default class RssDashboardPlugin extends Plugin {
           // find the vault data.json on restart. Does NOT write full
           // settings to .obsidian, preventing the stale-read bug on mobile.
           await this.saveData({
-            metadataStorageMode: this.settings.metadataStorageMode,
-            metadataStorageFolder: this.settings.metadataStorageFolder,
+            metadataStorageMode: settings.metadataStorageMode,
+            metadataStorageFolder: settings.metadataStorageFolder,
             metadataStorageSchemaVersion:
-              this.settings.metadataStorageSchemaVersion,
+              settings.metadataStorageSchemaVersion,
           });
         } catch (error) {
           storageError("Failed to save metadata to vault location", error);
@@ -5038,6 +5167,8 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   onunload() {
+    this.isUnloading = true;
+    this.importExportService?.revokeAllSafeDiagnosticsPreviews();
     if (this.progressSaveDebounce !== null) {
       window.clearTimeout(this.progressSaveDebounce);
       this.progressSaveDebounce = null;

@@ -16,7 +16,7 @@ import {
   buildPublicPortableBundleExport,
   buildPublicSettingsExport,
   preparePublicSettingsImport,
-  MAX_PUBLIC_SETTINGS_JSON_CHARACTERS,
+  assertPublicSettingsJsonTextBudget,
 } from "../security/public-settings-export";
 import {
   stringifySafeDiagnostics,
@@ -28,6 +28,7 @@ import {
  * Extracted from RssDashboardPlugin to allow isolated testing.
  */
 export class ImportExportService {
+  private static readonly DIAGNOSTICS_PREVIEW_TTL_MS = 5 * 60_000;
   private settings: RssDashboardSettings;
   private isMobile: boolean;
   private getPortableDataBundle?: () => PortableDataBundle;
@@ -35,7 +36,10 @@ export class ImportExportService {
   private importPublicSettingsBundle?: (settings: unknown) => Promise<void>;
   private readonly getSafeDiagnosticsInput?: () => SafeDiagnosticsInput;
   private readonly getLocale: () => Locale;
-  private readonly trustedDiagnosticsPreviews = new Map<string, string>();
+  private readonly trustedDiagnosticsPreviews = new Map<
+    string,
+    { text: string; expiresAt: number }
+  >();
   private readonly createDiagnosticsToken: () => string;
 
   constructor(options: {
@@ -157,9 +161,7 @@ export class ImportExportService {
 
   async importPortableDataBundleFromFile(file: File): Promise<void> {
     const text = await file.text();
-    if (text.length === 0 || text.length > MAX_PUBLIC_SETTINGS_JSON_CHARACTERS) {
-      throw new Error("Invalid safe configuration JSON");
-    }
+    assertPublicSettingsJsonTextBudget(text);
     let parsed: unknown;
 
     try {
@@ -261,6 +263,7 @@ export class ImportExportService {
       throw new Error("Safe diagnostics are unavailable.");
     }
     const text = stringifySafeDiagnostics(this.getSafeDiagnosticsInput());
+    this.revokeAllSafeDiagnosticsPreviews();
     const token = this.createDiagnosticsToken();
     if (
       typeof token !== "string" ||
@@ -270,11 +273,11 @@ export class ImportExportService {
     ) {
       throw new Error("Unable to create a diagnostics preview token.");
     }
-    if (this.trustedDiagnosticsPreviews.size >= 32) {
-      const oldest = this.trustedDiagnosticsPreviews.keys().next().value;
-      if (oldest) this.trustedDiagnosticsPreviews.delete(oldest);
-    }
-    this.trustedDiagnosticsPreviews.set(token, text);
+    this.trustedDiagnosticsPreviews.set(token, {
+      text,
+      expiresAt:
+        Date.now() + ImportExportService.DIAGNOSTICS_PREVIEW_TTL_MS,
+    });
     return Object.freeze({ token, text });
   }
 
@@ -282,9 +285,10 @@ export class ImportExportService {
     token: string,
     preview: string,
   ): Promise<void> {
+    this.purgeExpiredDiagnosticsPreviews();
     const trustedPreview = this.trustedDiagnosticsPreviews.get(token);
     this.trustedDiagnosticsPreviews.delete(token);
-    if (trustedPreview === undefined || trustedPreview !== preview) {
+    if (trustedPreview === undefined || trustedPreview.text !== preview) {
       new Notice(this.t("service.diagnostics.copyFailed"));
       return;
     }
@@ -296,5 +300,22 @@ export class ImportExportService {
           : "service.diagnostics.copyFailed",
       ),
     );
+  }
+
+  revokeSafeDiagnosticsPreview(token: string): void {
+    this.trustedDiagnosticsPreviews.delete(token);
+  }
+
+  revokeAllSafeDiagnosticsPreviews(): void {
+    this.trustedDiagnosticsPreviews.clear();
+  }
+
+  private purgeExpiredDiagnosticsPreviews(): void {
+    const now = Date.now();
+    for (const [token, preview] of this.trustedDiagnosticsPreviews) {
+      if (preview.expiresAt <= now) {
+        this.trustedDiagnosticsPreviews.delete(token);
+      }
+    }
   }
 }

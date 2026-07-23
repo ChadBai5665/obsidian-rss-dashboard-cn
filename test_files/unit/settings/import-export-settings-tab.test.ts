@@ -52,12 +52,13 @@ function getSettingByName(containerEl: HTMLElement, name: string): HTMLElement {
 }
 
 function createPlugin() {
-  return {
+  const plugin = {
     app: obsidian.App.createMock(),
     settings: cloneSettings(),
     saveSettings: vi.fn(async () => {}),
     exportDataJson: vi.fn(async () => {}),
     copyDataJsonToClipboard: vi.fn(async () => {}),
+    importDataJsonFromFile: vi.fn(async (_file: File) => {}),
     importUserSettingsJsonFromFile: vi.fn(async () => {}),
     exportUserSettingsJson: vi.fn(async () => {}),
     copyUserSettingsJsonToClipboard: vi.fn(async () => {}),
@@ -70,9 +71,16 @@ function createPlugin() {
       text: '{"pluginVersion":"0.1.0"}',
     })),
     copySafeDiagnosticsPreview: vi.fn(async () => {}),
+    revokeSafeDiagnosticsPreview: vi.fn(),
+    revokeAllSafeDiagnosticsPreviews: vi.fn(),
     getActiveDashboardView: vi.fn(async () => null),
     performFactoryReset: vi.fn(async () => {}),
   };
+  plugin.importDataJsonFromFile.mockImplementation(async (file: File) => {
+    const imported = JSON.parse(await file.text()) as { locale?: "en" | "zh-CN" };
+    if (imported.locale) plugin.settings.locale = imported.locale;
+  });
+  return plugin;
 }
 
 beforeEach(() => {
@@ -165,6 +173,7 @@ describe("Auto Backup Helpers", () => {
 
   describe("renderImportExportSettingsTab() factory reset section", () => {
     it.each([
+      ["导入 data.json", "importDataJsonFromFile", "导入失败"],
       ["导入安全配置", "importPortableDataBundleFromFile", "无法导入安全配置"],
       ["导入 usersettings.json", "importUserSettingsJsonFromFile", "无法导入用户偏好"],
     ] as const)("shows a safe localized error for %s", async (buttonLabel, method, expected) => {
@@ -323,6 +332,7 @@ describe("Auto Backup Helpers", () => {
         containerEl,
         plugin as unknown as RssDashboardPlugin,
       );
+      expect(plugin.revokeAllSafeDiagnosticsPreviews).toHaveBeenCalledTimes(1);
       const diagnostics = Array.from(
         containerEl.querySelectorAll<HTMLButtonElement>("button"),
       ).find((candidate) => candidate.textContent === "Preview diagnostics");
@@ -335,6 +345,34 @@ describe("Auto Backup Helpers", () => {
       expect(modal.contentEl.querySelector("pre")?.textContent).toBe(
         '{"pluginVersion":"0.1.0"}',
       );
+    });
+
+    it("delegates data.json mutation to the transactional plugin entrypoint", async () => {
+      const containerEl = createContainerEl();
+      const plugin = createPlugin();
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+      );
+      const button = Array.from(
+        containerEl.querySelectorAll<HTMLButtonElement>("button"),
+      ).find((candidate) => candidate.textContent === "Import data.json")!;
+      button.click();
+      const input = Array.from(
+        document.body.querySelectorAll<HTMLInputElement>('input[type="file"]'),
+      ).at(-1)!;
+      Object.defineProperty(input, "files", {
+        configurable: true,
+        value: [new File([JSON.stringify({ locale: "zh-CN" })], "data.json")],
+      });
+      input.dispatchEvent(new Event("change"));
+      await flushPromises();
+      await flushPromises();
+
+      expect(plugin.importDataJsonFromFile).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "data.json" }),
+      );
+      expect(plugin.saveSettings).not.toHaveBeenCalled();
     });
 
     it("calls shard data export when Export shard data is clicked", () => {

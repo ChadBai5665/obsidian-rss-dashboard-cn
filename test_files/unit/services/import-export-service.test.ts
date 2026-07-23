@@ -249,6 +249,23 @@ describe("ImportExportService", () => {
       expect(exportBlob).not.toHaveBeenCalled();
       expect(copyTextToClipboard).not.toHaveBeenCalled();
     });
+
+    it("does not download or copy a partial result when the shared export budget is exceeded", async () => {
+      const settings = makeSettings();
+      const longTitle = "x".repeat(4_096);
+      settings.feeds = Array.from({ length: 1_300 }, (_, index) => ({
+        ...settings.feeds[0],
+        title: `${longTitle.slice(0, -String(index).length)}${index}`,
+        items: [],
+      }));
+      const svc = new ImportExportService({ settings, isMobile: false });
+
+      await svc.exportDataJson();
+      await svc.copyDataJsonToClipboard();
+
+      expect(exportBlob).not.toHaveBeenCalled();
+      expect(copyTextToClipboard).not.toHaveBeenCalled();
+    });
   });
 
   describe("exportPortableDataBundle", () => {
@@ -337,6 +354,36 @@ describe("ImportExportService", () => {
         "Invalid portable bundle JSON",
       );
     });
+
+    it("does not report portable import success when the transactional callback rejects", async () => {
+      const svc = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        importPublicSettingsBundle: vi
+          .fn()
+          .mockRejectedValue(new Error("transaction-rollback")),
+      });
+      const file = new File(
+        [
+          JSON.stringify({
+            version: 1,
+            exportedAt: 123,
+            storageMode: "vault-shards",
+            metadata: { ...makeSettings(), feeds: [] },
+            shards: [],
+            markdownMirrorFallbackPlanned: false,
+          }),
+        ],
+        "portable.json",
+      );
+
+      await expect(svc.importPortableDataBundleFromFile(file)).rejects.toThrow(
+        "transaction-rollback",
+      );
+      expect(getNoticeMessages(consoleLogSpy)).not.toContain(
+        "Portable data bundle imported",
+      );
+    });
   });
 
   describe("safe diagnostics", () => {
@@ -402,6 +449,61 @@ describe("ImportExportService", () => {
       expect(copyTextToClipboard).toHaveBeenCalledTimes(1);
       expect(consoleLogSpy.mock.calls.flat().join(" ")).not.toContain(preview.text);
       expect(errorSpy.mock.calls.flat().join(" ")).not.toContain(preview.text);
+    });
+
+    it("keeps only one preview owner and expires an unconsumed token", async () => {
+      const tokens = ["owner-one", "owner-two"];
+      let now = 1_000;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      const svc = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        getSafeDiagnosticsInput: () => ({
+          pluginVersion: "0.1.0",
+          obsidianVersion: "1.8.7",
+          osName: "linux",
+          generatedAt: "2026-07-22T10:00:00.000Z",
+          sourceKinds: [],
+          statusCodes: [],
+          aggregateCounts: {},
+        }),
+        createDiagnosticsToken: () => tokens.shift()!,
+      });
+
+      const first = svc.createSafeDiagnosticsPreview();
+      const second = svc.createSafeDiagnosticsPreview();
+      await svc.copySafeDiagnosticsPreview(first.token, first.text);
+      expect(copyTextToClipboard).not.toHaveBeenCalled();
+
+      now += 5 * 60_000 + 1;
+      await svc.copySafeDiagnosticsPreview(second.token, second.text);
+      expect(copyTextToClipboard).not.toHaveBeenCalled();
+    });
+
+    it("exposes explicit revocation for modal close and settings rerender", async () => {
+      const svc = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        getSafeDiagnosticsInput: () => ({
+          pluginVersion: "0.1.0",
+          obsidianVersion: "1.8.7",
+          osName: "linux",
+          generatedAt: "2026-07-22T10:00:00.000Z",
+          sourceKinds: [],
+          statusCodes: [],
+          aggregateCounts: {},
+        }),
+        createDiagnosticsToken: () => "revoked-preview",
+      });
+      const preview = svc.createSafeDiagnosticsPreview();
+      const revocation = svc as unknown as {
+        revokeSafeDiagnosticsPreview?: (token: string) => void;
+      };
+
+      expect(revocation.revokeSafeDiagnosticsPreview).toBeTypeOf("function");
+      revocation.revokeSafeDiagnosticsPreview?.(preview.token);
+      await svc.copySafeDiagnosticsPreview(preview.token, preview.text);
+      expect(copyTextToClipboard).not.toHaveBeenCalled();
     });
   });
 });

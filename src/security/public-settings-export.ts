@@ -14,6 +14,11 @@ const MAX_TEXT_LENGTH = 4_096;
 const MAX_URL_LENGTH = 2_048;
 const MAX_SAFE_NUMBER = 1_000_000_000;
 export const MAX_PUBLIC_SETTINGS_JSON_CHARACTERS = 5_000_000;
+export const MAX_PUBLIC_SETTINGS_JSON_BYTES = 5_000_000;
+const MAX_PUBLIC_EXPORT_ARRAY_ENTRIES = 5_000;
+const MAX_PUBLIC_EXPORT_NODES = 50_000;
+const MAX_PUBLIC_EXPORT_KEYS = 50_000;
+const MAX_PUBLIC_EXPORT_DEPTH = 32;
 
 const SOURCE_KINDS = new Set<SourceKind>(["feed", "x-account", "x-topic"]);
 const REFRESH_MODES = new Set(["daily-on-open", "interval", "off"]);
@@ -30,7 +35,7 @@ const STORAGE_MODES = new Set([
   "vault-shards",
   "vault-shards-v2",
 ]);
-const SECRET_QUERY_KEYS = new Set([
+const EXACT_SECRET_QUERY_KEYS = new Set([
   "apikey",
   "key",
   "token",
@@ -46,7 +51,29 @@ const SECRET_QUERY_KEYS = new Set([
   "credentials",
   "signature",
   "sig",
+  "session",
+  "sessionid",
 ]);
+const SECRET_QUERY_KEY_PARTS = [
+  "apikey",
+  "accesstoken",
+  "authtoken",
+  "securitytoken",
+  "credential",
+  "signature",
+  "accesskey",
+  "secretkey",
+  "password",
+  "passwd",
+  "secret",
+  "session",
+] as const;
+const SECRET_VALUE_PATTERNS = [
+  /(?:^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{12,}(?:$|[^A-Za-z0-9])/u,
+  /(?:^|[^A-Za-z0-9])AIza[A-Za-z0-9_-]{20,}(?:$|[^A-Za-z0-9])/u,
+  /(?:^|[^A-Za-z0-9])A(?:KI|SI)A[A-Z0-9]{16}(?:$|[^A-Za-z0-9])/u,
+  /(?:^|[^A-Za-z0-9])Bearer\s+[A-Za-z0-9._~-]{12,}(?:$|[^A-Za-z0-9])/iu,
+] as const;
 
 export interface PublicSettingsExport extends Readonly<Record<string, unknown>> {
   readonly feeds?: readonly Readonly<Record<string, unknown>>[];
@@ -130,7 +157,7 @@ export function buildPublicSettingsExport(
       output.availableTags = copyTags(requiredData(settings, "availableTags"));
     }
 
-    return deepFreeze(output) as PublicSettingsExport;
+    return finalizePublicExport(output) as PublicSettingsExport;
   } catch (error) {
     if (error instanceof PublicSettingsExportError) throw error;
     throw new PublicSettingsExportError("invalid-settings");
@@ -154,7 +181,7 @@ export function buildPublicPortableBundleExport(input: unknown): Readonly<Record
     const metadata = buildPublicSettingsExport(requiredData(bundle, "metadata"), {
       includeSources: true,
     });
-    return deepFreeze(
+    return finalizePublicExport(
       Object.assign(createRecord(), {
         version: 1,
         exportedAt,
@@ -209,7 +236,7 @@ export function preparePublicSettingsImport(
     if (nextDefault) ai.defaultConnectionId = nextDefault;
     else delete ai.defaultConnectionId;
   }
-  return deepFreeze(output) as PublicSettingsExport;
+  return finalizePublicExport(output) as PublicSettingsExport;
 }
 
 export function parsePublicSettingsImportJson(
@@ -219,13 +246,7 @@ export function parsePublicSettingsImportJson(
     createConnectionId?: () => string;
   },
 ): PublicSettingsExport {
-  if (
-    typeof text !== "string" ||
-    text.length === 0 ||
-    text.length > MAX_PUBLIC_SETTINGS_JSON_CHARACTERS
-  ) {
-    throw new PublicSettingsExportError("invalid-settings");
-  }
+  assertPublicSettingsJsonTextBudget(text);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
@@ -233,6 +254,17 @@ export function parsePublicSettingsImportJson(
     throw new PublicSettingsExportError("invalid-settings");
   }
   return preparePublicSettingsImport(parsed, options);
+}
+
+export function assertPublicSettingsJsonTextBudget(text: unknown): asserts text is string {
+  if (
+    typeof text !== "string" ||
+    text.length === 0 ||
+    text.length > MAX_PUBLIC_SETTINGS_JSON_CHARACTERS ||
+    utf8ByteLength(text) > MAX_PUBLIC_SETTINGS_JSON_BYTES
+  ) {
+    throw new PublicSettingsExportError("invalid-settings");
+  }
 }
 
 function copyFeeds(value: unknown): Record<string, unknown>[] {
@@ -353,7 +385,7 @@ function copyTikHubSettings(value: unknown): Record<string, unknown> {
   if (hasOwnData(settings, "baseUrl")) {
     const baseUrl = normalizeTikHubBaseUrl(requiredData(settings, "baseUrl"));
     if (!baseUrl) throw new PublicSettingsExportError("invalid-settings");
-    output.baseUrl = baseUrl;
+    output.baseUrl = safeHttpUrl(baseUrl);
   }
   copyInteger(settings, output, "timeoutMs", 1, MAX_SAFE_NUMBER);
   copyInteger(settings, output, "maxRequestsPerRun", 1, MAX_SAFE_NUMBER);
@@ -375,7 +407,11 @@ function copyAiSettings(value: unknown): Record<string, unknown> {
     return normalized;
   });
   const output = createRecord();
-  output.connections = connections.map((connection) => Object.assign(createRecord(), connection));
+  output.connections = connections.map((connection) => {
+    const copy = Object.assign(createRecord(), connection);
+    copy.baseUrl = safeHttpUrl(connection.baseUrl);
+    return copy;
+  });
   if (hasOwnData(settings, "defaultConnectionId")) {
     const id = normalizeConnectionId(requiredData(settings, "defaultConnectionId"));
     if (!id || !connections.some((connection) => connection.id === id)) {
@@ -623,19 +659,50 @@ function safeHttpUrl(value: unknown): string {
   } catch {
     throw new PublicSettingsExportError("invalid-settings");
   }
-  if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password || url.hash) {
+  if (
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    url.username ||
+    url.password ||
+    url.hash
+  ) {
     throw new PublicSettingsExportError("invalid-settings");
   }
-  for (const key of url.searchParams.keys()) {
-    const normalizedKey = key
-      .normalize("NFKC")
-      .toLowerCase()
-      .replace(/[^a-z0-9]/gu, "");
-    if (SECRET_QUERY_KEYS.has(normalizedKey)) {
+  for (const [key, value] of url.searchParams.entries()) {
+    if (isSecretQueryKey(key) || containsSecretValue(value)) {
       throw new PublicSettingsExportError("invalid-settings");
     }
   }
-  return url.toString();
+  return candidate;
+}
+
+function isSecretQueryKey(value: string): boolean {
+  const normalized = repeatedlyDecode(value)
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/gu, "");
+  return (
+    EXACT_SECRET_QUERY_KEYS.has(normalized) ||
+    SECRET_QUERY_KEY_PARTS.some((part) => normalized.includes(part))
+  );
+}
+
+function containsSecretValue(value: string): boolean {
+  const decoded = repeatedlyDecode(value);
+  return SECRET_VALUE_PATTERNS.some((pattern) => pattern.test(decoded));
+}
+
+function repeatedlyDecode(value: string): string {
+  let decoded = value;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) return decoded;
+      decoded = next;
+    } catch {
+      throw new PublicSettingsExportError("invalid-settings");
+    }
+  }
+  return decoded;
 }
 
 function objectRecord(value: unknown): Record<string, unknown> {
@@ -718,6 +785,85 @@ function deepFreeze<T>(value: T, seen = new Set<object>()): T {
     if (descriptor && "value" in descriptor) deepFreeze(descriptor.value, seen);
   }
   return Object.freeze(value);
+}
+
+function finalizePublicExport<T extends Record<string, unknown>>(value: T): T {
+  assertPublicExportStructureBudget(value);
+  const text = JSON.stringify(value);
+  assertPublicSettingsJsonTextBudget(text);
+  return deepFreeze(value);
+}
+
+function assertPublicExportStructureBudget(value: unknown): void {
+  const totals = { nodes: 0, keys: 0, arrayEntries: 0 };
+  const ancestors = new Set<object>();
+
+  const visit = (entry: unknown, depth: number): void => {
+    if (typeof entry !== "object" || entry === null) return;
+    if (depth > MAX_PUBLIC_EXPORT_DEPTH || ancestors.has(entry)) {
+      throw new PublicSettingsExportError("invalid-settings");
+    }
+    totals.nodes += 1;
+    if (totals.nodes > MAX_PUBLIC_EXPORT_NODES) {
+      throw new PublicSettingsExportError("invalid-settings");
+    }
+
+    ancestors.add(entry);
+    try {
+      const keys = Reflect.ownKeys(entry);
+      if (Array.isArray(entry)) {
+        const length: unknown = Object.getOwnPropertyDescriptor(
+          entry,
+          "length",
+        )?.value;
+        if (
+          Object.getPrototypeOf(entry) !== Array.prototype ||
+          !safeInteger(length, 0, MAX_PUBLIC_EXPORT_ARRAY_ENTRIES) ||
+          keys.length !== length + 1
+        ) {
+          throw new PublicSettingsExportError("invalid-settings");
+        }
+        totals.arrayEntries += length;
+        if (totals.arrayEntries > MAX_PUBLIC_EXPORT_ARRAY_ENTRIES) {
+          throw new PublicSettingsExportError("invalid-settings");
+        }
+        for (let index = 0; index < length; index += 1) {
+          const descriptor = Object.getOwnPropertyDescriptor(
+            entry,
+            String(index),
+          );
+          if (!descriptor || !("value" in descriptor)) {
+            throw new PublicSettingsExportError("invalid-settings");
+          }
+          visit(descriptor.value, depth + 1);
+        }
+        return;
+      }
+
+      totals.keys += keys.length;
+      if (totals.keys > MAX_PUBLIC_EXPORT_KEYS) {
+        throw new PublicSettingsExportError("invalid-settings");
+      }
+      for (const key of keys) {
+        if (typeof key !== "string") {
+          throw new PublicSettingsExportError("invalid-settings");
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(entry, key);
+        if (!descriptor || !("value" in descriptor)) {
+          throw new PublicSettingsExportError("invalid-settings");
+        }
+        visit(descriptor.value, depth + 1);
+      }
+    } finally {
+      ancestors.delete(entry);
+    }
+  };
+
+  visit(value, 0);
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function cloneDataTree(value: unknown): unknown {

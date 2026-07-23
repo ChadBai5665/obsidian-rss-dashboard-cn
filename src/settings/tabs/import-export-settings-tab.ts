@@ -10,14 +10,9 @@ import type RssDashboardPlugin from "../../../main";
 import { ImportOpmlModal } from "../../modals/import-opml-modal";
 import { ImportSuccessModal } from "../../modals/import-success-modal";
 import { FactoryResetConfirmModal } from "../modals/settings-modals";
-import { AutoBackupSettings, RssDashboardSettings } from "../../types/types";
+import { AutoBackupSettings } from "../../types/types";
 import { createTranslator } from "../../i18n";
-import { loadAndNormalizeSettings } from "../../utils/settings-loader";
 import { DiagnosticsPreviewModal } from "../../modals/diagnostics-preview-modal";
-import {
-  MAX_PUBLIC_SETTINGS_JSON_CHARACTERS,
-  preparePublicSettingsImport,
-} from "../../security/public-settings-export";
 
 /** @deprecated Import from settings-modals; this re-export preserves integrations. */
 export { FactoryResetConfirmModal } from "../modals/settings-modals";
@@ -44,6 +39,7 @@ export function renderImportExportSettingsTab(
   containerEl: HTMLElement,
   plugin: RssDashboardPlugin,
 ): void {
+  plugin.revokeAllSafeDiagnosticsPreviews();
   const t = createTranslator(plugin.settings.locale ?? "zh-CN");
   // ── data.json ─────────────────────────────────────────────────────────────
   const dataSection = containerEl.createDiv();
@@ -67,46 +63,8 @@ export function renderImportExportSettingsTab(
             void (async () => {
               const file = input.files?.[0];
               if (!file) return;
-              const text = await file.text();
               try {
-                if (
-                  text.length === 0 ||
-                  text.length > MAX_PUBLIC_SETTINGS_JSON_CHARACTERS
-                ) {
-                  throw new Error("Invalid public settings");
-                }
-                const rawData = JSON.parse(text) as unknown;
-                if (!rawData || typeof rawData !== "object") {
-                  throw new Error("Invalid public settings");
-                }
-                const rawRecord = rawData as Record<string, unknown>;
-                const sourceFields = ["feeds", "folders", "availableTags"];
-                const presentSourceFields = sourceFields.filter((key) =>
-                  Object.prototype.hasOwnProperty.call(rawRecord, key),
-                );
-                if (
-                  presentSourceFields.length > 0 &&
-                  presentSourceFields.length !== sourceFields.length
-                ) {
-                  throw new Error("Incomplete public source configuration");
-                }
-                const data = JSON.parse(
-                  JSON.stringify(
-                    preparePublicSettingsImport(rawData, {
-                      includeSources:
-                        presentSourceFields.length === sourceFields.length,
-                    }),
-                  ),
-                ) as Partial<RssDashboardSettings>;
-                plugin.settings = loadAndNormalizeSettings(
-                  Object.assign({}, plugin.settings, data),
-                );
-                await plugin.saveSettings();
-                const view = await plugin.getActiveDashboardView();
-                if (view) {
-                  await plugin.app.workspace.revealLeaf(view.leaf);
-                  view.render();
-                }
+                await plugin.importDataJsonFromFile(file);
                 const finalLocale = plugin.settings.locale ?? "zh-CN";
                 const finalT = createTranslator(finalLocale);
                 new ImportSuccessModal(
@@ -268,6 +226,8 @@ export function renderImportExportSettingsTab(
             preview,
             copyPreview: (token, exactPreview) =>
               plugin.copySafeDiagnosticsPreview(token, exactPreview),
+            revokePreview: (token) =>
+              plugin.revokeSafeDiagnosticsPreview(token),
           }).open();
         } catch {
           new Notice(t("settings.diagnostics.unavailable"));

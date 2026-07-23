@@ -25,6 +25,7 @@ describe("DiagnosticsPreviewModal", () => {
       locale: "en",
       preview: { token: "one", text: preview },
       copyPreview,
+      revokePreview: vi.fn(),
     });
     modal.open();
 
@@ -35,23 +36,28 @@ describe("DiagnosticsPreviewModal", () => {
 
   it("closing or cancelling performs zero clipboard writes", () => {
     const copyPreview = vi.fn(async () => {});
+    const revokePreview = vi.fn();
     const modal = new DiagnosticsPreviewModal(new App(), {
       locale: "zh-CN",
       preview: { token: "one", text: "SAFE PREVIEW" },
       copyPreview,
-    });
+      revokePreview,
+    } as unknown as ConstructorParameters<typeof DiagnosticsPreviewModal>[1]);
     modal.open();
     button(modal, "取消").click();
     expect(copyPreview).not.toHaveBeenCalled();
+    expect(revokePreview).toHaveBeenCalledWith("one");
 
     const second = new DiagnosticsPreviewModal(new App(), {
       locale: "zh-CN",
       preview: { token: "two", text: "SAFE PREVIEW" },
       copyPreview,
-    });
+      revokePreview,
+    } as unknown as ConstructorParameters<typeof DiagnosticsPreviewModal>[1]);
     second.open();
     second.close();
     expect(copyPreview).not.toHaveBeenCalled();
+    expect(revokePreview).toHaveBeenCalledWith("two");
   });
 
   it("copies exactly once only after the separate explicit confirmation", async () => {
@@ -61,6 +67,7 @@ describe("DiagnosticsPreviewModal", () => {
       locale: "en",
       preview: { token: "one", text: preview },
       copyPreview,
+      revokePreview: vi.fn(),
     });
     modal.open();
     const copy = button(modal, "Copy diagnostics");

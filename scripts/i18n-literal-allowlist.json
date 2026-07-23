@@ -1,6 +1,6 @@
 [
   {
-    "pattern": "src/settings/tabs/import-export-settings-tab.ts:281:setName:OPML",
+    "pattern": "src/settings/tabs/import-export-settings-tab.ts:241:setName:OPML",
     "reason": "OPML is the standardized file format name and must remain unchanged in every locale."
   },
   {

@@ -5,10 +5,12 @@ export interface DiagnosticsPreviewModalOptions {
   locale: Locale;
   preview: Readonly<{ token: string; text: string }>;
   copyPreview(token: string, preview: string): Promise<void> | void;
+  revokePreview(token: string): void;
 }
 
 export class DiagnosticsPreviewModal extends Modal {
   private copyStarted = false;
+  private previewRevoked = false;
 
   constructor(app: App, private readonly options: DiagnosticsPreviewModalOptions) {
     super(app);
@@ -16,6 +18,7 @@ export class DiagnosticsPreviewModal extends Modal {
 
   override onOpen(): void {
     this.copyStarted = false;
+    this.previewRevoked = false;
     const t = createTranslator(this.options.locale);
     this.contentEl.empty();
     this.modalEl.addClass("rss-dashboard-modal");
@@ -52,6 +55,10 @@ export class DiagnosticsPreviewModal extends Modal {
   }
 
   override onClose(): void {
+    if (!this.previewRevoked) {
+      this.previewRevoked = true;
+      this.options.revokePreview(this.options.preview.token);
+    }
     this.contentEl.empty();
   }
 }
