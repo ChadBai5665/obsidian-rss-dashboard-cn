@@ -58,7 +58,7 @@ Rollback plan:
 
 ## Checklist
 
-- [ ] Base branch is master
+- [ ] Base branch is main
 - [ ] Branch is scoped to one concern
 - [ ] No unrelated files included
 - [ ] If validation logic changed, tests updated

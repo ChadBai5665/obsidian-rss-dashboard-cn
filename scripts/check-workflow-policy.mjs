@@ -25,8 +25,8 @@ const EXPECTED_TEST_WORKFLOW = {
   name: "Test",
   permissions: { contents: "read" },
   on: {
-    push: { branches: ["master"] },
-    pull_request: { branches: ["master"] },
+    push: { branches: ["main"] },
+    pull_request: { branches: ["main"] },
   },
   jobs: {
     check: {
@@ -227,8 +227,8 @@ function checkTestWorkflow(text, errors) {
     errors.push("test-trigger-unsafe");
   }
   if (
-    !isDeepStrictEqual(record(trigger.push).branches, ["master"]) ||
-    !isDeepStrictEqual(record(trigger.pull_request).branches, ["master"])
+    !isDeepStrictEqual(record(trigger.push).branches, ["main"]) ||
+    !isDeepStrictEqual(record(trigger.pull_request).branches, ["main"])
   ) {
     errors.push("test-base-branch-mismatch");
   }
@@ -439,7 +439,7 @@ function checkReleaseWorkflow(text, errors) {
 
 function checkPullRequestTemplate(text, errors) {
   const requirements = [
-    "Base branch is master",
+    "Base branch is main",
     "npm run check:public",
     "npm run audit:i18n",
     "npm run test:unit",

@@ -37,6 +37,11 @@ beforeAll(async () => {
 });
 
 describe("public workflow policy", () => {
+  it("targets the public default branch for pushes, pull requests, and review", () => {
+    expect(inputs.testWorkflow).toContain("branches: [main]");
+    expect(inputs.pullRequestTemplate).toContain("Base branch is main");
+  });
+
   it("accepts the repository CI, release workflow, and PR checklist", () => {
     expect(checkWorkflowPolicy(inputs)).toEqual([]);
   });
