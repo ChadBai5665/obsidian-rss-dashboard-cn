@@ -1,30 +1,48 @@
 ---
-name: Bug report
-about: Report a bug
+name: Bug 报告
+about: 使用脱敏信息报告可复现问题
 title: ''
 labels: bug
 assignees: ''
 
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+## 问题说明
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+请简要说明实际发生了什么，以及你原本期望的结果。
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+## 环境
 
-**Documents**
-If applicable, attach a markdown document that triggers the bug.
+- RSS Dashboard CN 版本：
+- Obsidian 版本：
+- 操作系统及版本：
+- 安装方式：手动复制发布文件 / GitHub release / 其他
+- 是否可在一次性空知识库中复现：
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+## 最小复现步骤
 
-**Additional context**
-Add any other context about the problem here.
+1.
+2.
+3.
+
+## 脱敏证据
+
+请优先使用合成 RSS、虚构账号和替代关键词复现。可以提供：
+
+- 完整且最小的操作顺序；
+- 界面显示的错误提示；
+- 删除私人内容后的日志片段；
+- 只包含复现所需字段的合成文件。
+
+如果问题涉及 TikHub 或 AI，请说明是否真正发起了请求、是否可能计费，但不要粘贴请求头、密钥或原始响应。
+
+## 提交前隐私检查
+
+请确认没有提交：
+
+- API 密钥、Cookie、Authorization 请求头或外部密钥文件；
+- 完整 `data.json`、订阅源导出、OPML 或原始 TikHub 响应；
+- 真实 feed URL、X 账号、关注关键词、知识库路径或用户目录；
+- 私人文章正文、阅读记录或可识别个人订阅的截图。
+
+安全漏洞不要创建公开 Issue，请按根目录 `SECURITY.md` 使用 GitHub 私密漏洞报告。

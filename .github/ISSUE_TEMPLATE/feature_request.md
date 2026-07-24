@@ -1,20 +1,31 @@
 ---
-name: Feature request
-about: Suggest an idea for this project
+name: 功能建议
+about: 提议新的采集、阅读或知识库工作流
 title: ''
 labels: enhancement
 assignees: ''
 
 ---
 
-**Is your feature request related to a problem? Please describe.**
-A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
+## 要解决的问题
 
-**Describe the solution you'd like**
-A clear and concise description of what you want to happen.
+请描述当前工作流中具体遇到的限制，以及它影响了什么。
 
-**Describe alternatives you've considered**
-A clear and concise description of any alternative solutions or features you've considered.
+## 期望的结果
 
-**Additional context**
-Add any other context or screenshots about the feature request here.
+请描述希望插件提供的用户行为或结果，不必预设实现方式。
+
+## 使用场景与边界
+
+- 涉及的来源类型：RSS / 网站 / YouTube / X / 其他
+- 是否应保持完全本地：
+- 是否可能产生第三方 API 费用：
+- 是否需要修改现有 Markdown 或 collection schema：
+
+## 考虑过的替代方案
+
+请说明目前如何绕过，以及为什么仍需要插件支持。
+
+## 隐私提醒
+
+请使用虚构示例，不要粘贴 API 密钥、完整 `data.json`、订阅源导出、原始服务响应、真实 feed URL、X 账号、关注关键词、知识库路径或私人文章正文。

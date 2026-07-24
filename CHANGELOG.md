@@ -1,3 +1,25 @@
+# Changelog
+
+## RSS Dashboard CN 0.1.0 - July 24, 2026
+
+### Added
+
+- 中文优先的 Obsidian 桌面信息台，保留英文切换。
+- RSS、网站、YouTube 与播客采集沿用上游成熟解析路径，并增加按本地日期生成的每日采集记录和可追溯来源分片。
+- 可选 TikHub X 账号订阅和主题发现，包含显式启用、外部密钥、请求预算与计费确认边界。
+- Kimi、DeepSeek、通义千问、GLM、OpenAI、Anthropic Claude 及 OpenAI-compatible 中转站连接配置。
+- 单条信息的手动摘要、翻译、观点提取与深度分析；未配置 AI 时不影响采集。
+- 不覆盖 Markdown 的保存流程、重复打开既有笔记和同标题稳定 ID 后缀。
+
+### Privacy and scope
+
+- API 密钥只保存在知识库外的桌面密钥文件，不进入设置、导出、日志或诊断信息。
+- AI 仅在用户明确点击后调用，不参与自动采集、自动摘要或 Top 内容筛选。
+- 插件为仅桌面端版本；Windows 与 Linux 运行时验证仍待补充。
+- 本版本不会自动删除采集数据、已保存 Markdown 或外部密钥文件。
+
+# Upstream history
+
 ## 2.5.0 - July 11, 2026
 
 ### Features
