@@ -48,6 +48,14 @@ function connectionNames(container: HTMLElement): string[] {
 interface CapturedEditorOptions {
   existing?: unknown;
   onSave(connection: ReturnType<typeof createAiConnection>): Promise<void>;
+  testConnection?: (
+    connection: ReturnType<typeof createAiConnection>,
+    pendingKey: string | undefined,
+    controller: AbortController,
+  ) => Promise<{
+    status: "success" | "cancelled" | "error";
+    message?: string;
+  }>;
   onPersisted?: (
     connection: ReturnType<typeof createAiConnection>,
     status: "unchanged" | "key-saved" | "key-failed",
@@ -248,6 +256,116 @@ describe("renderAiSettingsTab", () => {
     expect(refreshes).toBe(0);
     add.onPersisted?.(added, "key-saved");
     expect(refreshes).toBe(1);
+  });
+
+  it("tests draft modal metadata with the entered key without saving it first", async () => {
+    const pendingKey = ["draft", "modal", "key"].join("-");
+    const generate = vi.fn(async () => ({ text: "OK" }));
+    const providerFactory = vi.fn(async (
+      _connection: ReturnType<typeof createAiConnection>,
+      secretStore: { get(connectionId: string): Promise<string | undefined> },
+    ) => {
+      expect("set" in secretStore).toBe(false);
+      expect("delete" in secretStore).toBe(false);
+      expect(await secretStore.get("84794c18-dd50-4128-8498-01ed2a508006"))
+        .toBe(pendingKey);
+      return { generate };
+    });
+    const test = harness({ providerFactory });
+    button(test.containerEl, "添加连接").click();
+    const add = test.openedEditors[0] as CapturedEditorOptions;
+    const draft = createAiConnection({
+      id: "84794c18-dd50-4128-8498-01ed2a508006",
+      name: "弹窗草稿",
+      providerKind: "deepseek",
+      model: "account-model",
+    });
+
+    const result = await add.testConnection?.(
+      draft,
+      pendingKey,
+      new AbortController(),
+    );
+
+    expect(result).toEqual({ status: "success" });
+    expect(test.confirmPaidRequest).toHaveBeenCalledWith(draft);
+    expect(generate).toHaveBeenCalledWith({
+      system: "",
+      user: "回复 OK",
+      maxOutputTokens: 8,
+      signal: expect.any(AbortSignal),
+    });
+    expect(test.secretStore.set).not.toHaveBeenCalled();
+    expect(test.plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("tests a stored key through a runtime read-only secret wrapper", async () => {
+    const generate = vi.fn(async () => ({ text: "OK" }));
+    const providerFactory = vi.fn(async (
+      _connection: ReturnType<typeof createAiConnection>,
+      secretStore: { get(connectionId: string): Promise<string | undefined> },
+    ) => {
+      expect("set" in secretStore).toBe(false);
+      expect("delete" in secretStore).toBe(false);
+      expect(await secretStore.get(FIRST_ID)).toBe(API_KEY);
+      return { generate };
+    });
+    const test = harness({ providerFactory });
+    button(row(test.containerEl, "Kimi 工作"), "编辑").click();
+    const edit = test.openedEditors[0] as CapturedEditorOptions;
+    const existing = test.plugin.settings.ai.connections[0];
+
+    const result = await edit.testConnection?.(
+      existing,
+      undefined,
+      new AbortController(),
+    );
+
+    expect(result).toEqual({ status: "success" });
+    expect(test.secretStore.set).not.toHaveBeenCalled();
+    expect(test.secretStore.delete).not.toHaveBeenCalled();
+  });
+
+  it("keeps the global paid-test gate active until an aborted draft request settles", async () => {
+    const underlying = deferred<{
+      status: number;
+      json: { choices: Array<{ message: { content: string } }> };
+    }>();
+    const transport = vi.fn(() => underlying.promise);
+    const providerFactory = vi.fn(async (
+      connection: ReturnType<typeof createAiConnection>,
+      secretStore: { get(connectionId: string): Promise<string | undefined> },
+    ) => await createTextGenerationProvider(connection, secretStore, { transport }));
+    const test = harness({ providerFactory });
+    button(test.containerEl, "添加连接").click();
+    const add = test.openedEditors[0] as CapturedEditorOptions;
+    const draft = createAiConnection({
+      id: "84794c18-dd50-4128-8498-01ed2a508006",
+      name: "弹窗草稿",
+      providerKind: "deepseek",
+      model: "account-model",
+    });
+    const controller = new AbortController();
+
+    const result = add.testConnection?.(draft, API_KEY, controller);
+    await flushPromises();
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(button(row(test.containerEl, "Kimi 工作"), "测试连接").disabled)
+      .toBe(true);
+
+    controller.abort();
+    await flushPromises();
+    expect(button(row(test.containerEl, "Kimi 工作"), "测试连接").disabled)
+      .toBe(true);
+
+    underlying.resolve({
+      status: 200,
+      json: { choices: [{ message: { content: "OK" } }] },
+    });
+    await result;
+    await flushPromises();
+    expect(button(row(test.containerEl, "Kimi 工作"), "测试连接").disabled)
+      .toBe(false);
   });
 
   it("keeps the renderer alive after key failure so a same-modal retry can refresh to configured", async () => {

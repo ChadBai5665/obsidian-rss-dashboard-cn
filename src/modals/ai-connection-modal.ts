@@ -45,11 +45,21 @@ export type AiKeyPersistenceStatus =
   | "key-saved"
   | "key-failed";
 
+export type AiConnectionTestOutcome =
+  | { status: "success" }
+  | { status: "cancelled" }
+  | { status: "error"; message: TranslationKey };
+
 export interface AiConnectionModalOptions {
   locale?: Locale;
   existing?: AiConnection;
   secretStore: Pick<DesktopSecretStore, "set"> | AiConnectionModalSecretStore;
   createConnectionId?: () => string;
+  testConnection?(
+    connection: AiConnection,
+    pendingKey: string | undefined,
+    controller: AbortController,
+  ): Promise<AiConnectionTestOutcome>;
   onSave(connection: AiConnection): Promise<void> | void;
   runTransaction?<T>(operation: () => Promise<T>): Promise<T>;
   onPersisted?(
@@ -64,6 +74,7 @@ export class AiConnectionModal extends Modal {
   private persistenceInFlight = false;
   private closeNotificationPending = false;
   private closeNotified = false;
+  private testController: AbortController | undefined;
 
   constructor(
     app: App,
@@ -77,6 +88,7 @@ export class AiConnectionModal extends Modal {
     this.persistenceInFlight = false;
     this.closeNotificationPending = false;
     this.closeNotified = false;
+    this.testController = undefined;
     const t = createTranslator(this.options.locale ?? "zh-CN");
     const existing = this.options.existing
       ? normalizeAiConnection(this.options.existing)
@@ -84,6 +96,7 @@ export class AiConnectionModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     this.modalEl.addClass("rss-dashboard-modal");
+    this.modalEl.addClass("rss-dashboard-ai-connection-modal");
     contentEl.createEl("h2", {
       text: t(existing ? "settings.ai.editTitle" : "settings.ai.addTitle"),
     });
@@ -96,6 +109,7 @@ export class AiConnectionModal extends Modal {
     let pendingKey = "";
     let generatedConnectionId: string | undefined;
     let inFlight = false;
+    let draftRevision = 0;
 
     const providerGuidanceEl = contentEl.createEl("p", {
       cls: "rss-dashboard-ai-provider-guidance",
@@ -105,15 +119,30 @@ export class AiConnectionModal extends Modal {
     });
     errorEl.setAttribute("role", "alert");
     errorEl.setAttribute("aria-live", "polite");
+    const testStatusEl = contentEl.createEl("p", {
+      cls: "rss-dashboard-ai-test-status",
+    });
+    testStatusEl.setAttribute("role", "status");
+    testStatusEl.setAttribute("aria-live", "polite");
+    const markDraftChanged = (): void => {
+      draftRevision += 1;
+      testStatusEl.setText("");
+    };
 
     let protocolSetting: Setting;
     let baseUrlInput: HTMLInputElement;
     let modelInput: HTMLInputElement;
     let keyInput: HTMLInputElement;
     let cancelButton: HTMLButtonElement | undefined;
+    let testButton: HTMLButtonElement | undefined;
     let saveButton: HTMLButtonElement | undefined;
+    const fieldSetting = (): Setting => {
+      const result = new Setting(contentEl);
+      result.settingEl.addClass("rss-dashboard-ai-connection-field");
+      return result;
+    };
 
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("settings.ai.provider"))
       .setDesc(t("settings.ai.providerDesc"))
       .addDropdown((dropdown) => {
@@ -131,40 +160,50 @@ export class AiConnectionModal extends Modal {
           model = "";
           baseUrlInput.value = baseUrl;
           modelInput.value = "";
+          markDraftChanged();
           renderProviderFields();
         });
       });
 
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("settings.ai.connectionName"))
       .setDesc(t("settings.ai.connectionNameDesc"))
       .addText((text) => {
-        text.setValue(name).onChange((value) => { name = value; });
+        text.setValue(name).onChange((value) => {
+          name = value;
+          markDraftChanged();
+        });
         text.inputEl.maxLength = MAX_NAME_CHARACTERS;
       });
 
-    protocolSetting = new Setting(contentEl)
+    protocolSetting = fieldSetting()
       .setName(t("settings.ai.protocol"));
 
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("settings.ai.baseUrl"))
       .setDesc(t("settings.ai.baseUrlDesc"))
       .addText((text) => {
         baseUrlInput = text.inputEl;
-        text.setValue(baseUrl).onChange((value) => { baseUrl = value; });
+        text.setValue(baseUrl).onChange((value) => {
+          baseUrl = value;
+          markDraftChanged();
+        });
         baseUrlInput.maxLength = MAX_BASE_URL_CHARACTERS;
       });
 
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("settings.ai.model"))
       .setDesc(t("settings.ai.modelDesc"))
       .addText((text) => {
         modelInput = text.inputEl;
-        text.setValue(model).onChange((value) => { model = value; });
+        text.setValue(model).onChange((value) => {
+          model = value;
+          markDraftChanged();
+        });
         modelInput.maxLength = MAX_MODEL_CHARACTERS;
       });
 
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("settings.ai.apiKey"))
       .setDesc(t(existing
         ? "settings.ai.apiKeyEditDesc"
@@ -175,20 +214,26 @@ export class AiConnectionModal extends Modal {
         keyInput.autocomplete = "off";
         keyInput.maxLength = MAX_KEY_CHARACTERS;
         text.setPlaceholder(t("settings.ai.apiKeyPlaceholder"));
-        text.onChange((value) => { pendingKey = value; });
+        text.onChange((value) => {
+          pendingKey = value;
+          markDraftChanged();
+        });
       });
 
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("settings.ai.enabled"))
       .setDesc(t("settings.ai.enabledDesc"))
       .addToggle((toggle) => toggle
         .setValue(enabled)
-        .onChange((value) => { enabled = value; }));
+        .onChange((value) => {
+          enabled = value;
+          markDraftChanged();
+        }));
 
     const isCurrent = (): boolean =>
       lifecycleToken === this.lifecycleEpoch && contentEl.isConnected;
     const setBusy = (busy: boolean): void => {
-      for (const button of [cancelButton, saveButton]) {
+      for (const button of [cancelButton, testButton, saveButton]) {
         if (!button) continue;
         button.disabled = busy;
         button.setAttribute("aria-disabled", String(busy));
@@ -207,7 +252,84 @@ export class AiConnectionModal extends Modal {
     };
     renderProviderFields();
 
-    new Setting(contentEl)
+    const actionSetting = new Setting(contentEl);
+    actionSetting.settingEl.addClass("rss-dashboard-ai-connection-actions");
+    if (this.options.testConnection) {
+      actionSetting.addButton((button) => {
+        testButton = button.buttonEl;
+        button
+          .setButtonText(t("settings.ai.testConnection"))
+          .onClick(() => {
+            if (inFlight || !isCurrent() || !this.options.testConnection) return;
+            const submittedKey = pendingKey || undefined;
+            const connection = buildConnection({
+              existing,
+              providerKind,
+              name,
+              model,
+              baseUrl,
+              enabled,
+              createConnectionId: () => {
+                generatedConnectionId ??=
+                  (this.options.createConnectionId ?? defaultConnectionId)();
+                return generatedConnectionId;
+              },
+            });
+            if (!connection.ok) {
+              errorEl.setText(t(connection.error));
+              return;
+            }
+            if (submittedKey && !validSubmittedKey(submittedKey)) {
+              errorEl.setText(t("settings.ai.invalidKey"));
+              return;
+            }
+
+            inFlight = true;
+            setBusy(true);
+            const controller = new AbortController();
+            const testedRevision = draftRevision;
+            this.testController = controller;
+            void (async () => {
+              try {
+                errorEl.setText("");
+                testStatusEl.setText(t("settings.ai.connectionTesting"));
+                const outcome = await this.options.testConnection!(
+                  connection.connection,
+                  submittedKey,
+                  controller,
+                );
+                if (!isCurrent() || testedRevision !== draftRevision) return;
+                if (outcome.status === "success") {
+                  testStatusEl.setText(t(
+                    submittedKey
+                      ? "settings.ai.connectionSucceededKeyPending"
+                      : "settings.ai.connectionSucceeded",
+                  ));
+                } else if (outcome.status === "cancelled") {
+                  testStatusEl.setText(t(
+                    "settings.ai.connectionCancelledBeforeSend",
+                  ));
+                } else {
+                  testStatusEl.setText(t(outcome.message));
+                }
+              } catch {
+                if (isCurrent() && testedRevision === draftRevision) {
+                  testStatusEl.setText(t("settings.ai.connectionFailed"));
+                }
+              } finally {
+                if (this.testController === controller) {
+                  this.testController = undefined;
+                }
+                if (isCurrent()) {
+                  inFlight = false;
+                  setBusy(false);
+                }
+              }
+            })();
+          });
+      });
+    }
+    actionSetting
       .addButton((button) => {
         cancelButton = button.buttonEl;
         button.setButtonText(t("common.cancel")).onClick(() => {
@@ -222,8 +344,6 @@ export class AiConnectionModal extends Modal {
           .onClick(() => {
             if (inFlight || !isCurrent()) return;
             const submittedKey = pendingKey;
-            pendingKey = "";
-            keyInput.value = "";
 
             const connection = buildConnection({
               existing,
@@ -246,6 +366,8 @@ export class AiConnectionModal extends Modal {
               errorEl.setText(t("settings.ai.invalidKey"));
               return;
             }
+            pendingKey = "";
+            keyInput.value = "";
 
             inFlight = true;
             this.persistenceInFlight = true;
@@ -309,6 +431,8 @@ export class AiConnectionModal extends Modal {
 
   onClose(): void {
     this.lifecycleEpoch += 1;
+    this.testController?.abort();
+    this.testController = undefined;
     this.contentEl.empty();
     if (this.persistenceInFlight) {
       this.closeNotificationPending = true;

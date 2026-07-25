@@ -459,9 +459,10 @@ export const zhCN = {
   "settings.ai.modelDesc":
     "必填。请输入当前账户和区域实际开通的模型 ID，预设不会替你猜测。",
   "settings.ai.apiKey": "API 密钥",
-  "settings.ai.apiKeyDesc": "创建时可选；填写后只写入桌面端外部密钥文件。",
+  "settings.ai.apiKeyDesc":
+    "可先在本窗口测试当前填写内容；只有点击“保存”后，密钥才会写入桌面端外部密钥文件。",
   "settings.ai.apiKeyEditDesc":
-    "留空会保留原密钥；这里不会读取或显示已经保存的密钥。",
+    "留空会保留原密钥；填写新密钥后可先测试，只有点击“保存”才会替换。这里不会读取或显示已经保存的密钥。",
   "settings.ai.apiKeyPlaceholder": "粘贴新密钥",
   "settings.ai.enabled": "启用连接",
   "settings.ai.enabledDesc": "停用后仍保留连接，但不能用于 AI 操作或连接测试。",
@@ -496,7 +497,12 @@ export const zhCN = {
     "连接已保留，但无法确认密钥状态，请重新配置。",
   "settings.ai.testConnection": "测试连接",
   "settings.ai.cancelTest": "取消测试",
+  "settings.ai.connectionTesting": "正在测试当前填写的连接…",
+  "settings.ai.connectionTestBusy":
+    "已有连接测试仍在进行，请等待它结束后再试。",
   "settings.ai.connectionSucceeded": "连接成功。",
+  "settings.ai.connectionSucceededKeyPending":
+    "连接成功；API 密钥尚未保存，请点击“保存”。",
   "settings.ai.connectionMissingKey": "尚未配置 API 密钥。",
   "settings.ai.connectionInvalidKey": "API 密钥无效或已过期。",
   "settings.ai.connectionInsufficientBalance": "账户余额不足。",
