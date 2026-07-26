@@ -1678,14 +1678,21 @@ describe("AI privacy boundary", () => {
     const savedPath = await save.mock.results[0].value;
 
     const outbound = requestUrl.mock.calls[0]?.[0] as {
+      url?: string;
       headers?: Record<string, string>;
       body?: string;
     };
+    const nonAuthorizationHeaders = { ...outbound.headers };
+    delete nonAuthorizationHeaders.Authorization;
     const result = save.mock.calls[0]?.[0];
     const markdown = await test.app.vault.adapter.read(savedPath);
 
     expect(outbound.headers?.Authorization).toBe(`Bearer ${minimaxSecret}`);
-    expect(outbound.body).not.toContain(minimaxSecret);
+    expect(JSON.stringify({
+      url: outbound.url,
+      headers: nonAuthorizationHeaders,
+      body: outbound.body,
+    })).not.toContain(minimaxSecret);
     expect(outboundBody(requestUrl)).toMatchObject({
       model: "MiniMax-M3",
       max_completion_tokens: 4096,
@@ -1728,11 +1735,18 @@ describe("AI privacy boundary", () => {
     ));
 
     const outbound = requestUrl.mock.calls[0]?.[0] as {
+      url?: string;
       headers?: Record<string, string>;
       body?: string;
     };
+    const nonAuthorizationHeaders = { ...outbound.headers };
+    delete nonAuthorizationHeaders.Authorization;
     expect(outbound.headers?.Authorization).toBe(`Bearer ${minimaxSecret}`);
-    expect(outbound.body).not.toContain(minimaxSecret);
+    expect(JSON.stringify({
+      url: outbound.url,
+      headers: nonAuthorizationHeaders,
+      body: outbound.body,
+    })).not.toContain(minimaxSecret);
     expect(modal?.contentEl.textContent).not.toContain(minimaxSecret);
     expect(save).not.toHaveBeenCalled();
     modal?.close();
