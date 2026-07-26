@@ -35,6 +35,7 @@ export class XTopicSourceModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     this.modalEl.addClass("rss-dashboard-modal");
+    this.modalEl.addClass("rss-dashboard-form-modal");
 
     contentEl.createEl("h2", {
       text: t(this.options.existing
@@ -48,19 +49,24 @@ export class XTopicSourceModal extends Modal {
     let folder = this.options.existing?.folder ?? "";
     let windowDays: XTopicSourceConfig["windowDays"] =
       this.options.existing?.windowDays ?? 7;
+    const fieldSetting = (): Setting => {
+      const result = new Setting(contentEl);
+      result.settingEl.addClass("rss-dashboard-form-field");
+      return result;
+    };
 
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xTopic.name"))
       .addText((text) => text
         .setValue(name)
         .onChange((value) => { name = value; }));
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xTopic.includeKeywords"))
       .setDesc(t("modal.xTopic.listDesc"))
       .addText((text) => text
         .setValue(includeKeywords)
         .onChange((value) => { includeKeywords = value; }));
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xTopic.excludeKeywords"))
       .setDesc(t("modal.xTopic.listDesc"))
       .addText((text) => text
@@ -77,7 +83,7 @@ export class XTopicSourceModal extends Modal {
         count: hasPriority ? 3 : 2,
       }));
     };
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xTopic.priorityAccounts"))
       .setDesc(t("modal.xTopic.priorityAccountsDesc"))
       .addText((text) => text
@@ -86,7 +92,7 @@ export class XTopicSourceModal extends Modal {
           priorityAccounts = value;
           updateEstimate();
         }));
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xTopic.window"))
       .addDropdown((dropdown) => {
         for (const days of WINDOW_DAYS) {
@@ -99,7 +105,7 @@ export class XTopicSourceModal extends Modal {
           }
         });
       });
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xTopic.folder"))
       .addText((text) => text
         .setValue(folder)
@@ -132,7 +138,9 @@ export class XTopicSourceModal extends Modal {
       }
     };
 
-    new Setting(contentEl)
+    const actionSetting = new Setting(contentEl);
+    actionSetting.settingEl.addClass("rss-dashboard-form-actions");
+    actionSetting
       .addButton((button) => {
         cancelButtonEl = button.buttonEl;
         button

@@ -1,0 +1,128 @@
+/* Shared editor modal: bounded desktop width, balanced fields, mobile stacking. */
+body .modal.rss-dashboard-form-modal {
+  width: min(720px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+  padding: 0;
+}
+
+body .modal.rss-dashboard-form-modal > .modal-content {
+  width: 100%;
+  min-width: 0;
+  max-height: calc(100vh - 32px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 28px 24px 20px;
+}
+
+.rss-dashboard-form-modal p {
+  overflow-wrap: anywhere;
+}
+
+.rss-dashboard-form-modal .rss-dashboard-form-field {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(260px, 1.1fr);
+  align-items: center;
+  gap: 16px;
+}
+
+.rss-dashboard-form-modal
+  .rss-dashboard-form-field
+  .setting-item-info,
+.rss-dashboard-form-modal
+  .rss-dashboard-form-field
+  .setting-item-control {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+.rss-dashboard-form-modal
+  .rss-dashboard-form-field
+  .setting-item-control {
+  justify-content: flex-end;
+}
+
+.rss-dashboard-form-modal
+  .rss-dashboard-form-field
+  .setting-item-control
+  input,
+.rss-dashboard-form-modal
+  .rss-dashboard-form-field
+  .setting-item-control
+  select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.rss-dashboard-form-modal .rss-dashboard-form-actions {
+  padding-top: 16px;
+}
+
+.rss-dashboard-form-modal
+  .rss-dashboard-form-actions
+  .setting-item-info {
+  display: none;
+}
+
+.rss-dashboard-form-modal
+  .rss-dashboard-form-actions
+  .setting-item-control {
+  width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  body .modal.rss-dashboard-form-modal {
+    width: calc(100vw - 20px);
+    max-width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
+  }
+
+  body .modal.rss-dashboard-form-modal > .modal-content {
+    max-height: calc(100vh - 20px);
+    padding: 24px 16px 16px;
+  }
+
+  .rss-dashboard-form-modal .rss-dashboard-form-field {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .rss-dashboard-form-modal
+    .rss-dashboard-form-field
+    .setting-item-control {
+    justify-content: stretch;
+  }
+
+  .rss-dashboard-form-modal
+    .rss-dashboard-form-actions
+    .setting-item-control {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+  }
+
+  .rss-dashboard-form-modal
+    .rss-dashboard-form-actions
+    button {
+    width: 100%;
+    margin: 0;
+  }
+}
+
+@media (max-width: 460px) {
+  .rss-dashboard-form-modal
+    .rss-dashboard-form-actions
+    .setting-item-control {
+    grid-auto-flow: row;
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
