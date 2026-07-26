@@ -1653,4 +1653,88 @@ describe("AI privacy boundary", () => {
       modal?.close();
     },
   );
+
+  it("keeps a MiniMax key in the outbound header and out of the body, result, and Markdown artifact", async () => {
+    const minimaxSecret = "PRIVATE_MINIMAX_API_KEY_CANARY";
+    const test = harness();
+    installAtomicAdapter(test.app);
+    test.settings.ai.connections = [createAiConnection({
+      id: SELECTED_CONNECTION_ID,
+      name: "MiniMax 默认模型",
+      providerKind: "minimax-global",
+      model: "",
+    })];
+    secretState.values.set(SELECTED_CONNECTION_ID, minimaxSecret);
+    const save = vi.spyOn(AnalysisRepository.prototype, "save");
+    const requestUrl = vi.spyOn(obsidian, "requestUrl")
+      .mockResolvedValue(responseWithText("safe MiniMax analysis"));
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "MiniMax-M3",
+    ));
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    const savedPath = await save.mock.results[0].value;
+
+    const outbound = requestUrl.mock.calls[0]?.[0] as {
+      headers?: Record<string, string>;
+      body?: string;
+    };
+    const result = save.mock.calls[0]?.[0];
+    const markdown = await test.app.vault.adapter.read(savedPath);
+
+    expect(outbound.headers?.Authorization).toBe(`Bearer ${minimaxSecret}`);
+    expect(outbound.body).not.toContain(minimaxSecret);
+    expect(outboundBody(requestUrl)).toMatchObject({
+      model: "MiniMax-M3",
+      max_completion_tokens: 4096,
+    });
+    expect(JSON.stringify(result)).not.toContain(minimaxSecret);
+    expect(result).toMatchObject({
+      providerKind: "minimax-global",
+      model: "MiniMax-M3",
+    });
+    expect(markdown).toContain('providerKind: "minimax-global"');
+    expect(markdown).toContain('model: "MiniMax-M3"');
+    expect(markdown).not.toContain(minimaxSecret);
+    expect(modal?.contentEl.textContent).not.toContain(minimaxSecret);
+    modal?.close();
+  });
+
+  it("does not echo a MiniMax key from a failed provider response", async () => {
+    const minimaxSecret = "PRIVATE_MINIMAX_API_KEY_CANARY";
+    const test = harness();
+    installAtomicAdapter(test.app);
+    test.settings.ai.connections = [createAiConnection({
+      id: SELECTED_CONNECTION_ID,
+      name: "MiniMax 默认模型",
+      providerKind: "minimax-cn",
+      model: "",
+    })];
+    secretState.values.set(SELECTED_CONNECTION_ID, minimaxSecret);
+    const save = vi.spyOn(AnalysisRepository.prototype, "save");
+    const requestUrl = vi.spyOn(obsidian, "requestUrl")
+      .mockResolvedValue(responseWithText(minimaxSecret, 500));
+
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+    await vi.waitFor(() => expect(button(
+      modal!.contentEl,
+      "确认发送",
+    ).disabled).toBe(false));
+    button(modal!.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+      "AI 操作失败，没有创建分析文档。",
+    ));
+
+    const outbound = requestUrl.mock.calls[0]?.[0] as {
+      headers?: Record<string, string>;
+      body?: string;
+    };
+    expect(outbound.headers?.Authorization).toBe(`Bearer ${minimaxSecret}`);
+    expect(outbound.body).not.toContain(minimaxSecret);
+    expect(modal?.contentEl.textContent).not.toContain(minimaxSecret);
+    expect(save).not.toHaveBeenCalled();
+    modal?.close();
+  });
 });

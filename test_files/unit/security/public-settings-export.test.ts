@@ -441,4 +441,69 @@ describe("buildPublicSettingsExport", () => {
       parsePublicSettingsImportJson(text, { includeSources: true }),
     ).not.toThrow();
   });
+
+  it("preserves a blank MiniMax default marker without exporting an adjacent key", () => {
+    const settings = settingsFixture();
+    settings.ai = {
+      connections: [{
+        ...settings.ai.connections[0],
+        name: "MiniMax 默认模型",
+        providerKind: "minimax-global",
+        baseUrl: "https://api.minimax.io/v1",
+        model: "",
+      }],
+      defaultConnectionId: CONNECTION_ID,
+    };
+    (settings as unknown as Record<string, unknown>).apiKey =
+      "PRIVATE_API_KEY_CANARY";
+
+    const exported = buildPublicSettingsExport(settings, {
+      includeSources: false,
+    });
+    const exportedAi = exported.ai as {
+      connections: Array<Record<string, unknown>>;
+    };
+
+    expect(exportedAi.connections[0]).toMatchObject({
+      providerKind: "minimax-global",
+      model: "",
+    });
+    expect(JSON.stringify(exported)).not.toContain("PRIVATE_API_KEY_CANARY");
+  });
+
+  it("keeps an old non-empty model byte-for-byte pinned through load, export, and import normalization", async () => {
+    const pinnedModel = "MiniMax-M2.1-account-enabled";
+    const settings = settingsFixture();
+    settings.ai = {
+      connections: [{
+        ...settings.ai.connections[0],
+        name: "MiniMax 旧连接",
+        providerKind: "minimax-cn",
+        baseUrl: "https://api.minimaxi.com/v1",
+        model: pinnedModel,
+      }],
+      defaultConnectionId: CONNECTION_ID,
+    };
+    const { loadAndNormalizeSettings } = await import(
+      "../../../src/utils/settings-loader"
+    );
+    const loaded = loadAndNormalizeSettings(settings);
+
+    const exported = buildPublicSettingsExport(loaded, {
+      includeSources: false,
+    });
+    const imported = preparePublicSettingsImport(exported, {
+      includeSources: false,
+      createConnectionId: () =>
+        "22222222-2222-4222-8222-222222222222",
+    });
+
+    expect(loaded.ai.connections[0].model).toBe(pinnedModel);
+    expect((exported.ai as {
+      connections: Array<Record<string, unknown>>;
+    }).connections[0].model).toBe(pinnedModel);
+    expect((imported.ai as {
+      connections: Array<Record<string, unknown>>;
+    }).connections[0].model).toBe(pinnedModel);
+  });
 });
