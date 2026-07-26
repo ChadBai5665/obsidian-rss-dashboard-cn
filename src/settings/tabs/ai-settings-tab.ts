@@ -59,7 +59,7 @@ export interface AiSettingsDependencies {
   secretStore?: AiSettingsSecretStore;
   providerFactory?: (
     connection: AiConnection,
-    secretStore: AiSettingsSecretStore,
+    secretStore: Pick<AiSettingsSecretStore, "get">,
   ) => Promise<TextGenerationProvider>;
   confirmPaidRequest?: (connection: AiConnection) => Promise<boolean>;
   confirmDeleteKey?: (connection: AiConnection) => Promise<boolean>;
@@ -170,6 +170,66 @@ export function renderAiSettingsTab(
       secretStore,
       runTransaction: (operation) =>
         runSerializedAiOperation(plugin, operation),
+      testConnection: async (connection, pendingKey, controller) => {
+        const signal = controller.signal;
+        const normalized = normalizeAiConnection(connection);
+        if (!normalized) {
+          return {
+            status: "error",
+            message: "settings.ai.connectionInvalid",
+          };
+        }
+        if (!normalized.enabled) {
+          return {
+            status: "error",
+            message: "settings.ai.connectionDisabled",
+          };
+        }
+        if (AI_ACTIVE_TESTS.has(plugin)) {
+          return {
+            status: "error",
+            message: "settings.ai.connectionTestBusy",
+          };
+        }
+        const operation: ActiveAiTest = {
+          connectionId: normalized.id,
+          controller,
+          cancelled: false,
+          requestStarted: false,
+        };
+        setActiveAiTest(plugin, operation);
+        try {
+          const confirmed = await confirmPaidRequest(normalized);
+          if (!confirmed || signal.aborted) return { status: "cancelled" };
+          const testSecretStore = overlayPendingAiKey(
+            secretStore,
+            normalized.id,
+            pendingKey,
+          );
+          const provider = await providerFactory(normalized, testSecretStore);
+          if (signal.aborted) return { status: "cancelled" };
+          operation.requestStarted = true;
+          await provider.generate({
+            system: "",
+            user: TEST_USER_PROMPT,
+            maxOutputTokens: TEST_OUTPUT_TOKENS,
+            signal,
+          });
+          if (signal.aborted) return { status: "cancelled" };
+          return { status: "success" };
+        } catch (error) {
+          if (signal.aborted) return { status: "cancelled" };
+          return {
+            status: "error",
+            message: getAiConnectionMessageKey(error),
+          };
+        } finally {
+          await waitForTrustedAbortWork(signal);
+          if (AI_ACTIVE_TESTS.get(plugin) === operation) {
+            setActiveAiTest(plugin, undefined);
+          }
+        }
+      },
       onSave: async (connection) => {
         const normalized = normalizeAiConnection(connection);
         if (!normalized) throw new Error("Invalid AI connection metadata.");
@@ -283,7 +343,7 @@ interface RenderConnectionInput {
   secretStore: AiSettingsSecretStore;
   providerFactory: (
     connection: AiConnection,
-    secretStore: AiSettingsSecretStore,
+    secretStore: Pick<AiSettingsSecretStore, "get">,
   ) => Promise<TextGenerationProvider>;
   confirmPaidRequest(connection: AiConnection): Promise<boolean>;
   confirmDeleteKey(connection: AiConnection): Promise<boolean>;
@@ -748,7 +808,11 @@ export function getAiConnectionMessage(
   error: unknown,
   t: Translator,
 ): string {
-  if (!(error instanceof ProviderError)) return t("settings.ai.connectionFailed");
+  return t(getAiConnectionMessageKey(error));
+}
+
+function getAiConnectionMessageKey(error: unknown): TranslationKey {
+  if (!(error instanceof ProviderError)) return "settings.ai.connectionFailed";
   const keys: Partial<Record<ProviderError["code"], TranslationKey>> = {
     "missing-key": "settings.ai.connectionMissingKey",
     "invalid-key": "settings.ai.connectionInvalidKey",
@@ -763,7 +827,20 @@ export function getAiConnectionMessage(
     "secret-store-failure": "settings.ai.keyStatusUnavailable",
   };
   const key = keys[error.code];
-  return key ? t(key) : t("settings.ai.connectionFailed");
+  return key ?? "settings.ai.connectionFailed";
+}
+
+function overlayPendingAiKey(
+  secretStore: Pick<AiSettingsSecretStore, "get">,
+  connectionId: string,
+  pendingKey: string | undefined,
+): Pick<AiSettingsSecretStore, "get"> {
+  return {
+    get: async (requestedId) =>
+      requestedId === connectionId && pendingKey !== undefined
+        ? pendingKey
+        : await secretStore.get(requestedId),
+  };
 }
 
 function providerLabelKey(

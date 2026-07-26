@@ -53,6 +53,7 @@ function harness(
     onSave?: ReturnType<typeof vi.fn>;
     secretSet?: ReturnType<typeof vi.fn>;
     onPersisted?: ReturnType<typeof vi.fn>;
+    testConnection?: ReturnType<typeof vi.fn>;
     runTransaction?: <T>(operation: () => Promise<T>) => Promise<T>;
     createConnectionId?: () => string;
   } = {},
@@ -71,6 +72,9 @@ function harness(
     createConnectionId: options.createConnectionId ?? (() => CONNECTION_ID),
     onSave,
     onPersisted,
+    ...(options.testConnection
+      ? { testConnection: options.testConnection }
+      : {}),
     ...(options.runTransaction ? { runTransaction: options.runTransaction } : {}),
   });
   modal.open();
@@ -84,6 +88,17 @@ beforeEach(() => {
 });
 
 describe("AiConnectionModal", () => {
+  it("uses a responsive modal layout hook for the connection form", () => {
+    const { modal } = harness();
+
+    expect(modal.modalEl.classList).toContain(
+      "rss-dashboard-ai-connection-modal",
+    );
+    expect(
+      modal.contentEl.querySelectorAll(".rss-dashboard-ai-connection-field"),
+    ).toHaveLength(7);
+  });
+
   it("shows all eight provider choices and fills protocol/base URL without inventing a model", () => {
     const { modal } = harness();
     const provider = setting(modal, "服务商或兼容接口")
@@ -185,6 +200,101 @@ describe("AiConnectionModal", () => {
       test.secretStore.set.mock.invocationCallOrder[0],
     );
     expect(JSON.stringify(save.mock.calls[0][0])).not.toContain(API_KEY);
+  });
+
+  it("keeps the entered key when another form field fails validation", async () => {
+    const test = harness();
+    setInput(test.modal, "连接名称", "待补模型");
+    setInput(test.modal, "API 密钥", API_KEY);
+    const keyInput = setting(test.modal, "API 密钥")
+      .querySelector<HTMLInputElement>("input")!;
+
+    button(test.modal, "保存").click();
+    await flushPromises();
+
+    expect(test.onSave).not.toHaveBeenCalled();
+    expect(test.secretStore.set).not.toHaveBeenCalled();
+    expect(keyInput.value).toBe(API_KEY);
+    expect(test.modal.contentEl.textContent).toContain("请输入模型 ID");
+
+    setInput(test.modal, "模型 ID", "account-model");
+    button(test.modal, "保存").click();
+    await flushPromises();
+
+    expect(test.secretStore.set).toHaveBeenCalledWith(CONNECTION_ID, API_KEY);
+  });
+
+  it("tests the current form and unsaved key without persisting either", async () => {
+    const testConnection = vi.fn(async () => ({
+      status: "success" as const,
+    }));
+    const test = harness({ testConnection });
+    setInput(test.modal, "连接名称", "先测试再保存");
+    setInput(test.modal, "模型 ID", "account-model");
+    setInput(test.modal, "API 密钥", API_KEY);
+
+    button(test.modal, "测试连接").click();
+    await flushPromises();
+
+    expect(testConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: CONNECTION_ID,
+        name: "先测试再保存",
+        model: "account-model",
+      }),
+      API_KEY,
+      expect.any(AbortController),
+    );
+    expect(test.onSave).not.toHaveBeenCalled();
+    expect(test.secretStore.set).not.toHaveBeenCalled();
+    expect(
+      setting(test.modal, "API 密钥").querySelector<HTMLInputElement>("input")!
+        .value,
+    ).toBe(API_KEY);
+    expect(test.modal.contentEl.textContent).toContain(
+      "连接成功；API 密钥尚未保存，请点击“保存”。",
+    );
+  });
+
+  it("clears a stale test result when the draft connection changes", async () => {
+    const testConnection = vi.fn(async () => ({
+      status: "success" as const,
+    }));
+    const test = harness({ testConnection });
+    setInput(test.modal, "连接名称", "测试结果失效");
+    setInput(test.modal, "模型 ID", "account-model");
+    setInput(test.modal, "API 密钥", API_KEY);
+
+    button(test.modal, "测试连接").click();
+    await flushPromises();
+    expect(test.modal.contentEl.textContent).toContain(
+      "连接成功；API 密钥尚未保存，请点击“保存”。",
+    );
+
+    setInput(test.modal, "模型 ID", "another-model");
+
+    expect(test.modal.contentEl.textContent).not.toContain(
+      "连接成功；API 密钥尚未保存，请点击“保存”。",
+    );
+  });
+
+  it("does not apply a late test result to a draft changed in flight", async () => {
+    const outcome = deferred<{ status: "success" }>();
+    const testConnection = vi.fn(() => outcome.promise);
+    const test = harness({ testConnection });
+    setInput(test.modal, "连接名称", "测试中修改");
+    setInput(test.modal, "模型 ID", "model-before-test");
+    setInput(test.modal, "API 密钥", API_KEY);
+
+    button(test.modal, "测试连接").click();
+    await flushPromises();
+    setInput(test.modal, "模型 ID", "model-after-test");
+    outcome.resolve({ status: "success" });
+    await flushPromises();
+
+    expect(test.modal.contentEl.textContent).not.toContain(
+      "连接成功；API 密钥尚未保存，请点击“保存”。",
+    );
   });
 
   it("waits for a deferred key write before announcing the final persisted state", async () => {

@@ -463,9 +463,9 @@ export const en = {
     "Required. Enter the exact model ID enabled for your account and region; presets do not guess one.",
   "settings.ai.apiKey": "API key",
   "settings.ai.apiKeyDesc":
-    "Optional while creating. A supplied key is written only to external desktop secret storage.",
+    "You can test the values entered here first. The key is written to external desktop secret storage only after you select Save.",
   "settings.ai.apiKeyEditDesc":
-    "Leave blank to keep the stored key unchanged. The existing key is never read or displayed here.",
+    "Leave blank to keep the stored key. You can test a replacement here first; it replaces the stored key only after Save. The existing key is never read or displayed.",
   "settings.ai.apiKeyPlaceholder": "Paste a new key",
   "settings.ai.enabled": "Enable connection",
   "settings.ai.enabledDesc":
@@ -502,7 +502,12 @@ export const en = {
     "The connection was retained, but the key state could not be confirmed. Configure the key again.",
   "settings.ai.testConnection": "Test connection",
   "settings.ai.cancelTest": "Cancel test",
+  "settings.ai.connectionTesting": "Testing the connection as currently entered…",
+  "settings.ai.connectionTestBusy":
+    "Another connection test is still in progress. Wait for it to finish.",
   "settings.ai.connectionSucceeded": "Connection succeeded.",
+  "settings.ai.connectionSucceededKeyPending":
+    "Connection succeeded. The API key is not saved yet; select Save.",
   "settings.ai.connectionMissingKey": "No API key is configured.",
   "settings.ai.connectionInvalidKey": "The API key is invalid or expired.",
   "settings.ai.connectionInsufficientBalance": "The provider account balance is insufficient.",
