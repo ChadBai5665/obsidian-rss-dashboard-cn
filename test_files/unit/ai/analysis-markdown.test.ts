@@ -65,6 +65,15 @@ describe("renderAnalysisMarkdown", () => {
     ).toBeNull();
   });
 
+  it.each(["minimax-cn", "minimax-global"])(
+    "accepts MiniMax provider kind %s",
+    (providerKind) => {
+      expect(() => renderAnalysisMarkdown(result({
+        providerKind: providerKind as AiAnalysisResult["providerKind"],
+      }))).not.toThrow();
+    },
+  );
+
   it("round-trips YAML-sensitive Unicode metadata without frontmatter injection", () => {
     const connectionName = "---\n名称: \"研究\" # 标签 !<tag:yaml.org,2002:js/function> 🌏\u2028行分隔";
     const model = "模型:\t'alpha'\n---\n!!python/object\u2029段分隔";

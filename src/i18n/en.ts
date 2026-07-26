@@ -448,6 +448,8 @@ export const en = {
   "settings.ai.provider.glm": "Zhipu GLM",
   "settings.ai.provider.openai": "OpenAI",
   "settings.ai.provider.claude": "Claude",
+  "settings.ai.provider.minimaxCn": "MiniMax (China)",
+  "settings.ai.provider.minimaxGlobal": "MiniMax (Global)",
   "settings.ai.provider.openaiCompatible": "OpenAI-compatible relay",
   "settings.ai.provider.anthropicCompatible": "Anthropic-compatible relay",
   "settings.ai.connectionName": "Connection name",
@@ -460,7 +462,7 @@ export const en = {
     "Provider presets use their documented compatible endpoint. Relay connections accept a safe HTTPS URL or exact localhost HTTP URL.",
   "settings.ai.model": "Model ID",
   "settings.ai.modelDesc":
-    "Required. Enter the exact model ID enabled for your account and region; presets do not guess one.",
+    "Official presets may be left blank to follow their default model. Relays require the exact model ID enabled for your account and region.",
   "settings.ai.apiKey": "API key",
   "settings.ai.apiKeyDesc":
     "You can test the values entered here first. The key is written to external desktop secret storage only after you select Save.",

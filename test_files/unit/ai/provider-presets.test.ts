@@ -4,51 +4,48 @@ import {
   AI_PROVIDER_PRESETS,
   createAiConnection,
   getAiProviderPreset,
+  resolveAiConnectionForRequest,
 } from "../../../src/ai/provider-presets";
 import { normalizeAiConnection } from "../../../src/ai/connection-validation";
 
 describe("AI provider presets", () => {
-  it("defines the six fixed providers with exact protocols and base URLs", () => {
-    expect(AI_PROVIDER_PRESETS).toEqual([
-      {
-        providerKind: "kimi",
-        protocol: "openai-chat",
-        baseUrl: "https://api.moonshot.cn/v1",
-      },
-      {
-        providerKind: "deepseek",
-        protocol: "openai-chat",
-        baseUrl: "https://api.deepseek.com",
-      },
-      {
-        providerKind: "qwen",
-        protocol: "openai-chat",
-        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      },
-      {
-        providerKind: "glm",
-        protocol: "openai-chat",
-        baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-      },
-      {
-        providerKind: "openai",
-        protocol: "openai-chat",
-        baseUrl: "https://api.openai.com/v1",
-      },
-      {
-        providerKind: "claude",
-        protocol: "anthropic-messages",
-        baseUrl: "https://api.anthropic.com",
-      },
-      {
-        providerKind: "openai-compatible",
-        protocol: "openai-chat",
-      },
-      {
-        providerKind: "anthropic-compatible",
-        protocol: "anthropic-messages",
-      },
+  it("defines the ten provider default-model policies", () => {
+    expect(AI_PROVIDER_PRESETS.map(({ providerKind, defaultModel }) => [
+      providerKind,
+      defaultModel,
+    ])).toEqual([
+      ["kimi", "kimi-latest"],
+      ["deepseek", "deepseek-v4-pro"],
+      ["qwen", "qwen3.7-plus"],
+      ["glm", "glm-5.2"],
+      ["openai", "gpt-5.6"],
+      ["claude", "claude-sonnet-5"],
+      ["minimax-cn", "MiniMax-M3"],
+      ["minimax-global", "MiniMax-M3"],
+      ["openai-compatible", undefined],
+      ["anthropic-compatible", undefined],
     ]);
+  });
+
+  it("resolves an official default model only for a blank official connection", () => {
+    const following = createAiConnection({
+      id: "33333333-3333-4333-8333-333333333333",
+      name: "跟随默认",
+      providerKind: "minimax-cn",
+      model: "",
+    });
+    expect(following.model).toBe("");
+    expect(resolveAiConnectionForRequest(following)?.model).toBe("MiniMax-M3");
+
+    const pinned = createAiConnection({
+      id: "44444444-4444-4444-8444-444444444444",
+      name: "固定模型",
+      providerKind: "deepseek",
+      model: "deepseek-account-model",
+    });
+    expect(resolveAiConnectionForRequest(pinned)?.model).toBe(
+      "deepseek-account-model",
+    );
   });
 
   it("creates metadata defaults without inventing a model or storing a key", () => {
@@ -180,6 +177,7 @@ describe("AI provider presets", () => {
         providerKind: "openai",
         protocol: "openai-chat",
         baseUrl: "https://api.openai.com/v1",
+        defaultModel: "gpt-5.6",
       });
       expect(Object.isFrozen(second)).toBe(true);
     } finally {

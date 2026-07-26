@@ -7,6 +7,8 @@ export type AiProviderKind =
   | "glm"
   | "openai"
   | "claude"
+  | "minimax-cn"
+  | "minimax-global"
   | "openai-compatible"
   | "anthropic-compatible";
 

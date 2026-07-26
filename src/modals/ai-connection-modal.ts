@@ -32,6 +32,8 @@ const PROVIDER_LABEL_KEYS: Readonly<Record<AiProviderKind, TranslationKey>> =
     glm: "settings.ai.provider.glm",
     openai: "settings.ai.provider.openai",
     claude: "settings.ai.provider.claude",
+    "minimax-cn": "settings.ai.provider.minimaxCn",
+    "minimax-global": "settings.ai.provider.minimaxGlobal",
     "openai-compatible": "settings.ai.provider.openaiCompatible",
     "anthropic-compatible": "settings.ai.provider.anthropicCompatible",
   });
@@ -466,8 +468,13 @@ type BuildConnectionResult =
 function buildConnection(input: BuildConnectionInput): BuildConnectionResult {
   const name = boundedText(input.name, MAX_NAME_CHARACTERS);
   if (!name) return { ok: false, error: "settings.ai.nameRequired" };
-  const model = boundedText(input.model, MAX_MODEL_CHARACTERS);
-  if (!model) return { ok: false, error: "settings.ai.modelRequired" };
+  const model = optionalBoundedText(input.model, MAX_MODEL_CHARACTERS);
+  if (
+    model === undefined ||
+    (model === "" && getAiProviderPreset(input.providerKind)?.defaultModel === undefined)
+  ) {
+    return { ok: false, error: "settings.ai.modelRequired" };
+  }
   if (
     typeof input.baseUrl !== "string" ||
     input.baseUrl.length > MAX_BASE_URL_CHARACTERS
@@ -515,6 +522,12 @@ function boundedText(value: unknown, maximum: number): string | undefined {
     return undefined;
   }
   return normalized;
+}
+
+function optionalBoundedText(value: unknown, maximum: number): string | undefined {
+  if (typeof value !== "string" || value.length > maximum) return undefined;
+  const normalized = value.normalize("NFC").trim();
+  return hasControlCharacters(normalized) ? undefined : normalized;
 }
 
 function hasControlCharacters(value: string): boolean {

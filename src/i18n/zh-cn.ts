@@ -445,6 +445,8 @@ export const zhCN = {
   "settings.ai.provider.glm": "智谱 GLM",
   "settings.ai.provider.openai": "OpenAI",
   "settings.ai.provider.claude": "Claude",
+  "settings.ai.provider.minimaxCn": "MiniMax（中国）",
+  "settings.ai.provider.minimaxGlobal": "MiniMax（全球）",
   "settings.ai.provider.openaiCompatible": "OpenAI 兼容中转站",
   "settings.ai.provider.anthropicCompatible": "Anthropic 兼容中转站",
   "settings.ai.connectionName": "连接名称",
@@ -457,7 +459,7 @@ export const zhCN = {
     "服务商预设使用其兼容接口；中转站可填写安全的 HTTPS 地址或明确的本机 HTTP 地址。",
   "settings.ai.model": "模型 ID",
   "settings.ai.modelDesc":
-    "必填。请输入当前账户和区域实际开通的模型 ID，预设不会替你猜测。",
+    "官方预设可留空以跟随默认模型；中转站必须填写当前账户和区域实际开通的模型 ID。",
   "settings.ai.apiKey": "API 密钥",
   "settings.ai.apiKeyDesc":
     "可先在本窗口测试当前填写内容；只有点击“保存”后，密钥才会写入桌面端外部密钥文件。",

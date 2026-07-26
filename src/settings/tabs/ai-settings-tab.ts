@@ -853,6 +853,8 @@ function providerLabelKey(
     glm: "settings.ai.provider.glm",
     openai: "settings.ai.provider.openai",
     claude: "settings.ai.provider.claude",
+    "minimax-cn": "settings.ai.provider.minimaxCn",
+    "minimax-global": "settings.ai.provider.minimaxGlobal",
     "openai-compatible": "settings.ai.provider.openaiCompatible",
     "anthropic-compatible": "settings.ai.provider.anthropicCompatible",
   };
