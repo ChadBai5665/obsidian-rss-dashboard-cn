@@ -365,7 +365,7 @@ status: 待加工
 
 ### 10.2 TikHub
 
-- 中国大陆默认使用 `https://api.tikhub.dev`，其他地区默认使用 `https://api.tikhub.io`，允许手动覆盖。
+- 默认使用 TikHub 官方主站 `https://api.tikhub.io`；中国大陆无代理时可手动切换直连加速地址 `https://api.tikhub.dev`，也允许配置自定义 HTTPS 源站。
 - 只允许经过白名单的只读 X 接口。
 - 提供每次刷新和每日最大请求数。
 - UI 显示请求数量和估算费用，并明确“估算不等于账单”。

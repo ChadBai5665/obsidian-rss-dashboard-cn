@@ -628,7 +628,7 @@ export const DEFAULT_SETTINGS: RssDashboardSettings = {
   tikhub: {
     enabled: false,
     connectionId: "",
-    baseUrl: "https://api.tikhub.dev",
+    baseUrl: "https://api.tikhub.io",
     timeoutMs: 20_000,
     maxRequestsPerRun: 40,
     maxRequestsPerDay: 100,

@@ -320,6 +320,8 @@ describe("captureTikHubFixtures", () => {
       "/api/v1/twitter/web/fetch_search_timeline",
       "/api/v1/twitter/web/fetch_search_timeline",
     ]);
+    expect(calls.every(({ url }) => new URL(url).origin === "https://api.tikhub.io"))
+      .toBe(true);
     expect(calls.map(({ url }) => new URL(url).searchParams.get("search_type"))).toEqual([
       null,
       "Latest",

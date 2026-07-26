@@ -70,6 +70,42 @@ afterEach(() => {
 });
 
 describe("TikHubClient exact request contract", () => {
+  it("verifies the saved key against the official account endpoint without requiring content data", async () => {
+    const test = createHarness({
+      status: 200,
+      text: JSON.stringify({
+        code: 200,
+        router: "/api/v1/tikhub/user/get_user_info",
+        api_key_data: {
+          api_key_name: "Obsidian",
+          api_key_scopes: ["Twitter-Web-API"],
+          created_at: "2026-07-26T00:00:00Z",
+          expires_at: "2027-07-26T00:00:00Z",
+          api_key_status: 1,
+        },
+        user_data: {
+          email: "account@example.com",
+          balance: 1,
+          free_credit: 1,
+          email_verified: true,
+          account_disabled: false,
+          is_active: true,
+        },
+      }),
+      headers: {},
+    });
+
+    await expect(test.client.verifyAccount({ apiKey: API_KEY })).resolves.toBeUndefined();
+
+    expect(test.requests).toEqual([{
+      url: "https://api.tikhub.dev/api/v1/tikhub/user/get_user_info",
+      method: "GET",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    }]);
+    expect(test.reserve).toHaveBeenCalledWith(1);
+    expect(test.markAttempted).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     {
       name: "user posts",
@@ -640,11 +676,11 @@ describe("TikHubClient exact request contract", () => {
 describe("TikHub settings metadata", () => {
   const TIKHUB_SECRET_SENTINEL = "tikhub-secret-sentinel";
 
-  it("defaults to an optional disabled .dev connection with bounded request limits", () => {
+  it("defaults to the official primary API with bounded request limits", () => {
     expect(DEFAULT_SETTINGS.tikhub).toEqual({
       enabled: false,
       connectionId: "",
-      baseUrl: "https://api.tikhub.dev",
+      baseUrl: "https://api.tikhub.io",
       timeoutMs: 20_000,
       maxRequestsPerRun: 40,
       maxRequestsPerDay: 100,

@@ -157,6 +157,7 @@ export function renderTikHubSettingsTab(
   let customBaseUrl = isPresetBaseUrl(plugin.settings.tikhub.baseUrl)
     ? ""
     : plugin.settings.tikhub.baseUrl;
+  let setCustomBaseUrlVisible = (_visible: boolean): void => {};
   const customErrorEl = containerEl.createEl("p", {
     cls: "rss-dashboard-validation-error",
   });
@@ -168,13 +169,14 @@ export function renderTikHubSettingsTab(
   baseUrlSetting.addDropdown((dropdown) => {
     registerControl(dropdown.selectEl);
     dropdown
-      .addOption(MAINLAND_BASE_URL, t("settings.tikhub.presetMainland"))
       .addOption(OVERSEAS_BASE_URL, t("settings.tikhub.presetOverseas"))
+      .addOption(MAINLAND_BASE_URL, t("settings.tikhub.presetMainland"))
       .addOption("custom", t("settings.tikhub.presetCustom"))
       .setValue(isPresetBaseUrl(plugin.settings.tikhub.baseUrl)
         ? plugin.settings.tikhub.baseUrl
         : "custom")
       .onChange((value) => {
+        setCustomBaseUrlVisible(value === "custom");
         if (value === "custom") return;
         const operation = beginOperation();
         if (operation === undefined) return;
@@ -200,6 +202,14 @@ export function renderTikHubSettingsTab(
   const customBaseSetting = new Setting(containerEl)
     .setName(t("settings.tikhub.customBaseUrl"))
     .setDesc(t("settings.tikhub.customBaseUrlDesc"));
+  setCustomBaseUrlVisible = (visible: boolean): void => {
+    customBaseSetting.settingEl.hidden = !visible;
+    customBaseSetting.settingEl.style.display = visible ? "" : "none";
+    customErrorEl.hidden = !visible;
+    customErrorEl.style.display = visible ? "" : "none";
+    if (!visible) customErrorEl.setText("");
+  };
+  setCustomBaseUrlVisible(!isPresetBaseUrl(plugin.settings.tikhub.baseUrl));
   customBaseSetting
     .addText((text) => {
       customBaseUrlInput = registerControl(text.inputEl);
@@ -572,7 +582,7 @@ export async function runTikHubConnectionTest(
     budget,
     ...(input.transport ? { transport: input.transport } : {}),
   });
-  await client.fetchUserPosts({ apiKey, handle: "x" });
+  await client.verifyAccount({ apiKey });
 }
 
 function isPresetBaseUrl(value: string): value is typeof MAINLAND_BASE_URL | typeof OVERSEAS_BASE_URL {

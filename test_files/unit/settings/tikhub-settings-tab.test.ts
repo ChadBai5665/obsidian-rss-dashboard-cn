@@ -116,25 +116,34 @@ describe("renderTikHubSettingsTab", () => {
     expect(test.plugin.saveSettings).toHaveBeenCalledTimes(1);
   });
 
-  it("offers mainland and overseas presets and saves only validated custom HTTPS origins", async () => {
+  it("offers the official primary API first, keeps the mainland accelerator, and saves only validated custom HTTPS origins", async () => {
     const test = harness();
     const preset = getSetting(test.containerEl, "接口地址")
       .querySelector<HTMLSelectElement>("select")!;
     expect(Array.from(preset.options).map(({ value }) => value)).toEqual([
-      "https://api.tikhub.dev",
       "https://api.tikhub.io",
+      "https://api.tikhub.dev",
       "custom",
     ]);
+    expect(Array.from(preset.options).map(({ text }) => text)).toEqual([
+      "官方主站（api.tikhub.io）",
+      "中国大陆直连加速（api.tikhub.dev）",
+      "自定义 HTTPS 地址",
+    ]);
+    const customSetting = getSetting(test.containerEl, "自定义 HTTPS 地址");
+    expect(customSetting.hidden).toBe(true);
+    expect(customSetting.style.display).toBe("none");
 
     preset.value = "custom";
     preset.dispatchEvent(new Event("change"));
-    const custom = getSetting(test.containerEl, "自定义 HTTPS 地址")
-      .querySelector<HTMLInputElement>("input")!;
+    expect(customSetting.hidden).toBe(false);
+    expect(customSetting.style.display).toBe("");
+    const custom = customSetting.querySelector<HTMLInputElement>("input")!;
     custom.value = "https://gateway.example.com/path";
     custom.dispatchEvent(new Event("input"));
     getButton(test.containerEl, "应用地址").click();
     await flushPromises();
-    expect(test.plugin.settings.tikhub.baseUrl).toBe("https://api.tikhub.dev");
+    expect(test.plugin.settings.tikhub.baseUrl).toBe("https://api.tikhub.io");
     expect(test.containerEl.textContent).toContain("必须是仅包含域名的 HTTPS 地址");
 
     custom.value = "https://gateway.example.com/";
@@ -142,6 +151,12 @@ describe("renderTikHubSettingsTab", () => {
     getButton(test.containerEl, "应用地址").click();
     await flushPromises();
     expect(test.plugin.settings.tikhub.baseUrl).toBe("https://gateway.example.com");
+
+    preset.value = "https://api.tikhub.io";
+    preset.dispatchEvent(new Event("change"));
+    await flushPromises();
+    expect(customSetting.hidden).toBe(true);
+    expect(customSetting.style.display).toBe("none");
   });
 
   it("stores the key outside settings, masks and clears the input, and shows status only", async () => {
@@ -323,7 +338,7 @@ describe("renderTikHubSettingsTab", () => {
     expect(test.testConnection).toHaveBeenCalledWith(
       syntheticCredential(),
       expect.objectContaining({
-        baseUrl: "https://api.tikhub.dev",
+        baseUrl: "https://api.tikhub.io",
         maxRequestsPerRun: 7,
         maxRequestsPerDay: 11,
       }),
@@ -378,18 +393,36 @@ describe("renderTikHubSettingsTab", () => {
 });
 
 describe("runTikHubConnectionTest", () => {
-  it("uses one read-only account request through the configured run/day budget", async () => {
+  it("uses the official account endpoint and accepts its documented response without a data field", async () => {
     const app = obsidian.App.createMock();
     const transport = vi.fn(async () => ({
       status: 200,
-      text: JSON.stringify({ code: 200, data: {} }),
+      text: JSON.stringify({
+        code: 200,
+        router: "/api/v1/tikhub/user/get_user_info",
+        api_key_data: {
+          api_key_name: "Obsidian",
+          api_key_scopes: ["Twitter-Web-API"],
+          created_at: "2026-07-26T00:00:00Z",
+          expires_at: "2027-07-26T00:00:00Z",
+          api_key_status: 1,
+        },
+        user_data: {
+          email: "account@example.com",
+          balance: 1,
+          free_credit: 1,
+          email_verified: true,
+          account_disabled: false,
+          is_active: true,
+        },
+      }),
     }));
 
     const credential = syntheticCredential();
     await runTikHubConnectionTest(credential, {
       app,
       connectionId: CONNECTION_ID,
-      baseUrl: "https://api.tikhub.dev",
+      baseUrl: "https://api.tikhub.io",
       timeoutMs: 20_000,
       dataFolder: ".rss-dashboard-data",
       maxRequestsPerRun: 1,
@@ -399,7 +432,7 @@ describe("runTikHubConnectionTest", () => {
 
     expect(transport).toHaveBeenCalledTimes(1);
     expect(transport).toHaveBeenCalledWith({
-      url: "https://api.tikhub.dev/api/v1/twitter/web/fetch_user_post_tweet?screen_name=x",
+      url: "https://api.tikhub.io/api/v1/tikhub/user/get_user_info",
       method: "GET",
       headers: { Authorization: `Bearer ${credential}` },
     });
