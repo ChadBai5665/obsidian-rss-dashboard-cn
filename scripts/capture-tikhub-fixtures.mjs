@@ -19,7 +19,7 @@ import {
 } from "./sanitize-tikhub-fixture.mjs";
 
 const execFileAsync = promisify(execFile);
-const API_ORIGIN = "https://api.tikhub.dev";
+const API_ORIGIN = "https://api.tikhub.io";
 const FIXTURE_NAMES = [
   "account-posts.json",
   "search-latest.json",

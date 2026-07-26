@@ -48,6 +48,11 @@ export interface TikHubUserRequest extends CommonRequestInput {
   handle: string;
 }
 
+export interface TikHubAccountRequest {
+  apiKey: string;
+  signal?: AbortSignal;
+}
+
 export interface TikHubSearchRequest extends CommonRequestInput {
   query: string;
   searchType: TikHubSearchType;
@@ -101,6 +106,16 @@ export class TikHubClient {
     this.timeoutMs = options.timeoutMs;
     this.budget = options.budget;
     this.transport = options.transport ?? obsidianTransport;
+  }
+
+  async verifyAccount(input: TikHubAccountRequest): Promise<void> {
+    await this.request<void>(
+      "/api/v1/tikhub/user/get_user_info",
+      {},
+      input,
+      undefined,
+      false,
+    );
   }
 
   async fetchUserPosts<T = unknown>(
@@ -184,6 +199,7 @@ export class TikHubClient {
     query: Record<string, string>,
     input: CommonRequestInput,
     batch?: TikHubBatchHandle,
+    requireData = true,
   ): Promise<TikHubResult<T>> {
     const apiKey = input.apiKey.trim();
     if (!apiKey) {
@@ -269,7 +285,7 @@ export class TikHubClient {
       if (envelope.code !== 200) {
         throw errorForProviderCode(envelope.code, requestId);
       }
-      if (!("data" in envelope)) {
+      if (requireData && !("data" in envelope)) {
         throw new TikHubClientError(
           "malformed-response",
           "TikHub response data is missing.",
