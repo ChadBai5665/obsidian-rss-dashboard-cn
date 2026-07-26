@@ -3,6 +3,7 @@ import type { AiConnection } from "../../ai/ai-types";
 import { normalizeAiConnection } from "../../ai/connection-validation";
 import { ProviderError } from "../../ai/providers/provider-error";
 import { createTextGenerationProvider } from "../../ai/providers/provider-factory";
+import { resolveAiConnectionForRequest } from "../../ai/provider-presets";
 import type { TextGenerationProvider } from "../../ai/providers/text-generation-provider";
 import { waitForTrustedAbortWork } from "../../ai/trusted-abort";
 import { DesktopSecretStore } from "../../security/desktop-secret-store";
@@ -369,12 +370,17 @@ function renderConnection(input: RenderConnectionInput): void {
     secretStore,
   } = input;
   const isDefault = plugin.settings.ai.defaultConnectionId === connection.id;
+  const resolved = resolveAiConnectionForRequest(connection);
+  if (!resolved) return;
   const providerName = t(providerLabelKey(connection.providerKind));
+  const modelLabel = connection.model
+    ? connection.model
+    : t("settings.ai.defaultModelLabel", { model: resolved.model });
   const setting = new Setting(containerEl)
     .setName(connection.name)
     .setDesc([
       providerName,
-      connection.model,
+      modelLabel,
       isDefault ? t("settings.ai.defaultBadge") : "",
     ].filter(Boolean).join(" · "));
   setting.settingEl.addClass("rss-dashboard-ai-connection");
@@ -853,6 +859,8 @@ function providerLabelKey(
     glm: "settings.ai.provider.glm",
     openai: "settings.ai.provider.openai",
     claude: "settings.ai.provider.claude",
+    "minimax-cn": "settings.ai.provider.minimaxCn",
+    "minimax-global": "settings.ai.provider.minimaxGlobal",
     "openai-compatible": "settings.ai.provider.openaiCompatible",
     "anthropic-compatible": "settings.ai.provider.anthropicCompatible",
   };

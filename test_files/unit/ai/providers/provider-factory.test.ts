@@ -4,6 +4,7 @@ import process from "node:process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AiConnection } from "../../../../src/ai/ai-types";
+import { createAiConnection } from "../../../../src/ai/provider-presets";
 import { createTextGenerationProvider } from "../../../../src/ai/providers/provider-factory";
 import type { AiTransport } from "../../../../src/ai/providers/text-generation-provider";
 import { DesktopSecretStore } from "../../../../src/security/desktop-secret-store";
@@ -33,6 +34,40 @@ function connection(overrides: Partial<AiConnection> = {}): AiConnection {
 }
 
 describe("AI provider factory", () => {
+  it.each([
+    ["minimax-cn", "https://api.minimaxi.com/v1/chat/completions"],
+    ["minimax-global", "https://api.minimax.io/v1/chat/completions"],
+  ] as const)("routes %s to its official API with MiniMax token limits", async (
+    providerKind,
+    url,
+  ) => {
+    const transport = vi.fn<AiTransport>(() => Promise.resolve({
+      status: 200,
+      headers: {},
+      json: { choices: [{ message: { content: "ok" } }] },
+    }));
+    const provider = await createTextGenerationProvider(
+      createAiConnection({
+        id: "11111111-1111-4111-8111-111111111111",
+        name: "MiniMax",
+        providerKind,
+        model: "",
+      }),
+      { get: vi.fn(async () => API_KEY) },
+      { transport },
+    );
+
+    await provider.generate({ system: "system", user: "user", maxOutputTokens: 512 });
+
+    expect(transport).toHaveBeenCalledWith(expect.objectContaining({ url }));
+    const body = JSON.parse(transport.mock.calls[0]?.[0].body ?? "{}");
+    expect(body).toMatchObject({
+      model: "MiniMax-M3",
+      max_completion_tokens: 512,
+    });
+    expect(body).not.toHaveProperty("max_tokens");
+  });
+
   it("reads the external key immediately before construction and retains no enumerable secret", async () => {
     const events: string[] = [];
     const secretStore = {

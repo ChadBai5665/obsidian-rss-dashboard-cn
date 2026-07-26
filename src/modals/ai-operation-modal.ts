@@ -18,6 +18,7 @@ import type {
   SelectedAiContent,
 } from "../ai/content/ai-content-selector";
 import { normalizeAiConnection } from "../ai/connection-validation";
+import { resolveAiConnectionForRequest } from "../ai/provider-presets";
 import type { AnalysisNoteInsertResult } from "../ai/analysis-note-inserter";
 import { buildAiPrompt } from "../ai/prompts/prompt-builder";
 import type { AiOperation } from "../ai/prompts/prompt-types";
@@ -216,6 +217,8 @@ export class AiOperationModal extends Modal {
 
     const renderPreview = (): void => {
       if (!isCurrent() || !selectedConnection) return;
+      const effectiveConnection = resolveAiConnectionForRequest(selectedConnection);
+      if (!effectiveConnection) return;
       previewEl.empty();
       if (!preview) {
         previewEl.createEl("p", { text: t("ai.preview.loading") });
@@ -248,7 +251,7 @@ export class AiOperationModal extends Modal {
         t("ai.preview.connection"),
         selectedConnection.name,
       );
-      addPreviewRow(previewEl, t("ai.preview.model"), selectedConnection.model);
+      addPreviewRow(previewEl, t("ai.preview.model"), effectiveConnection.model);
 
       if (
         preview.contentBasis !== "full-text" &&
@@ -454,6 +457,11 @@ export class AiOperationModal extends Modal {
         return;
       }
       if (!previewReadyForSend) return;
+      const effectiveConnection = resolveAiConnectionForRequest(selectedConnection);
+      if (!effectiveConnection) {
+        statusEl.setText(t("ai.error.invalidConnection"));
+        return;
+      }
       const confirmedPreview = preview;
       cancelled = false;
       pendingResult = null;
@@ -478,7 +486,7 @@ export class AiOperationModal extends Modal {
           operationResult,
           this.options.item,
           this.options.operation,
-          selectedConnection,
+          effectiveConnection,
           confirmedPreview,
           (this.options.createResultId ?? defaultResultId)(),
           (this.options.now ?? (() => new Date()))(),
@@ -586,13 +594,15 @@ function createAnalysisResult(
   id: string,
   now: Date,
 ): AiAnalysisResult {
+  const effectiveConnection = resolveAiConnectionForRequest(connection);
   if (
+    !effectiveConnection ||
     generated.itemId !== item.id ||
     generated.operation !== operation ||
     generated.connectionId !== connection.id ||
     generated.connectionName !== connection.name ||
     generated.providerKind !== connection.providerKind ||
-    generated.model !== connection.model ||
+    generated.model !== effectiveConnection.model ||
     generated.contentBasis !== preview.contentBasis ||
     generated.inputCharacterCount !== preview.inputCharacterCount ||
     generated.inputTruncated !== preview.inputTruncated

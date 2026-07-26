@@ -91,12 +91,29 @@ describe("AI connection validation", () => {
     ).toBeUndefined();
   });
 
-  it.each(["", "  ", "model\nheader", "model\u0000secret", "model\u0085next"])(
+  it.each(["model\nheader", "model\u0000secret", "model\u0085next"])(
     "rejects invalid model id %j",
     (model) => {
       expect(normalizeAiConnection(connection({ model }))).toBeUndefined();
     },
   );
+
+  it("keeps blank official models but rejects blank relay models and swapped MiniMax URLs", () => {
+    expect(normalizeAiConnection(connection({
+      providerKind: "kimi",
+      protocol: "openai-chat",
+      baseUrl: "https://api.moonshot.cn/v1",
+      model: "",
+    }))).toMatchObject({ providerKind: "kimi", model: "" });
+    expect(normalizeAiConnection(connection({
+      providerKind: "openai-compatible",
+      baseUrl: "https://relay.example/v1",
+      model: "",
+    }))).toBeUndefined();
+    expect(normalizeAiConnection(connection({ model: "bad\nmodel" }))).toBeUndefined();
+    expect(normalizeAiBaseUrl("https://api.minimax.io/v1", "minimax-cn")).toBeUndefined();
+    expect(normalizeAiBaseUrl("https://api.minimaxi.com/v1", "minimax-global")).toBeUndefined();
+  });
 
   it("rejects duplicate connection IDs and dangling defaults", () => {
     expect(

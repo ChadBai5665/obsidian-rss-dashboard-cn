@@ -42,21 +42,13 @@ function harness(
   overrides: Partial<AiConnection> = {},
   supportsStoreFalse = false,
 ) {
-  const providerByBaseUrl: Partial<AiConnection> =
-    overrides.baseUrl === "https://api.deepseek.com"
-      ? { providerKind: "deepseek" }
-      : overrides.baseUrl === "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        ? { providerKind: "qwen" }
-        : overrides.baseUrl === "https://open.bigmodel.cn/api/paas/v4"
-          ? { providerKind: "glm" }
-          : {};
   const requests: AiTransportRequest[] = [];
   const transport = vi.fn<AiTransport>((request) => {
     requests.push(request);
     return Promise.resolve(response);
   });
   const provider = new OpenAiChatProvider({
-    connection: connection({ ...providerByBaseUrl, ...overrides }),
+    connection: connection(overrides),
     apiKey: API_KEY,
     transport,
     supportsStoreFalse,
@@ -84,18 +76,18 @@ describe("OpenAI-compatible provider", () => {
   });
 
   it.each([
-    ["https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions"],
-    ["https://api.deepseek.com", "https://api.deepseek.com/chat/completions"],
+    ["openai", "https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions"],
+    ["kimi", "https://api.moonshot.cn/v1", "https://api.moonshot.cn/v1/chat/completions"],
+    ["deepseek", "https://api.deepseek.com", "https://api.deepseek.com/chat/completions"],
+    ["qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"],
+    ["glm", "https://open.bigmodel.cn/api/paas/v4", "https://open.bigmodel.cn/api/paas/v4/chat/completions"],
     [
-      "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      "openai-compatible",
+      "https://relay.example.com/v1",
+      "https://relay.example.com/v1/chat/completions",
     ],
-    [
-      "https://open.bigmodel.cn/api/paas/v4",
-      "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-    ],
-  ])("sends the exact protocol contract for %s", async (baseUrl, expectedUrl) => {
-    const test = harness(success(), { baseUrl });
+  ] as const)("sends max_tokens to %s at %s", async (providerKind, baseUrl, expectedUrl) => {
+    const test = harness(success(), { providerKind, baseUrl });
     const controller = new AbortController();
 
     await expect(test.provider.generate({
@@ -124,10 +116,25 @@ describe("OpenAI-compatible provider", () => {
           { role: "system", content: "系统提示" },
           { role: "user", content: "用户内容" },
         ],
-        max_tokens: 512,
         stream: false,
+        max_tokens: 512,
       }),
       signal: controller.signal,
+    });
+  });
+
+  it("resolves a blank Kimi model before a direct provider request", async () => {
+    const test = harness(success(), {
+      providerKind: "kimi",
+      baseUrl: "https://api.moonshot.cn/v1",
+      model: "",
+    });
+
+    await test.provider.generate({ system: "system", user: "user", maxOutputTokens: 10 });
+
+    expect(JSON.parse(test.requests[0]?.body ?? "{}")).toMatchObject({
+      model: "kimi-latest",
+      max_tokens: 10,
     });
   });
 

@@ -5,6 +5,7 @@ export interface AiProviderPreset {
   providerKind: AiProviderKind;
   protocol: AiProtocol;
   baseUrl?: string;
+  defaultModel?: string;
 }
 
 const CANONICAL_PROVIDER_PRESETS = Object.freeze([
@@ -12,31 +13,49 @@ const CANONICAL_PROVIDER_PRESETS = Object.freeze([
     providerKind: "kimi",
     protocol: "openai-chat",
     baseUrl: "https://api.moonshot.cn/v1",
+    defaultModel: "kimi-latest",
   },
   {
     providerKind: "deepseek",
     protocol: "openai-chat",
     baseUrl: "https://api.deepseek.com",
+    defaultModel: "deepseek-v4-pro",
   },
   {
     providerKind: "qwen",
     protocol: "openai-chat",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    defaultModel: "qwen3.7-plus",
   },
   {
     providerKind: "glm",
     protocol: "openai-chat",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    defaultModel: "glm-5.2",
   },
   {
     providerKind: "openai",
     protocol: "openai-chat",
     baseUrl: "https://api.openai.com/v1",
+    defaultModel: "gpt-5.6",
   },
   {
     providerKind: "claude",
     protocol: "anthropic-messages",
     baseUrl: "https://api.anthropic.com",
+    defaultModel: "claude-sonnet-5",
+  },
+  {
+    providerKind: "minimax-cn",
+    protocol: "openai-chat",
+    baseUrl: "https://api.minimaxi.com/v1",
+    defaultModel: "MiniMax-M3",
+  },
+  {
+    providerKind: "minimax-global",
+    protocol: "openai-chat",
+    baseUrl: "https://api.minimax.io/v1",
+    defaultModel: "MiniMax-M3",
   },
   {
     providerKind: "openai-compatible",
@@ -58,10 +77,22 @@ export const AI_PROVIDER_PRESETS: readonly Readonly<AiProviderPreset>[] =
 export function getAiProviderPreset(
   providerKind: AiProviderKind,
 ): AiProviderPreset | undefined {
-  const preset = CANONICAL_PROVIDER_PRESETS.find(
+  const preset: AiProviderPreset | undefined = CANONICAL_PROVIDER_PRESETS.find(
     (preset) => preset.providerKind === providerKind,
   );
   return preset ? Object.freeze({ ...preset }) : undefined;
+}
+
+export function resolveAiConnectionForRequest(
+  value: unknown,
+): AiConnection | undefined {
+  const connection = normalizeAiConnection(value);
+  if (!connection) return undefined;
+  const preset: AiProviderPreset | undefined = CANONICAL_PROVIDER_PRESETS.find(
+    ({ providerKind }) => providerKind === connection.providerKind,
+  );
+  const model = connection.model || preset?.defaultModel;
+  return model ? { ...connection, model } : undefined;
 }
 
 export interface CreateAiConnectionInput {

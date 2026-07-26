@@ -14,31 +14,49 @@ const VALIDATION_PROVIDER_PRESETS = Object.freeze({
     providerKind: "kimi",
     protocol: "openai-chat",
     baseUrl: "https://api.moonshot.cn/v1",
+    defaultModel: "kimi-latest",
   }),
   deepseek: Object.freeze({
     providerKind: "deepseek",
     protocol: "openai-chat",
     baseUrl: "https://api.deepseek.com",
+    defaultModel: "deepseek-v4-pro",
   }),
   qwen: Object.freeze({
     providerKind: "qwen",
     protocol: "openai-chat",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    defaultModel: "qwen3.7-plus",
   }),
   glm: Object.freeze({
     providerKind: "glm",
     protocol: "openai-chat",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    defaultModel: "glm-5.2",
   }),
   openai: Object.freeze({
     providerKind: "openai",
     protocol: "openai-chat",
     baseUrl: "https://api.openai.com/v1",
+    defaultModel: "gpt-5.6",
   }),
   claude: Object.freeze({
     providerKind: "claude",
     protocol: "anthropic-messages",
     baseUrl: "https://api.anthropic.com",
+    defaultModel: "claude-sonnet-5",
+  }),
+  "minimax-cn": Object.freeze({
+    providerKind: "minimax-cn",
+    protocol: "openai-chat",
+    baseUrl: "https://api.minimaxi.com/v1",
+    defaultModel: "MiniMax-M3",
+  }),
+  "minimax-global": Object.freeze({
+    providerKind: "minimax-global",
+    protocol: "openai-chat",
+    baseUrl: "https://api.minimax.io/v1",
+    defaultModel: "MiniMax-M3",
   }),
   "openai-compatible": Object.freeze({
     providerKind: "openai-compatible",
@@ -75,7 +93,7 @@ export function normalizeAiConnection(
 
   const id = normalizedId(ownData(record, "id"));
   const name = normalizedText(ownData(record, "name"));
-  const model = normalizedText(ownData(record, "model"));
+  const model = normalizedOptionalText(ownData(record, "model"));
   const providerKind = ownData(record, "providerKind");
   const preset = providerPreset(providerKind);
   const protocol = ownData(record, "protocol");
@@ -89,11 +107,12 @@ export function normalizeAiConnection(
   if (
     !id ||
     !name ||
-    !model ||
+    model === undefined ||
     !preset ||
     protocol !== preset.protocol ||
     !baseUrl ||
     (preset.baseUrl !== undefined && baseUrl !== preset.baseUrl) ||
+    (model === "" && preset.defaultModel === undefined) ||
     !positiveSafeInteger(timeoutMs) ||
     timeoutMs > MAX_AI_TIMEOUT_MS ||
     !positiveSafeInteger(maxInputCharacters) ||
@@ -235,6 +254,13 @@ function normalizedText(value: unknown): string | undefined {
   }
   const text = value.normalize("NFC").trim();
   return text || undefined;
+}
+
+function normalizedOptionalText(value: unknown): string | undefined {
+  if (typeof value !== "string" || hasControlCharacters(value)) {
+    return undefined;
+  }
+  return value.normalize("NFC").trim();
 }
 
 function normalizedId(value: unknown): string | undefined {

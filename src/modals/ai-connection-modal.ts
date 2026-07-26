@@ -32,6 +32,8 @@ const PROVIDER_LABEL_KEYS: Readonly<Record<AiProviderKind, TranslationKey>> =
     glm: "settings.ai.provider.glm",
     openai: "settings.ai.provider.openai",
     claude: "settings.ai.provider.claude",
+    "minimax-cn": "settings.ai.provider.minimaxCn",
+    "minimax-global": "settings.ai.provider.minimaxGlobal",
     "openai-compatible": "settings.ai.provider.openaiCompatible",
     "anthropic-compatible": "settings.ai.provider.anthropicCompatible",
   });
@@ -131,6 +133,7 @@ export class AiConnectionModal extends Modal {
 
     let protocolSetting: Setting;
     let baseUrlInput: HTMLInputElement;
+    let modelSetting: Setting;
     let modelInput: HTMLInputElement;
     let keyInput: HTMLInputElement;
     let cancelButton: HTMLButtonElement | undefined;
@@ -191,9 +194,8 @@ export class AiConnectionModal extends Modal {
         baseUrlInput.maxLength = MAX_BASE_URL_CHARACTERS;
       });
 
-    fieldSetting()
+    modelSetting = fieldSetting()
       .setName(t("settings.ai.model"))
-      .setDesc(t("settings.ai.modelDesc"))
       .addText((text) => {
         modelInput = text.inputEl;
         text.setValue(model).onChange((value) => {
@@ -248,6 +250,15 @@ export class AiConnectionModal extends Modal {
       ));
       baseUrlInput.disabled = preset?.baseUrl !== undefined;
       baseUrlInput.setAttribute("aria-disabled", String(baseUrlInput.disabled));
+      const defaultModel = preset?.defaultModel;
+      modelSetting.setDesc(t(defaultModel
+        ? "settings.ai.modelDefaultDesc"
+        : "settings.ai.modelRequiredDesc", {
+        ...(defaultModel ? { model: defaultModel } : {}),
+      }));
+      modelInput.placeholder = defaultModel
+        ? t("settings.ai.modelDefaultPlaceholder", { model: defaultModel })
+        : t("settings.ai.modelRequiredPlaceholder");
       providerGuidanceEl.setText(providerGuidance(providerKind, t));
     };
     renderProviderFields();
@@ -466,8 +477,13 @@ type BuildConnectionResult =
 function buildConnection(input: BuildConnectionInput): BuildConnectionResult {
   const name = boundedText(input.name, MAX_NAME_CHARACTERS);
   if (!name) return { ok: false, error: "settings.ai.nameRequired" };
-  const model = boundedText(input.model, MAX_MODEL_CHARACTERS);
-  if (!model) return { ok: false, error: "settings.ai.modelRequired" };
+  const model = boundedOptionalText(input.model, MAX_MODEL_CHARACTERS);
+  if (
+    model === undefined ||
+    (model === "" && getAiProviderPreset(input.providerKind)?.defaultModel === undefined)
+  ) {
+    return { ok: false, error: "settings.ai.modelRequired" };
+  }
   if (
     typeof input.baseUrl !== "string" ||
     input.baseUrl.length > MAX_BASE_URL_CHARACTERS
@@ -517,6 +533,12 @@ function boundedText(value: unknown, maximum: number): string | undefined {
   return normalized;
 }
 
+function boundedOptionalText(value: unknown, maximum: number): string | undefined {
+  if (typeof value !== "string" || value.length > maximum) return undefined;
+  const normalized = value.normalize("NFC").trim();
+  return hasControlCharacters(normalized) ? undefined : normalized;
+}
+
 function hasControlCharacters(value: string): boolean {
   for (const character of value) {
     const codePoint = character.codePointAt(0);
@@ -544,6 +566,10 @@ function providerGuidance(
 ): string {
   if (providerKind === "qwen") return t("settings.ai.qwenGuidance");
   if (providerKind === "claude") return t("settings.ai.claudeGuidance");
+  if (providerKind === "minimax-cn") return t("settings.ai.minimaxCnGuidance");
+  if (providerKind === "minimax-global") {
+    return t("settings.ai.minimaxGlobalGuidance");
+  }
   if (
     providerKind === "openai-compatible" ||
     providerKind === "anthropic-compatible"

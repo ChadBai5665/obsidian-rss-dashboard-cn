@@ -191,28 +191,28 @@
   {
     "path": "test_files/unit/ai/analysis-markdown.test.ts",
     "rule": "credential-value",
-    "line": 91,
+    "line": 100,
     "fingerprint": "sha256:8c65c86ce11dbad12269ef1265dc56e2301dcd3922be5e19edcbee71a74e5bf9",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/analysis-markdown.test.ts",
     "rule": "credential-value",
-    "line": 93,
+    "line": 102,
     "fingerprint": "sha256:935d112de3eeadeb9a3ac446885d57290c26802d4fb53540f7e3cfee08182835",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/analysis-markdown.test.ts",
     "rule": "home-path",
-    "line": 132,
+    "line": 141,
     "fingerprint": "sha256:5beadea37d0480582c19f89e0fbc974ecee182dddd13badb270a55b365047c14",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/ai/analysis-markdown.test.ts",
     "rule": "credential-url",
-    "line": 133,
+    "line": 142,
     "fingerprint": "sha256:b9bc2327c28d30850f536014cdab6d2e2869326ac003acd12c3df7c484e498a4",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
@@ -233,7 +233,7 @@
   {
     "path": "test_files/unit/ai/connection-validation.test.ts",
     "rule": "credential-value",
-    "line": 160,
+    "line": 177,
     "fingerprint": "sha256:38b0d02a59bc0b91d6b92c362ea19b1d9f401a5636257c543b17c3f5be501680",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
@@ -252,6 +252,13 @@
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
+    "path": "test_files/unit/ai/providers/anthropic-messages-provider.test.ts",
+    "rule": "credential-value",
+    "line": 59,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
     "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
     "rule": "credential-value",
     "line": 15,
@@ -261,42 +268,42 @@
   {
     "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
     "rule": "credential-value",
-    "line": 60,
+    "line": 52,
     "fingerprint": "sha256:ddecffd61175e66d3f9b90c9b39e106434cb510db27a97b7636efa82cc9b9821",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
     "rule": "credential-value",
-    "line": 169,
+    "line": 176,
     "fingerprint": "sha256:a62525d830ee12dc577d3e266cb1466d2c000cbf745a06ae919a32a16ca97bd4",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
     "rule": "credential-value",
-    "line": 219,
+    "line": 226,
     "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
     "rule": "credential-value",
-    "line": 243,
+    "line": 250,
     "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
     "rule": "credential-value",
-    "line": 265,
+    "line": 272,
     "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/providers/provider-factory.test.ts",
     "rule": "credential-value",
-    "line": 11,
+    "line": 12,
     "fingerprint": "sha256:9eac646e0f71e6da92dcf4979a92ee70d2e9d9acd36f54a8ad2c3e130846e606",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },

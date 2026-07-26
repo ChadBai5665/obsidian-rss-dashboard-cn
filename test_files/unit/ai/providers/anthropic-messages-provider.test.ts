@@ -52,6 +52,26 @@ function harness(response: unknown = success(), baseUrl?: string) {
 }
 
 describe("Anthropic-compatible provider", () => {
+  it("resolves a blank Claude model before a direct messages request", async () => {
+    const requests: AiTransportRequest[] = [];
+    const provider = new AnthropicMessagesProvider({
+      connection: { ...connection(), model: "" },
+      apiKey: API_KEY,
+      transport: (request) => {
+        requests.push(request);
+        return Promise.resolve(success());
+      },
+    });
+
+    await provider.generate({ system: "system", user: "user", maxOutputTokens: 1024 });
+
+    expect(requests[0]?.url).toBe("https://api.anthropic.com/v1/messages");
+    expect(JSON.parse(requests[0]?.body ?? "{}")).toMatchObject({
+      model: "claude-sonnet-5",
+      max_tokens: 1024,
+    });
+  });
+
   it.each([
     ["https://api.anthropic.com", "https://api.anthropic.com/v1/messages"],
     ["https://relay.example.com/v1", "https://relay.example.com/v1/messages"],
