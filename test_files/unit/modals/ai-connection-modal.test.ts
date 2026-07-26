@@ -99,7 +99,7 @@ describe("AiConnectionModal", () => {
     ).toHaveLength(7);
   });
 
-  it("shows all eight provider choices and fills protocol/base URL without inventing a model", () => {
+  it("shows all ten provider choices and fills protocol/base URL without inventing a model", () => {
     const { modal } = harness();
     const provider = setting(modal, "服务商或兼容接口")
       .querySelector<HTMLSelectElement>("select")!;
@@ -110,6 +110,8 @@ describe("AiConnectionModal", () => {
       "glm",
       "openai",
       "claude",
+      "minimax-cn",
+      "minimax-global",
       "openai-compatible",
       "anthropic-compatible",
     ]);
@@ -120,6 +122,8 @@ describe("AiConnectionModal", () => {
       "智谱 GLM",
       "OpenAI",
       "Claude",
+      "MiniMax（中国大陆）",
+      "MiniMax（国际）",
       "OpenAI 兼容中转站",
       "Anthropic 兼容中转站",
     ]);
@@ -144,18 +148,42 @@ describe("AiConnectionModal", () => {
     expect(modal.contentEl.textContent).toContain("Claude Code 登录不会自动导入");
   });
 
+  it("saves a MiniMax connection with its empty default-model marker", async () => {
+    const { modal, onSave } = harness();
+    setInput(modal, "连接名称", "默认 MiniMax");
+    const provider = setting(modal, "服务商或兼容接口")
+      .querySelector<HTMLSelectElement>("select")!;
+
+    provider.value = "minimax-cn";
+    provider.dispatchEvent(new Event("change"));
+
+    expect(setting(modal, "模型 ID").textContent)
+      .toContain("留空使用平台默认模型：MiniMax-M3");
+    expect(setting(modal, "模型 ID").querySelector<HTMLInputElement>("input")!.placeholder)
+      .toBe("留空使用默认模型：MiniMax-M3");
+    button(modal, "保存").click();
+    await flushPromises();
+
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      providerKind: "minimax-cn",
+      baseUrl: "https://api.minimaxi.com/v1",
+      model: "",
+    }));
+  });
+
   it("requires an explicit model ID and accepts only safe relay base URLs", async () => {
     const { modal, onSave } = harness();
-    setInput(modal, "连接名称", "我的 Kimi");
+    const provider = setting(modal, "服务商或兼容接口")
+      .querySelector<HTMLSelectElement>("select")!;
+    provider.value = "openai-compatible";
+    provider.dispatchEvent(new Event("change"));
+    setInput(modal, "连接名称", "我的中转站");
+    setInput(modal, "接口地址", "https://relay.example.com/v1");
     button(modal, "保存").click();
     await flushPromises();
     expect(onSave).not.toHaveBeenCalled();
     expect(modal.contentEl.textContent).toContain("请输入模型 ID");
 
-    const provider = setting(modal, "服务商或兼容接口")
-      .querySelector<HTMLSelectElement>("select")!;
-    provider.value = "openai-compatible";
-    provider.dispatchEvent(new Event("change"));
     setInput(modal, "模型 ID", "relay-model");
     setInput(modal, "接口地址", "http://evil.example.com/v1");
     button(modal, "保存").click();
@@ -173,6 +201,45 @@ describe("AiConnectionModal", () => {
       baseUrl: "http://127.0.0.1:11434/v1",
       model: "relay-model",
     }));
+  });
+
+  it("keeps a pinned MiniMax model while switching providers clears only the unsaved draft", () => {
+    const { modal } = harness();
+    const provider = setting(modal, "服务商或兼容接口")
+      .querySelector<HTMLSelectElement>("select")!;
+    setInput(modal, "模型 ID", "MiniMax-M3-custom");
+
+    provider.value = "minimax-cn";
+    provider.dispatchEvent(new Event("change"));
+    expect(setting(modal, "模型 ID").querySelector<HTMLInputElement>("input")!.value)
+      .toBe("");
+    expect(setting(modal, "模型 ID").textContent)
+      .toContain("留空使用平台默认模型：MiniMax-M3");
+
+    setInput(modal, "模型 ID", "MiniMax-M3-custom");
+    expect(setting(modal, "模型 ID").querySelector<HTMLInputElement>("input")!.value)
+      .toBe("MiniMax-M3-custom");
+    provider.value = "minimax-global";
+    provider.dispatchEvent(new Event("change"));
+    expect(setting(modal, "模型 ID").querySelector<HTMLInputElement>("input")!.value)
+      .toBe("");
+    expect(setting(modal, "模型 ID").textContent)
+      .toContain("留空使用平台默认模型：MiniMax-M3");
+  });
+
+  it("retains an existing pinned model when opening the editor", () => {
+    const existing = createAiConnection({
+      id: CONNECTION_ID,
+      name: "固定 MiniMax",
+      providerKind: "minimax-cn",
+      model: "MiniMax-M3-custom",
+    });
+    const { modal } = harness({ existing });
+
+    expect(setting(modal, "模型 ID").querySelector<HTMLInputElement>("input")!.value)
+      .toBe("MiniMax-M3-custom");
+    expect(setting(modal, "模型 ID").textContent)
+      .toContain("留空使用平台默认模型：MiniMax-M3");
   });
 
   it("persists metadata before a new key, clears the key immediately, and never puts it in metadata", async () => {
@@ -204,7 +271,12 @@ describe("AiConnectionModal", () => {
 
   it("keeps the entered key when another form field fails validation", async () => {
     const test = harness();
+    const provider = setting(test.modal, "服务商或兼容接口")
+      .querySelector<HTMLSelectElement>("select")!;
+    provider.value = "openai-compatible";
+    provider.dispatchEvent(new Event("change"));
     setInput(test.modal, "连接名称", "待补模型");
+    setInput(test.modal, "接口地址", "https://relay.example.com/v1");
     setInput(test.modal, "API 密钥", API_KEY);
     const keyInput = setting(test.modal, "API 密钥")
       .querySelector<HTMLInputElement>("input")!;

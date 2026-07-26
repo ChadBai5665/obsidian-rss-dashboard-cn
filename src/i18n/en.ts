@@ -463,6 +463,11 @@ export const en = {
   "settings.ai.model": "Model ID",
   "settings.ai.modelDesc":
     "Official presets may be left blank to follow their default model. Relays require the exact model ID enabled for your account and region.",
+  "settings.ai.modelDefaultDesc":
+    "Optional. Leave blank to use the platform default model: {model}; enter a value to pin that exact model.",
+  "settings.ai.modelDefaultPlaceholder": "Leave blank to use default model: {model}",
+  "settings.ai.modelRequiredDesc": "Required. Compatible relays do not have a shared default model.",
+  "settings.ai.modelRequiredPlaceholder": "Enter a model ID",
   "settings.ai.apiKey": "API key",
   "settings.ai.apiKeyDesc":
     "You can test the values entered here first. The key is written to external desktop secret storage only after you select Save.",
@@ -474,12 +479,17 @@ export const en = {
     "Disabled connections remain saved but cannot be used for AI operations or connection tests.",
   "settings.ai.qwenGuidance":
     "Qwen workspace or region URLs may differ. If your account requires another URL, use an OpenAI-compatible relay connection. The model ID must match the current account and region.",
+  "settings.ai.minimaxCnGuidance":
+    "The official China endpoint is https://api.minimaxi.com/v1. Any manual override must use the complete model ID available to your account and region.",
+  "settings.ai.minimaxGlobalGuidance":
+    "The official global endpoint is https://api.minimax.io/v1. Any manual override must use the complete model ID available to your account and region.",
   "settings.ai.relayGuidance":
     "Relay compatibility is not guaranteed. Confirm its protocol and enter the exact model ID available to your account.",
   "settings.ai.modelAccountGuidance":
     "The model ID must match the current account and region. This preset does not promise current model availability.",
   "settings.ai.nameRequired": "Enter a valid connection name.",
   "settings.ai.modelRequired": "Enter a model ID.",
+  "settings.ai.defaultModelLabel": "Default ({model})",
   "settings.ai.invalidBaseUrl": "Enter a safe API base URL.",
   "settings.ai.invalidConnectionId": "A secure UUID connection ID could not be created.",
   "settings.ai.invalidConnection": "The connection metadata is invalid.",

@@ -445,8 +445,8 @@ export const zhCN = {
   "settings.ai.provider.glm": "智谱 GLM",
   "settings.ai.provider.openai": "OpenAI",
   "settings.ai.provider.claude": "Claude",
-  "settings.ai.provider.minimaxCn": "MiniMax（中国）",
-  "settings.ai.provider.minimaxGlobal": "MiniMax（全球）",
+  "settings.ai.provider.minimaxCn": "MiniMax（中国大陆）",
+  "settings.ai.provider.minimaxGlobal": "MiniMax（国际）",
   "settings.ai.provider.openaiCompatible": "OpenAI 兼容中转站",
   "settings.ai.provider.anthropicCompatible": "Anthropic 兼容中转站",
   "settings.ai.connectionName": "连接名称",
@@ -460,6 +460,11 @@ export const zhCN = {
   "settings.ai.model": "模型 ID",
   "settings.ai.modelDesc":
     "官方预设可留空以跟随默认模型；中转站必须填写当前账户和区域实际开通的模型 ID。",
+  "settings.ai.modelDefaultDesc":
+    "可选。留空使用平台默认模型：{model}；填写后固定使用指定模型。",
+  "settings.ai.modelDefaultPlaceholder": "留空使用默认模型：{model}",
+  "settings.ai.modelRequiredDesc": "必填。兼容中转站没有统一默认模型。",
+  "settings.ai.modelRequiredPlaceholder": "请输入模型 ID",
   "settings.ai.apiKey": "API 密钥",
   "settings.ai.apiKeyDesc":
     "可先在本窗口测试当前填写内容；只有点击“保存”后，密钥才会写入桌面端外部密钥文件。",
@@ -470,12 +475,17 @@ export const zhCN = {
   "settings.ai.enabledDesc": "停用后仍保留连接，但不能用于 AI 操作或连接测试。",
   "settings.ai.qwenGuidance":
     "千问的工作空间或区域接口地址可能不同；若账户要求其他地址，请选择 OpenAI 兼容中转站并自定义。模型 ID 必须与当前账户和区域匹配。",
+  "settings.ai.minimaxCnGuidance":
+    "中国大陆官方接口为 https://api.minimaxi.com/v1。手动覆盖时请填写完整模型 ID，并确认账户与区域可用。",
+  "settings.ai.minimaxGlobalGuidance":
+    "国际官方接口为 https://api.minimax.io/v1。手动覆盖时请填写完整模型 ID，并确认账户与区域可用。",
   "settings.ai.relayGuidance":
     "中转站兼容性不保证；请确认协议，并填写当前账户实际可用的模型 ID。",
   "settings.ai.modelAccountGuidance":
     "模型 ID 必须与当前账户和区域匹配；此预设不承诺当前模型一定可用。",
   "settings.ai.nameRequired": "请输入有效的连接名称。",
   "settings.ai.modelRequired": "请输入模型 ID。",
+  "settings.ai.defaultModelLabel": "默认（{model}）",
   "settings.ai.invalidBaseUrl": "请输入安全的接口地址。",
   "settings.ai.invalidConnectionId": "无法创建安全的 UUID 连接标识。",
   "settings.ai.invalidConnection": "连接元数据无效。",

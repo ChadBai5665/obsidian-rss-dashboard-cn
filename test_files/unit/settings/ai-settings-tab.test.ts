@@ -96,6 +96,8 @@ function harness(options: {
   secretGet?: ReturnType<typeof vi.fn>;
   secretSet?: ReturnType<typeof vi.fn>;
   secretDelete?: ReturnType<typeof vi.fn>;
+  connectionModels?: { first?: string; second?: string };
+  firstProviderKind?: "kimi" | "minimax-cn";
 } = {}) {
   const settings: RssDashboardSettings = structuredClone(DEFAULT_SETTINGS);
   settings.locale = "zh-CN";
@@ -103,14 +105,14 @@ function harness(options: {
     createAiConnection({
       id: FIRST_ID,
       name: "Kimi 工作",
-      providerKind: "kimi",
-      model: "moonshot-model",
+      providerKind: options.firstProviderKind ?? "kimi",
+      model: options.connectionModels?.first ?? "moonshot-model",
     }),
     createAiConnection({
       id: SECOND_ID,
       name: "Claude 研究",
       providerKind: "claude",
-      model: "claude-account-model",
+      model: options.connectionModels?.second ?? "claude-account-model",
     }),
   ];
   settings.ai.connections[0].enabled = options.firstEnabled ?? true;
@@ -164,6 +166,18 @@ beforeEach(() => {
 });
 
 describe("renderAiSettingsTab", () => {
+  it("shows the resolved default model for blank connections and preserves pinned labels", () => {
+    const test = harness({
+      firstProviderKind: "minimax-cn",
+      connectionModels: { first: "" },
+    });
+
+    expect(row(test.containerEl, "Kimi 工作").textContent)
+      .toContain("默认（MiniMax-M3）");
+    expect(row(test.containerEl, "Claude 研究").textContent)
+      .toContain("claude-account-model");
+  });
+
   it("shows only key status and provider guidance without any secret fingerprint", async () => {
     const test = harness();
     await flushPromises();
