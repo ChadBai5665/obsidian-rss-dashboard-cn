@@ -1,5 +1,5 @@
 import type { AiConnection } from "../ai-types";
-import { normalizeAiConnection } from "../connection-validation";
+import { resolveAiConnectionForRequest } from "../provider-presets";
 import { ProviderError, malformedProviderResponse } from "./provider-error";
 import {
   type AiTransport,
@@ -28,6 +28,7 @@ export interface OpenAiChatProviderOptions {
   transport?: AiTransport;
   /** Opt-in only. Compatible providers are never probed or retried. */
   supportsStoreFalse?: boolean;
+  usesMaxCompletionTokens?: boolean;
 }
 
 interface OpenAiPrivateState {
@@ -35,6 +36,7 @@ interface OpenAiPrivateState {
   baseUrl: string;
   model: string;
   timeoutMs: number;
+  usesMaxCompletionTokens: boolean;
 }
 
 const PRIVATE_STATE = new WeakMap<OpenAiChatProvider, OpenAiPrivateState>();
@@ -44,7 +46,7 @@ export class OpenAiChatProvider implements TextGenerationProvider {
   private readonly supportsStoreFalse: boolean;
 
   constructor(options: OpenAiChatProviderOptions) {
-    const connection = normalizeAiConnection(options.connection);
+    const connection = resolveAiConnectionForRequest(options.connection);
     if (!connection || connection.protocol !== "openai-chat") {
       throw new ProviderError(
         "invalid-connection",
@@ -59,6 +61,7 @@ export class OpenAiChatProvider implements TextGenerationProvider {
       baseUrl: connection.baseUrl,
       model: connection.model,
       timeoutMs: connection.timeoutMs,
+      usesMaxCompletionTokens: options.usesMaxCompletionTokens === true,
     });
   }
 
@@ -73,9 +76,11 @@ export class OpenAiChatProvider implements TextGenerationProvider {
         { role: "system", content: snapshot.system },
         { role: "user", content: snapshot.user },
       ],
-      max_tokens: snapshot.maxOutputTokens,
       stream: false,
     };
+    body[state.usesMaxCompletionTokens
+      ? "max_completion_tokens"
+      : "max_tokens"] = snapshot.maxOutputTokens;
     if (this.supportsStoreFalse) body.store = false;
 
     const response = await performAiRequest(

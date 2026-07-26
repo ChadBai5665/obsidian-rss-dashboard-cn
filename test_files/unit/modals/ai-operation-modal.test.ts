@@ -467,6 +467,36 @@ describe("AiOperationModal", () => {
     expect(test.run).not.toHaveBeenCalled();
   });
 
+  it("shows the resolved blank-model default and accepts matching result provenance", async () => {
+    const blankKimi = createAiConnection({
+      id: FIRST_ID,
+      name: "Kimi 工作",
+      providerKind: "kimi",
+      model: "",
+    });
+    const runPrepared = vi.fn(async () => ({
+      operation: "summary" as const,
+      itemId: ITEM_ID,
+      connectionId: FIRST_ID,
+      connectionName: "Kimi 工作",
+      providerKind: "kimi" as const,
+      model: "kimi-latest",
+      contentBasis: "feed" as const,
+      inputCharacterCount: 6,
+      inputTruncated: false,
+      text: "摘要结果",
+    }));
+    const test = harness({ connections: [blankKimi], runPrepared });
+    await vi.waitFor(() => expect(test.select).toHaveBeenCalledTimes(1));
+
+    expect(test.modal.contentEl.textContent).toContain("kimi-latest");
+    button(test.modal.contentEl, "确认发送").click();
+    await vi.waitFor(() => expect(test.save).toHaveBeenCalledTimes(1));
+    expect(test.save).toHaveBeenCalledWith(expect.objectContaining({
+      model: "kimi-latest",
+    }));
+  });
+
   it("shows the exact prompt-bounded character count and truncation used by the prepared request", async () => {
     const limited = createAiConnection({
       id: FIRST_ID,

@@ -1,5 +1,5 @@
 import type { AiConnection, AiProviderKind } from "../ai-types";
-import { normalizeAiConnection } from "../connection-validation";
+import { resolveAiConnectionForRequest } from "../provider-presets";
 import type { DesktopSecretStore } from "../../security/desktop-secret-store";
 import { AnthropicMessagesProvider } from "./anthropic-messages-provider";
 import { OpenAiChatProvider } from "./openai-chat-provider";
@@ -20,13 +20,15 @@ export interface ProviderFactoryOptions {
 
 const STORE_FALSE_CAPABLE_PROVIDER_KINDS: ReadonlySet<AiProviderKind> =
   new Set<AiProviderKind>(["openai"]);
+const MAX_COMPLETION_TOKEN_PROVIDER_KINDS: ReadonlySet<AiProviderKind> =
+  new Set<AiProviderKind>(["minimax-cn", "minimax-global"]);
 
 export async function createTextGenerationProvider(
   connectionValue: AiConnection,
   secretStore: Pick<DesktopSecretStore, "get"> | AiSecretReader,
   options: ProviderFactoryOptions = {},
 ): Promise<TextGenerationProvider> {
-  const connection = normalizeAiConnection(connectionValue);
+  const connection = resolveAiConnectionForRequest(connectionValue);
   if (!connection) {
     throw new ProviderError(
       "invalid-connection",
@@ -59,6 +61,9 @@ export async function createTextGenerationProvider(
       apiKey,
       ...(options.transport ? { transport: options.transport } : {}),
       supportsStoreFalse: STORE_FALSE_CAPABLE_PROVIDER_KINDS.has(
+        connection.providerKind,
+      ),
+      usesMaxCompletionTokens: MAX_COMPLETION_TOKEN_PROVIDER_KINDS.has(
         connection.providerKind,
       ),
     });

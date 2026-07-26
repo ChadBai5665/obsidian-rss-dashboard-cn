@@ -7,6 +7,7 @@ import {
   normalizeAiConnection,
   normalizeAiSettings,
 } from "./connection-validation";
+import { resolveAiConnectionForRequest } from "./provider-presets";
 import type {
   AiContentSelector,
   SelectedAiContent,
@@ -134,16 +135,18 @@ export class AiOperationService {
   async run(input: AiOperationRunInput): Promise<AiOperationResult> {
     const request = snapshotRunInput(input);
     const connection = this.selectedConnection(request.connectionId);
+    const effectiveConnection = resolveAiConnectionForRequest(connection);
+    if (!effectiveConnection) throw new AiOperationError("invalid-connection");
 
     const provider = await this.runStage<TextGenerationProvider>(
-      () => this.providerFactory(connection, this.secretStore),
+      () => this.providerFactory(effectiveConnection, this.secretStore),
       request.signal,
       "provider",
     );
     const selectedContent = await this.runStage<SelectedAiContent>(
       () => this.contentSelector.select({
         item: request.item,
-        maxInputCharacters: connection.maxInputCharacters,
+        maxInputCharacters: effectiveConnection.maxInputCharacters,
         fetchFullText: request.fetchFullText,
         ...(request.signal ? { signal: request.signal } : {}),
       }),
@@ -153,7 +156,7 @@ export class AiOperationService {
     const prompt = buildPromptSafely(
       request.operation,
       selectedContent,
-      connection.maxInputCharacters,
+      effectiveConnection.maxInputCharacters,
     );
     const generated = await this.runStage<TextGenerationResult>(
       () => provider.generate({
@@ -170,10 +173,10 @@ export class AiOperationService {
     return {
       operation: request.operation,
       itemId: selectedContent.itemId,
-      connectionId: connection.id,
-      connectionName: connection.name,
-      providerKind: connection.providerKind,
-      model: connection.model,
+      connectionId: effectiveConnection.id,
+      connectionName: effectiveConnection.name,
+      providerKind: effectiveConnection.providerKind,
+      model: effectiveConnection.model,
       contentBasis: prompt.contentBasis,
       inputCharacterCount: prompt.inputCharacterCount,
       inputTruncated: prompt.inputTruncated,
@@ -190,13 +193,15 @@ export class AiOperationService {
     if (!sameConnection(connection, request.connection)) {
       throw new AiOperationError("invalid-connection");
     }
+    const effectiveConnection = resolveAiConnectionForRequest(connection);
+    if (!effectiveConnection) throw new AiOperationError("invalid-connection");
     const prompt = buildPromptSafely(
       request.operation,
       request.selectedContent,
-      connection.maxInputCharacters,
+      effectiveConnection.maxInputCharacters,
     );
     const provider = await this.runStage<TextGenerationProvider>(
-      () => this.providerFactory(connection, this.secretStore),
+      () => this.providerFactory(effectiveConnection, this.secretStore),
       request.signal,
       "provider",
     );
@@ -215,10 +220,10 @@ export class AiOperationService {
     return {
       operation: request.operation,
       itemId: request.itemId,
-      connectionId: connection.id,
-      connectionName: connection.name,
-      providerKind: connection.providerKind,
-      model: connection.model,
+      connectionId: effectiveConnection.id,
+      connectionName: effectiveConnection.name,
+      providerKind: effectiveConnection.providerKind,
+      model: effectiveConnection.model,
       contentBasis: prompt.contentBasis,
       inputCharacterCount: prompt.inputCharacterCount,
       inputTruncated: prompt.inputTruncated,

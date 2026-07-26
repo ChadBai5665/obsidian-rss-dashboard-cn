@@ -1,5 +1,5 @@
 import type { AiConnection } from "../ai-types";
-import { normalizeAiConnection } from "../connection-validation";
+import { resolveAiConnectionForRequest } from "../provider-presets";
 import { ProviderError, malformedProviderResponse } from "./provider-error";
 import {
   type AiTransport,
@@ -44,7 +44,7 @@ export class AnthropicMessagesProvider implements TextGenerationProvider {
   private readonly transport: AiTransport;
 
   constructor(options: AnthropicMessagesProviderOptions) {
-    const connection = normalizeAiConnection(options.connection);
+    const connection = resolveAiConnectionForRequest(options.connection);
     if (!connection || connection.protocol !== "anthropic-messages") {
       throw new ProviderError(
         "invalid-connection",

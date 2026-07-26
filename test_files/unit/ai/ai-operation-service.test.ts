@@ -237,6 +237,61 @@ describe("manual AI operation service", () => {
     });
   });
 
+  it("uses the resolved Kimi model for the provider request and result provenance", async () => {
+    const providerFactory = vi.fn(async () => ({
+      generate: vi.fn(async () => ({ text: "模型结果" })),
+    }));
+    const test = harness({
+      aiSettings: {
+        connections: [connection({
+          name: "Kimi",
+          providerKind: "kimi",
+          baseUrl: "https://api.moonshot.cn/v1",
+          model: "",
+        })],
+      },
+      providerFactory,
+    });
+
+    const result = await test.service.run(runInput());
+
+    expect(providerFactory).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "kimi-latest" }),
+      expect.anything(),
+    );
+    expect(result.model).toBe("kimi-latest");
+  });
+
+  it("keeps an explicitly selected model pinned for prepared operations", async () => {
+    const pinned = connection({
+      name: "Kimi",
+      providerKind: "kimi",
+      baseUrl: "https://api.moonshot.cn/v1",
+      model: "kimi-pinned",
+    });
+    const providerFactory = vi.fn(async () => ({
+      generate: vi.fn(async () => ({ text: "模型结果" })),
+    }));
+    const test = harness({
+      aiSettings: { connections: [pinned] },
+      providerFactory,
+    });
+
+    const result = await test.service.runPrepared({
+      operation: "summary",
+      itemId: ITEM_ID,
+      connectionId: CONNECTION_ID,
+      connection: pinned,
+      selectedContent: selected(),
+    });
+
+    expect(providerFactory).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "kimi-pinned" }),
+      expect.anything(),
+    );
+    expect(result.model).toBe("kimi-pinned");
+  });
+
   it.each([
     ["no connections", { connections: [] } satisfies AiSettings, CONNECTION_ID],
     ["no explicit/default selection", { connections: [connection()] } satisfies AiSettings, ""],
