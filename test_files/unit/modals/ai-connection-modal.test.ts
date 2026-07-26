@@ -91,12 +91,19 @@ describe("AiConnectionModal", () => {
   it("uses a responsive modal layout hook for the connection form", () => {
     const { modal } = harness();
 
+    expect(modal.modalEl.classList).toContain("rss-dashboard-form-modal");
     expect(modal.modalEl.classList).toContain(
       "rss-dashboard-ai-connection-modal",
     );
     expect(
+      modal.contentEl.querySelectorAll(".rss-dashboard-form-field"),
+    ).toHaveLength(7);
+    expect(
       modal.contentEl.querySelectorAll(".rss-dashboard-ai-connection-field"),
     ).toHaveLength(7);
+    expect(
+      modal.contentEl.querySelectorAll(".rss-dashboard-form-actions"),
+    ).toHaveLength(1);
   });
 
   it("shows all ten provider choices and fills protocol/base URL without inventing a model", () => {

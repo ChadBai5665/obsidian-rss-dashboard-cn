@@ -22,6 +22,25 @@ beforeEach(() => {
 });
 
 describe("XAccountSourceModal", () => {
+  it("uses the responsive form layout for fields and actions", () => {
+    const modal = new XAccountSourceModal(new obsidian.App(), {
+      locale: "zh-CN",
+      maxRequestsPerRun: 40,
+      maxRequestsPerDay: 100,
+      existingAccounts: [],
+      onSave: vi.fn(async () => {}),
+    });
+    modal.open();
+
+    expect(modal.modalEl.classList).toContain("rss-dashboard-form-modal");
+    expect(
+      modal.contentEl.querySelectorAll(".rss-dashboard-form-field"),
+    ).toHaveLength(6);
+    expect(
+      modal.contentEl.querySelectorAll(".rss-dashboard-form-actions"),
+    ).toHaveLength(1);
+  });
+
   it("defaults replies/reposts off and updates the visible estimate when replies are enabled", () => {
     const modal = new XAccountSourceModal(new obsidian.App(), {
       locale: "zh-CN",

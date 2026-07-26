@@ -32,6 +32,7 @@ export class XAccountSourceModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     this.modalEl.addClass("rss-dashboard-modal");
+    this.modalEl.addClass("rss-dashboard-form-modal");
 
     contentEl.createEl("h2", {
       text: t(this.options.existing
@@ -45,25 +46,30 @@ export class XAccountSourceModal extends Modal {
     let topics = this.options.existing?.topics.join(", ") ?? "";
     let includeReplies = this.options.existing?.includeReplies ?? false;
     let includeReposts = this.options.existing?.includeReposts ?? false;
+    const fieldSetting = (): Setting => {
+      const result = new Setting(contentEl);
+      result.settingEl.addClass("rss-dashboard-form-field");
+      return result;
+    };
 
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xAccount.handle"))
       .setDesc(t("modal.xAccount.handleDesc"))
       .addText((text) => text
         .setPlaceholder(t("modal.xAccount.handlePlaceholder"))
         .setValue(handle)
         .onChange((value) => { handle = value; }));
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xAccount.displayName"))
       .addText((text) => text
         .setValue(displayName)
         .onChange((value) => { displayName = value; }));
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xAccount.folder"))
       .addText((text) => text
         .setValue(folder)
         .onChange((value) => { folder = value; }));
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xAccount.topics"))
       .setDesc(t("modal.xAccount.topicsDesc"))
       .addText((text) => text
@@ -79,7 +85,7 @@ export class XAccountSourceModal extends Modal {
       }));
     };
 
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xAccount.includeReplies"))
       .setDesc(t("modal.xAccount.repliesWarning"))
       .addToggle((toggle) => toggle
@@ -88,7 +94,7 @@ export class XAccountSourceModal extends Modal {
           includeReplies = value;
           updateEstimate();
         }));
-    new Setting(contentEl)
+    fieldSetting()
       .setName(t("modal.xAccount.includeReposts"))
       .setDesc(t("modal.xAccount.repostsDesc"))
       .addToggle((toggle) => toggle
@@ -122,7 +128,9 @@ export class XAccountSourceModal extends Modal {
       }
     };
 
-    new Setting(contentEl)
+    const actionSetting = new Setting(contentEl);
+    actionSetting.settingEl.addClass("rss-dashboard-form-actions");
+    actionSetting
       .addButton((button) => {
         cancelButtonEl = button.buttonEl;
         button

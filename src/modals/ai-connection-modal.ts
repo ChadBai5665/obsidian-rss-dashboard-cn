@@ -98,6 +98,7 @@ export class AiConnectionModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     this.modalEl.addClass("rss-dashboard-modal");
+    this.modalEl.addClass("rss-dashboard-form-modal");
     this.modalEl.addClass("rss-dashboard-ai-connection-modal");
     contentEl.createEl("h2", {
       text: t(existing ? "settings.ai.editTitle" : "settings.ai.addTitle"),
@@ -141,6 +142,7 @@ export class AiConnectionModal extends Modal {
     let saveButton: HTMLButtonElement | undefined;
     const fieldSetting = (): Setting => {
       const result = new Setting(contentEl);
+      result.settingEl.addClass("rss-dashboard-form-field");
       result.settingEl.addClass("rss-dashboard-ai-connection-field");
       return result;
     };
@@ -264,6 +266,7 @@ export class AiConnectionModal extends Modal {
     renderProviderFields();
 
     const actionSetting = new Setting(contentEl);
+    actionSetting.settingEl.addClass("rss-dashboard-form-actions");
     actionSetting.settingEl.addClass("rss-dashboard-ai-connection-actions");
     if (this.options.testConnection) {
       actionSetting.addButton((button) => {

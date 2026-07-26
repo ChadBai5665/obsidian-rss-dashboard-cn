@@ -22,6 +22,25 @@ beforeEach(() => {
 });
 
 describe("XTopicSourceModal", () => {
+  it("uses the responsive form layout for fields and actions", () => {
+    const modal = new XTopicSourceModal(new obsidian.App(), {
+      locale: "zh-CN",
+      maxRequestsPerRun: 40,
+      maxRequestsPerDay: 100,
+      existingTopics: [],
+      onSave: vi.fn(async () => {}),
+    });
+    modal.open();
+
+    expect(modal.modalEl.classList).toContain("rss-dashboard-form-modal");
+    expect(
+      modal.contentEl.querySelectorAll(".rss-dashboard-form-field"),
+    ).toHaveLength(6);
+    expect(
+      modal.contentEl.querySelectorAll(".rss-dashboard-form-actions"),
+    ).toHaveLength(1);
+  });
+
   it("offers exactly 1, 3, 7, 14, 30 days with 7 selected and updates request math", () => {
     const modal = new XTopicSourceModal(new obsidian.App(), {
       locale: "zh-CN",
