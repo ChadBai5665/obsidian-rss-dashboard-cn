@@ -228,12 +228,21 @@ interface CollectionServicePort {
 
 export interface SubscriptionServiceDependencies {
   settings: SubscriptionSettingsPort;
+  /** Resolves the live settings generation after any queued import/reset. */
+  getSettings?: () => SubscriptionSettingsPort;
+  /** Production mutations share Main's complete settings persistence queue. */
+  enqueueMutation?: <T>(operation: () => Promise<T>) => Promise<T>;
   defaults: {
+    autoDeleteDuration: number;
+    maxItems: number;
+  };
+  getDefaults?: () => {
     autoDeleteDuration: number;
     maxItems: number;
   };
   parseFeed(url: string, seed: Feed): Promise<Feed>;
   collectionService: CollectionServicePort;
+  getCollectionService?: () => CollectionServicePort;
   ensureFolder(folder: string): Promise<unknown>;
   saveSettings(): Promise<void>;
   saveSettingsCandidate?: (
@@ -297,6 +306,19 @@ export class SubscriptionService {
     this.createFeedId = dependencies.createFeedId ?? createFeedId;
   }
 
+  private get settings(): SubscriptionSettingsPort {
+    return this.dependencies.getSettings?.() ?? this.dependencies.settings;
+  }
+
+  private get defaults(): SubscriptionServiceDependencies["defaults"] {
+    return this.dependencies.getDefaults?.() ?? this.dependencies.defaults;
+  }
+
+  private get collectionService(): CollectionServicePort {
+    return this.dependencies.getCollectionService?.() ??
+      this.dependencies.collectionService;
+  }
+
   async add(request: VerifiedSubscriptionRequest): Promise<Feed> {
     return await this.enqueueMutation(async () => await this.addUnlocked(request));
   }
@@ -313,7 +335,7 @@ export class SubscriptionService {
         if (feed.folder) await this.dependencies.ensureFolder(feed.folder);
         this.assertPublicationAvailable(request, feedId);
         await this.commitFeeds([
-          ...cloneFeeds(this.dependencies.settings.feeds),
+          ...cloneFeeds(this.settings.feeds),
           feed,
         ]);
         return feed;
@@ -336,7 +358,7 @@ export class SubscriptionService {
     request: SubscriptionUpdateRequest,
   ): Promise<Feed> {
     const index = this.feedIndex(feedId);
-    const previous = this.dependencies.settings.feeds[index];
+    const previous = this.settings.feeds[index];
     if (request.kind === "x-account-options") {
       return await this.updateXOptions(index, previous, request);
     }
@@ -375,7 +397,7 @@ export class SubscriptionService {
           subscriptionStatus: previous.subscriptionStatus ?? "active",
         };
         if (folder) await this.dependencies.ensureFolder(folder);
-        const candidate = cloneFeeds(this.dependencies.settings.feeds);
+        const candidate = cloneFeeds(this.settings.feeds);
         candidate[index] = updated;
         await this.commitFeeds(candidate);
         return updated;
@@ -389,7 +411,7 @@ export class SubscriptionService {
       this.dependencies,
     );
     if (folder) await this.dependencies.ensureFolder(folder);
-    const candidate = cloneFeeds(this.dependencies.settings.feeds);
+    const candidate = cloneFeeds(this.settings.feeds);
     candidate[index] = updated;
     await this.commitFeeds(candidate);
     return updated;
@@ -432,7 +454,7 @@ export class SubscriptionService {
             autoDeleteDuration: numberOrDefault(
               request.autoDeleteDuration,
               previous.autoDeleteDuration ??
-                this.dependencies.defaults.autoDeleteDuration,
+                this.defaults.autoDeleteDuration,
             ),
           }),
       ...(request.maxItemsLimit === undefined
@@ -440,7 +462,7 @@ export class SubscriptionService {
         : {
             maxItemsLimit: numberOrDefault(
               request.maxItemsLimit,
-              previous.maxItemsLimit ?? this.dependencies.defaults.maxItems,
+              previous.maxItemsLimit ?? this.defaults.maxItems,
             ),
           }),
       ...(request.scanInterval === undefined
@@ -460,7 +482,7 @@ export class SubscriptionService {
         : { subscriptionStatus: request.paused ? "paused" : "active" }),
     };
     if (folder) await this.dependencies.ensureFolder(folder);
-    const candidate = cloneFeeds(this.dependencies.settings.feeds);
+    const candidate = cloneFeeds(this.settings.feeds);
     candidate[index] = updated;
     await this.commitFeeds(candidate);
     return updated;
@@ -495,7 +517,7 @@ export class SubscriptionService {
             autoDeleteDuration: numberOrDefault(
               request.autoDeleteDuration,
               previous.autoDeleteDuration ??
-                this.dependencies.defaults.autoDeleteDuration,
+                this.defaults.autoDeleteDuration,
             ),
           }),
       ...(request.maxItemsLimit === undefined
@@ -503,7 +525,7 @@ export class SubscriptionService {
         : {
             maxItemsLimit: numberOrDefault(
               request.maxItemsLimit,
-              previous.maxItemsLimit ?? this.dependencies.defaults.maxItems,
+              previous.maxItemsLimit ?? this.defaults.maxItems,
             ),
           }),
       ...(request.scanInterval === undefined
@@ -526,7 +548,7 @@ export class SubscriptionService {
         : { subscriptionStatus: request.paused ? "paused" : "active" }),
     };
     if (folder) await this.dependencies.ensureFolder(folder);
-    const candidate = cloneFeeds(this.dependencies.settings.feeds);
+    const candidate = cloneFeeds(this.settings.feeds);
     candidate[index] = updated;
     await this.commitFeeds(candidate);
     return updated;
@@ -545,7 +567,7 @@ export class SubscriptionService {
     request: SidebarOrderingMutationRequest,
   ): Promise<SidebarOrderingMutationResult> {
     return await this.enqueueMutation(async () => {
-      const settings = this.dependencies.settings as RssDashboardSettings;
+      const settings = this.settings as RssDashboardSettings;
       const result = request.kind === "feed-insert"
         ? moveFeedAndInsert(settings, request)
         : request.kind === "feed-folder-append"
@@ -569,37 +591,45 @@ export class SubscriptionService {
     }
 
     const folderPath = normalizeRequiredFolderPath(request.folderPath);
-    if (!findFolderNode(this.dependencies.settings.folders, folderPath)) {
+    if (!findFolderNode(this.settings.folders, folderPath)) {
       return { ok: false, reason: "dragged-folder-not-found" };
     }
-    const intents = new Map<string, symbol>();
+    const intents: Array<{
+      owner: SubscriptionSettingsPort;
+      sourceId: string;
+      token: symbol;
+    }> = [];
     const registerCurrentRemovalIntents = (): void => {
-      for (const feed of this.dependencies.settings.feeds) {
+      const owner = this.settings;
+      for (const feed of owner.feeds) {
         if (
           feed.sourceKind === "x-topic" ||
           !isFolderWithin(feed.folder, folderPath)
         ) continue;
         const sourceId = feed.feedId ?? feed.url;
-        if (intents.has(sourceId)) continue;
-        intents.set(
+        if (intents.some((intent) =>
+          intent.owner === owner && intent.sourceId === sourceId
+        )) continue;
+        intents.push({
+          owner,
           sourceId,
-          registerRemovalIntent(this.dependencies.settings, sourceId),
-        );
+          token: registerRemovalIntent(owner, sourceId),
+        });
         this.dependencies.abortInitialImport?.(sourceId);
       }
     };
-    registerCurrentRemovalIntents();
     try {
+      registerCurrentRemovalIntents();
       return await this.enqueueMutation(async () => {
         registerCurrentRemovalIntents();
-        for (const sourceId of intents.keys()) {
-          this.dependencies.abortInitialImport?.(sourceId);
+        for (const intent of intents) {
+          this.dependencies.abortInitialImport?.(intent.sourceId);
         }
         return await this.deleteFolderUnlocked(folderPath);
       });
     } finally {
-      for (const [sourceId, token] of intents) {
-        clearRemovalIntent(this.dependencies.settings, sourceId, token);
+      for (const { owner, sourceId, token } of intents) {
+        clearRemovalIntent(owner, sourceId, token);
       }
     }
   }
@@ -613,7 +643,7 @@ export class SubscriptionService {
 
   async resumeInitialImport(feedId: string): Promise<Feed> {
     return await this.enqueueMutation(async () => {
-      const feed = this.dependencies.settings.feeds[this.feedIndex(feedId)];
+      const feed = this.settings.feeds[this.feedIndex(feedId)];
       const status = feed.initialImportProgress?.status;
       const mayResume = status === "stopped" || status === "paused-limit" || (
         (feed.sourceKind === undefined || feed.sourceKind === "feed") &&
@@ -634,15 +664,24 @@ export class SubscriptionService {
     options: RemoveSubscriptionOptions,
   ): Promise<void> {
     this.removalIndex(feedId, options);
-    const intent = registerRemovalIntent(this.dependencies.settings, feedId);
+    const intents: Array<{ owner: SubscriptionSettingsPort; token: symbol }> = [];
+    const registerCurrentRemovalIntent = (): void => {
+      const owner = this.settings;
+      if (intents.some((intent) => intent.owner === owner)) return;
+      intents.push({ owner, token: registerRemovalIntent(owner, feedId) });
+    };
     try {
+      registerCurrentRemovalIntent();
       this.dependencies.abortInitialImport?.(feedId);
       return await this.enqueueMutation(async () => {
+        registerCurrentRemovalIntent();
         this.dependencies.abortInitialImport?.(feedId);
         await this.removeUnlocked(feedId, options);
       });
     } finally {
-      clearRemovalIntent(this.dependencies.settings, feedId, intent);
+      for (const { owner, token } of intents) {
+        clearRemovalIntent(owner, feedId, token);
+      }
     }
   }
 
@@ -652,14 +691,14 @@ export class SubscriptionService {
   ): Promise<void> {
     const index = this.removalIndex(feedId, options);
 
-    const candidate = cloneFeeds(this.dependencies.settings.feeds);
+    const candidate = cloneFeeds(this.settings.feeds);
     candidate.splice(index, 1);
     if (!options.purgeCollection) {
       await this.commitFeeds(candidate);
       return;
     }
 
-    const removal = await this.dependencies.collectionService.removeSource(feedId);
+    const removal = await this.collectionService.removeSource(feedId);
     try {
       await this.commitFeeds(candidate);
       await removal.commit();
@@ -709,11 +748,11 @@ export class SubscriptionService {
     const folder = normalizedFolder(request.folder);
     const autoDeleteDuration = numberOrDefault(
       request.autoDeleteDuration,
-      this.dependencies.defaults.autoDeleteDuration,
+      this.defaults.autoDeleteDuration,
     );
     const maxItemsLimit = numberOrDefault(
       request.maxItemsLimit,
-      this.dependencies.defaults.maxItems,
+      this.defaults.maxItems,
     );
     const seed: Feed = {
       feedId,
@@ -781,13 +820,13 @@ export class SubscriptionService {
     } else {
       this.assertPublicationAvailable(request, feedId);
       await this.commitFeeds([
-        ...cloneFeeds(this.dependencies.settings.feeds),
+        ...cloneFeeds(this.settings.feeds),
         pending,
       ]);
     }
 
     try {
-      await this.dependencies.collectionService.collectFeedRefresh({
+      await this.collectionService.collectFeedRefresh({
         feed: pending,
         previousItems: [],
         refreshedItems: selected,
@@ -854,11 +893,11 @@ export class SubscriptionService {
       mediaType: request.mediaType ?? "article",
       autoDeleteDuration: numberOrDefault(
         request.autoDeleteDuration,
-        this.dependencies.defaults.autoDeleteDuration,
+        this.defaults.autoDeleteDuration,
       ),
       maxItemsLimit: numberOrDefault(
         request.maxItemsLimit,
-        this.dependencies.defaults.maxItems,
+        this.defaults.maxItems,
       ),
       scanInterval: request.scanInterval ?? 0,
       keywordRules: cloneKeywordRules(request.keywordRules),
@@ -882,13 +921,13 @@ export class SubscriptionService {
     if (this.hasDuplicate(requestKey(request))) {
       throw new SubscriptionServiceError("duplicate-subscription");
     }
-    if (this.dependencies.settings.feeds.some((feed) => feed.feedId === feedId)) {
+    if (this.settings.feeds.some((feed) => feed.feedId === feedId)) {
       throw new SubscriptionServiceError("invalid-subscription-request");
     }
   }
 
   private hasDuplicate(key: string, excludedFeedId?: string): boolean {
-    return this.dependencies.settings.feeds.some(
+    return this.settings.feeds.some(
       (feed) =>
         (feed.feedId ?? feed.url) !== excludedFeedId &&
         existingFeedKey(feed) === key,
@@ -899,7 +938,7 @@ export class SubscriptionService {
     const feedId = this.createFeedId().normalize("NFC").trim().toLowerCase();
     if (
       !/^[a-z0-9][a-z0-9_-]{0,127}$/u.test(feedId) ||
-      this.dependencies.settings.feeds.some((feed) => feed.feedId === feedId)
+      this.settings.feeds.some((feed) => feed.feedId === feedId)
     ) {
       throw new SubscriptionServiceError("invalid-subscription-request");
     }
@@ -907,7 +946,7 @@ export class SubscriptionService {
   }
 
   private feedIndex(feedId: string): number {
-    const index = this.dependencies.settings.feeds.findIndex(
+    const index = this.settings.feeds.findIndex(
       (feed) => (feed.feedId ?? feed.url) === feedId,
     );
     if (index < 0) {
@@ -920,7 +959,7 @@ export class SubscriptionService {
     feedId: string,
     update: (feed: Feed) => Feed,
   ): Promise<Feed> {
-    const candidate = cloneFeeds(this.dependencies.settings.feeds);
+    const candidate = cloneFeeds(this.settings.feeds);
     const index = candidate.findIndex(
       (feed) => (feed.feedId ?? feed.url) === feedId,
     );
@@ -972,7 +1011,7 @@ export class SubscriptionService {
     };
     await this.replacePublishedFeed(feedId, running);
     try {
-      await this.dependencies.collectionService.collectFeedRefresh({
+      await this.collectionService.collectFeedRefresh({
         feed: running,
         previousItems: [],
         refreshedItems: selected,
@@ -1007,7 +1046,7 @@ export class SubscriptionService {
   }
 
   private async replacePublishedFeed(feedId: string, feed: Feed): Promise<void> {
-    const candidate = cloneFeeds(this.dependencies.settings.feeds);
+    const candidate = cloneFeeds(this.settings.feeds);
     const index = candidate.findIndex(
       (entry) => (entry.feedId ?? entry.url) === feedId,
     );
@@ -1020,7 +1059,7 @@ export class SubscriptionService {
 
   private async commitFeeds(candidate: Feed[]): Promise<void> {
     await this.commitSettingsReferences({
-      ...cloneSubscriptionSettings(this.dependencies.settings),
+      ...cloneSubscriptionSettings(this.settings),
       feeds: candidate,
     });
   }
@@ -1040,7 +1079,7 @@ export class SubscriptionService {
   private async commitSettingsReferences(
     candidate: SubscriptionSettingsPort,
   ): Promise<void> {
-    const settings = this.dependencies.settings;
+    const settings = this.settings;
     const original = snapshotSettingsReferences(settings);
     const publish = (): void => publishSettingsReferences(settings, candidate);
     if (this.dependencies.saveSettingsCandidate) {
@@ -1061,7 +1100,7 @@ export class SubscriptionService {
   ): Promise<SubscriptionFolderMutationResult> {
     const folderPath = normalizeRequiredFolderPath(request.folderPath);
     const newName = normalizeFolderName(request.newName);
-    const candidate = cloneSubscriptionSettings(this.dependencies.settings);
+    const candidate = cloneSubscriptionSettings(this.settings);
     const location = findFolderLocationForMutation(candidate.folders, folderPath);
     if (!location) return { ok: false, reason: "dragged-folder-not-found" };
     if (
@@ -1096,7 +1135,7 @@ export class SubscriptionService {
   private async deleteFolderUnlocked(
     folderPath: string,
   ): Promise<SubscriptionFolderMutationResult> {
-    const candidate = cloneSubscriptionSettings(this.dependencies.settings);
+    const candidate = cloneSubscriptionSettings(this.settings);
     const location = findFolderLocationForMutation(candidate.folders, folderPath);
     if (!location) return { ok: false, reason: "dragged-folder-not-found" };
     const topicDestinationFolder = location.parentPath;
@@ -1157,7 +1196,10 @@ export class SubscriptionService {
   }
 
   private async enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
-    const owner = this.dependencies.settings;
+    if (this.dependencies.enqueueMutation) {
+      return await this.dependencies.enqueueMutation(operation);
+    }
+    const owner = this.settings;
     const prior = lifecycleMutationQueues.get(owner) ?? Promise.resolve();
     const running = prior.catch(() => undefined).then(operation);
     const settled = running.then(() => undefined, () => undefined);

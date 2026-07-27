@@ -169,7 +169,6 @@ function createPluginWithSettings(feeds: Feed[]): TestPlugin {
       ): Promise<void>;
     }
   ).persistSubscriptionSettingsCandidate = async (_candidate, publish) => {
-    await testPlugin.saveSettings();
     publish();
   };
 
@@ -1714,7 +1713,15 @@ describe("refreshFeeds() pipeline behavior", () => {
     const source = createActiveXImportFeed("x-history-default-delete");
     const plugin = createPluginWithSettings([source]);
     const initialRefreshTimestamp = plugin.settings.lastRefreshTimestamp;
-    const saveSettingsSpy = vi.spyOn(plugin, "saveSettings");
+    const candidatePersistenceSpy = vi.spyOn(
+      plugin as unknown as {
+        persistSubscriptionSettingsCandidate(
+          candidate: unknown,
+          publish: () => void,
+        ): Promise<void>;
+      },
+      "persistSubscriptionSettingsCandidate",
+    );
     plugin.settings.tikhub = {
       ...plugin.settings.tikhub,
       enabled: true,
@@ -1763,7 +1770,7 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(paidRefresh).not.toHaveBeenCalled();
     expect(collectFeedRefresh).not.toHaveBeenCalled();
     expect(plugin.validateSavedArticles).not.toHaveBeenCalled();
-    expect(saveSettingsSpy).toHaveBeenCalledOnce();
+    expect(candidatePersistenceSpy).toHaveBeenCalledOnce();
     expect(plugin.settings.lastRefreshTimestamp).toBe(initialRefreshTimestamp);
     expect(plugin.settings.feeds).toEqual([]);
   });
@@ -1840,12 +1847,20 @@ describe("refreshFeeds() pipeline behavior", () => {
       const saveBlocked = new Promise<void>((resolve) => {
         releaseSave = resolve;
       });
-      plugin.saveSettings = vi.fn()
-        .mockImplementationOnce(async () => {
+      (
+        plugin as unknown as {
+          persistSubscriptionSettingsCandidate(
+            candidate: unknown,
+            publish: () => void,
+          ): Promise<void>;
+        }
+      ).persistSubscriptionSettingsCandidate = vi.fn()
+        .mockImplementationOnce(async (_candidate, publish) => {
           markSaveStarted();
           await saveBlocked;
+          publish();
         })
-        .mockResolvedValue(undefined);
+        .mockImplementation(async (_candidate, publish) => { publish(); });
       const paidRefresh = vi.fn().mockResolvedValue({
         feed: source,
         items: source.items,
@@ -1916,13 +1931,21 @@ describe("refreshFeeds() pipeline behavior", () => {
     const saveBlocked = new Promise<void>((resolve) => {
       releaseSave = resolve;
     });
-    plugin.saveSettings = vi.fn()
-      .mockImplementationOnce(async () => {
+    (
+      plugin as unknown as {
+        persistSubscriptionSettingsCandidate(
+          candidate: unknown,
+          publish: () => void,
+        ): Promise<void>;
+      }
+    ).persistSubscriptionSettingsCandidate = vi.fn()
+      .mockImplementationOnce(async (_candidate, publish) => {
         markSaveStarted();
         await saveBlocked;
+        publish();
       })
       .mockRejectedValueOnce(new Error("removal save failed"))
-      .mockResolvedValue(undefined);
+      .mockImplementation(async (_candidate, publish) => { publish(); });
     const paidRefresh = vi.fn().mockResolvedValue({
       feed: source,
       items: source.items,
@@ -1981,12 +2004,20 @@ describe("refreshFeeds() pipeline behavior", () => {
     const saveBlocked = new Promise<void>((resolve) => {
       releaseSave = resolve;
     });
-    plugin.saveSettings = vi.fn()
-      .mockImplementationOnce(async () => {
+    (
+      plugin as unknown as {
+        persistSubscriptionSettingsCandidate(
+          candidate: unknown,
+          publish: () => void,
+        ): Promise<void>;
+      }
+    ).persistSubscriptionSettingsCandidate = vi.fn()
+      .mockImplementationOnce(async (_candidate, publish) => {
         markSaveStarted();
         await saveBlocked;
+        publish();
       })
-      .mockResolvedValue(undefined);
+      .mockImplementation(async (_candidate, publish) => { publish(); });
     let markAttemptStarted!: () => void;
     let releaseAttempt!: () => void;
     const attemptStarted = new Promise<void>((resolve) => {
@@ -2020,6 +2051,12 @@ describe("refreshFeeds() pipeline behavior", () => {
     const queueOwner = plugin.getSubscriptionService();
     const removingService = new SubscriptionService({
       settings: plugin.settings,
+      getSettings: () => plugin.settings,
+      enqueueMutation: async (operation) => await (
+        plugin as unknown as {
+          enqueueSettingsOperation<T>(operation: () => Promise<T>): Promise<T>;
+        }
+      ).enqueueSettingsOperation(operation),
       defaults: {
         autoDeleteDuration: plugin.settings.defaultAutoDeleteDuration,
         maxItems: plugin.settings.maxItems,
@@ -2028,6 +2065,7 @@ describe("refreshFeeds() pipeline behavior", () => {
       collectionService,
       ensureFolder: vi.fn(),
       saveSettings: async () => await plugin.saveSettings(),
+      saveSettingsCandidate: async (_candidate, publish) => { publish(); },
     });
 
     const priorMutation = queueOwner.setPaused(source.feedId!, false);

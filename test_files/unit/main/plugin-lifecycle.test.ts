@@ -219,6 +219,239 @@ describe("subscription settings candidate persistence", () => {
     });
     expect(plugin.settings).toBe(settings);
   });
+
+  it("builds an ordering candidate after an earlier refresh save and preserves refreshed history", async () => {
+    const plugin = await createPluginInstance(createMockApp());
+    const settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+    settings.feeds = [
+      {
+        feedId: "first",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "First",
+        url: "https://example.com/first.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 1,
+        initialImportProgress: {
+          status: "running",
+          pagesFetched: 1,
+          itemsImported: 0,
+        },
+      },
+      {
+        feedId: "target",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "Target",
+        url: "https://example.com/target.xml",
+        folder: "New",
+        items: [],
+        lastUpdated: 1,
+      },
+    ];
+    settings.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ];
+    plugin.settings = settings;
+
+    const queueEntered = createDeferred<void>();
+    const releaseEarlierSave = createDeferred<void>();
+    const queueBlock = (
+      plugin as unknown as {
+        enqueueSettingsOperation<T>(operation: () => Promise<T>): Promise<T>;
+      }
+    ).enqueueSettingsOperation(async () => {
+      queueEntered.resolve();
+      await releaseEarlierSave.promise;
+    });
+    await queueEntered.promise;
+
+    let persistedCandidate: RssDashboardSettings | undefined;
+    const repository = (
+      plugin as unknown as {
+        feedStorageRepository: {
+          persistSettingsTransaction<T>(
+            previous: RssDashboardSettings,
+            candidate: RssDashboardSettings,
+            metadataPlan: unknown,
+            afterPersist: () => Promise<T>,
+          ): Promise<T>;
+        };
+      }
+    ).feedStorageRepository;
+    vi.spyOn(repository, "persistSettingsTransaction").mockImplementation(
+      async (_previous, candidate, _metadataPlan, afterPersist) => {
+        persistedCandidate = candidate;
+        return await afterPersist();
+      },
+    );
+
+    const ordering = plugin.applySidebarOrdering({
+      kind: "feed-insert",
+      draggedUrl: "https://example.com/first.xml",
+      targetUrl: "https://example.com/target.xml",
+      placement: "before",
+    });
+    await flushPromises();
+
+    const refreshedItem: FeedItem = {
+      guid: "refresh-won",
+      title: "Refresh won",
+      link: "https://example.com/refresh-won",
+      pubDate: "2026-07-28T05:00:00.000Z",
+      feedUrl: "https://example.com/first.xml",
+      feedTitle: "First",
+    };
+    settings.feeds[0] = {
+      ...settings.feeds[0],
+      items: [refreshedItem],
+      lastUpdated: 99,
+      initialImportProgress: {
+        status: "running",
+        pagesFetched: 2,
+        itemsImported: 1,
+        nextCursor: "refresh-cursor",
+      },
+    };
+    settings.locale = "en";
+    settings.tikhub = { ...settings.tikhub, maxRequestsPerDay: 321 };
+    settings.ai = { ...settings.ai, defaultConnectionId: "refresh-ai" };
+
+    releaseEarlierSave.resolve();
+    await queueBlock;
+    await expect(ordering).resolves.toMatchObject({ ok: true });
+
+    const first = plugin.settings.feeds.find((feed) => feed.feedId === "first");
+    expect(first).toMatchObject({
+      folder: "New",
+      items: [{ guid: "refresh-won" }],
+      lastUpdated: 99,
+      initialImportProgress: {
+        pagesFetched: 2,
+        itemsImported: 1,
+        nextCursor: "refresh-cursor",
+      },
+    });
+    expect(persistedCandidate?.feeds.find((feed) => feed.feedId === "first"))
+      .toMatchObject(first as Feed);
+    expect(persistedCandidate).toMatchObject({
+      locale: "en",
+      tikhub: { maxRequestsPerDay: 321 },
+      ai: { defaultConnectionId: "refresh-ai" },
+    });
+  });
+
+  it("applies a queued subscription mutation to the latest replaced settings generation", async () => {
+    const plugin = await createPluginInstance(createMockApp());
+    const original = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+    original.feeds = [
+      {
+        feedId: "first",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "First",
+        url: "https://example.com/first.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 1,
+      },
+      {
+        feedId: "target",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "Target",
+        url: "https://example.com/target.xml",
+        folder: "New",
+        items: [],
+        lastUpdated: 1,
+      },
+    ];
+    original.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ];
+    plugin.settings = original;
+
+    const imported = JSON.parse(JSON.stringify(original)) as RssDashboardSettings;
+    imported.locale = "en";
+    imported.ai = { ...imported.ai, defaultConnectionId: "imported-ai" };
+    imported.tikhub = { ...imported.tikhub, maxRequestsPerRun: 17 };
+    imported.feeds.push({
+      feedId: "imported-only",
+      sourceKind: "feed",
+      sourceConfig: { kind: "feed" },
+      title: "Imported only",
+      url: "https://example.com/imported.xml",
+      folder: "Old",
+      items: [],
+      lastUpdated: 55,
+    });
+
+    const queueEntered = createDeferred<void>();
+    const releaseImport = createDeferred<void>();
+    const queueBlock = (
+      plugin as unknown as {
+        enqueueSettingsOperation<T>(operation: () => Promise<T>): Promise<T>;
+      }
+    ).enqueueSettingsOperation(async () => {
+      queueEntered.resolve();
+      await releaseImport.promise;
+      plugin.settings = imported;
+    });
+    await queueEntered.promise;
+
+    let persistedCandidate: RssDashboardSettings | undefined;
+    const repository = (
+      plugin as unknown as {
+        feedStorageRepository: {
+          persistSettingsTransaction<T>(
+            previous: RssDashboardSettings,
+            candidate: RssDashboardSettings,
+            metadataPlan: unknown,
+            afterPersist: () => Promise<T>,
+          ): Promise<T>;
+        };
+      }
+    ).feedStorageRepository;
+    vi.spyOn(repository, "persistSettingsTransaction").mockImplementation(
+      async (_previous, candidate, _metadataPlan, afterPersist) => {
+        persistedCandidate = candidate;
+        return await afterPersist();
+      },
+    );
+
+    const ordering = plugin.applySidebarOrdering({
+      kind: "feed-insert",
+      draggedUrl: "https://example.com/first.xml",
+      targetUrl: "https://example.com/target.xml",
+      placement: "before",
+    });
+    await flushPromises();
+
+    releaseImport.resolve();
+    await queueBlock;
+    await expect(ordering).resolves.toMatchObject({ ok: true });
+
+    expect(plugin.settings).toBe(imported);
+    expect(plugin.settings.feeds.map((feed) => feed.feedId)).toEqual([
+      "first",
+      "target",
+      "imported-only",
+    ]);
+    expect(plugin.settings.feeds[0].folder).toBe("New");
+    expect(persistedCandidate?.feeds.map((feed) => feed.feedId)).toEqual([
+      "first",
+      "target",
+      "imported-only",
+    ]);
+    expect(persistedCandidate).toMatchObject({
+      locale: "en",
+      ai: { defaultConnectionId: "imported-ai" },
+      tikhub: { maxRequestsPerRun: 17 },
+    });
+  });
 });
 
 // Helper to create a plugin instance with mocks

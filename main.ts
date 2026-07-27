@@ -1245,13 +1245,21 @@ export default class RssDashboardPlugin extends Plugin {
   private getSubscriptionService(): SubscriptionService {
     return new SubscriptionService({
       settings: this.settings,
+      getSettings: () => this.settings,
+      enqueueMutation: async (operation) =>
+        await this.enqueueSettingsOperation(operation),
       defaults: {
         autoDeleteDuration: this.settings.defaultAutoDeleteDuration,
         maxItems: this.settings.maxItems,
       },
+      getDefaults: () => ({
+        autoDeleteDuration: this.settings.defaultAutoDeleteDuration,
+        maxItems: this.settings.maxItems,
+      }),
       parseFeed: async (url, seed) =>
         await this.feedParser.parseFeed(url, seed, { allowEmpty: true }),
       collectionService: this.getCollectionService(),
+      getCollectionService: () => this.getCollectionService(),
       ensureFolder: async (folder) => {
         if (folder) {
           await this.ensureFolderExists(folder, {
@@ -1280,27 +1288,27 @@ export default class RssDashboardPlugin extends Plugin {
     subscriptionCandidate: SubscriptionSettingsPort,
     publish: () => void,
   ): Promise<void> {
-    await this.enqueueSettingsOperation(async () => {
-      const previousPersistenceSettings = cloneStableOwnData(this.settings);
-      const candidate = cloneStableOwnData(this.settings);
-      candidate.feeds = cloneStableOwnData(subscriptionCandidate.feeds);
-      candidate.folders = cloneStableOwnData(subscriptionCandidate.folders);
-      candidate.collapsedFolders = cloneStableOwnData(
-        subscriptionCandidate.collapsedFolders ?? [],
-      );
-      candidate.folderFeedSortOrders = cloneStableOwnData(
-        subscriptionCandidate.folderFeedSortOrders,
-      );
-      candidate.folderSortOrder = cloneStableOwnData(
-        subscriptionCandidate.folderSortOrder,
-      );
-      await this.feedStorageRepository.persistSettingsTransaction(
-        previousPersistenceSettings,
-        candidate,
-        this.getMetadataWritePlanFor(candidate),
-        async () => { publish(); },
-      );
-    });
+    // SubscriptionService invokes this only while it owns settingsImportQueue.
+    // Re-entering saveSettings() here would deadlock that queue.
+    const previousPersistenceSettings = cloneStableOwnData(this.settings);
+    const candidate = cloneStableOwnData(this.settings);
+    candidate.feeds = cloneStableOwnData(subscriptionCandidate.feeds);
+    candidate.folders = cloneStableOwnData(subscriptionCandidate.folders);
+    candidate.collapsedFolders = cloneStableOwnData(
+      subscriptionCandidate.collapsedFolders ?? [],
+    );
+    candidate.folderFeedSortOrders = cloneStableOwnData(
+      subscriptionCandidate.folderFeedSortOrders,
+    );
+    candidate.folderSortOrder = cloneStableOwnData(
+      subscriptionCandidate.folderSortOrder,
+    );
+    await this.feedStorageRepository.persistSettingsTransaction(
+      previousPersistenceSettings,
+      candidate,
+      this.getMetadataWritePlanFor(candidate),
+      async () => { publish(); },
+    );
   }
 
   /**
@@ -1571,14 +1579,14 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   public async performFactoryReset(): Promise<void> {
-    const resetSettings = this.buildFactoryResetSettings();
-    this.settings = resetSettings;
-    this.activeRefreshState.clear();
-    this.isMultiFeedRefreshRunning = false;
-    this.initializeSettingsBackedServices();
-    this.clearFactoryResetLocalStorage();
-
-    await this.saveSettings();
+    await this.enqueueSettingsOperation(async () => {
+      this.settings = this.buildFactoryResetSettings();
+      this.activeRefreshState.clear();
+      this.isMultiFeedRefreshRunning = false;
+      this.initializeSettingsBackedServices();
+      this.clearFactoryResetLocalStorage();
+      await this.saveSettingsUnlocked();
+    });
 
     const dashboardView = await this.getActiveDashboardView();
     if (dashboardView) {
@@ -4717,31 +4725,37 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   async saveSettings(options: PersistSettingsOptions = {}) {
-    return this.enqueueSettingsOperation(async () => {
-      const settings = this.settings;
-      storageLog("saveSettings invoked", {
+    return this.enqueueSettingsOperation(
+      async () => await this.saveSettingsUnlocked(options),
+    );
+  }
+
+  private async saveSettingsUnlocked(
+    options: PersistSettingsOptions = {},
+  ): Promise<void> {
+    const settings = this.settings;
+    storageLog("saveSettings invoked", {
+      mode: settings.storageMode,
+      folder: settings.storageFolder,
+      metadataMode: settings.metadataStorageMode,
+      feedCount: settings.feeds.length,
+    });
+
+    try {
+      const result = await this.feedStorageRepository.persistSettings(
+        settings,
+        this.getMetadataWritePlanFor(settings),
+        options,
+      );
+      storageLog("saveSettings completed", result);
+    } catch (error) {
+      storageError("saveSettings failed", error, {
         mode: settings.storageMode,
         folder: settings.storageFolder,
         metadataMode: settings.metadataStorageMode,
-        feedCount: settings.feeds.length,
       });
-
-      try {
-        const result = await this.feedStorageRepository.persistSettings(
-          settings,
-          this.getMetadataWritePlanFor(settings),
-          options,
-        );
-        storageLog("saveSettings completed", result);
-      } catch (error) {
-        storageError("saveSettings failed", error, {
-          mode: settings.storageMode,
-          folder: settings.storageFolder,
-          metadataMode: settings.metadataStorageMode,
-        });
-        throw error;
-      }
-    });
+      throw error;
+    }
   }
 
   /**

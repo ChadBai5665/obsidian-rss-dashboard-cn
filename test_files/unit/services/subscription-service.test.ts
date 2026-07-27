@@ -1681,6 +1681,36 @@ describe("SubscriptionService", () => {
     expect(test.collectionService.removeSource).not.toHaveBeenCalled();
   });
 
+  it("clears every folder removal intent when a later initial-import abort throws", async () => {
+    const abortInitialImport = vi.fn((feedId: string) => {
+      if (feedId === "second") throw new Error("abort hook failed");
+    });
+    const first = existingFeed({ feedId: "first", folder: "Delete" });
+    const second = existingFeed({
+      feedId: "second",
+      url: "https://second.example/feed.xml",
+      folder: "Delete/Child",
+    });
+    const test = harness([first, second], { abortInitialImport });
+    test.settings.folders = [{
+      name: "Delete",
+      subfolders: [{ name: "Child", subfolders: [] }],
+    }];
+    const before = structuredClone(test.settings);
+
+    await expect(test.service.applyFolderMutation({
+      kind: "delete",
+      folderPath: "Delete",
+    })).rejects.toThrow("abort hook failed");
+
+    expect(abortInitialImport).toHaveBeenNthCalledWith(1, "first");
+    expect(abortInitialImport).toHaveBeenNthCalledWith(2, "second");
+    expect(isSubscriptionRemovalPending(test.settings, "first")).toBe(false);
+    expect(isSubscriptionRemovalPending(test.settings, "second")).toBe(false);
+    expect(test.settings).toEqual(before);
+    expect(test.saveSettingsCandidate).not.toHaveBeenCalled();
+  });
+
   it("moves a whole folder with account and topic source configuration kept in sync", async () => {
     const account = existingFeed({
       feedId: "account",
