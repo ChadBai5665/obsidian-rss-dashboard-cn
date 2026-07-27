@@ -1,6 +1,19 @@
 import { requestUrl } from "obsidian";
 
 export class MastodonService {
+  private static readonly NON_MASTODON_HOSTS = new Set([
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "x.com",
+    "www.x.com",
+    "twitter.com",
+    "www.twitter.com",
+    "t.co",
+    "www.t.co",
+    "github.com",
+    "www.github.com",
+  ]);
   private static readonly PROFILE_PATH_PATTERNS = [
     /^\/@[^/?#]+\/?$/i,
     /^\/users\/[^/?#]+\/?$/i,
@@ -21,6 +34,13 @@ export class MastodonService {
     }
 
     if (!/^https?:$/i.test(parsed.protocol)) {
+      return false;
+    }
+
+    if (
+      this.NON_MASTODON_HOSTS.has(parsed.hostname.toLowerCase()) ||
+      /(?:^|\.)nitter\.net$/iu.test(parsed.hostname)
+    ) {
       return false;
     }
 

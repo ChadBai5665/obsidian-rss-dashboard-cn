@@ -165,17 +165,6 @@ export async function resolveAndLoadPreview(
     }
   }
 
-  if (MediaService.isMastodonUrl(url)) {
-    const mastodonFeedUrl = await MediaService.getMastodonRssFeed(url);
-    if (!mastodonFeedUrl) {
-      throw new Error(t("modal.feed.mastodonResolve"));
-    }
-
-    url = mastodonFeedUrl;
-    finalUrl = mastodonFeedUrl;
-    isMastodonConversion = true;
-  }
-
   if (isYouTubePageUrl(url)) {
     detectedType = "youtube";
     const rssUrl = await MediaService.getYouTubeRssFeed(
@@ -189,7 +178,20 @@ export async function resolveAndLoadPreview(
     finalUrl = rssUrl;
   } else if (MediaService.isYouTubeFeed(url) && isYouTubeRssFeedUrl(url)) {
     detectedType = "youtube";
-  } else {
+  }
+
+  if (MediaService.isMastodonUrl(url)) {
+    const mastodonFeedUrl = await MediaService.getMastodonRssFeed(url);
+    if (!mastodonFeedUrl) {
+      throw new Error(t("modal.feed.mastodonResolve"));
+    }
+
+    url = mastodonFeedUrl;
+    finalUrl = mastodonFeedUrl;
+    isMastodonConversion = true;
+  }
+
+  if (detectedType !== "youtube") {
     const platform = detectPodcastPlatform(url);
     if (platform) {
       if (platform.id === "pocketcasts" && !options?.corsProxyEnabled) {

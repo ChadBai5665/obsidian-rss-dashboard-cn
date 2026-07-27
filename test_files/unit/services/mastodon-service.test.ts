@@ -59,6 +59,17 @@ describe("MastodonService", () => {
         ),
       ).toBe(false);
     });
+
+    it.each([
+      "https://www.youtube.com/@OpenAI",
+      "https://x.com/OpenAI",
+      "https://twitter.com/OpenAI",
+      "https://t.co/@OpenAI",
+      "https://nitter.net/OpenAI",
+      "https://github.com/OpenAI",
+    ])("rejects known non-Mastodon profile hosts: %s", (url) => {
+      expect(MastodonService.isMastodonProfileUrl(url)).toBe(false);
+    });
   });
 
   describe("resolveProfileFeed", () => {
