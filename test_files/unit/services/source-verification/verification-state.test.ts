@@ -24,23 +24,22 @@ describe("source verification state", () => {
     expect(state.canSubscribe()).toBe(false);
   });
 
-  it("shares a token for a duplicate click but supersedes an edited input", () => {
+  it("creates a fresh token for every click, including duplicate input", () => {
     const state = new VerificationController<VerifiedSource>();
 
     const first = state.begin("https://a.example/feed");
-    expect(state.begin("https://a.example/feed")).toBe(first);
-
-    const second = state.begin("https://b.example/feed");
+    const second = state.begin("https://a.example/feed");
     expect(second).not.toBe(first);
+
     expect(state.succeed(first, { title: "A", url: "https://a.example/feed" })).toBe(false);
-    expect(state.succeed(second, { title: "B", url: "https://b.example/feed" })).toBe(true);
+    expect(state.succeed(second, { title: "A", url: "https://a.example/feed" })).toBe(true);
     expect(state.snapshot()).toEqual({
       status: "success",
-      value: { title: "B", url: "https://b.example/feed" },
+      value: { title: "A", url: "https://a.example/feed" },
     });
   });
 
-  it("permits subscription only after success or an accepted empty-feed warning", () => {
+  it("permits subscription only after success or current empty-feed warning acceptance", () => {
     const state = new VerificationController<VerifiedSource>();
 
     const success = state.begin("https://a.example/feed");
@@ -49,11 +48,43 @@ describe("source verification state", () => {
 
     const emptyFeed = state.begin("https://empty.example/feed");
     state.warn(emptyFeed, { title: "Empty", url: "https://empty.example/feed" }, "empty-feed");
+    expect(state.snapshot()).toEqual({
+      status: "warning",
+      value: { title: "Empty", url: "https://empty.example/feed" },
+      code: "empty-feed",
+      accepted: false,
+    });
+    expect(state.canSubscribe()).toBe(false);
+    expect(state.acceptWarning(emptyFeed)).toBe(true);
     expect(state.canSubscribe()).toBe(true);
 
     const otherWarning = state.begin("https://choice.example");
     state.warn(otherWarning, { title: "Choice", url: "https://choice.example" }, "feed-selection-required");
     expect(state.canSubscribe()).toBe(false);
+  });
+
+  it("rejects stale or non-empty-feed warning acceptance", () => {
+    const state = new VerificationController<VerifiedSource>();
+    const first = state.begin("https://empty.example/feed");
+    state.warn(first, { title: "Empty", url: "https://empty.example/feed" }, "empty-feed");
+
+    const second = state.begin("https://choice.example");
+    expect(state.acceptWarning(first)).toBe(false);
+    state.warn(second, { title: "Choice", url: "https://choice.example" }, "feed-selection-required");
+    expect(state.acceptWarning(second)).toBe(false);
+    expect(state.canSubscribe()).toBe(false);
+  });
+
+  it("rejects unsafe runtime codes without putting them into state", () => {
+    const state = new VerificationController<VerifiedSource>();
+    const warning = state.begin("https://a.example/feed");
+    const value = { title: "A", url: "https://a.example/feed" };
+
+    expect(state.warn(warning, value, "secret=value" as never)).toBe(false);
+    expect(state.snapshot()).toEqual({ status: "checking" });
+
+    expect(state.fail(warning, "secret=value" as never)).toBe(false);
+    expect(state.snapshot()).toEqual({ status: "checking" });
   });
 
   it.each(["cancel", "close"])("invalidates an in-flight completion on %s", () => {
