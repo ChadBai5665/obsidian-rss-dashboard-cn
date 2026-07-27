@@ -180,6 +180,12 @@ export interface FeedRefreshResult {
   linkedPageGroups?: SourceRefreshOutput["linkedPageGroups"];
 }
 
+interface FeedRefreshPublication {
+  result: FeedRefreshResult;
+  sourceId: string;
+  sourceIdentity: string;
+}
+
 export interface FiltersUpdatedEventPayload {
   source: string;
   feedUrl?: string;
@@ -638,6 +644,34 @@ function cloneRefreshData<T>(value: T, seen = new WeakMap<object, object>()): T 
     clone[key] = cloneRefreshData(entry, seen);
   }
   return clone as T;
+}
+
+function refreshSourceIdentity(feed: Feed): string | undefined {
+  const config = normalizeSourceConfig(feed.sourceConfig);
+  if (config?.kind === "x-account") {
+    return JSON.stringify([
+      "x-account",
+      config.handle,
+      config.restId ?? "",
+      config.includeReplies,
+      config.includeReposts,
+    ]);
+  }
+  if (config?.kind === "x-topic") {
+    return JSON.stringify([
+      "x-topic",
+      config.id,
+      config.includeKeywords,
+      config.excludeKeywords,
+      config.priorityAccounts,
+      config.windowDays,
+    ]);
+  }
+  if (feed.sourceKind === undefined || feed.sourceKind === "feed") {
+    const url = feed.url.normalize("NFC").trim();
+    return url ? JSON.stringify(["feed", url]) : undefined;
+  }
+  return undefined;
 }
 
 function toFeedRefreshPipelineError(error: unknown): FeedRefreshPipelineError {
@@ -4868,27 +4902,76 @@ export default class RssDashboardPlugin extends Plugin {
     return count;
   }
 
-  private mergeRefreshedFeed(updatedFeed: Feed): void {
-    const index = this.settings.feeds.findIndex(
-      (f) => f.url === updatedFeed.url,
+  private mergeRefreshedFeed(
+    feeds: Feed[],
+    publication: FeedRefreshPublication,
+  ): boolean {
+    const index = feeds.findIndex((feed) =>
+      (feed.feedId ?? feed.url) === publication.sourceId
     );
-    if (index >= 0) {
-      const current = this.settings.feeds[index];
-      const stoppedProgress =
-        current.initialImportProgress?.status === "stopped" &&
-        updatedFeed.initialImportProgress?.status !== "stopped"
-          ? current.initialImportProgress
-          : updatedFeed.initialImportProgress;
-      this.settings.feeds[index] = {
-        ...updatedFeed,
-        ...(stoppedProgress ? { initialImportProgress: stoppedProgress } : {}),
-        excludeFromRefresh:
-          updatedFeed.excludeFromRefresh ??
-          current.excludeFromRefresh,
-        subscriptionStatus:
-          current.subscriptionStatus ?? updatedFeed.subscriptionStatus,
-      };
+    if (index < 0) return false;
+
+    const current = feeds[index];
+    if (
+      isSubscriptionRemovalPending(this.settings, publication.sourceId) ||
+      current.subscriptionStatus === "paused" ||
+      current.initialImportProgress?.status === "stopped" ||
+      refreshSourceIdentity(current) !== publication.sourceIdentity ||
+      refreshSourceIdentity(publication.result.feed) !== publication.sourceIdentity
+    ) {
+      return false;
     }
+
+    const updatedFeed = cloneRefreshData(publication.result.feed);
+    feeds[index] = {
+      ...updatedFeed,
+      feedId: current.feedId,
+      sourceKind: current.sourceKind,
+      sourceConfig: cloneRefreshData(current.sourceConfig),
+      url: current.url,
+      title: current.title,
+      folder: current.folder,
+      customTags: cloneRefreshData(current.customTags),
+      initialImportPolicy: cloneRefreshData(current.initialImportPolicy),
+      autoDeleteDuration: current.autoDeleteDuration,
+      maxItemsLimit: current.maxItemsLimit,
+      scanInterval: current.scanInterval,
+      keywordRules: cloneRefreshData(current.keywordRules),
+      customTemplate: current.customTemplate,
+      excludeFromRefresh: current.excludeFromRefresh,
+      mediaType: current.mediaType,
+      subscriptionStatus: current.subscriptionStatus,
+    };
+    return true;
+  }
+
+  private async publishRefreshResults(
+    publications: FeedRefreshPublication[],
+  ): Promise<number> {
+    if (publications.length === 0) return 0;
+    return await this.enqueueSettingsOperation(async () => {
+      const candidateFeeds = cloneRefreshData(this.settings.feeds);
+      let publishedCount = 0;
+      for (const publication of publications) {
+        if (this.mergeRefreshedFeed(candidateFeeds, publication)) {
+          publishedCount += 1;
+        }
+      }
+      if (publishedCount === 0) return 0;
+
+      const previousFeeds = this.settings.feeds;
+      const previousRefreshTimestamp = this.settings.lastRefreshTimestamp;
+      this.settings.feeds = candidateFeeds;
+      this.settings.lastRefreshTimestamp = Date.now();
+      try {
+        await this.saveSettingsUnlocked();
+      } catch (error) {
+        this.settings.feeds = previousFeeds;
+        this.settings.lastRefreshTimestamp = previousRefreshTimestamp;
+        throw error;
+      }
+      return publishedCount;
+    });
   }
 
   private async refreshSingleFeed(
@@ -4896,13 +4979,12 @@ export default class RssDashboardPlugin extends Plugin {
     feedNoticeText: string,
     sourceRegistry: SourceRegistry,
   ): Promise<void> {
-    const result = await this.refreshFeedPipeline(feed, sourceRegistry);
-    if (!result) return;
-    this.mergeRefreshedFeed(result.feed);
+    const publication = await this.refreshFeedPipeline(feed, sourceRegistry);
+    if (!publication) return;
+    const publishedCount = await this.publishRefreshResults([publication]);
+    if (publishedCount === 0) return;
 
     await this.validateSavedArticles({ suppressCollectionBroadcast: true });
-    this.settings.lastRefreshTimestamp = Date.now();
-    await this.saveSettings();
     await this.refreshDashboardViews();
     this.notify("plugin.refreshed", { source: feedNoticeText });
   }
@@ -4949,6 +5031,7 @@ export default class RssDashboardPlugin extends Plugin {
     };
 
     const backgroundPromises: Promise<void>[] = [];
+    const publications: FeedRefreshPublication[] = [];
 
     const worker = async (): Promise<void> => {
       while (true) {
@@ -4966,7 +5049,9 @@ export default class RssDashboardPlugin extends Plugin {
           refreshSummary,
           refreshView,
           sourceRegistry,
-        ).finally(() => {
+        ).then((publication) => {
+          if (publication) publications.push(publication);
+        }).finally(() => {
           globalFetchSemaphore.release();
         });
 
@@ -4992,9 +5077,9 @@ export default class RssDashboardPlugin extends Plugin {
       await Promise.all(workers);
       await Promise.all(backgroundPromises);
 
+      const publishedCount = await this.publishRefreshResults(publications);
+      if (publishedCount === 0) return;
       await this.validateSavedArticles({ suppressCollectionBroadcast: true });
-      this.settings.lastRefreshTimestamp = Date.now();
-      await this.saveSettings();
       this.activeRefreshState.clear();
       await this.refreshDashboardViews();
 
@@ -5036,16 +5121,14 @@ export default class RssDashboardPlugin extends Plugin {
     refreshSummary: { failed: number; timedOut: number },
     refreshView: () => Promise<void>,
     sourceRegistry: SourceRegistry,
-  ): Promise<void> {
+  ): Promise<FeedRefreshPublication | null> {
     this.activeRefreshState.set(currentFeed.url, {
       status: "processing",
       startedAt: Date.now(),
     });
 
     try {
-      const result = await this.refreshFeedPipeline(currentFeed, sourceRegistry);
-      if (!result) return;
-      this.mergeRefreshedFeed(result.feed);
+      return await this.refreshFeedPipeline(currentFeed, sourceRegistry);
     } catch (error) {
       const isTimedOut =
         error instanceof FeedRefreshPipelineError && error.code === "timed-out";
@@ -5056,6 +5139,7 @@ export default class RssDashboardPlugin extends Plugin {
       }
 
       console.error("[RSS dashboard] A source refresh failed.");
+      return null;
     } finally {
       this.activeRefreshState.delete(currentFeed.url);
 
@@ -5074,18 +5158,19 @@ export default class RssDashboardPlugin extends Plugin {
   private async refreshFeedPipeline(
     feed: Feed,
     sourceRegistry: SourceRegistry,
-  ): Promise<FeedRefreshResult | null> {
-    this.feedStorageRepository.ensureFeedIds(this.settings);
-    if (!feed.feedId) {
-      feed.feedId = this.settings.feeds.find(
-        (candidate) => candidate.url === feed.url,
-      )?.feedId;
-    }
-    bindFeedItemsToSourceIdentity(feed);
-    const sourceId = feed.feedId ?? feed.url;
+  ): Promise<FeedRefreshPublication | null> {
+    const detachedFeed = cloneRefreshData(feed);
+    detachedFeed.feedId ??= this.settings.feeds.find(
+      (candidate) => candidate.url === detachedFeed.url,
+    )?.feedId;
+    bindFeedItemsToSourceIdentity(detachedFeed);
+    const sourceId = detachedFeed.feedId ?? detachedFeed.url;
     if (isSubscriptionRemovalPending(this.settings, sourceId)) return null;
-    const persistedAtStart = this.findCurrentFeedForRefresh(feed, sourceId);
-    const currentAtStart = persistedAtStart ?? feed;
+    const persistedAtStart = this.findCurrentFeedForRefresh(
+      detachedFeed,
+      sourceId,
+    );
+    const currentAtStart = persistedAtStart ?? detachedFeed;
     const attemptedAt = new Date();
     const ledger = this.getSourceRefreshLedger();
     const initialImportController =
@@ -5123,10 +5208,15 @@ export default class RssDashboardPlugin extends Plugin {
         (initialImportController &&
           persistedCurrent?.initialImportProgress?.status === "stopped")
       ) {
-        return stoppedInitialImportResult(
-          persistedCurrent ?? currentAtStart,
-          attemptedAt,
-        );
+        const stoppedFeed = persistedCurrent ?? currentAtStart;
+        const sourceIdentity = refreshSourceIdentity(stoppedFeed);
+        return sourceIdentity
+          ? {
+              result: stoppedInitialImportResult(stoppedFeed, attemptedAt),
+              sourceId,
+              sourceIdentity,
+            }
+          : null;
       }
 
       const currentFeed = persistedCurrent ?? feed;
@@ -5134,7 +5224,14 @@ export default class RssDashboardPlugin extends Plugin {
         currentFeed.initialImportProgress !== undefined ||
           feed.initialImportProgress !== undefined
           ? currentFeed
-          : feed;
+          : detachedFeed;
+      const sourceIdentity = refreshSourceIdentity(feedForAttempt);
+      if (!sourceIdentity) {
+        throw new FeedRefreshPipelineError(
+          "invalid-source-config",
+          this.t("source.invalidConfiguration"),
+        );
+      }
 
       const attempt = new RefreshAttemptToken();
       let result: FeedRefreshResult;
@@ -5173,7 +5270,10 @@ export default class RssDashboardPlugin extends Plugin {
           );
           throw failure;
         }
-        return result;
+        if (!this.isRefreshPublicationCurrent(sourceId, sourceIdentity)) {
+          return null;
+        }
+        return { result, sourceId, sourceIdentity };
       }
 
       try {
@@ -5202,7 +5302,10 @@ export default class RssDashboardPlugin extends Plugin {
         );
         throw failure;
       }
-      return result;
+      if (!this.isRefreshPublicationCurrent(sourceId, sourceIdentity)) {
+        return null;
+      }
+      return { result, sourceId, sourceIdentity };
     } finally {
       if (
         initialImportController &&
@@ -5211,6 +5314,20 @@ export default class RssDashboardPlugin extends Plugin {
         this.activeInitialImportControllers.delete(sourceId);
       }
     }
+  }
+
+  private isRefreshPublicationCurrent(
+    sourceId: string,
+    sourceIdentity: string,
+  ): boolean {
+    const current = this.settings.feeds.find(
+      (feed) => (feed.feedId ?? feed.url) === sourceId,
+    );
+    return current !== undefined &&
+      !isSubscriptionRemovalPending(this.settings, sourceId) &&
+      current.subscriptionStatus !== "paused" &&
+      current.initialImportProgress?.status !== "stopped" &&
+      refreshSourceIdentity(current) === sourceIdentity;
   }
 
   private findCurrentFeedForRefresh(
