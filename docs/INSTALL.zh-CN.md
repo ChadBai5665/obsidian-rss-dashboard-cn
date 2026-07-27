@@ -50,7 +50,7 @@ RSS Dashboard CN `0.1.0` 当前采用手动安装。你需要拿到同一版本�
 npm run install:local -- --target "/path/to/vault/.obsidian/plugins/rss-dashboard-cn"
 ```
 
-目标目录必须显式填写。更新器不会从用户目录推断知识库，也不会创建首次安装所需的插件目录。它会先核对目标确实位于 `.obsidian/plugins/<插件 ID>`、新旧 `manifest.json` 的插件 ID 一致，并拒绝符号链接或缺失的发布文件。
+目标目录必须显式填写。更新器不会从用户目录推断知识库，也不会创建首次安装所需的插件目录。它会先核对目标确实位于 `.obsidian/plugins/<插件 ID>`、新旧 `manifest.json` 的插件 ID 一致、版本是有效的 SemVer，并确认仓库根目录、`package.json` 与 `release/` 中的版本和三个程序文件完全一致。缺失、陈旧、混合版本、符号链接或硬链接发布文件都会在覆盖前被拒绝。
 
 更新器只替换以下三个程序文件：
 
@@ -65,7 +65,7 @@ npm run install:local -- --target "/path/to/vault/.obsidian/plugins/rss-dashboar
 - `信息收集/` 及其他目录中已经保存的 Markdown；
 - 知识库之外的 TikHub 与 AI 外部密钥文件。
 
-更新器不会读取、复制、移动或输出外部密钥文件。它会比较更新前后的 `data.json` 与整个 `.rss-dashboard-data/` 的哈希；只有确认两者未变化，安装才算成功。
+更新器不会读取、复制、移动或输出外部密钥文件。它会用固定大小的数据块逐步计算更新前后的 `data.json` 与整个 `.rss-dashboard-data/` 哈希；历史目录中的符号链接只记录链接本身，不会跟随到目录外部。只有确认两者未变化，安装才算成功。
 
 覆盖前，更新器会在目标插件目录旁创建类似下面的时间戳备份，而不是放到系统临时目录：
 
@@ -75,7 +75,7 @@ npm run install:local -- --target "/path/to/vault/.obsidian/plugins/rss-dashboar
   rss-dashboard-cn.backup-20260728T120000.000Z/
 ```
 
-备份中包含更新前存在的三个程序文件，以及只读的 `data.json` 副本。程序文件使用目标目录内的临时文件完成原子替换；如果替换或校验中途失败，更新器会自动恢复原来的三个程序文件，并保留备份供人工核对。
+备份中包含更新前存在的三个程序文件，以及只读的 `data.json` 副本。为避免 Obsidian 把备份目录误认成可执行插件，旧清单在备份中命名为 `manifest.json.restore`，恢复时再改回 `manifest.json`。程序文件使用目标目录内的临时文件完成原子替换；同一个插件同一时间只允许一个安装进程。临时文件和备份文件会在改名提交前同步写入磁盘；如果替换或校验中途失败，更新器会自动恢复原来的三个程序文件，并保留完整备份供人工核对。
 
 命令成功后：
 
@@ -90,7 +90,7 @@ npm run install:local -- --target "/path/to/vault/.obsidian/plugins/rss-dashboar
 
 1. 在 Obsidian 中禁用插件并完全退出 Obsidian。
 2. 找到插件目录旁最近一次 `rss-dashboard-cn.backup-<时间戳>` 文件夹。
-3. 把其中的 `main.js`、`manifest.json`、`styles.css` 复制回 `rss-dashboard-cn`，同时替换三个文件。
+3. 把其中的 `main.js`、`styles.css` 复制回 `rss-dashboard-cn`，再把 `manifest.json.restore` 复制到目标目录并命名为 `manifest.json`，同时替换三个文件。
 4. 正常情况下不要恢复 `data.json`，因为更新器从未修改当前设置。只有确认当前设置文件本身损坏、并且明确接受回到备份时刻的设置后，才人工使用备份中的 `data.json`。
 5. 重新加载或重启 Obsidian，再启用插件。
 

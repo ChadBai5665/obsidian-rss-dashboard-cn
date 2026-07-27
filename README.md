@@ -60,7 +60,7 @@ RSS Dashboard CN 是一个中文优先、仅桌面端使用的 Obsidian 信息�
 npm run install:local -- --target "/path/to/vault/.obsidian/plugins/rss-dashboard-cn"
 ```
 
-该命令只从 `release/` 替换 `main.js`、`manifest.json`、`styles.css`，并在插件目录旁创建带时间戳的只读备份。它不会修改 `data.json`、知识库根目录的 `.rss-dashboard-data/`、已保存的 Markdown 或知识库外部的密钥文件；安装前后还会校验本地设置与采集历史保持不变。成功后需要重新加载或重启 Obsidian。
+该命令会先确认仓库根目录、`package.json` 与 `release/` 中的版本和三个程序文件属于同一次构建，再只替换 `main.js`、`manifest.json`、`styles.css`。安装期间使用插件目录旁的互斥锁，并创建带时间戳的只读备份；备份清单保存为不可被 Obsidian 误加载的 `manifest.json.restore`。它不会修改 `data.json`、知识库根目录的 `.rss-dashboard-data/`、已保存的 Markdown 或知识库外部的密钥文件；安装前后还会以流式哈希校验本地设置与采集历史保持不变。成功后需要重新加载或重启 Obsidian。
 
 完整步骤见 [中文安装指南](docs/INSTALL.zh-CN.md)。
 
