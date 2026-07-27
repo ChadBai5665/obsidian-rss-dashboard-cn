@@ -30,6 +30,8 @@ type LifecycleStatus =
 export class FeedManagerModal extends Modal {
   plugin: RssDashboardPlugin;
   private filter: "all" | SubscriptionType = "all";
+  private busy = false;
+  private active = false;
 
   constructor(app: App, plugin: RssDashboardPlugin) {
     super(app);
@@ -37,6 +39,7 @@ export class FeedManagerModal extends Modal {
   }
 
   onOpen(): void {
+    this.active = true;
     this.modalEl.addClass(
       "rss-dashboard-modal",
       "rss-dashboard-modal-container",
@@ -209,16 +212,17 @@ export class FeedManagerModal extends Modal {
 
     this.actionButton(actions, t("modal.feedManager.editOptions"), () => {
       this.openOptionsEditor(feed, sourceId, t);
-    });
+    }, false, undefined, false);
     this.actionButton(actions, t("modal.feedManager.editIdentity"), () => {
       this.openIdentityEditor(feed, sourceId);
-    });
+    }, false, undefined, false);
     this.actionButton(
       actions,
       t("modal.feedManager.delete"),
       () => this.openDeleteConfirmation([feed], t),
       false,
       "mod-warning",
+      false,
     );
   }
 
@@ -228,6 +232,7 @@ export class FeedManagerModal extends Modal {
     action: () => Promise<boolean | void> | boolean | void,
     disabled = false,
     className?: string,
+    singleFlight = true,
   ): void {
     const button = container.createEl("button", {
       text: label,
@@ -236,21 +241,55 @@ export class FeedManagerModal extends Modal {
     });
     button.disabled = disabled;
     button.addEventListener("click", () => {
-      if (button.disabled) return;
-      void this.runAction(action);
+      if (button.disabled || this.busy || !this.active) return;
+      if (singleFlight) {
+        void this.runAction(action);
+        return;
+      }
+      try {
+        void action();
+      } catch {
+        const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
+        new Notice(t("modal.feedManager.actionFailed"));
+      }
     });
   }
 
   private async runAction(
     action: () => Promise<boolean | void> | boolean | void,
   ): Promise<void> {
-    const result = await action();
-    if (result === false) {
-      const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
-      new Notice(t("modal.feedManager.actionFailed"));
-      return;
+    if (this.busy || !this.active) return;
+    this.busy = true;
+    this.setButtonsBusy(true);
+    try {
+      const result = await action();
+      if (!this.active) return;
+      if (result === false) {
+        const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
+        new Notice(t("modal.feedManager.actionFailed"));
+      }
+    } catch {
+      if (this.active) {
+        const t = createTranslator(this.plugin.settings.locale ?? "zh-CN");
+        new Notice(t("modal.feedManager.actionFailed"));
+      }
+    } finally {
+      this.busy = false;
+      if (this.active) this.render();
     }
-    this.render();
+  }
+
+  private setButtonsBusy(busy: boolean): void {
+    for (const button of Array.from(
+      this.contentEl.querySelectorAll<HTMLButtonElement>("button"),
+    )) {
+      button.disabled = busy;
+      button.setAttribute("aria-disabled", String(busy));
+    }
+  }
+
+  private renderIfOpen(): void {
+    if (this.active) this.render();
   }
 
   private openIdentityEditor(feed: Feed, sourceId: string): void {
@@ -264,7 +303,7 @@ export class FeedManagerModal extends Modal {
       initialKind,
       initialInput: account?.handle ?? feed.url,
       initialFolder: feed.folder,
-    }, sourceId);
+    }, sourceId, () => this.renderIfOpen());
   }
 
   private openOptionsEditor(feed: Feed, sourceId: string, t: Translator): void {
@@ -287,7 +326,7 @@ export class FeedManagerModal extends Modal {
             initialKind: "x-account",
             initialInput: handle,
             initialFolder: feed.folder,
-          }, sourceId);
+          }, sourceId, () => this.renderIfOpen());
         },
         onSave: async (config, retention) => {
           const request: XSubscriptionOptionsUpdateRequest = {
@@ -301,7 +340,7 @@ export class FeedManagerModal extends Modal {
           };
           const saved = await this.plugin.updateSubscription(sourceId, request);
           if (!saved) throw new Error("subscription-update-failed");
-          this.render();
+          this.renderIfOpen();
         },
       }).open();
       return;
@@ -346,29 +385,65 @@ export class FeedManagerModal extends Modal {
 
     const actions = new Setting(modal.contentEl);
     actions.settingEl.addClass("rss-dashboard-form-actions");
-    actions.addButton((button) => button
-      .setButtonText(t("common.cancel"))
-      .onClick(() => modal.close()));
-    actions.addButton((button) => button
-      .setButtonText(t("common.save"))
-      .setCta()
-      .onClick(async () => {
-        const request: FeedSubscriptionOptionsUpdateRequest = {
-          kind: "feed-options",
-          displayName,
-          folder,
-          tags: splitList(tags),
-          autoDeleteDuration,
-          maxItemsLimit,
-        };
-        const saved = await this.plugin.updateSubscription(sourceId, request);
-        if (!saved) {
-          new Notice(t("modal.feedManager.actionFailed"));
-          return;
-        }
-        modal.close();
-        this.render();
-      }));
+    let inFlight = false;
+    let cancelButton: HTMLButtonElement | undefined;
+    let saveButton: HTMLButtonElement | undefined;
+    const setEditorBusy = (busy: boolean): void => {
+      for (const button of [cancelButton, saveButton]) {
+        if (!button) continue;
+        button.disabled = busy;
+        button.setAttribute("aria-disabled", String(busy));
+      }
+    };
+    actions.addButton((button) => {
+      cancelButton = button.buttonEl;
+      button
+        .setButtonText(t("common.cancel"))
+        .onClick(() => {
+          if (!inFlight) modal.close();
+        });
+    });
+    actions.addButton((button) => {
+      saveButton = button.buttonEl;
+      button
+        .setButtonText(t("common.save"))
+        .setCta()
+        .onClick(() => {
+          if (inFlight || !modal.containerEl.isConnected) return;
+          inFlight = true;
+          setEditorBusy(true);
+          void (async () => {
+            try {
+              const request: FeedSubscriptionOptionsUpdateRequest = {
+                kind: "feed-options",
+                displayName,
+                folder,
+                tags: splitList(tags),
+                autoDeleteDuration,
+                maxItemsLimit,
+              };
+              const saved = await this.plugin.updateSubscription(sourceId, request);
+              if (!saved) {
+                if (modal.containerEl.isConnected) {
+                  new Notice(t("modal.feedManager.actionFailed"));
+                }
+                return;
+              }
+              if (modal.containerEl.isConnected) modal.close();
+              this.renderIfOpen();
+            } catch {
+              if (modal.containerEl.isConnected) {
+                new Notice(t("modal.feedManager.actionFailed"));
+              }
+            } finally {
+              if (modal.containerEl.isConnected) {
+                inFlight = false;
+                setEditorBusy(false);
+              }
+            }
+          })();
+        });
+    });
     modal.open();
   }
 
@@ -404,7 +479,9 @@ export class FeedManagerModal extends Modal {
         if (purge.checked) {
           this.openPurgeConfirmation(feeds, t);
         } else {
-          void this.removeSubscriptions(feeds, false, t);
+          void this.runAction(
+            async () => await this.removeSubscriptions(feeds, false),
+          );
         }
       }));
     confirmation.open();
@@ -425,7 +502,9 @@ export class FeedManagerModal extends Modal {
       .setWarning()
       .onClick(() => {
         confirmation.close();
-        void this.removeSubscriptions(feeds, true, t);
+        void this.runAction(
+          async () => await this.removeSubscriptions(feeds, true),
+        );
       }));
     confirmation.open();
   }
@@ -433,8 +512,7 @@ export class FeedManagerModal extends Modal {
   private async removeSubscriptions(
     feeds: readonly Feed[],
     purge: boolean,
-    t: Translator,
-  ): Promise<void> {
+  ): Promise<boolean> {
     for (const feed of feeds) {
       const sourceId = feed.feedId ?? feed.url;
       const result = purge
@@ -446,11 +524,10 @@ export class FeedManagerModal extends Modal {
             purgeCollection: false,
           });
       if (!result) {
-        new Notice(t("modal.feedManager.actionFailed"));
-        break;
+        return false;
       }
     }
-    this.render();
+    return true;
   }
 
   private applyFilter(): void {
@@ -462,6 +539,7 @@ export class FeedManagerModal extends Modal {
   }
 
   onClose(): void {
+    this.active = false;
     this.contentEl.empty();
   }
 }

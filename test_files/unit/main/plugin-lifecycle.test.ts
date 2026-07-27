@@ -17,7 +17,10 @@ import type {
 import { DEFAULT_SETTINGS } from "../../../src/types/types";
 import { AddSourceModal } from "../../../src/modals/source-onboarding/add-source-modal";
 import { FeedStorageRollbackIncompleteError } from "../../../src/services/feed-storage-repository";
-import type { VerifiedSubscriptionRequest } from "../../../src/services/subscription-service";
+import type {
+  SubscriptionUpdateRequest,
+  VerifiedSubscriptionRequest,
+} from "../../../src/services/subscription-service";
 
 // Mock functions for FeedParser - must be declared before mocks
 const mockParseFeed = vi.fn<(url: string) => Promise<Feed>>();
@@ -1463,6 +1466,89 @@ describe("addVerifiedSubscription()", () => {
     expect(add).toHaveBeenCalledTimes(1);
     expect(plugin.refreshDashboardViews).toHaveBeenCalledTimes(2);
     expect(errorLog.mock.calls.flat().join(" ")).not.toContain("secret refresh detail");
+  });
+});
+
+describe("subscription lifecycle command durability", () => {
+  it("does not consume an X identity update twice when view refresh fails", async () => {
+    const plugin = await createPluginInstance(createMockApp());
+    const update = vi.fn(async () => undefined);
+    vi.spyOn(
+      plugin as unknown as {
+        getSubscriptionService: () => {
+          update: (feedId: string, request: SubscriptionUpdateRequest) => Promise<void>;
+        };
+      },
+      "getSubscriptionService",
+    ).mockReturnValue({ update });
+    vi.spyOn(plugin, "refreshDashboardViews")
+      .mockRejectedValueOnce(new Error("private view failure"))
+      .mockResolvedValueOnce(undefined);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request = {
+      kind: "x-account",
+      profile: { restId: "44196397", handle: "openai", displayName: "OpenAI" },
+      verificationProof: Object.freeze({}),
+      includeReplies: false,
+      includeReposts: false,
+      tags: [],
+      initialImportPolicy: { mode: "lookback-days", days: 7 },
+    } as unknown as SubscriptionUpdateRequest;
+
+    await expect(plugin.updateSubscription("x-account-openai", request))
+      .resolves.toBe(true);
+    await flushPromises();
+
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith("x-account-openai", request);
+    expect(plugin.refreshDashboardViews).toHaveBeenCalledTimes(2);
+    expect(errorLog.mock.calls.flat().join(" ")).not.toContain(
+      "private view failure",
+    );
+  });
+
+  it.each([
+    "pause",
+    "stop",
+    "resume",
+    "remove",
+  ] as const)("reports durable %s success when only view refresh fails", async (command) => {
+    const plugin = await createPluginInstance(createMockApp());
+    const service = {
+      setPaused: vi.fn(async () => undefined),
+      stopInitialImport: vi.fn(async () => undefined),
+      resumeInitialImport: vi.fn(async () => undefined),
+      remove: vi.fn(async () => undefined),
+    };
+    vi.spyOn(
+      plugin as unknown as { getSubscriptionService: () => typeof service },
+      "getSubscriptionService",
+    ).mockReturnValue(service);
+    vi.spyOn(plugin, "refreshDashboardViews")
+      .mockRejectedValueOnce(new Error("private view failure"))
+      .mockResolvedValueOnce(undefined);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = command === "pause"
+      ? await plugin.setSubscriptionPaused("source-id", true)
+      : command === "stop"
+        ? await plugin.stopSubscriptionInitialImport("source-id")
+        : command === "resume"
+          ? await plugin.resumeSubscriptionInitialImport("source-id")
+          : await plugin.removeSubscription("source-id", {
+              purgeCollection: false,
+            });
+    await flushPromises();
+
+    expect(result).toBe(true);
+    expect(service.setPaused).toHaveBeenCalledTimes(command === "pause" ? 1 : 0);
+    expect(service.stopInitialImport).toHaveBeenCalledTimes(command === "stop" ? 1 : 0);
+    expect(service.resumeInitialImport).toHaveBeenCalledTimes(command === "resume" ? 1 : 0);
+    expect(service.remove).toHaveBeenCalledTimes(command === "remove" ? 1 : 0);
+    expect(plugin.refreshDashboardViews).toHaveBeenCalledTimes(2);
+    expect(errorLog.mock.calls.flat().join(" ")).not.toContain(
+      "private view failure",
+    );
   });
 });
 

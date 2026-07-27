@@ -437,6 +437,39 @@ describe("SubscriptionService", () => {
     });
   });
 
+  it.each(["pending", "running", "completed", "failed"] as const)(
+    "rejects an X history resume from %s so callers cannot restart collection",
+    async (status) => {
+      const source = existingFeed({
+        sourceKind: "x-account",
+        sourceConfig: {
+          kind: "x-account",
+          id: "legacy-feed",
+          handle: "openai",
+          includeReplies: false,
+          includeReposts: false,
+          folder: "X",
+          topics: [],
+        },
+        url: "tikhub://x-account/openai",
+        initialImportPolicy: { mode: "all-available" },
+        initialImportProgress: {
+          status,
+          pagesFetched: 2,
+          itemsImported: 20,
+          nextCursor: "keep-cursor",
+        },
+      });
+      const test = harness([source]);
+
+      await expect(test.service.resumeInitialImport("legacy-feed"))
+        .rejects.toMatchObject({ code: "invalid-subscription-request" });
+
+      expect(test.settings.feeds[0]).toBe(source);
+      expect(test.saveSettings).not.toHaveBeenCalled();
+    },
+  );
+
   it("aborts the active historical run before persisting stopped progress", async () => {
     const source = existingFeed({
       sourceKind: "x-account",

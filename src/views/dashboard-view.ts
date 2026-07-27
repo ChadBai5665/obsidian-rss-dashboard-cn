@@ -856,7 +856,9 @@ export class RssDashboardView extends ItemView {
           onAddFeed: this.handleAddFeed.bind(this),
           onEditFeed: this.handleEditFeed.bind(this),
           onDeleteFeed: (feed) => { void this.handleDeleteFeed(feed); },
-          onDeleteFolder: this.handleDeleteFolder.bind(this),
+          onDeleteFolder: (folder) => {
+            void this.handleDeleteFolder(folder);
+          },
           onRefreshFeeds: this.handleRefreshFeeds.bind(this),
           onUpdateFeed: this.handleUpdateFeed.bind(this),
           onImportOpml: this.handleImportOpml.bind(this),
@@ -3061,18 +3063,45 @@ export class RssDashboardView extends ItemView {
     void this.render();
   }
 
-  private handleDeleteFolder(folder: string): void {
-    this.plugin.settings.feeds = this.plugin.settings.feeds.filter(
-      (feed: Feed) => feed.folder !== folder,
+  private async handleDeleteFolder(folder: string): Promise<void> {
+    const folderPaths = new Set(this.getAllDescendantFolders(folder));
+    const sourceIds = this.plugin.settings.feeds
+      .filter((feed) => feed.sourceKind !== "x-topic" && folderPaths.has(feed.folder))
+      .map((feed) => feed.feedId ?? feed.url);
+    for (const sourceId of sourceIds) {
+      let removed = false;
+      try {
+        removed = await this.plugin.removeSubscription(sourceId, {
+          purgeCollection: false,
+        });
+      } catch {
+        removed = false;
+      }
+      if (!removed) {
+        void this.render();
+        return;
+      }
+    }
+
+    const parts = folder.split("/");
+    const removeFolder = (
+      folders: Folder[],
+      depth: number,
+    ): Folder[] => folders.flatMap((entry) => {
+      if (entry.name !== parts[depth]) return [entry];
+      if (depth === parts.length - 1) return [];
+      return [{
+        ...entry,
+        subfolders: removeFolder(entry.subfolders, depth + 1),
+      }];
+    });
+    this.plugin.settings.folders = removeFolder(
+      this.plugin.settings.folders,
+      0,
     );
+    await this.plugin.saveSettings();
 
-    this.plugin.settings.folders = this.plugin.settings.folders.filter(
-      (f: { name: string }) => f.name !== folder,
-    );
-
-    void this.plugin.saveSettings();
-
-    if (this.currentFolder === folder) {
+    if (this.currentFolder && folderPaths.has(this.currentFolder)) {
       this.currentFolder = null;
     }
 
@@ -3155,7 +3184,9 @@ export class RssDashboardView extends ItemView {
         onAddFeed: this.handleAddFeed.bind(this),
         onEditFeed: this.handleEditFeed.bind(this),
         onDeleteFeed: (feed) => { void this.handleDeleteFeed(feed); },
-        onDeleteFolder: this.handleDeleteFolder.bind(this),
+        onDeleteFolder: (folder) => {
+          void this.handleDeleteFolder(folder);
+        },
         onRefreshFeeds: this.handleRefreshFeeds.bind(this),
         onUpdateFeed: this.handleUpdateFeed.bind(this),
         onImportOpml: this.handleImportOpml.bind(this),

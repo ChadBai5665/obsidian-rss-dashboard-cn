@@ -31,6 +31,10 @@ import { applyFeedSortOrder } from "../utils/sidebar-sort-utils";
 import { applyFolderSortOrder } from "../utils/sidebar-folder-sort-utils";
 import { MediaService } from "../services/media-service";
 import { MastodonService } from "../services/mastodon-service";
+import type {
+  FeedSubscriptionOptionsUpdateRequest,
+  XSubscriptionOptionsUpdateRequest,
+} from "../services/subscription-service";
 import { createTranslator, type Locale } from "../i18n";
 import {
   createSafeIconImage,
@@ -2007,12 +2011,7 @@ export class Sidebar {
           this.showConfirmModal(
             this.t("sidebar.deleteFolderConfirm", { folder: folderName }),
             () => {
-              const allPaths = this.getAllDescendantFolderPaths(fullPath);
-              this.settings.feeds = this.settings.feeds.filter(
-                (feed) => !allPaths.includes(feed.folder),
-              );
-              this.removeFolderByPath(fullPath);
-              this.render();
+              void this.deleteFolderAndSubscriptions(fullPath);
             },
           );
         });
@@ -2040,25 +2039,31 @@ export class Sidebar {
     const parentPath = parts.slice(0, -1).join("/");
     const folder = this.findFolderByPath(oldPath);
     if (folder) {
+      const newPath = parentPath ? `${parentPath}/${newName}` : newName;
+      const moves = this.settings.feeds
+        .filter((feed) => feed.sourceKind !== "x-topic" && (
+          feed.folder === oldPath || feed.folder.startsWith(`${oldPath}/`)
+        ))
+        .map((feed) => ({
+          feed,
+          folder: feed.folder === oldPath
+            ? newPath
+            : feed.folder.replace(oldPath, newPath),
+        }));
+      for (const move of moves) {
+        if (!await this.updateSubscriptionOptions(move.feed, {
+          folder: move.folder,
+        })) {
+          return;
+        }
+      }
+
       folder.name = newName;
       folder.modifiedAt = Date.now();
-
       if (parentPath) {
         const parent = this.findFolderByPath(parentPath);
         if (parent) parent.modifiedAt = Date.now();
       }
-
-      const newPath = parentPath ? `${parentPath}/${newName}` : newName;
-
-      this.settings.feeds.forEach((feed: Feed) => {
-        if (feed.folder) {
-          if (feed.folder === oldPath) {
-            feed.folder = newPath;
-          } else if (feed.folder.startsWith(oldPath + "/")) {
-            feed.folder = feed.folder.replace(oldPath, newPath);
-          }
-        }
-      });
 
       await this.plugin.saveSettings();
       this.clearFolderPathCache();
@@ -2163,12 +2168,7 @@ export class Sidebar {
       this.showConfirmModal(
         this.t("sidebar.deleteFolderConfirm", { folder: row.folderName }),
         () => {
-          const allPaths = this.getAllDescendantFolderPaths(row.folderPath!);
-          this.settings.feeds = this.settings.feeds.filter(
-            (feed) => !allPaths.includes(feed.folder),
-          );
-          this.removeFolderByPath(row.folderPath!);
-          this.render();
+          void this.deleteFolderAndSubscriptions(row.folderPath!);
         },
       );
     }
@@ -2458,6 +2458,38 @@ export class Sidebar {
     }
     this.clearFolderPathCache();
     this.render();
+  }
+
+  private async deleteFolderAndSubscriptions(
+    folderPath: string,
+  ): Promise<boolean> {
+    const paths = new Set(this.getAllDescendantFolderPaths(folderPath));
+    const subscriptions = this.settings.feeds
+      .filter((feed) => feed.sourceKind !== "x-topic" && paths.has(feed.folder))
+      .map((feed) => feed.feedId ?? feed.url);
+    for (const sourceId of subscriptions) {
+      let removed = false;
+      try {
+        removed = await this.plugin.removeSubscription(sourceId, {
+          purgeCollection: false,
+        });
+      } catch {
+        removed = false;
+      }
+      if (!removed) {
+        new Notice(this.t("modal.feedManager.actionFailed"));
+        this.render();
+        return false;
+      }
+    }
+    this.removeFolderByPath(folderPath);
+    try {
+      await this.plugin.saveSettings();
+    } catch {
+      new Notice(this.t("modal.feedManager.actionFailed"));
+      return false;
+    }
+    return true;
   }
 
   private getAllDescendantFolderPaths(path: string): string[] {
@@ -3561,44 +3593,49 @@ export class Sidebar {
         });
     });
 
-    menu.addItem((item: MenuItem) => {
-      item
-        .setTitle(this.t("sidebar.changeMediaType"))
-        .setIcon("circle-gauge")
-        .onClick((evt) => {
-          const typeMenu = new Menu();
-          typeMenu.addItem((subItem: MenuItem) => {
-            subItem
-              .setTitle(this.t("sidebar.mediaArticle"))
-              .setIcon("file-text")
-              .onClick(() => {
-                feed.mediaType = "article";
-                void this.plugin.saveSettings().then(() => this.render());
-              });
+    if (feed.sourceKind !== "x-account" && feed.sourceKind !== "x-topic") {
+      menu.addItem((item: MenuItem) => {
+        item
+          .setTitle(this.t("sidebar.changeMediaType"))
+          .setIcon("circle-gauge")
+          .onClick((evt) => {
+            const typeMenu = new Menu();
+            typeMenu.addItem((subItem: MenuItem) => {
+              subItem
+                .setTitle(this.t("sidebar.mediaArticle"))
+                .setIcon("file-text")
+                .onClick(() => {
+                  void this.updateSubscriptionOptions(feed, {
+                    mediaType: "article",
+                  });
+                });
+            });
+            typeMenu.addItem((subItem: MenuItem) => {
+              subItem
+                .setTitle(this.t("sidebar.mediaPodcast"))
+                .setIcon("headphones")
+                .onClick(() => {
+                  void this.updateSubscriptionOptions(feed, {
+                    mediaType: "podcast",
+                  });
+                });
+            });
+            typeMenu.addItem((subItem: MenuItem) => {
+              subItem
+                .setTitle(this.t("sidebar.mediaVideo"))
+                .setIcon("play-circle")
+                .onClick(() => {
+                  void this.updateSubscriptionOptions(feed, {
+                    mediaType: "video",
+                  });
+                });
+            });
+            if (evt instanceof MouseEvent) {
+              typeMenu.showAtMouseEvent(evt);
+            }
           });
-          typeMenu.addItem((subItem: MenuItem) => {
-            subItem
-              .setTitle(this.t("sidebar.mediaPodcast"))
-              .setIcon("headphones")
-              .onClick(() => {
-                feed.mediaType = "podcast";
-                void this.plugin.saveSettings().then(() => this.render());
-              });
-          });
-          typeMenu.addItem((subItem: MenuItem) => {
-            subItem
-              .setTitle(this.t("sidebar.mediaVideo"))
-              .setIcon("play-circle")
-              .onClick(() => {
-                feed.mediaType = "video";
-                void this.plugin.saveSettings().then(() => this.render());
-              });
-          });
-          if (evt instanceof MouseEvent) {
-            typeMenu.showAtMouseEvent(evt);
-          }
-        });
-    });
+      });
+    }
 
     menu.addItem((item: MenuItem) => {
       item
@@ -3638,15 +3675,13 @@ export class Sidebar {
         .setTitle(this.t("sidebar.rootFolder"))
         .setIcon(isInRoot ? "check" : "folder")
         .onClick(() => {
-          if (feed.folder) {
-            const oldFolder = this.findFolderByPath(feed.folder);
-            if (oldFolder) oldFolder.modifiedAt = Date.now();
-          }
-          feed.folder = "";
-          void this.plugin.saveSettings().then(() => {
-            this.render();
-            new Notice(this.t("sidebar.movedToRoot", { feed: feed.title }));
-          });
+          void this.updateSubscriptionOptions(feed, { folder: "" }).then(
+            (saved) => {
+              if (saved) {
+                new Notice(this.t("sidebar.movedToRoot", { feed: feed.title }));
+              }
+            },
+          );
         });
     });
 
@@ -3666,22 +3701,17 @@ export class Sidebar {
             .setIcon(isCurrentFolder ? "check" : "folder")
             .onClick(() => {
               if (feed.folder !== folderPath) {
-                if (feed.folder) {
-                  const oldFolder = this.findFolderByPath(feed.folder);
-                  if (oldFolder) oldFolder.modifiedAt = Date.now();
-                }
-                feed.folder = folderPath;
-                const newFolder = this.findFolderByPath(folderPath);
-                if (newFolder) newFolder.modifiedAt = Date.now();
-
-                void this.plugin.saveSettings().then(() => {
-                  this.render();
-                  new Notice(
-                    this.t("sidebar.movedToFolder", {
-                      feed: feed.title,
-                      folder: folderPath,
-                    }),
-                  );
+                void this.updateSubscriptionOptions(feed, {
+                  folder: folderPath,
+                }).then((saved) => {
+                  if (saved) {
+                    new Notice(
+                      this.t("sidebar.movedToFolder", {
+                        feed: feed.title,
+                        folder: folderPath,
+                      }),
+                    );
+                  }
                 });
               }
             });
@@ -3702,18 +3732,17 @@ export class Sidebar {
             onSubmit: (folderName) => {
               void (async () => {
                 await this.addTopLevelFolder(folderName);
-                // Move the feed to the newly created folder
-                feed.folder = folderName;
-                const newFolder = this.findFolderByPath(folderName);
-                if (newFolder) newFolder.modifiedAt = Date.now();
-                await this.plugin.saveSettings();
-                this.render();
-                new Notice(
-                  this.t("sidebar.createdAndMoved", {
-                    folder: folderName,
-                    feed: feed.title,
-                  }),
-                );
+                const saved = await this.updateSubscriptionOptions(feed, {
+                  folder: folderName,
+                });
+                if (saved) {
+                  new Notice(
+                    this.t("sidebar.createdAndMoved", {
+                      folder: folderName,
+                      feed: feed.title,
+                    }),
+                  );
+                }
               })();
             },
           });
@@ -3721,6 +3750,35 @@ export class Sidebar {
     });
 
     menu.showAtMouseEvent(event);
+  }
+
+  private async updateSubscriptionOptions(
+    feed: Feed,
+    patch: {
+      folder?: string;
+      mediaType?: "article" | "video" | "podcast";
+    },
+  ): Promise<boolean> {
+    const sourceId = feed.feedId ?? feed.url;
+    let request:
+      | FeedSubscriptionOptionsUpdateRequest
+      | XSubscriptionOptionsUpdateRequest;
+    if (feed.sourceKind === "x-account") {
+      if (patch.mediaType !== undefined) return false;
+      request = { kind: "x-account-options", ...patch };
+    } else if (feed.sourceKind === "x-topic") {
+      return false;
+    } else {
+      request = { kind: "feed-options", ...patch };
+    }
+    let saved = false;
+    try {
+      saved = await this.plugin.updateSubscription(sourceId, request);
+    } catch {
+      saved = false;
+    }
+    if (saved) this.render();
+    return saved;
   }
 
   private _sortFolders(

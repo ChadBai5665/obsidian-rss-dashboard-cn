@@ -3911,44 +3911,71 @@ export default class RssDashboardPlugin extends Plugin {
   ): Promise<boolean> {
     try {
       await this.getSubscriptionService().update(feedId, request);
-      await this.refreshDashboardViews();
-      return true;
     } catch {
       console.error("[RSS Dashboard] Subscription update failed.");
       return false;
     }
+    await this.refreshDashboardViewsAfterSubscriptionMutation(
+      "Subscription update",
+    );
+    return true;
   }
 
   async setSubscriptionPaused(feedId: string, paused: boolean): Promise<boolean> {
     try {
       await this.getSubscriptionService().setPaused(feedId, paused);
-      await this.refreshDashboardViews();
-      return true;
     } catch {
       console.error("[RSS Dashboard] Subscription pause update failed.");
       return false;
     }
+    await this.refreshDashboardViewsAfterSubscriptionMutation(
+      "Subscription pause update",
+    );
+    return true;
   }
 
   async stopSubscriptionInitialImport(feedId: string): Promise<boolean> {
     try {
       await this.getSubscriptionService().stopInitialImport(feedId);
-      await this.refreshDashboardViews();
-      return true;
     } catch {
       console.error("[RSS Dashboard] Historical import stop failed.");
       return false;
     }
+    await this.refreshDashboardViewsAfterSubscriptionMutation(
+      "Historical import stop",
+    );
+    return true;
   }
 
   async resumeSubscriptionInitialImport(feedId: string): Promise<boolean> {
     try {
       await this.getSubscriptionService().resumeInitialImport(feedId);
-      await this.refreshDashboardViews();
-      return true;
     } catch {
       console.error("[RSS Dashboard] Historical import resume failed.");
       return false;
+    }
+    await this.refreshDashboardViewsAfterSubscriptionMutation(
+      "Historical import resume",
+    );
+    return true;
+  }
+
+  private async refreshDashboardViewsAfterSubscriptionMutation(
+    operation: string,
+  ): Promise<void> {
+    try {
+      await this.refreshDashboardViews();
+    } catch {
+      console.error(
+        `[RSS Dashboard] ${operation} saved; dashboard refresh deferred.`,
+      );
+      void Promise.resolve().then(async () => {
+        await this.refreshDashboardViews().catch(() => {
+          console.error(
+            `[RSS Dashboard] Deferred dashboard refresh after ${operation.toLowerCase()} failed.`,
+          );
+        });
+      });
     }
   }
 
@@ -3959,6 +3986,7 @@ export default class RssDashboardPlugin extends Plugin {
       "initialKind" | "initialInput" | "initialFolder"
     >,
     existingFeedId?: string,
+    onSubscribed?: () => void,
   ): AddSourceModal {
     const requestText = async (url: string, signal: AbortSignal) => {
       if (signal.aborted) throw new Error("source-verification-aborted");
@@ -4017,6 +4045,7 @@ export default class RssDashboardPlugin extends Plugin {
       onSubscribe: async (request) => existingFeedId
         ? await this.updateSubscription(existingFeedId, request)
         : await this.addVerifiedSubscription(request),
+      onSubscribed,
       onOpenSettings: () => { void this.openSettingsToTab("tikhub"); },
       xRequestCaps: {
         run: this.settings.tikhub.maxRequestsPerRun,
@@ -4035,12 +4064,14 @@ export default class RssDashboardPlugin extends Plugin {
   ): Promise<boolean> {
     try {
       await this.getSubscriptionService().remove(feedId, options);
-      await this.refreshDashboardViews();
-      return true;
     } catch {
       console.error("[RSS Dashboard] Subscription removal failed.");
       return false;
     }
+    await this.refreshDashboardViewsAfterSubscriptionMutation(
+      "Subscription removal",
+    );
+    return true;
   }
 
   async addYouTubeFeed(input: string, customTitle?: string) {

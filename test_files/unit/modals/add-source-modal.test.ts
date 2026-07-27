@@ -486,6 +486,57 @@ describe("AddSourceModal", () => {
     await flush();
   });
 
+  it("notifies the owning manager after a durable subscription update succeeds", async () => {
+    const onSubscribed = vi.fn();
+    const modal = new AddSourceModal(obsidian.App.createMock(), options({
+      initialKind: "youtube",
+      onSubscribed,
+    }));
+    modal.open();
+    const input = modal.contentEl.querySelector(
+      ".rss-source-identity-input",
+    ) as HTMLInputElement;
+    input.value = "@OpenAI";
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(
+      ".rss-source-detect-button",
+    ) as HTMLButtonElement).click();
+    await flush();
+
+    (modal.contentEl.querySelector(
+      ".rss-source-subscribe-button",
+    ) as HTMLButtonElement).click();
+    await flush();
+
+    expect(onSubscribed).toHaveBeenCalledTimes(1);
+  });
+
+  it("still closes after durable success when the optional owner callback fails", async () => {
+    const modal = new AddSourceModal(obsidian.App.createMock(), options({
+      initialKind: "youtube",
+      onSubscribed: () => {
+        throw new Error("owner view no longer exists");
+      },
+    }));
+    modal.open();
+    const input = modal.contentEl.querySelector(
+      ".rss-source-identity-input",
+    ) as HTMLInputElement;
+    input.value = "@OpenAI";
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(
+      ".rss-source-detect-button",
+    ) as HTMLButtonElement).click();
+    await flush();
+
+    (modal.contentEl.querySelector(
+      ".rss-source-subscribe-button",
+    ) as HTMLButtonElement).click();
+    await flush();
+
+    expect(modal.containerEl.isConnected).toBe(false);
+  });
+
   it("supports keyboard verification, announces status, and keeps advanced settings collapsed", async () => {
     const verifyYouTube = vi.fn(async () => youtube);
     const modal = new AddSourceModal(obsidian.App.createMock(), options({

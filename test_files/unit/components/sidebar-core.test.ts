@@ -42,6 +42,8 @@ interface TestPlugin extends Partial<RssDashboardPlugin> {
   activeRefreshState?: Map<string, FeedRefreshState>;
   backgroundImportQueue?: FeedMetadata[];
   openAddSourceModal: Mock;
+  updateSubscription: Mock;
+  removeSubscription: Mock;
 }
 
 /** Typed interface for Sidebar private member access */
@@ -70,6 +72,11 @@ type TestSidebar = {
   markAllReadAsUnread: () => Promise<void>;
   markSelectionReadStatus: (read: boolean) => Promise<void>;
   markFeedsReadStatus: (feeds: Feed[], read: boolean) => Promise<number | null>;
+  updateSubscriptionOptions: (
+    feed: Feed,
+    patch: { folder?: string; mediaType?: "article" | "video" | "podcast" },
+  ) => Promise<boolean>;
+  deleteFolderAndSubscriptions: (folderPath: string) => Promise<boolean>;
 };
 
 describe("Sidebar Core", () => {
@@ -133,6 +140,8 @@ describe("Sidebar Core", () => {
       saveSettings: vi.fn().mockResolvedValue(undefined),
       updateArticlesReadBatch: vi.fn().mockResolvedValue(true),
       openAddSourceModal: vi.fn(),
+      updateSubscription: vi.fn().mockResolvedValue(true),
+      removeSubscription: vi.fn().mockResolvedValue(true),
     };
   });
 
@@ -177,6 +186,151 @@ describe("Sidebar Core", () => {
     sidebar.showEditFeedModal(selected);
 
     expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes media and folder changes through typed subscription updates without mutating on failure", async () => {
+    const rss = {
+      feedId: "rss-id",
+      title: "RSS",
+      url: "https://example.com/feed.xml",
+      folder: "Old",
+      items: [],
+      lastUpdated: 0,
+      mediaType: "article",
+      sourceKind: "feed",
+      sourceConfig: { kind: "feed" },
+    } as Feed;
+    const xAccount = {
+      feedId: "x-id",
+      title: "OpenAI",
+      url: "tikhub://x-account/openai",
+      folder: "Old",
+      items: [],
+      lastUpdated: 0,
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "x-id",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "Old",
+        topics: [],
+      },
+    } as Feed;
+    settings.feeds = [rss, xAccount];
+    plugin.updateSubscription.mockResolvedValue(false);
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.updateSubscriptionOptions(rss, { mediaType: "video" }))
+      .resolves.toBe(false);
+    await expect(sidebar.updateSubscriptionOptions(xAccount, { folder: "New" }))
+      .resolves.toBe(false);
+
+    expect(plugin.updateSubscription.mock.calls).toEqual([
+      ["rss-id", { kind: "feed-options", mediaType: "video" }],
+      ["x-id", { kind: "x-account-options", folder: "New" }],
+    ]);
+    expect(rss.mediaType).toBe("article");
+    expect(rss.folder).toBe("Old");
+    expect(xAccount.folder).toBe("Old");
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("keeps a folder after partial subscription removal and never removes X topics", async () => {
+    settings.folders = [{ name: "Tech", subfolders: [] }] as Folder[];
+    const first = {
+      feedId: "first",
+      title: "First",
+      url: "https://example.com/first.xml",
+      folder: "Tech",
+      items: [],
+      lastUpdated: 0,
+    } as Feed;
+    const failed = {
+      feedId: "failed",
+      title: "Failed",
+      url: "https://example.com/failed.xml",
+      folder: "Tech",
+      items: [],
+      lastUpdated: 0,
+    } as Feed;
+    const topic = {
+      feedId: "topic",
+      title: "Topic",
+      url: "tikhub://x-topic/ai",
+      folder: "Tech",
+      items: [],
+      lastUpdated: 0,
+      sourceKind: "x-topic",
+      sourceConfig: { kind: "x-topic", id: "topic", name: "AI" },
+    } as Feed;
+    settings.feeds = [first, failed, topic];
+    plugin.removeSubscription.mockImplementation(async (sourceId: string) => {
+      if (sourceId === "failed") return false;
+      settings.feeds = settings.feeds.filter(
+        (candidate) => (candidate.feedId ?? candidate.url) !== sourceId,
+      );
+      return true;
+    });
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.deleteFolderAndSubscriptions("Tech"))
+      .resolves.toBe(false);
+
+    expect(plugin.removeSubscription.mock.calls).toEqual([
+      ["first", { purgeCollection: false }],
+      ["failed", { purgeCollection: false }],
+    ]);
+    expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
+    expect(settings.feeds).toContain(topic);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("removes a folder only after every external subscription removal succeeds", async () => {
+    settings.folders = [{ name: "Tech", subfolders: [] }] as Folder[];
+    settings.feeds = [{
+      feedId: "rss-id",
+      title: "RSS",
+      url: "https://example.com/feed.xml",
+      folder: "Tech",
+      items: [],
+      lastUpdated: 0,
+    } as Feed];
+    plugin.removeSubscription.mockImplementation(async (sourceId: string) => {
+      settings.feeds = settings.feeds.filter(
+        (candidate) => (candidate.feedId ?? candidate.url) !== sourceId,
+      );
+      return true;
+    });
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.deleteFolderAndSubscriptions("Tech"))
+      .resolves.toBe(true);
+
+    expect(settings.folders.map((folder) => folder.name)).not.toContain("Tech");
+    expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
   });
 
   it("routes all-feed read changes through the status transaction batch", async () => {

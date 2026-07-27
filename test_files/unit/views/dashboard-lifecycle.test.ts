@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 import { App } from "obsidian";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import {
@@ -124,8 +124,13 @@ interface DashViewTestAPI {
     foldersToExpand: string[],
   ): void;
   handleDeleteFeed(feed: Feed): Promise<void>;
-  removeSubscription: ReturnType<typeof vi.fn>;
-  handleDeleteFolder(folder: string): void;
+  removeSubscription: Mock<
+    (
+      sourceId: string,
+      options: { purgeCollection: false },
+    ) => Promise<boolean>
+  >;
+  handleDeleteFolder(folder: string): Promise<void>;
   syncCurrentFeedReference(): void;
   getAllDescendantFolders(folderPath: string): string[];
   syncDashboardMultiFiltersFromSettings(): void;
@@ -666,9 +671,13 @@ describe("Dashboard lifecycle", () => {
         { name: "News", subfolders: [], pinned: false },
       ];
       const view = await makeView(settings);
-      view.handleDeleteFolder("Tech");
+      await view.handleDeleteFolder("Tech");
       expect(settings.folders.map((f) => f.name)).not.toContain("Tech");
       expect(settings.feeds.some((f) => f.folder === "Tech")).toBe(false);
+      expect(view.removeSubscription).toHaveBeenCalledWith(
+        "https://a.com/feed",
+        { purgeCollection: false },
+      );
     });
 
     it("clears currentFolder if the deleted folder was active", async () => {
@@ -677,8 +686,39 @@ describe("Dashboard lifecycle", () => {
       settings.folders = [{ name: "Science", subfolders: [], pinned: false }];
       const view = await makeView(settings);
       view.currentFolder = "Science";
-      view.handleDeleteFolder("Science");
+      await view.handleDeleteFolder("Science");
       expect(view.currentFolder).toBeNull();
+    });
+
+    it("keeps the folder on partial removal and excludes X topics", async () => {
+      const settings = cloneSettings();
+      const first = makeFeed("https://a.com/feed", "Tech");
+      const failed = makeFeed("https://b.com/feed", "Tech");
+      const topic = {
+        ...makeFeed("tikhub://x-topic/ai", "Tech"),
+        feedId: "topic",
+        sourceKind: "x-topic",
+        sourceConfig: { kind: "x-topic", id: "topic", name: "AI" },
+      } as Feed;
+      settings.feeds = [first, failed, topic];
+      settings.folders = [{ name: "Tech", subfolders: [], pinned: false }];
+      const view = await makeView(settings);
+      view.removeSubscription.mockImplementation(async (sourceId: string) => {
+        if (sourceId === failed.url) return false;
+        settings.feeds = settings.feeds.filter(
+          (feed) => (feed.feedId ?? feed.url) !== sourceId,
+        );
+        return true;
+      });
+
+      await view.handleDeleteFolder("Tech");
+
+      expect(view.removeSubscription.mock.calls).toEqual([
+        [first.url, { purgeCollection: false }],
+        [failed.url, { purgeCollection: false }],
+      ]);
+      expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
+      expect(settings.feeds).toContain(topic);
     });
   });
 

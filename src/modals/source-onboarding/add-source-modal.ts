@@ -37,6 +37,7 @@ export interface AddSourceModalOptions {
   ) => Promise<YouTubeChannelVerification>;
   verifyX: (input: string, signal: AbortSignal) => Promise<VerifiedXProfile>;
   onSubscribe: (request: VerifiedSubscriptionRequest) => Promise<boolean | void>;
+  onSubscribed?: () => void;
   onOpenSettings: () => void;
   xRequestCaps?: Readonly<{ run: number; day: number }>;
   defaultAutoDeleteDuration?: number;
@@ -663,6 +664,13 @@ export class AddSourceModal extends Modal {
     try {
       const result = await this.options.onSubscribe(request);
       if (result !== false) {
+        try {
+          this.options.onSubscribed?.();
+        } catch {
+          console.error(
+            "[RSS Dashboard] Subscription owner refresh callback failed.",
+          );
+        }
         this.close();
       } else {
         this.showSubscribeFailure();

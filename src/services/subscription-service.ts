@@ -488,6 +488,14 @@ export class SubscriptionService {
   async resumeInitialImport(feedId: string): Promise<Feed> {
     return await this.enqueueMutation(async () => {
       const feed = this.dependencies.settings.feeds[this.feedIndex(feedId)];
+      const status = feed.initialImportProgress?.status;
+      const mayResume = status === "stopped" || status === "paused-limit" || (
+        (feed.sourceKind === undefined || feed.sourceKind === "feed") &&
+        status === "failed"
+      );
+      if (!mayResume) {
+        throw new SubscriptionServiceError("invalid-subscription-request");
+      }
       if (feed.sourceKind === undefined || feed.sourceKind === "feed") {
         return await this.resumeFeedImport(feedId, feed);
       }
