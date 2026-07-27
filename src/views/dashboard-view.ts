@@ -857,7 +857,9 @@ export class RssDashboardView extends ItemView {
           onEditFeed: this.handleEditFeed.bind(this),
           onDeleteFeed: (feed) => { void this.handleDeleteFeed(feed); },
           onDeleteFolder: (folder) => {
-            void this.handleDeleteFolder(folder);
+            void this.handleDeleteFolder(folder).catch(() => {
+              void this.render();
+            });
           },
           onRefreshFeeds: this.handleRefreshFeeds.bind(this),
           onUpdateFeed: this.handleUpdateFeed.bind(this),
@@ -3095,11 +3097,18 @@ export class RssDashboardView extends ItemView {
         subfolders: removeFolder(entry.subfolders, depth + 1),
       }];
     });
+    const originalFolders = this.plugin.settings.folders;
     this.plugin.settings.folders = removeFolder(
-      this.plugin.settings.folders,
+      structuredClone(originalFolders),
       0,
     );
-    await this.plugin.saveSettings();
+    try {
+      await this.plugin.saveSettings();
+    } catch {
+      this.plugin.settings.folders = originalFolders;
+      void this.render();
+      return;
+    }
 
     if (this.currentFolder && folderPaths.has(this.currentFolder)) {
       this.currentFolder = null;
@@ -3185,7 +3194,9 @@ export class RssDashboardView extends ItemView {
         onEditFeed: this.handleEditFeed.bind(this),
         onDeleteFeed: (feed) => { void this.handleDeleteFeed(feed); },
         onDeleteFolder: (folder) => {
-          void this.handleDeleteFolder(folder);
+          void this.handleDeleteFolder(folder).catch(() => {
+            void this.render();
+          });
         },
         onRefreshFeeds: this.handleRefreshFeeds.bind(this),
         onUpdateFeed: this.handleUpdateFeed.bind(this),

@@ -31,8 +31,11 @@ import { applyFeedSortOrder } from "../utils/sidebar-sort-utils";
 import { applyFolderSortOrder } from "../utils/sidebar-folder-sort-utils";
 import { MediaService } from "../services/media-service";
 import { MastodonService } from "../services/mastodon-service";
+import { normalizeXTopicSourceConfig } from "../sources/source-config";
 import type {
   FeedSubscriptionOptionsUpdateRequest,
+  SidebarOrderingMutationRequest,
+  SidebarOrderingMutationResult,
   XSubscriptionOptionsUpdateRequest,
 } from "../services/subscription-service";
 import { createTranslator, type Locale } from "../i18n";
@@ -43,9 +46,6 @@ import {
   getFaviconUrl,
 } from "../utils/favicon-utils";
 import {
-  moveFeedAndInsert,
-  moveFeedToFolderAppend,
-  moveFolder,
   setFolderFeedSortCustom,
   setFolderSortCustom,
   type OrderingFailureReason,
@@ -125,6 +125,29 @@ type SidebarRowDescriptor = {
   folderName?: string;
   expandable?: boolean;
 };
+
+function remapFolderPath(path: string, fromBase: string, toBase: string): string {
+  if (path === fromBase) return toBase;
+  return path.startsWith(`${fromBase}/`)
+    ? `${toBase}${path.substring(fromBase.length)}`
+    : path;
+}
+
+function isFolderPathWithin(path: string, base: string): boolean {
+  return path === base || path.startsWith(`${base}/`);
+}
+
+function findFolderInGraph(folders: Folder[], path: string): Folder | null {
+  const parts = path.split("/").filter(Boolean);
+  let current: Folder | undefined;
+  let level = folders;
+  for (const part of parts) {
+    current = level.find((folder) => folder.name === part);
+    if (!current) return null;
+    level = current.subfolders ?? [];
+  }
+  return current ?? null;
+}
 
 // FolderNameModal — Uses Obsidian's Modal class to prevent mobile focus bugs.
 // ⚠️ DO NOT move the input to a raw document.body div or add event.stopPropagation()
@@ -339,6 +362,28 @@ export class Sidebar {
       ? names.target ?? names.dragged
       : names.dragged;
     new Notice(this.t(key, { name }));
+  }
+
+  private async applySidebarOrdering(
+    request: SidebarOrderingMutationRequest,
+    kind: "folder" | "feed",
+    names: { dragged: string; target?: string },
+    onSuccess?: (result: SidebarOrderingMutationResult) => void,
+  ): Promise<boolean> {
+    let result: SidebarOrderingMutationResult;
+    try {
+      result = await this.plugin.applySidebarOrdering(request);
+    } catch {
+      result = { ok: false, reason: "unknown" };
+    }
+    if (!result.ok) {
+      this.showOrderingFailure(kind, result.reason, names);
+      return false;
+    }
+    this.clearFolderPathCache();
+    onSuccess?.(result);
+    this.render();
+    return true;
   }
 
   private renderFallbackFeedIcon(feedIcon: HTMLElement): void {
@@ -637,48 +682,28 @@ export class Sidebar {
       if (e.dataTransfer) {
         const draggedFolderPath = e.dataTransfer.getData("folder-path");
         if (draggedFolderPath) {
-          const result = moveFolder(this.settings, {
+          void this.applySidebarOrdering({
+            kind: "folder-move",
             draggedPath: draggedFolderPath,
             targetPath: "",
             placement: "rootAppend",
-          });
-
-          if (!result.ok) {
-            this.showOrderingFailure("folder", result.reason, {
-              dragged: draggedFolderPath.split("/").pop() ?? draggedFolderPath,
-            });
-            return;
-          }
-
-          this.clearFolderPathCache();
-
-          const remapPathPrefix = (
-            path: string,
-            fromBase: string,
-            toBase: string,
-          ) => {
-            if (path === fromBase) return toBase;
-            if (path.startsWith(`${fromBase}/`)) {
-              return `${toBase}${path.substring(fromBase.length)}`;
+          }, "folder", {
+            dragged: draggedFolderPath.split("/").pop() ?? draggedFolderPath,
+          }, (result) => {
+            if (!("newPath" in result)) return;
+            const currentFolder = this.options.currentFolder;
+            if (
+              currentFolder &&
+              (currentFolder === draggedFolderPath ||
+                currentFolder.startsWith(`${draggedFolderPath}/`))
+            ) {
+              this.callbacks.onFolderClick(remapFolderPath(
+                currentFolder,
+                draggedFolderPath,
+                result.newPath,
+              ));
             }
-            return path;
-          };
-
-          const currentFolder = this.options.currentFolder;
-          if (
-            currentFolder &&
-            (currentFolder === draggedFolderPath ||
-              currentFolder.startsWith(`${draggedFolderPath}/`))
-          ) {
-            const nextFolder = remapPathPrefix(
-              currentFolder,
-              draggedFolderPath,
-              result.newPath,
-            );
-            this.callbacks.onFolderClick(nextFolder);
-          }
-
-          void this.plugin.saveSettings().then(() => this.render());
+          });
           return;
         }
 
@@ -687,21 +712,11 @@ export class Sidebar {
           const feed = this.settings.feeds.find((f) => f.url === feedUrl);
           if (!feed || !feed.folder) return;
 
-          const oldFolderPath = feed.folder;
-          const result = moveFeedToFolderAppend(this.settings, {
+          void this.applySidebarOrdering({
+            kind: "feed-folder-append",
             draggedUrl: feedUrl,
             destinationFolderPath: "",
-          });
-          if (!result.ok) {
-            this.showOrderingFailure("feed", result.reason, {
-              dragged: feed.title || feedUrl,
-            });
-            return;
-          }
-
-          const oldFolder = this.findFolderByPath(oldFolderPath);
-          if (oldFolder) oldFolder.modifiedAt = Date.now();
-          void this.plugin.saveSettings().then(() => this.render());
+          }, "feed", { dragged: feed.title || feedUrl });
         }
       }
     });
@@ -1250,49 +1265,29 @@ export class Sidebar {
       const draggedFolderPath = e.dataTransfer.getData("folder-path");
       if (draggedFolderPath) {
         const placement = getFolderDropPlacement(e.clientY);
-        const result = moveFolder(this.settings, {
+        void this.applySidebarOrdering({
+          kind: "folder-move",
           draggedPath: draggedFolderPath,
           targetPath: fullPath,
           placement,
-        });
-
-        if (!result.ok) {
-          this.showOrderingFailure("folder", result.reason, {
+        }, "folder", {
             dragged: draggedFolderPath.split("/").pop() ?? draggedFolderPath,
             target: fullPath.split("/").pop() ?? fullPath,
-          });
-          return;
-        }
-
-        this.clearFolderPathCache();
-
-        const remapPathPrefix = (
-          path: string,
-          fromBase: string,
-          toBase: string,
-        ) => {
-          if (path === fromBase) return toBase;
-          if (path.startsWith(`${fromBase}/`)) {
-            return `${toBase}${path.substring(fromBase.length)}`;
+        }, (result) => {
+          if (!("newPath" in result)) return;
+          const currentFolder = this.options.currentFolder;
+          if (
+            currentFolder &&
+            (currentFolder === draggedFolderPath ||
+              currentFolder.startsWith(`${draggedFolderPath}/`))
+          ) {
+            this.callbacks.onFolderClick(remapFolderPath(
+              currentFolder,
+              draggedFolderPath,
+              result.newPath,
+            ));
           }
-          return path;
-        };
-
-        const currentFolder = this.options.currentFolder;
-        if (
-          currentFolder &&
-          (currentFolder === draggedFolderPath ||
-            currentFolder.startsWith(`${draggedFolderPath}/`))
-        ) {
-          const nextFolder = remapPathPrefix(
-            currentFolder,
-            draggedFolderPath,
-            result.newPath,
-          );
-          this.callbacks.onFolderClick(nextFolder);
-        }
-
-        void this.plugin.saveSettings().then(() => this.render());
+        });
         return;
       }
 
@@ -1302,27 +1297,14 @@ export class Sidebar {
       const feed = this.settings.feeds.find((f) => f.url === feedUrl);
       if (!feed || (feed.folder || "") === fullPath) return;
 
-      const oldFolderPath = feed.folder || "";
-      const op = moveFeedToFolderAppend(this.settings, {
+      void this.applySidebarOrdering({
+        kind: "feed-folder-append",
         draggedUrl: feedUrl,
         destinationFolderPath: fullPath,
-      });
-      if (!op.ok) {
-        this.showOrderingFailure("feed", op.reason, {
+      }, "feed", {
           dragged: feed.title || feedUrl,
           target: fullPath.split("/").pop() ?? fullPath,
-        });
-        return;
-      }
-
-      if (oldFolderPath) {
-        const oldFolder = this.findFolderByPath(oldFolderPath);
-        if (oldFolder) oldFolder.modifiedAt = Date.now();
-      }
-      const newFolder = this.findFolderByPath(fullPath);
-      if (newFolder) newFolder.modifiedAt = Date.now();
-
-      void this.plugin.saveSettings().then(() => this.render());
+      });
     });
 
     // Create the container for both subfolders and feeds
@@ -1352,27 +1334,14 @@ export class Sidebar {
           const feed = this.settings.feeds.find((f) => f.url === feedUrl);
           if (!feed || (feed.folder || "") === fullPath) return;
 
-          const oldFolderPath = feed.folder || "";
-          const result = moveFeedToFolderAppend(this.settings, {
+          void this.applySidebarOrdering({
+            kind: "feed-folder-append",
             draggedUrl: feedUrl,
             destinationFolderPath: fullPath,
-          });
-          if (!result.ok) {
-            this.showOrderingFailure("feed", result.reason, {
+          }, "feed", {
               dragged: feed.title || feedUrl,
               target: fullPath.split("/").pop() ?? fullPath,
-            });
-            return;
-          }
-
-          if (oldFolderPath) {
-            const oldFolder = this.findFolderByPath(oldFolderPath);
-            if (oldFolder) oldFolder.modifiedAt = Date.now();
-          }
-          const newFolder = this.findFolderByPath(fullPath);
-          if (newFolder) newFolder.modifiedAt = Date.now();
-
-          void this.plugin.saveSettings().then(() => this.render());
+          });
         }
       }
     });
@@ -1672,37 +1641,20 @@ export class Sidebar {
       clearFeedDropClasses();
 
       const dragged = this.settings.feeds.find((f) => f.url === draggedUrl);
-      const oldFolderPath = dragged?.folder ?? "";
-      const destinationFolderPath = feed.folder ?? "";
 
       const rect = feedEl.getBoundingClientRect();
       const before = e.clientY < rect.top + rect.height / 2;
       const placement = before ? "before" : "after";
 
-      const result = moveFeedAndInsert(this.settings, {
+      void this.applySidebarOrdering({
+        kind: "feed-insert",
         draggedUrl,
         targetUrl: feed.url,
         placement,
-      });
-
-      if (!result.ok) {
-        this.showOrderingFailure("feed", result.reason, {
+      }, "feed", {
           dragged: dragged?.title || draggedUrl,
           target: feed.title || feed.url,
-        });
-        return;
-      }
-
-      if (oldFolderPath && oldFolderPath !== destinationFolderPath) {
-        const oldFolder = this.findFolderByPath(oldFolderPath);
-        if (oldFolder) oldFolder.modifiedAt = Date.now();
-      }
-      if (destinationFolderPath && oldFolderPath !== destinationFolderPath) {
-        const newFolder = this.findFolderByPath(destinationFolderPath);
-        if (newFolder) newFolder.modifiedAt = Date.now();
-      }
-
-      void this.plugin.saveSettings().then(() => this.render());
+      });
     });
   }
 
@@ -2034,41 +1986,116 @@ export class Sidebar {
     return current || null;
   }
 
-  private async renameFolderByPath(oldPath: string, newName: string) {
+  private async renameFolderByPath(
+    oldPath: string,
+    newName: string,
+  ): Promise<boolean> {
     const parts = oldPath.split("/");
     const parentPath = parts.slice(0, -1).join("/");
     const folder = this.findFolderByPath(oldPath);
-    if (folder) {
-      const newPath = parentPath ? `${parentPath}/${newName}` : newName;
-      const moves = this.settings.feeds
-        .filter((feed) => feed.sourceKind !== "x-topic" && (
-          feed.folder === oldPath || feed.folder.startsWith(`${oldPath}/`)
-        ))
-        .map((feed) => ({
-          feed,
-          folder: feed.folder === oldPath
-            ? newPath
-            : feed.folder.replace(oldPath, newPath),
-        }));
-      for (const move of moves) {
-        if (!await this.updateSubscriptionOptions(move.feed, {
-          folder: move.folder,
-        })) {
-          return;
-        }
-      }
+    if (!folder) return false;
 
-      folder.name = newName;
-      folder.modifiedAt = Date.now();
-      if (parentPath) {
-        const parent = this.findFolderByPath(parentPath);
-        if (parent) parent.modifiedAt = Date.now();
+    const newPath = parentPath ? `${parentPath}/${newName}` : newName;
+    const moves = this.settings.feeds
+      .filter((feed) =>
+        feed.sourceKind !== "x-topic" &&
+        !!feed.folder &&
+        isFolderPathWithin(feed.folder, oldPath)
+      )
+      .map((feed) => ({
+        feed,
+        oldFolder: feed.folder,
+        newFolder: remapFolderPath(feed.folder, oldPath, newPath),
+      }));
+    const completed: typeof moves = [];
+    const compensate = async (): Promise<boolean> => {
+      let complete = true;
+      for (const move of [...completed].reverse()) {
+        const restored = await this.updateSubscriptionOptions(
+          move.feed,
+          { folder: move.oldFolder },
+          false,
+        );
+        complete = restored && complete;
       }
+      return complete;
+    };
 
+    for (const move of moves) {
+      if (!await this.updateSubscriptionOptions(
+        move.feed,
+        { folder: move.newFolder },
+        false,
+      )) {
+        await compensate();
+        new Notice(this.t("modal.feedManager.actionFailed"));
+        this.render();
+        return false;
+      }
+      completed.push(move);
+    }
+
+    const feedsAfterSubscriptionMoves = this.settings.feeds;
+    const originalFolders = this.settings.folders;
+    const originalCollapsedFolders = this.settings.collapsedFolders;
+    const originalSortOrders = this.settings.folderFeedSortOrders;
+    const renamedFolders = structuredClone(originalFolders);
+    const renamedFolder = findFolderInGraph(renamedFolders, oldPath);
+    if (!renamedFolder) {
+      await compensate();
+      return false;
+    }
+    renamedFolder.name = newName;
+    renamedFolder.modifiedAt = Date.now();
+    if (parentPath) {
+      const parent = findFolderInGraph(renamedFolders, parentPath);
+      if (parent) parent.modifiedAt = Date.now();
+    }
+
+    const renamedFeeds = feedsAfterSubscriptionMoves.map((feed) => {
+      if (
+        feed.sourceKind !== "x-topic" ||
+        !feed.folder ||
+        !isFolderPathWithin(feed.folder, oldPath)
+      ) {
+        return feed;
+      }
+      const nextFolder = remapFolderPath(feed.folder, oldPath, newPath);
+      const config = normalizeXTopicSourceConfig(feed.sourceConfig);
+      return {
+        ...feed,
+        folder: nextFolder,
+        ...(config ? { sourceConfig: { ...config, folder: nextFolder } } : {}),
+      };
+    });
+    const renamedSortOrders = originalSortOrders === undefined
+      ? undefined
+      : Object.fromEntries(Object.entries(originalSortOrders).map(
+        ([path, order]) => [remapFolderPath(path, oldPath, newPath), order],
+      ));
+
+    this.settings.feeds = renamedFeeds;
+    this.settings.folders = renamedFolders;
+    this.settings.collapsedFolders = (originalCollapsedFolders ?? []).map(
+      (path) => remapFolderPath(path, oldPath, newPath),
+    );
+    this.settings.folderFeedSortOrders = renamedSortOrders;
+    try {
       await this.plugin.saveSettings();
+    } catch {
+      this.settings.feeds = feedsAfterSubscriptionMoves;
+      this.settings.folders = originalFolders;
+      this.settings.collapsedFolders = originalCollapsedFolders;
+      this.settings.folderFeedSortOrders = originalSortOrders;
+      await compensate();
       this.clearFolderPathCache();
       this.render();
+      new Notice(this.t("modal.feedManager.actionFailed"));
+      return false;
     }
+    this.clearFolderPathCache();
+    this.render();
+    return true;
   }
 
   public focusSidebar(): void {
@@ -2434,9 +2461,8 @@ export class Sidebar {
     }).open();
   }
 
-  private removeFolderByPath(path: string) {
+  private folderGraphWithoutPath(path: string): Folder[] {
     const parts = path.split("/");
-    const parentPath = parts.slice(0, -1).join("/");
     function removeRecursive(folders: Folder[], depth: number): Folder[] {
       return folders.filter((folder: Folder) => {
         if (folder.name === parts[depth]) {
@@ -2451,13 +2477,7 @@ export class Sidebar {
         }
       });
     }
-    this.settings.folders = removeRecursive(this.settings.folders, 0);
-    if (parentPath) {
-      const parent = this.findFolderByPath(parentPath);
-      if (parent) parent.modifiedAt = Date.now();
-    }
-    this.clearFolderPathCache();
-    this.render();
+    return removeRecursive(structuredClone(this.settings.folders), 0);
   }
 
   private async deleteFolderAndSubscriptions(
@@ -2482,13 +2502,19 @@ export class Sidebar {
         return false;
       }
     }
-    this.removeFolderByPath(folderPath);
+    const originalFolders = this.settings.folders;
+    this.settings.folders = this.folderGraphWithoutPath(folderPath);
     try {
       await this.plugin.saveSettings();
     } catch {
+      this.settings.folders = originalFolders;
+      this.clearFolderPathCache();
+      this.render();
       new Notice(this.t("modal.feedManager.actionFailed"));
       return false;
     }
+    this.clearFolderPathCache();
+    this.render();
     return true;
   }
 
@@ -3758,6 +3784,7 @@ export class Sidebar {
       folder?: string;
       mediaType?: "article" | "video" | "podcast";
     },
+    renderOnSuccess = true,
   ): Promise<boolean> {
     const sourceId = feed.feedId ?? feed.url;
     let request:
@@ -3777,7 +3804,7 @@ export class Sidebar {
     } catch {
       saved = false;
     }
-    if (saved) this.render();
+    if (saved && renderOnSuccess) this.render();
     return saved;
   }
 

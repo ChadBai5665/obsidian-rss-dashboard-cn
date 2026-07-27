@@ -95,6 +95,8 @@ import {
   isSubscriptionRemovalPending,
   SubscriptionService,
   type RemoveSubscriptionOptions,
+  type SidebarOrderingMutationRequest,
+  type SidebarOrderingMutationResult,
   type SubscriptionUpdateRequest,
   type VerifiedSubscriptionRequest,
 } from "./src/services/subscription-service";
@@ -3837,13 +3839,13 @@ export default class RssDashboardPlugin extends Plugin {
     options?: { showNotice?: boolean },
   ) {
     const showNotice = options?.showNotice !== false;
+    let mediaType: "article" | "video" | "podcast" = "article";
+    if (folder === this.settings.media.defaultYouTubeFolder) {
+      mediaType = "video";
+    } else if (folder === this.settings.media.defaultPodcastFolder) {
+      mediaType = "podcast";
+    }
     try {
-      let mediaType: "article" | "video" | "podcast" = "article";
-      if (folder === this.settings.media.defaultYouTubeFolder) {
-        mediaType = "video";
-      } else if (folder === this.settings.media.defaultPodcastFolder) {
-        mediaType = "podcast";
-      }
       await this.getSubscriptionService().add({
         kind: "rss-website",
         verification: {
@@ -3867,11 +3869,6 @@ export default class RssDashboardPlugin extends Plugin {
         excludeFromRefresh,
         mediaType,
       });
-
-      const view = await this.getActiveDashboardView();
-      if (view) void view.refresh();
-      if (showNotice) this.notify("plugin.feedAdded", { feed: title });
-      return true;
     } catch {
       if (showNotice) {
         console.error("[RSS Dashboard] Feed add failed.");
@@ -3879,6 +3876,24 @@ export default class RssDashboardPlugin extends Plugin {
       }
       return false;
     }
+    try {
+      const view = await this.getActiveDashboardView();
+      if (view) await Promise.resolve(view.refresh());
+    } catch {
+      console.error(
+        "[RSS Dashboard] Feed saved; dashboard refresh deferred.",
+      );
+    }
+    if (showNotice) {
+      try {
+        this.notify("plugin.feedAdded", { feed: title });
+      } catch {
+        console.error(
+          "[RSS Dashboard] Feed saved; success notice unavailable.",
+        );
+      }
+    }
+    return true;
   }
 
   async addVerifiedSubscription(
@@ -3919,6 +3934,12 @@ export default class RssDashboardPlugin extends Plugin {
       "Subscription update",
     );
     return true;
+  }
+
+  async applySidebarOrdering(
+    request: SidebarOrderingMutationRequest,
+  ): Promise<SidebarOrderingMutationResult> {
+    return await this.getSubscriptionService().applySidebarOrdering(request);
   }
 
   async setSubscriptionPaused(feedId: string, paused: boolean): Promise<boolean> {

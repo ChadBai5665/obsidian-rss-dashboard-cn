@@ -11,6 +11,7 @@ import {
   createXAccountSourceConfig,
   normalizeXAccountSourceConfig,
   normalizeXHandle,
+  normalizeXTopicSourceConfig,
 } from "../sources/source-config";
 import type { XProfile } from "../sources/tikhub/x-profile";
 import {
@@ -25,7 +26,18 @@ import type {
   Feed,
   FeedItem,
   FeedKeywordRulesSettings,
+  Folder,
+  RssDashboardSettings,
 } from "../types/types";
+import {
+  moveFeedAndInsert,
+  moveFeedToFolderAppend,
+  moveFolder,
+  type FeedInsertPlacement,
+  type FolderDropPlacement,
+  type FolderOperationResult,
+  type OperationResult,
+} from "./sidebar-ordering-controller";
 
 export interface SubscriptionPreferences {
   displayName?: string;
@@ -155,7 +167,34 @@ export type RemoveSubscriptionOptions =
 
 interface SubscriptionSettingsPort {
   feeds: Feed[];
+  folders: Folder[];
+  collapsedFolders?: string[];
+  folderFeedSortOrders?: RssDashboardSettings["folderFeedSortOrders"];
+  folderSortOrder?: RssDashboardSettings["folderSortOrder"];
 }
+
+export type SidebarOrderingMutationRequest =
+  | {
+      kind: "feed-insert";
+      draggedUrl: string;
+      targetUrl: string;
+      placement: FeedInsertPlacement;
+    }
+  | {
+      kind: "feed-folder-append";
+      draggedUrl: string;
+      destinationFolderPath: string;
+    }
+  | {
+      kind: "folder-move";
+      draggedPath: string;
+      targetPath: string;
+      placement: FolderDropPlacement;
+    };
+
+export type SidebarOrderingMutationResult =
+  | OperationResult
+  | FolderOperationResult;
 
 interface CollectionServicePort {
   collectFeedRefresh(input: {
@@ -476,6 +515,24 @@ export class SubscriptionService {
         subscriptionStatus: paused ? "paused" : "active",
       }))
     );
+  }
+
+  async applySidebarOrdering(
+    request: SidebarOrderingMutationRequest,
+  ): Promise<SidebarOrderingMutationResult> {
+    return await this.enqueueMutation(async () => {
+      const settings = this.dependencies.settings as RssDashboardSettings;
+      const result = request.kind === "feed-insert"
+        ? moveFeedAndInsert(settings, request)
+        : request.kind === "feed-folder-append"
+          ? moveFeedToFolderAppend(settings, request)
+          : moveFolder(settings, request);
+      if (!result.ok) return result;
+
+      synchronizeSourceConfigFolders(result.settings.feeds);
+      await this.commitSidebarOrdering(result.settings);
+      return result;
+    });
   }
 
   async stopInitialImport(feedId: string): Promise<Feed> {
@@ -903,6 +960,34 @@ export class SubscriptionService {
     }
   }
 
+  private async commitSidebarOrdering(
+    candidate: RssDashboardSettings,
+  ): Promise<void> {
+    const settings = this.dependencies.settings;
+    const original = {
+      feeds: settings.feeds,
+      folders: settings.folders,
+      collapsedFolders: settings.collapsedFolders,
+      folderFeedSortOrders: settings.folderFeedSortOrders,
+      folderSortOrder: settings.folderSortOrder,
+    };
+    settings.feeds = candidate.feeds;
+    settings.folders = candidate.folders;
+    settings.collapsedFolders = candidate.collapsedFolders;
+    settings.folderFeedSortOrders = candidate.folderFeedSortOrders;
+    settings.folderSortOrder = candidate.folderSortOrder;
+    try {
+      await this.dependencies.saveSettings();
+    } catch (error) {
+      settings.feeds = original.feeds;
+      settings.folders = original.folders;
+      settings.collapsedFolders = original.collapsedFolders;
+      settings.folderFeedSortOrders = original.folderFeedSortOrders;
+      settings.folderSortOrder = original.folderSortOrder;
+      throw error;
+    }
+  }
+
   private reserveXVerification(
     request: VerifiedXSubscriptionRequest,
   ): XProfileVerificationReservation {
@@ -944,6 +1029,24 @@ export class SubscriptionService {
     } finally {
       if (lifecycleMutationQueues.get(owner) === settled) {
         lifecycleMutationQueues.delete(owner);
+      }
+    }
+  }
+}
+
+function synchronizeSourceConfigFolders(feeds: Feed[]): void {
+  for (const feed of feeds) {
+    if (feed.sourceKind === "x-account") {
+      const config = normalizeXAccountSourceConfig(feed.sourceConfig);
+      if (config) {
+        feed.sourceConfig = { ...config, folder: feed.folder ?? "" };
+      }
+      continue;
+    }
+    if (feed.sourceKind === "x-topic") {
+      const config = normalizeXTopicSourceConfig(feed.sourceConfig);
+      if (config) {
+        feed.sourceConfig = { ...config, folder: feed.folder ?? "" };
       }
     }
   }

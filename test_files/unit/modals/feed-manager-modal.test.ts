@@ -350,6 +350,70 @@ describe("FeedManagerModal", () => {
     expect(plugin.resumeSubscriptionInitialImport).toHaveBeenCalledWith("stopped");
   });
 
+  it("offers failed history resume for feed subscriptions but never for failed X accounts", async () => {
+    const failedProgress = {
+      status: "failed" as const,
+      pagesFetched: 1,
+      itemsImported: 4,
+    };
+    const plugin = makePlugin([
+      feed({
+        feedId: "rss-failed",
+        title: "RSS failed",
+        url: "https://example.com/feed.xml",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        initialImportProgress: failedProgress,
+      }),
+      feed({
+        feedId: "youtube-failed",
+        title: "YouTube failed",
+        url: "https://www.youtube.com/feeds/videos.xml?channel_id=UC123",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        initialImportProgress: failedProgress,
+      }),
+      feed({
+        feedId: "legacy-failed",
+        title: "Legacy failed",
+        url: "https://legacy.example/feed.xml",
+        initialImportProgress: failedProgress,
+      }),
+      feed({
+        feedId: "x-failed",
+        title: "X failed",
+        url: "tikhub://x-account/openai",
+        sourceKind: "x-account",
+        sourceConfig: createXAccountSourceConfig({
+          id: "x-failed",
+          handle: "openai",
+        }),
+        initialImportProgress: failedProgress,
+      }),
+    ]);
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+    const row = (id: string) => modal.contentEl.querySelector<HTMLElement>(
+      `.rss-subscription-row[data-source-id="${id}"]`,
+    )!;
+
+    expect(button(row("rss-failed"), "继续历史导入")).toBeTruthy();
+    expect(button(row("youtube-failed"), "继续历史导入")).toBeTruthy();
+    expect(button(row("legacy-failed"), "继续历史导入")).toBeTruthy();
+    expect(Array.from(row("x-failed").querySelectorAll("button")).some(
+      (candidate) => candidate.textContent === "继续历史导入",
+    )).toBe(false);
+
+    button(row("rss-failed"), "继续历史导入").click();
+    await flushPromises();
+    expect(plugin.resumeSubscriptionInitialImport).toHaveBeenCalledWith(
+      "rss-failed",
+    );
+  });
+
   it("disables manager actions synchronously and ignores repeated refresh clicks", async () => {
     const pending = deferred<void>();
     const plugin = makePlugin([

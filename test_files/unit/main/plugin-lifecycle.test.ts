@@ -1932,6 +1932,65 @@ describe("addFeed()", () => {
     expect(plugin.settings.feeds).toHaveLength(2);
   });
 
+  it("reports durable add success when the follow-up dashboard refresh fails", async () => {
+    const newUrl = "https://example.com/durable-feed.xml";
+    mockParseFeed.mockResolvedValue({
+      title: "Durable Feed",
+      url: newUrl,
+      folder: "Research",
+      items: [],
+      lastUpdated: Date.now(),
+      mediaType: "article",
+    });
+    plugin.getActiveDashboardView = vi.fn().mockRejectedValue(
+      new Error("private UI failure"),
+    );
+    const notify = vi.spyOn(
+      plugin as unknown as { notify(key: string, params?: unknown): void },
+      "notify",
+    );
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await plugin.addFeed("Durable Feed", newUrl, "Research");
+
+    expect(result).toBe(true);
+    expect(plugin.settings.feeds.filter((feed) => feed.url === newUrl)).toHaveLength(1);
+    expect(notify.mock.calls.filter(([key]) => key === "plugin.feedAdded"))
+      .toHaveLength(1);
+    expect(notify.mock.calls.some(([key]) => key === "plugin.feedAddFailed"))
+      .toBe(false);
+    expect(consoleError.mock.calls.flat().join(" ")).not.toContain(
+      "private UI failure",
+    );
+  });
+
+  it("contains a rejected dashboard refresh after a durable add", async () => {
+    const newUrl = "https://example.com/rejected-refresh.xml";
+    mockParseFeed.mockResolvedValue({
+      title: "Durable Feed",
+      url: newUrl,
+      folder: "Research",
+      items: [],
+      lastUpdated: Date.now(),
+      mediaType: "article",
+    });
+    const refresh = vi.fn().mockRejectedValue(new Error("private refresh error"));
+    plugin.getActiveDashboardView = vi.fn().mockResolvedValue({ refresh });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(plugin.addFeed("Durable Feed", newUrl, "Research"))
+      .resolves.toBe(true);
+    await flushPromises();
+
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[RSS Dashboard] Feed saved; dashboard refresh deferred.",
+    );
+    expect(consoleError.mock.calls.flat().join(" ")).not.toContain(
+      "private refresh error",
+    );
+  });
+
   it("detects media type based on folder (YouTube)", async () => {
     // Given: Feed in YouTube folder
     const youtubeUrl = "https://youtube.com/feed.xml";

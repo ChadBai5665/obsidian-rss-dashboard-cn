@@ -205,7 +205,12 @@ export class FeedManagerModal extends Modal {
     if (importStatus === "pending" || importStatus === "running") {
       this.actionButton(actions, t("modal.feedManager.stopImport"), async () =>
         await this.plugin.stopSubscriptionInitialImport(sourceId));
-    } else if (importStatus === "stopped" || importStatus === "paused-limit") {
+    } else if (
+      importStatus === "stopped" ||
+      importStatus === "paused-limit" ||
+      (importStatus === "failed" &&
+        (feed.sourceKind === undefined || feed.sourceKind === "feed"))
+    ) {
       this.actionButton(actions, t("modal.feedManager.resumeImport"), async () =>
         await this.plugin.resumeSubscriptionInitialImport(sourceId));
     }

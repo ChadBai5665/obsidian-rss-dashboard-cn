@@ -13,6 +13,10 @@ import {
   XProfileResolver,
   type VerifiedXProfile,
 } from "../../../src/sources/tikhub/x-profile-resolver";
+import {
+  createXAccountSourceConfig,
+  createXTopicSourceConfig,
+} from "../../../src/sources/source-config";
 import type { Feed, FeedItem } from "../../../src/types/types";
 
 const NOW = new Date("2026-07-28T12:00:00.000Z");
@@ -150,7 +154,13 @@ function harness(
   initialFeeds: Feed[] = [],
   options: { abortInitialImport?: (feedId: string) => void } = {},
 ) {
-  const settings = { feeds: initialFeeds };
+  const settings = {
+    feeds: initialFeeds,
+    folders: [] as Array<{ name: string; subfolders: unknown[] }>,
+    collapsedFolders: [] as string[],
+    folderFeedSortOrders: {},
+    folderSortOrder: { by: "name" as const, ascending: true },
+  };
   const snapshots: Feed[][] = [];
   const selectedItems = [
     item("new", "2026-07-28T10:00:00.000Z"),
@@ -1293,6 +1303,162 @@ describe("SubscriptionService", () => {
     });
     expect(String(error)).not.toContain("unsafe save detail");
     expect(String(error)).not.toContain("unsafe rollback detail");
+  });
+
+  it("rolls back every live ordering reference when an ordered feed move cannot save", async () => {
+    const first = existingFeed({
+      feedId: "first",
+      url: "https://example.com/first.xml",
+      folder: "Old",
+    });
+    const target = existingFeed({
+      feedId: "target",
+      url: "https://example.com/target.xml",
+      folder: "New",
+    });
+    const test = harness([first, target]);
+    test.settings.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ];
+    const originalFeeds = test.settings.feeds;
+    const originalFolders = test.settings.folders;
+    const originalSortOrders = test.settings.folderFeedSortOrders;
+    test.saveSettings.mockRejectedValueOnce(new Error("disk full"));
+
+    await expect((test.service as unknown as {
+      applySidebarOrdering(request: {
+        kind: "feed-insert";
+        draggedUrl: string;
+        targetUrl: string;
+        placement: "before";
+      }): Promise<unknown>;
+    }).applySidebarOrdering({
+      kind: "feed-insert",
+      draggedUrl: first.url,
+      targetUrl: target.url,
+      placement: "before",
+    })).rejects.toThrow("disk full");
+
+    expect(test.settings.feeds).toBe(originalFeeds);
+    expect(test.settings.folders).toBe(originalFolders);
+    expect(test.settings.folderFeedSortOrders).toBe(originalSortOrders);
+    expect(first.folder).toBe("Old");
+  });
+
+  it("moves a whole folder with account and topic source configuration kept in sync", async () => {
+    const account = existingFeed({
+      feedId: "account",
+      sourceKind: "x-account",
+      sourceConfig: createXAccountSourceConfig({
+        id: "account",
+        handle: "openai",
+        folder: "Alpha/Child",
+      }),
+      url: "tikhub://x-account/openai",
+      folder: "Alpha/Child",
+    });
+    const topic = existingFeed({
+      feedId: "topic",
+      sourceKind: "x-topic",
+      sourceConfig: createXTopicSourceConfig({
+        id: "topic",
+        name: "AI",
+        folder: "Alpha",
+      }),
+      url: "tikhub://x-topic/topic",
+      folder: "Alpha",
+    });
+    const test = harness([account, topic]);
+    test.settings.folders = [
+      {
+        name: "Alpha",
+        subfolders: [{ name: "Child", subfolders: [] }],
+      },
+      { name: "Beta", subfolders: [] },
+    ];
+
+    await (test.service as unknown as {
+      applySidebarOrdering(request: {
+        kind: "folder-move";
+        draggedPath: string;
+        targetPath: string;
+        placement: "nest";
+      }): Promise<unknown>;
+    }).applySidebarOrdering({
+      kind: "folder-move",
+      draggedPath: "Alpha",
+      targetPath: "Beta",
+      placement: "nest",
+    });
+
+    expect(test.settings.feeds.map((feed) => ({
+      id: feed.feedId,
+      folder: feed.folder,
+      configFolder: "folder" in (feed.sourceConfig ?? {})
+        ? (feed.sourceConfig as { folder: string }).folder
+        : undefined,
+    }))).toEqual([
+      { id: "account", folder: "Beta/Alpha/Child", configFolder: "Beta/Alpha/Child" },
+      { id: "topic", folder: "Beta/Alpha", configFolder: "Beta/Alpha" },
+    ]);
+  });
+
+  it("serializes a queued update behind a failing ordering save without cross-rollback", async () => {
+    const first = existingFeed({
+      feedId: "first",
+      url: "https://example.com/first.xml",
+      folder: "Old",
+    });
+    const target = existingFeed({
+      feedId: "target",
+      url: "https://example.com/target.xml",
+      folder: "New",
+    });
+    const test = harness([first, target]);
+    test.settings.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ];
+    let rejectOrdering!: (reason?: unknown) => void;
+    test.saveSettings.mockImplementationOnce(async () => await new Promise(
+      (_resolve, reject) => { rejectOrdering = reject; },
+    ));
+
+    const ordering = (test.service as unknown as {
+      applySidebarOrdering(request: {
+        kind: "feed-insert";
+        draggedUrl: string;
+        targetUrl: string;
+        placement: "before";
+      }): Promise<unknown>;
+    }).applySidebarOrdering({
+      kind: "feed-insert",
+      draggedUrl: first.url,
+      targetUrl: target.url,
+      placement: "before",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const queuedUpdate = test.service.update("target", {
+      kind: "feed-options",
+      displayName: "Updated after rollback",
+    });
+
+    expect(test.saveSettings).toHaveBeenCalledTimes(1);
+    rejectOrdering(new Error("ordering save failed"));
+    await expect(ordering).rejects.toThrow("ordering save failed");
+    await expect(queuedUpdate).resolves.toMatchObject({
+      feedId: "target",
+      title: "Updated after rollback",
+    });
+
+    expect(test.saveSettings).toHaveBeenCalledTimes(2);
+    expect(test.settings.feeds.map((feed) => feed.feedId)).toEqual([
+      "first",
+      "target",
+    ]);
+    expect(test.settings.feeds[0].folder).toBe("Old");
   });
 
   it("uses stable service error codes", () => {

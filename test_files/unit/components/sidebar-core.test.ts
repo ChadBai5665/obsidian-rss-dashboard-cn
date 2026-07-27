@@ -24,6 +24,7 @@ import {
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import type RssDashboardPlugin from "../../../main";
 import { FeedManagerModal } from "../../../src/modals/feed-manager/feed-manager-modal";
+import { createXTopicSourceConfig } from "../../../src/sources/source-config";
 
 installObsidianDomPolyfills();
 
@@ -44,6 +45,7 @@ interface TestPlugin extends Partial<RssDashboardPlugin> {
   openAddSourceModal: Mock;
   updateSubscription: Mock;
   removeSubscription: Mock;
+  applySidebarOrdering: Mock;
 }
 
 /** Typed interface for Sidebar private member access */
@@ -77,6 +79,7 @@ type TestSidebar = {
     patch: { folder?: string; mediaType?: "article" | "video" | "podcast" },
   ) => Promise<boolean>;
   deleteFolderAndSubscriptions: (folderPath: string) => Promise<boolean>;
+  renameFolderByPath: (oldPath: string, newName: string) => Promise<boolean>;
 };
 
 describe("Sidebar Core", () => {
@@ -142,6 +145,7 @@ describe("Sidebar Core", () => {
       openAddSourceModal: vi.fn(),
       updateSubscription: vi.fn().mockResolvedValue(true),
       removeSubscription: vi.fn().mockResolvedValue(true),
+      applySidebarOrdering: vi.fn().mockResolvedValue({ ok: true }),
     };
   });
 
@@ -331,6 +335,264 @@ describe("Sidebar Core", () => {
 
     expect(settings.folders.map((folder) => folder.name)).not.toContain("Tech");
     expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the folder graph when its final deletion save fails", async () => {
+    const originalFolders = [{ name: "Tech", subfolders: [] }] as Folder[];
+    settings.folders = originalFolders;
+    settings.feeds = [{
+      feedId: "rss-id",
+      title: "RSS",
+      url: "https://example.com/feed.xml",
+      folder: "Tech",
+      items: [],
+      lastUpdated: 0,
+    } as Feed];
+    plugin.removeSubscription.mockImplementation(async (sourceId: string) => {
+      settings.feeds = settings.feeds.filter(
+        (candidate) => (candidate.feedId ?? candidate.url) !== sourceId,
+      );
+      return true;
+    });
+    plugin.saveSettings.mockRejectedValueOnce(new Error("disk full"));
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.deleteFolderAndSubscriptions("Tech"))
+      .resolves.toBe(false);
+
+    expect(settings.folders).toBe(originalFolders);
+    expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
+  });
+
+  it("keeps live feed ordering untouched while a drag transaction is pending", async () => {
+    settings.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ] as Folder[];
+    settings.feeds = [
+      {
+        feedId: "first",
+        title: "First",
+        url: "https://example.com/first.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 0,
+      },
+      {
+        feedId: "target",
+        title: "Target",
+        url: "https://example.com/target.xml",
+        folder: "New",
+        items: [],
+        lastUpdated: 0,
+      },
+    ] as Feed[];
+    let release!: (value: { ok: true }) => void;
+    plugin.applySidebarOrdering.mockImplementation(async () => await new Promise(
+      (resolve) => { release = resolve; },
+    ));
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    );
+    sidebar.render();
+    const before = structuredClone(settings);
+    const target = container.querySelector<HTMLElement>(
+      '[data-feed-url="https://example.com/target.xml"]',
+    )!;
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: {
+        types: ["feed-url"],
+        getData: (kind: string) => kind === "feed-url"
+          ? "https://example.com/first.xml"
+          : "",
+      },
+    });
+
+    target.dispatchEvent(drop);
+
+    expect(settings).toEqual(before);
+    expect(plugin.applySidebarOrdering).toHaveBeenCalledWith({
+      kind: "feed-insert",
+      draggedUrl: "https://example.com/first.xml",
+      targetUrl: "https://example.com/target.xml",
+      placement: "after",
+    });
+    release({ ok: true });
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it("compensates earlier subscription moves when a later folder rename move fails", async () => {
+    settings.folders = [{ name: "Old", subfolders: [] }] as Folder[];
+    settings.feeds = [
+      {
+        feedId: "first",
+        title: "First",
+        url: "https://example.com/first.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 0,
+      },
+      {
+        feedId: "second",
+        title: "Second",
+        url: "https://example.com/second.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 0,
+      },
+    ] as Feed[];
+    plugin.updateSubscription.mockImplementation(async (
+      sourceId: string,
+      request: { folder?: string },
+    ) => {
+      if (sourceId === "second" && request.folder === "New") return false;
+      settings.feeds = settings.feeds.map((feed) =>
+        (feed.feedId ?? feed.url) === sourceId
+          ? { ...feed, folder: request.folder ?? feed.folder }
+          : feed
+      );
+      return true;
+    });
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.renameFolderByPath("Old", "New")).resolves.toBe(false);
+
+    expect(plugin.updateSubscription.mock.calls.map(([id, request]) => [
+      id,
+      request.folder,
+    ])).toEqual([
+      ["first", "New"],
+      ["second", "New"],
+      ["first", "Old"],
+    ]);
+    expect(settings.feeds.map((feed) => feed.folder)).toEqual(["Old", "Old"]);
+    expect(settings.folders[0].name).toBe("Old");
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("rolls back the folder graph and compensates subscriptions when rename save fails", async () => {
+    const originalFolders = [{ name: "Old", subfolders: [] }] as Folder[];
+    settings.folders = originalFolders;
+    settings.feeds = [
+      {
+        feedId: "rss",
+        title: "RSS",
+        url: "https://example.com/feed.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 0,
+      },
+      {
+        feedId: "topic",
+        title: "Topic",
+        url: "tikhub://x-topic/topic",
+        folder: "Old",
+        items: [],
+        lastUpdated: 0,
+        sourceKind: "x-topic",
+        sourceConfig: createXTopicSourceConfig({
+          id: "topic",
+          name: "AI",
+          folder: "Old",
+        }),
+      },
+    ] as Feed[];
+    plugin.updateSubscription.mockImplementation(async (
+      sourceId: string,
+      request: { folder?: string },
+    ) => {
+      settings.feeds = settings.feeds.map((feed) =>
+        (feed.feedId ?? feed.url) === sourceId
+          ? { ...feed, folder: request.folder ?? feed.folder }
+          : feed
+      );
+      return true;
+    });
+    plugin.saveSettings.mockRejectedValueOnce(new Error("disk full"));
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.renameFolderByPath("Old", "New")).resolves.toBe(false);
+
+    expect(settings.folders).toBe(originalFolders);
+    expect(settings.feeds.map((feed) => feed.folder)).toEqual(["Old", "Old"]);
+    expect(plugin.updateSubscription.mock.calls.map(([id, request]) => [
+      id,
+      request.folder,
+    ])).toEqual([
+      ["rss", "New"],
+      ["rss", "Old"],
+    ]);
+  });
+
+  it("renames topic folder paths without routing topics through subscription update", async () => {
+    settings.folders = [{ name: "Old", subfolders: [] }] as Folder[];
+    settings.collapsedFolders = ["Old"];
+    settings.folderFeedSortOrders = {
+      Old: { by: "custom", ascending: true },
+    };
+    settings.feeds = [{
+      feedId: "topic",
+      title: "Topic",
+      url: "tikhub://x-topic/topic",
+      folder: "Old",
+      items: [],
+      lastUpdated: 0,
+      sourceKind: "x-topic",
+      sourceConfig: createXTopicSourceConfig({
+        id: "topic",
+        name: "AI",
+        folder: "Old",
+      }),
+    } as Feed];
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.renameFolderByPath("Old", "New")).resolves.toBe(true);
+
+    expect(plugin.updateSubscription).not.toHaveBeenCalled();
+    expect(settings.folders[0].name).toBe("New");
+    expect(settings.feeds[0].folder).toBe("New");
+    expect((settings.feeds[0].sourceConfig as { folder: string }).folder).toBe("New");
+    expect(settings.collapsedFolders).toEqual(["New"]);
+    expect(settings.folderFeedSortOrders?.New).toEqual({
+      by: "custom",
+      ascending: true,
+    });
+    expect(settings.folderFeedSortOrders?.Old).toBeUndefined();
   });
 
   it("routes all-feed read changes through the status transaction batch", async () => {

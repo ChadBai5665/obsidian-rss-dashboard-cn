@@ -130,6 +130,7 @@ interface DashViewTestAPI {
       options: { purgeCollection: false },
     ) => Promise<boolean>
   >;
+  saveSettings: Mock<() => Promise<void>>;
   handleDeleteFolder(folder: string): Promise<void>;
   syncCurrentFeedReference(): void;
   getAllDescendantFolders(folderPath: string): string[];
@@ -161,6 +162,7 @@ async function makeView(
   view.render = vi.fn();
   const testView = view as unknown as DashViewTestAPI;
   testView.removeSubscription = plugin.removeSubscription;
+  testView.saveSettings = plugin.saveSettings;
   return testView;
 }
 
@@ -719,6 +721,22 @@ describe("Dashboard lifecycle", () => {
       ]);
       expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
       expect(settings.feeds).toContain(topic);
+    });
+
+    it("restores the folder graph and resolves when the final save fails", async () => {
+      const settings = cloneSettings();
+      const originalFolders = [
+        { name: "Tech", subfolders: [], pinned: false },
+      ];
+      settings.feeds = [makeFeed("https://a.com/feed", "Tech")];
+      settings.folders = originalFolders;
+      const view = await makeView(settings);
+      view.saveSettings.mockRejectedValueOnce(new Error("disk full"));
+
+      await expect(view.handleDeleteFolder("Tech")).resolves.toBeUndefined();
+
+      expect(settings.folders).toBe(originalFolders);
+      expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
     });
   });
 
