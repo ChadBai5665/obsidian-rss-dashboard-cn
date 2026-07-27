@@ -182,8 +182,14 @@ function harness(
       rollback: vi.fn(async () => undefined),
     })),
   };
-  const saveSettings = vi.fn(async () => {
-    snapshots.push(structuredClone(settings.feeds));
+  const saveSettings = vi.fn(async () => undefined);
+  const saveSettingsCandidate = vi.fn(async (
+    candidate: typeof settings,
+    publish: () => void,
+  ) => {
+    await saveSettings();
+    snapshots.push(structuredClone(candidate.feeds));
+    publish();
   });
   const ensureFolder = vi.fn(async () => undefined);
   const service = new SubscriptionService({
@@ -193,6 +199,7 @@ function harness(
     collectionService,
     ensureFolder,
     saveSettings,
+    saveSettingsCandidate,
     now: () => NOW,
     createFeedId: () => "new-feed-id",
     abortInitialImport: options.abortInitialImport,
@@ -205,6 +212,7 @@ function harness(
     parseFeed,
     collectionService,
     saveSettings,
+    saveSettingsCandidate,
     ensureFolder,
   };
 }
@@ -1344,6 +1352,333 @@ describe("SubscriptionService", () => {
     expect(test.settings.folders).toBe(originalFolders);
     expect(test.settings.folderFeedSortOrders).toBe(originalSortOrders);
     expect(first.folder).toBe("Old");
+  });
+
+  it("does not publish ordered candidate references until their staged save succeeds", async () => {
+    const first = existingFeed({
+      feedId: "first",
+      url: "https://example.com/first.xml",
+      folder: "Old",
+    });
+    const target = existingFeed({
+      feedId: "target",
+      url: "https://example.com/target.xml",
+      folder: "New",
+    });
+    const test = harness([first, target]);
+    test.settings.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ];
+    const originalFeeds = test.settings.feeds;
+    const originalFolders = test.settings.folders;
+    const originalSortOrders = test.settings.folderFeedSortOrders;
+    let releaseSave!: () => void;
+    test.saveSettings.mockImplementationOnce(async () => await new Promise<void>(
+      (resolve) => { releaseSave = resolve; },
+    ));
+
+    const ordering = test.service.applySidebarOrdering({
+      kind: "feed-insert",
+      draggedUrl: first.url,
+      targetUrl: target.url,
+      placement: "before",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(test.saveSettingsCandidate).toHaveBeenCalledTimes(1);
+    expect(test.settings.feeds).toBe(originalFeeds);
+    expect(test.settings.folders).toBe(originalFolders);
+    expect(test.settings.folderFeedSortOrders).toBe(originalSortOrders);
+    expect(first.folder).toBe("Old");
+    const staged = test.saveSettingsCandidate.mock.calls[0][0];
+    expect(staged.feeds.find((feed: Feed) => feed.feedId === "first")?.folder)
+      .toBe("New");
+
+    releaseSave();
+    await expect(ordering).resolves.toMatchObject({ ok: true });
+    expect(test.settings.feeds).toBe(staged.feeds);
+    expect(test.settings.feeds.find((feed) => feed.feedId === "first")?.folder)
+      .toBe("New");
+  });
+
+  it("never publishes ordered candidate references when their staged save fails", async () => {
+    const first = existingFeed({
+      feedId: "first",
+      url: "https://example.com/first.xml",
+      folder: "Old",
+    });
+    const target = existingFeed({
+      feedId: "target",
+      url: "https://example.com/target.xml",
+      folder: "New",
+    });
+    const test = harness([first, target]);
+    test.settings.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ];
+    const original = {
+      feeds: test.settings.feeds,
+      folders: test.settings.folders,
+      collapsedFolders: test.settings.collapsedFolders,
+      folderFeedSortOrders: test.settings.folderFeedSortOrders,
+      folderSortOrder: test.settings.folderSortOrder,
+    };
+    test.saveSettings.mockRejectedValueOnce(new Error("disk full"));
+
+    await expect(test.service.applySidebarOrdering({
+      kind: "feed-insert",
+      draggedUrl: first.url,
+      targetUrl: target.url,
+      placement: "before",
+    })).rejects.toThrow("disk full");
+
+    expect(test.settings).toMatchObject(original);
+    expect(test.settings.feeds).toBe(original.feeds);
+    expect(first.folder).toBe("Old");
+  });
+
+  it("renames a folder and all source kinds in one queued staged commit", async () => {
+    const normal = existingFeed({
+      feedId: "normal",
+      folder: "Old/Child",
+    });
+    const account = existingFeed({
+      feedId: "account",
+      sourceKind: "x-account",
+      sourceConfig: createXAccountSourceConfig({
+        id: "account",
+        handle: "openai",
+        folder: "Old",
+      }),
+      url: "tikhub://x-account/openai",
+      folder: "Old",
+    });
+    const topic = existingFeed({
+      feedId: "topic",
+      sourceKind: "x-topic",
+      sourceConfig: createXTopicSourceConfig({
+        id: "topic",
+        name: "AI",
+        folder: "Old/Child",
+      }),
+      url: "tikhub://x-topic/topic",
+      folder: "Old/Child",
+    });
+    const test = harness([normal, account, topic]);
+    test.settings.folders = [{
+      name: "Old",
+      subfolders: [{ name: "Child", subfolders: [] }],
+    }];
+    test.settings.collapsedFolders = ["Old", "Old/Child"];
+    test.settings.folderFeedSortOrders = {
+      Old: { by: "name", ascending: true },
+      "Old/Child": { by: "custom", ascending: true },
+    };
+    const liveBefore = {
+      feeds: test.settings.feeds,
+      folders: test.settings.folders,
+      collapsedFolders: test.settings.collapsedFolders,
+      folderFeedSortOrders: test.settings.folderFeedSortOrders,
+    };
+    let releaseSave!: () => void;
+    test.saveSettings.mockImplementationOnce(async () => await new Promise<void>(
+      (resolve) => { releaseSave = resolve; },
+    ));
+
+    const rename = test.service.applyFolderMutation({
+      kind: "rename",
+      folderPath: "Old",
+      newName: "New",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const queuedPause = test.service.setPaused("normal", true);
+
+    expect(test.saveSettings).toHaveBeenCalledTimes(1);
+    expect(test.settings.feeds).toBe(liveBefore.feeds);
+    expect(test.settings.folders).toBe(liveBefore.folders);
+    expect(test.settings.collapsedFolders).toBe(liveBefore.collapsedFolders);
+    expect(test.settings.folderFeedSortOrders).toBe(
+      liveBefore.folderFeedSortOrders,
+    );
+    const staged = test.saveSettingsCandidate.mock.calls[0][0];
+    expect(staged.folders[0].name).toBe("New");
+    expect(staged.collapsedFolders).toEqual(["New", "New/Child"]);
+    expect(Object.keys(staged.folderFeedSortOrders)).toEqual([
+      "New",
+      "New/Child",
+    ]);
+    expect(staged.feeds.map((feed: Feed) => ({
+      id: feed.feedId,
+      folder: feed.folder,
+      configFolder: "folder" in (feed.sourceConfig ?? {})
+        ? (feed.sourceConfig as { folder: string }).folder
+        : undefined,
+    }))).toEqual([
+      { id: "normal", folder: "New/Child", configFolder: undefined },
+      { id: "account", folder: "New", configFolder: "New" },
+      { id: "topic", folder: "New/Child", configFolder: "New/Child" },
+    ]);
+
+    releaseSave();
+    await expect(rename).resolves.toEqual({ ok: true, newPath: "New" });
+    await expect(queuedPause).resolves.toMatchObject({
+      feedId: "normal",
+      subscriptionStatus: "paused",
+    });
+    expect(test.saveSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps live and durable folder state unchanged when an atomic rename save fails", async () => {
+    const topic = existingFeed({
+      feedId: "topic",
+      sourceKind: "x-topic",
+      sourceConfig: createXTopicSourceConfig({
+        id: "topic",
+        name: "AI",
+        folder: "Old",
+      }),
+      url: "tikhub://x-topic/topic",
+      folder: "Old",
+    });
+    const test = harness([topic]);
+    test.settings.folders = [{ name: "Old", subfolders: [] }];
+    test.settings.collapsedFolders = ["Old"];
+    const before = structuredClone(test.settings);
+    const refs = { feeds: test.settings.feeds, folders: test.settings.folders };
+    test.saveSettings.mockRejectedValueOnce(new Error("disk full"));
+
+    await expect(test.service.applyFolderMutation({
+      kind: "rename",
+      folderPath: "Old",
+      newName: "New",
+    })).rejects.toThrow("disk full");
+
+    expect(test.settings).toEqual(before);
+    expect(test.settings.feeds).toBe(refs.feeds);
+    expect(test.settings.folders).toBe(refs.folders);
+  });
+
+  it("atomically deletes normal subscriptions and remaps topics to a surviving parent", async () => {
+    const abortInitialImport = vi.fn();
+    const normal = existingFeed({ feedId: "normal", folder: "Keep/Delete" });
+    const account = existingFeed({
+      feedId: "account",
+      sourceKind: "x-account",
+      sourceConfig: createXAccountSourceConfig({
+        id: "account",
+        handle: "openai",
+        folder: "Keep/Delete/Child",
+      }),
+      url: "tikhub://x-account/openai",
+      folder: "Keep/Delete/Child",
+    });
+    const topic = existingFeed({
+      feedId: "topic",
+      sourceKind: "x-topic",
+      sourceConfig: createXTopicSourceConfig({
+        id: "topic",
+        name: "AI",
+        folder: "Keep/Delete/Child",
+      }),
+      url: "tikhub://x-topic/topic",
+      folder: "Keep/Delete/Child",
+    });
+    const outside = existingFeed({ feedId: "outside", folder: "Keep" });
+    const test = harness([normal, account, topic, outside], {
+      abortInitialImport,
+    });
+    test.settings.folders = [{
+      name: "Keep",
+      subfolders: [{
+        name: "Delete",
+        subfolders: [{ name: "Child", subfolders: [] }],
+      }],
+    }];
+    test.settings.collapsedFolders = ["Keep", "Keep/Delete", "Keep/Delete/Child"];
+    test.settings.folderFeedSortOrders = {
+      Keep: { by: "name", ascending: true },
+      "Keep/Delete": { by: "custom", ascending: true },
+      "Keep/Delete/Child": { by: "name", ascending: false },
+    };
+    const originalFeeds = test.settings.feeds;
+    let releaseSave!: () => void;
+    test.saveSettings.mockImplementationOnce(async () => await new Promise<void>(
+      (resolve) => { releaseSave = resolve; },
+    ));
+
+    const deletion = test.service.applyFolderMutation({
+      kind: "delete",
+      folderPath: "Keep/Delete",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(test.settings.feeds).toBe(originalFeeds);
+    expect(isSubscriptionRemovalPending(test.settings, "normal")).toBe(true);
+    expect(isSubscriptionRemovalPending(test.settings, "account")).toBe(true);
+    expect(isSubscriptionRemovalPending(test.settings, "topic")).toBe(false);
+    expect(abortInitialImport).toHaveBeenCalledWith("normal");
+    expect(abortInitialImport).toHaveBeenCalledWith("account");
+    const staged = test.saveSettingsCandidate.mock.calls[0][0];
+    expect(staged.feeds.map((feed: Feed) => feed.feedId)).toEqual([
+      "topic",
+      "outside",
+    ]);
+    expect(staged.feeds[0]).toMatchObject({
+      feedId: "topic",
+      folder: "Keep",
+      sourceConfig: { kind: "x-topic", folder: "Keep" },
+    });
+    expect(staged.folders).toEqual([{ name: "Keep", subfolders: [] }]);
+    expect(staged.collapsedFolders).toEqual(["Keep"]);
+    expect(Object.keys(staged.folderFeedSortOrders)).toEqual(["Keep"]);
+    expect(test.collectionService.removeSource).not.toHaveBeenCalled();
+
+    releaseSave();
+    await expect(deletion).resolves.toEqual({
+      ok: true,
+      removedSourceIds: ["normal", "account"],
+      topicDestinationFolder: "Keep",
+    });
+    expect(isSubscriptionRemovalPending(test.settings, "normal")).toBe(false);
+    expect(isSubscriptionRemovalPending(test.settings, "account")).toBe(false);
+  });
+
+  it("keeps a deleted folder batch unchanged and clears intents when saving fails", async () => {
+    const abortInitialImport = vi.fn();
+    const normal = existingFeed({ feedId: "normal", folder: "Delete" });
+    const topic = existingFeed({
+      feedId: "topic",
+      sourceKind: "x-topic",
+      sourceConfig: createXTopicSourceConfig({
+        id: "topic",
+        name: "AI",
+        folder: "Delete",
+      }),
+      url: "tikhub://x-topic/topic",
+      folder: "Delete",
+    });
+    const test = harness([normal, topic], { abortInitialImport });
+    test.settings.folders = [{ name: "Delete", subfolders: [] }];
+    test.settings.collapsedFolders = ["Delete"];
+    const before = structuredClone(test.settings);
+    const refs = { feeds: test.settings.feeds, folders: test.settings.folders };
+    test.saveSettings.mockRejectedValueOnce(new Error("disk full"));
+
+    await expect(test.service.applyFolderMutation({
+      kind: "delete",
+      folderPath: "Delete",
+    })).rejects.toThrow("disk full");
+
+    expect(test.settings).toEqual(before);
+    expect(test.settings.feeds).toBe(refs.feeds);
+    expect(test.settings.folders).toBe(refs.folders);
+    expect(isSubscriptionRemovalPending(test.settings, "normal")).toBe(false);
+    expect(test.collectionService.removeSource).not.toHaveBeenCalled();
   });
 
   it("moves a whole folder with account and topic source configuration kept in sync", async () => {

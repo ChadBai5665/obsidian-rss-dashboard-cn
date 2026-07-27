@@ -97,6 +97,9 @@ import {
   type RemoveSubscriptionOptions,
   type SidebarOrderingMutationRequest,
   type SidebarOrderingMutationResult,
+  type SubscriptionFolderMutationRequest,
+  type SubscriptionFolderMutationResult,
+  type SubscriptionSettingsPort,
   type SubscriptionUpdateRequest,
   type VerifiedSubscriptionRequest,
 } from "./src/services/subscription-service";
@@ -1258,6 +1261,8 @@ export default class RssDashboardPlugin extends Plugin {
         }
       },
       saveSettings: async () => await this.saveSettings(),
+      saveSettingsCandidate: async (candidate, publish) =>
+        await this.persistSubscriptionSettingsCandidate(candidate, publish),
       prepareFeed: (feed) =>
         MediaService.applyMediaTags(
           feed,
@@ -1268,6 +1273,33 @@ export default class RssDashboardPlugin extends Plugin {
       abortInitialImport: (feedId) => {
         this.activeInitialImportControllers.get(feedId)?.abort();
       },
+    });
+  }
+
+  private async persistSubscriptionSettingsCandidate(
+    subscriptionCandidate: SubscriptionSettingsPort,
+    publish: () => void,
+  ): Promise<void> {
+    await this.enqueueSettingsOperation(async () => {
+      const previousPersistenceSettings = cloneStableOwnData(this.settings);
+      const candidate = cloneStableOwnData(this.settings);
+      candidate.feeds = cloneStableOwnData(subscriptionCandidate.feeds);
+      candidate.folders = cloneStableOwnData(subscriptionCandidate.folders);
+      candidate.collapsedFolders = cloneStableOwnData(
+        subscriptionCandidate.collapsedFolders ?? [],
+      );
+      candidate.folderFeedSortOrders = cloneStableOwnData(
+        subscriptionCandidate.folderFeedSortOrders,
+      );
+      candidate.folderSortOrder = cloneStableOwnData(
+        subscriptionCandidate.folderSortOrder,
+      );
+      await this.feedStorageRepository.persistSettingsTransaction(
+        previousPersistenceSettings,
+        candidate,
+        this.getMetadataWritePlanFor(candidate),
+        async () => { publish(); },
+      );
     });
   }
 
@@ -3940,6 +3972,20 @@ export default class RssDashboardPlugin extends Plugin {
     request: SidebarOrderingMutationRequest,
   ): Promise<SidebarOrderingMutationResult> {
     return await this.getSubscriptionService().applySidebarOrdering(request);
+  }
+
+  async applyFolderMutation(
+    request: SubscriptionFolderMutationRequest,
+  ): Promise<SubscriptionFolderMutationResult> {
+    const result = await this.getSubscriptionService().applyFolderMutation(
+      request,
+    );
+    if (result.ok) {
+      await this.refreshDashboardViewsAfterSubscriptionMutation(
+        request.kind === "rename" ? "Folder rename" : "Folder deletion",
+      );
+    }
+    return result;
   }
 
   async setSubscriptionPaused(feedId: string, paused: boolean): Promise<boolean> {

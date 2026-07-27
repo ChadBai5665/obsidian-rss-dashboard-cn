@@ -161,6 +161,17 @@ function createPluginWithSettings(feeds: Feed[]): TestPlugin {
   testPlugin.getCollectionService = vi.fn(() => ({
     collectFeedRefresh: vi.fn().mockResolvedValue([]),
   }));
+  (
+    testPlugin as unknown as {
+      persistSubscriptionSettingsCandidate(
+        candidate: unknown,
+        publish: () => void,
+      ): Promise<void>;
+    }
+  ).persistSubscriptionSettingsCandidate = async (_candidate, publish) => {
+    await testPlugin.saveSettings();
+    publish();
+  };
 
   return testPlugin;
 }

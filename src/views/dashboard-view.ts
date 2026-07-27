@@ -3067,45 +3067,17 @@ export class RssDashboardView extends ItemView {
 
   private async handleDeleteFolder(folder: string): Promise<void> {
     const folderPaths = new Set(this.getAllDescendantFolders(folder));
-    const sourceIds = this.plugin.settings.feeds
-      .filter((feed) => feed.sourceKind !== "x-topic" && folderPaths.has(feed.folder))
-      .map((feed) => feed.feedId ?? feed.url);
-    for (const sourceId of sourceIds) {
-      let removed = false;
-      try {
-        removed = await this.plugin.removeSubscription(sourceId, {
-          purgeCollection: false,
-        });
-      } catch {
-        removed = false;
-      }
-      if (!removed) {
-        void this.render();
-        return;
-      }
-    }
-
-    const parts = folder.split("/");
-    const removeFolder = (
-      folders: Folder[],
-      depth: number,
-    ): Folder[] => folders.flatMap((entry) => {
-      if (entry.name !== parts[depth]) return [entry];
-      if (depth === parts.length - 1) return [];
-      return [{
-        ...entry,
-        subfolders: removeFolder(entry.subfolders, depth + 1),
-      }];
-    });
-    const originalFolders = this.plugin.settings.folders;
-    this.plugin.settings.folders = removeFolder(
-      structuredClone(originalFolders),
-      0,
-    );
+    let result;
     try {
-      await this.plugin.saveSettings();
+      result = await this.plugin.applyFolderMutation({
+        kind: "delete",
+        folderPath: folder,
+      });
     } catch {
-      this.plugin.settings.folders = originalFolders;
+      void this.render();
+      return;
+    }
+    if (!result.ok) {
       void this.render();
       return;
     }

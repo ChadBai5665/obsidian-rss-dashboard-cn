@@ -24,7 +24,6 @@ import {
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import type RssDashboardPlugin from "../../../main";
 import { FeedManagerModal } from "../../../src/modals/feed-manager/feed-manager-modal";
-import { createXTopicSourceConfig } from "../../../src/sources/source-config";
 
 installObsidianDomPolyfills();
 
@@ -46,6 +45,7 @@ interface TestPlugin extends Partial<RssDashboardPlugin> {
   updateSubscription: Mock;
   removeSubscription: Mock;
   applySidebarOrdering: Mock;
+  applyFolderMutation: Mock;
 }
 
 /** Typed interface for Sidebar private member access */
@@ -146,6 +146,7 @@ describe("Sidebar Core", () => {
       updateSubscription: vi.fn().mockResolvedValue(true),
       removeSubscription: vi.fn().mockResolvedValue(true),
       applySidebarOrdering: vi.fn().mockResolvedValue({ ok: true }),
+      applyFolderMutation: vi.fn().mockResolvedValue({ ok: true }),
     };
   });
 
@@ -248,41 +249,11 @@ describe("Sidebar Core", () => {
     expect(plugin.saveSettings).not.toHaveBeenCalled();
   });
 
-  it("keeps a folder after partial subscription removal and never removes X topics", async () => {
+  it("routes folder deletion through the single subscription folder transaction", async () => {
     settings.folders = [{ name: "Tech", subfolders: [] }] as Folder[];
-    const first = {
-      feedId: "first",
-      title: "First",
-      url: "https://example.com/first.xml",
-      folder: "Tech",
-      items: [],
-      lastUpdated: 0,
-    } as Feed;
-    const failed = {
-      feedId: "failed",
-      title: "Failed",
-      url: "https://example.com/failed.xml",
-      folder: "Tech",
-      items: [],
-      lastUpdated: 0,
-    } as Feed;
-    const topic = {
-      feedId: "topic",
-      title: "Topic",
-      url: "tikhub://x-topic/ai",
-      folder: "Tech",
-      items: [],
-      lastUpdated: 0,
-      sourceKind: "x-topic",
-      sourceConfig: { kind: "x-topic", id: "topic", name: "AI" },
-    } as Feed;
-    settings.feeds = [first, failed, topic];
-    plugin.removeSubscription.mockImplementation(async (sourceId: string) => {
-      if (sourceId === "failed") return false;
-      settings.feeds = settings.feeds.filter(
-        (candidate) => (candidate.feedId ?? candidate.url) !== sourceId,
-      );
-      return true;
+    plugin.applyFolderMutation.mockResolvedValueOnce({
+      ok: false,
+      reason: "dragged-folder-not-found",
     });
     const sidebar = new Sidebar(
       app,
@@ -296,16 +267,16 @@ describe("Sidebar Core", () => {
     await expect(sidebar.deleteFolderAndSubscriptions("Tech"))
       .resolves.toBe(false);
 
-    expect(plugin.removeSubscription.mock.calls).toEqual([
-      ["first", { purgeCollection: false }],
-      ["failed", { purgeCollection: false }],
-    ]);
+    expect(plugin.applyFolderMutation).toHaveBeenCalledWith({
+      kind: "delete",
+      folderPath: "Tech",
+    });
+    expect(plugin.removeSubscription).not.toHaveBeenCalled();
     expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
-    expect(settings.feeds).toContain(topic);
     expect(plugin.saveSettings).not.toHaveBeenCalled();
   });
 
-  it("removes a folder only after every external subscription removal succeeds", async () => {
+  it("returns success after the atomic folder deletion publishes", async () => {
     settings.folders = [{ name: "Tech", subfolders: [] }] as Folder[];
     settings.feeds = [{
       feedId: "rss-id",
@@ -315,11 +286,14 @@ describe("Sidebar Core", () => {
       items: [],
       lastUpdated: 0,
     } as Feed];
-    plugin.removeSubscription.mockImplementation(async (sourceId: string) => {
-      settings.feeds = settings.feeds.filter(
-        (candidate) => (candidate.feedId ?? candidate.url) !== sourceId,
-      );
-      return true;
+    plugin.applyFolderMutation.mockImplementationOnce(async () => {
+      settings.feeds = [];
+      settings.folders = [];
+      return {
+        ok: true,
+        removedSourceIds: ["rss-id"],
+        topicDestinationFolder: "",
+      };
     });
     const sidebar = new Sidebar(
       app,
@@ -334,10 +308,12 @@ describe("Sidebar Core", () => {
       .resolves.toBe(true);
 
     expect(settings.folders.map((folder) => folder.name)).not.toContain("Tech");
-    expect(plugin.saveSettings).toHaveBeenCalledTimes(1);
+    expect(plugin.applyFolderMutation).toHaveBeenCalledTimes(1);
+    expect(plugin.removeSubscription).not.toHaveBeenCalled();
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
   });
 
-  it("restores the folder graph when its final deletion save fails", async () => {
+  it("keeps controller state untouched when the atomic folder deletion fails", async () => {
     const originalFolders = [{ name: "Tech", subfolders: [] }] as Folder[];
     settings.folders = originalFolders;
     settings.feeds = [{
@@ -348,13 +324,7 @@ describe("Sidebar Core", () => {
       items: [],
       lastUpdated: 0,
     } as Feed];
-    plugin.removeSubscription.mockImplementation(async (sourceId: string) => {
-      settings.feeds = settings.feeds.filter(
-        (candidate) => (candidate.feedId ?? candidate.url) !== sourceId,
-      );
-      return true;
-    });
-    plugin.saveSettings.mockRejectedValueOnce(new Error("disk full"));
+    plugin.applyFolderMutation.mockRejectedValueOnce(new Error("disk full"));
     const sidebar = new Sidebar(
       app,
       container,
@@ -369,6 +339,8 @@ describe("Sidebar Core", () => {
 
     expect(settings.folders).toBe(originalFolders);
     expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
+    expect(plugin.removeSubscription).not.toHaveBeenCalled();
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
   });
 
   it("keeps live feed ordering untouched while a drag transaction is pending", async () => {
@@ -435,7 +407,7 @@ describe("Sidebar Core", () => {
     await Promise.resolve();
   });
 
-  it("compensates earlier subscription moves when a later folder rename move fails", async () => {
+  it("routes folder rename through one atomic subscription folder mutation", async () => {
     settings.folders = [{ name: "Old", subfolders: [] }] as Folder[];
     settings.feeds = [
       {
@@ -455,17 +427,9 @@ describe("Sidebar Core", () => {
         lastUpdated: 0,
       },
     ] as Feed[];
-    plugin.updateSubscription.mockImplementation(async (
-      sourceId: string,
-      request: { folder?: string },
-    ) => {
-      if (sourceId === "second" && request.folder === "New") return false;
-      settings.feeds = settings.feeds.map((feed) =>
-        (feed.feedId ?? feed.url) === sourceId
-          ? { ...feed, folder: request.folder ?? feed.folder }
-          : feed
-      );
-      return true;
+    plugin.applyFolderMutation.mockResolvedValueOnce({
+      ok: false,
+      reason: "duplicate-folder-target",
     });
     const sidebar = new Sidebar(
       app,
@@ -478,20 +442,18 @@ describe("Sidebar Core", () => {
 
     await expect(sidebar.renameFolderByPath("Old", "New")).resolves.toBe(false);
 
-    expect(plugin.updateSubscription.mock.calls.map(([id, request]) => [
-      id,
-      request.folder,
-    ])).toEqual([
-      ["first", "New"],
-      ["second", "New"],
-      ["first", "Old"],
-    ]);
+    expect(plugin.applyFolderMutation).toHaveBeenCalledWith({
+      kind: "rename",
+      folderPath: "Old",
+      newName: "New",
+    });
+    expect(plugin.updateSubscription).not.toHaveBeenCalled();
     expect(settings.feeds.map((feed) => feed.folder)).toEqual(["Old", "Old"]);
     expect(settings.folders[0].name).toBe("Old");
     expect(plugin.saveSettings).not.toHaveBeenCalled();
   });
 
-  it("rolls back the folder graph and compensates subscriptions when rename save fails", async () => {
+  it("does not perform controller compensation when atomic rename rejects", async () => {
     const originalFolders = [{ name: "Old", subfolders: [] }] as Folder[];
     settings.folders = originalFolders;
     settings.feeds = [
@@ -503,33 +465,8 @@ describe("Sidebar Core", () => {
         items: [],
         lastUpdated: 0,
       },
-      {
-        feedId: "topic",
-        title: "Topic",
-        url: "tikhub://x-topic/topic",
-        folder: "Old",
-        items: [],
-        lastUpdated: 0,
-        sourceKind: "x-topic",
-        sourceConfig: createXTopicSourceConfig({
-          id: "topic",
-          name: "AI",
-          folder: "Old",
-        }),
-      },
     ] as Feed[];
-    plugin.updateSubscription.mockImplementation(async (
-      sourceId: string,
-      request: { folder?: string },
-    ) => {
-      settings.feeds = settings.feeds.map((feed) =>
-        (feed.feedId ?? feed.url) === sourceId
-          ? { ...feed, folder: request.folder ?? feed.folder }
-          : feed
-      );
-      return true;
-    });
-    plugin.saveSettings.mockRejectedValueOnce(new Error("disk full"));
+    plugin.applyFolderMutation.mockRejectedValueOnce(new Error("disk full"));
     const sidebar = new Sidebar(
       app,
       container,
@@ -542,17 +479,12 @@ describe("Sidebar Core", () => {
     await expect(sidebar.renameFolderByPath("Old", "New")).resolves.toBe(false);
 
     expect(settings.folders).toBe(originalFolders);
-    expect(settings.feeds.map((feed) => feed.folder)).toEqual(["Old", "Old"]);
-    expect(plugin.updateSubscription.mock.calls.map(([id, request]) => [
-      id,
-      request.folder,
-    ])).toEqual([
-      ["rss", "New"],
-      ["rss", "Old"],
-    ]);
+    expect(settings.feeds.map((feed) => feed.folder)).toEqual(["Old"]);
+    expect(plugin.updateSubscription).not.toHaveBeenCalled();
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
   });
 
-  it("renames topic folder paths without routing topics through subscription update", async () => {
+  it("renders the atomically published rename without local topic mutation", async () => {
     settings.folders = [{ name: "Old", subfolders: [] }] as Folder[];
     settings.collapsedFolders = ["Old"];
     settings.folderFeedSortOrders = {
@@ -566,12 +498,24 @@ describe("Sidebar Core", () => {
       items: [],
       lastUpdated: 0,
       sourceKind: "x-topic",
-      sourceConfig: createXTopicSourceConfig({
-        id: "topic",
-        name: "AI",
-        folder: "Old",
-      }),
+      sourceConfig: { kind: "x-topic", id: "topic", name: "AI", folder: "Old" },
     } as Feed];
+    plugin.applyFolderMutation.mockImplementationOnce(async () => {
+      settings.folders = [{ name: "New", subfolders: [] }] as Folder[];
+      settings.collapsedFolders = ["New"];
+      settings.folderFeedSortOrders = {
+        New: { by: "custom", ascending: true },
+      };
+      settings.feeds = [{
+        ...settings.feeds[0],
+        folder: "New",
+        sourceConfig: {
+          ...settings.feeds[0].sourceConfig,
+          folder: "New",
+        } as Feed["sourceConfig"],
+      }];
+      return { ok: true, newPath: "New" };
+    });
     const sidebar = new Sidebar(
       app,
       container,
@@ -584,6 +528,11 @@ describe("Sidebar Core", () => {
     await expect(sidebar.renameFolderByPath("Old", "New")).resolves.toBe(true);
 
     expect(plugin.updateSubscription).not.toHaveBeenCalled();
+    expect(plugin.applyFolderMutation).toHaveBeenCalledWith({
+      kind: "rename",
+      folderPath: "Old",
+      newName: "New",
+    });
     expect(settings.folders[0].name).toBe("New");
     expect(settings.feeds[0].folder).toBe("New");
     expect((settings.feeds[0].sourceConfig as { folder: string }).folder).toBe("New");
@@ -593,6 +542,7 @@ describe("Sidebar Core", () => {
       ascending: true,
     });
     expect(settings.folderFeedSortOrders?.Old).toBeUndefined();
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
   });
 
   it("routes all-feed read changes through the status transaction batch", async () => {

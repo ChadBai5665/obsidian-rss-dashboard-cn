@@ -165,7 +165,7 @@ export type RemoveSubscriptionOptions =
       confirmation: ConfirmedCollectionPurge;
     };
 
-interface SubscriptionSettingsPort {
+export interface SubscriptionSettingsPort {
   feeds: Feed[];
   folders: Folder[];
   collapsedFolders?: string[];
@@ -196,6 +196,26 @@ export type SidebarOrderingMutationResult =
   | OperationResult
   | FolderOperationResult;
 
+export type SubscriptionFolderMutationRequest =
+  | {
+      kind: "rename";
+      folderPath: string;
+      newName: string;
+    }
+  | {
+      kind: "delete";
+      folderPath: string;
+    };
+
+export type SubscriptionFolderMutationResult =
+  | { ok: true; newPath: string }
+  | {
+      ok: true;
+      removedSourceIds: string[];
+      topicDestinationFolder: string;
+    }
+  | { ok: false; reason: "dragged-folder-not-found" | "duplicate-folder-target" };
+
 interface CollectionServicePort {
   collectFeedRefresh(input: {
     feed: Feed;
@@ -216,6 +236,10 @@ export interface SubscriptionServiceDependencies {
   collectionService: CollectionServicePort;
   ensureFolder(folder: string): Promise<unknown>;
   saveSettings(): Promise<void>;
+  saveSettingsCandidate?: (
+    candidate: SubscriptionSettingsPort,
+    publish: () => void,
+  ) => Promise<void>;
   now?: () => Date;
   createFeedId?: () => string;
   prepareFeed?: (feed: Feed) => Feed;
@@ -533,6 +557,51 @@ export class SubscriptionService {
       await this.commitSidebarOrdering(result.settings);
       return result;
     });
+  }
+
+  async applyFolderMutation(
+    request: SubscriptionFolderMutationRequest,
+  ): Promise<SubscriptionFolderMutationResult> {
+    if (request.kind === "rename") {
+      return await this.enqueueMutation(
+        async () => await this.renameFolderUnlocked(request),
+      );
+    }
+
+    const folderPath = normalizeRequiredFolderPath(request.folderPath);
+    if (!findFolderNode(this.dependencies.settings.folders, folderPath)) {
+      return { ok: false, reason: "dragged-folder-not-found" };
+    }
+    const intents = new Map<string, symbol>();
+    const registerCurrentRemovalIntents = (): void => {
+      for (const feed of this.dependencies.settings.feeds) {
+        if (
+          feed.sourceKind === "x-topic" ||
+          !isFolderWithin(feed.folder, folderPath)
+        ) continue;
+        const sourceId = feed.feedId ?? feed.url;
+        if (intents.has(sourceId)) continue;
+        intents.set(
+          sourceId,
+          registerRemovalIntent(this.dependencies.settings, sourceId),
+        );
+        this.dependencies.abortInitialImport?.(sourceId);
+      }
+    };
+    registerCurrentRemovalIntents();
+    try {
+      return await this.enqueueMutation(async () => {
+        registerCurrentRemovalIntents();
+        for (const sourceId of intents.keys()) {
+          this.dependencies.abortInitialImport?.(sourceId);
+        }
+        return await this.deleteFolderUnlocked(folderPath);
+      });
+    } finally {
+      for (const [sourceId, token] of intents) {
+        clearRemovalIntent(this.dependencies.settings, sourceId, token);
+      }
+    }
   }
 
   async stopInitialImport(feedId: string): Promise<Feed> {
@@ -950,42 +1019,111 @@ export class SubscriptionService {
   }
 
   private async commitFeeds(candidate: Feed[]): Promise<void> {
-    const original = this.dependencies.settings.feeds;
-    this.dependencies.settings.feeds = candidate;
-    try {
-      await this.dependencies.saveSettings();
-    } catch (error) {
-      this.dependencies.settings.feeds = original;
-      throw error;
-    }
+    await this.commitSettingsReferences({
+      ...cloneSubscriptionSettings(this.dependencies.settings),
+      feeds: candidate,
+    });
   }
 
   private async commitSidebarOrdering(
     candidate: RssDashboardSettings,
   ): Promise<void> {
+    await this.commitSettingsReferences({
+      feeds: candidate.feeds,
+      folders: candidate.folders,
+      collapsedFolders: candidate.collapsedFolders,
+      folderFeedSortOrders: candidate.folderFeedSortOrders,
+      folderSortOrder: candidate.folderSortOrder,
+    });
+  }
+
+  private async commitSettingsReferences(
+    candidate: SubscriptionSettingsPort,
+  ): Promise<void> {
     const settings = this.dependencies.settings;
-    const original = {
-      feeds: settings.feeds,
-      folders: settings.folders,
-      collapsedFolders: settings.collapsedFolders,
-      folderFeedSortOrders: settings.folderFeedSortOrders,
-      folderSortOrder: settings.folderSortOrder,
-    };
-    settings.feeds = candidate.feeds;
-    settings.folders = candidate.folders;
-    settings.collapsedFolders = candidate.collapsedFolders;
-    settings.folderFeedSortOrders = candidate.folderFeedSortOrders;
-    settings.folderSortOrder = candidate.folderSortOrder;
+    const original = snapshotSettingsReferences(settings);
+    const publish = (): void => publishSettingsReferences(settings, candidate);
+    if (this.dependencies.saveSettingsCandidate) {
+      await this.dependencies.saveSettingsCandidate(candidate, publish);
+      return;
+    }
+    publish();
     try {
       await this.dependencies.saveSettings();
     } catch (error) {
-      settings.feeds = original.feeds;
-      settings.folders = original.folders;
-      settings.collapsedFolders = original.collapsedFolders;
-      settings.folderFeedSortOrders = original.folderFeedSortOrders;
-      settings.folderSortOrder = original.folderSortOrder;
+      publishSettingsReferences(settings, original);
       throw error;
     }
+  }
+
+  private async renameFolderUnlocked(
+    request: Extract<SubscriptionFolderMutationRequest, { kind: "rename" }>,
+  ): Promise<SubscriptionFolderMutationResult> {
+    const folderPath = normalizeRequiredFolderPath(request.folderPath);
+    const newName = normalizeFolderName(request.newName);
+    const candidate = cloneSubscriptionSettings(this.dependencies.settings);
+    const location = findFolderLocationForMutation(candidate.folders, folderPath);
+    if (!location) return { ok: false, reason: "dragged-folder-not-found" };
+    if (
+      location.siblings.some((folder, index) =>
+        index !== location.index && folder.name === newName
+      )
+    ) {
+      return { ok: false, reason: "duplicate-folder-target" };
+    }
+    const newPath = location.parentPath
+      ? `${location.parentPath}/${newName}`
+      : newName;
+    location.folder.name = newName;
+    location.folder.modifiedAt = this.now().getTime();
+    for (const feed of candidate.feeds) {
+      if (!isFolderWithin(feed.folder, folderPath)) continue;
+      feed.folder = remapFolderPrefix(feed.folder, folderPath, newPath);
+    }
+    synchronizeSourceConfigFolders(candidate.feeds);
+    candidate.collapsedFolders = (candidate.collapsedFolders ?? []).map(
+      (path) => remapFolderPrefix(path, folderPath, newPath),
+    );
+    candidate.folderFeedSortOrders = remapFolderSortKeys(
+      candidate.folderFeedSortOrders,
+      folderPath,
+      newPath,
+    );
+    await this.commitSettingsReferences(candidate);
+    return { ok: true, newPath };
+  }
+
+  private async deleteFolderUnlocked(
+    folderPath: string,
+  ): Promise<SubscriptionFolderMutationResult> {
+    const candidate = cloneSubscriptionSettings(this.dependencies.settings);
+    const location = findFolderLocationForMutation(candidate.folders, folderPath);
+    if (!location) return { ok: false, reason: "dragged-folder-not-found" };
+    const topicDestinationFolder = location.parentPath;
+    location.siblings.splice(location.index, 1);
+    const removedSourceIds: string[] = [];
+    candidate.feeds = candidate.feeds.flatMap((feed) => {
+      if (!isFolderWithin(feed.folder, folderPath)) return [feed];
+      if (feed.sourceKind !== "x-topic") {
+        removedSourceIds.push(feed.feedId ?? feed.url);
+        return [];
+      }
+      const remapped = { ...feed, folder: topicDestinationFolder };
+      const config = normalizeXTopicSourceConfig(remapped.sourceConfig);
+      if (config) {
+        remapped.sourceConfig = { ...config, folder: topicDestinationFolder };
+      }
+      return [remapped];
+    });
+    candidate.collapsedFolders = (candidate.collapsedFolders ?? []).filter(
+      (path) => !isFolderWithin(path, folderPath),
+    );
+    candidate.folderFeedSortOrders = filterDeletedFolderSortKeys(
+      candidate.folderFeedSortOrders,
+      folderPath,
+    );
+    await this.commitSettingsReferences(candidate);
+    return { ok: true, removedSourceIds, topicDestinationFolder };
   }
 
   private reserveXVerification(
@@ -1050,6 +1188,133 @@ function synchronizeSourceConfigFolders(feeds: Feed[]): void {
       }
     }
   }
+}
+
+function cloneSubscriptionSettings(
+  settings: SubscriptionSettingsPort,
+): SubscriptionSettingsPort {
+  return {
+    feeds: cloneFeeds(settings.feeds),
+    folders: structuredClone(settings.folders),
+    collapsedFolders: [...(settings.collapsedFolders ?? [])],
+    ...(settings.folderFeedSortOrders === undefined
+      ? {}
+      : {
+          folderFeedSortOrders: structuredClone(
+            settings.folderFeedSortOrders,
+          ),
+        }),
+    ...(settings.folderSortOrder === undefined
+      ? {}
+      : { folderSortOrder: { ...settings.folderSortOrder } }),
+  };
+}
+
+function snapshotSettingsReferences(
+  settings: SubscriptionSettingsPort,
+): SubscriptionSettingsPort {
+  return {
+    feeds: settings.feeds,
+    folders: settings.folders,
+    collapsedFolders: settings.collapsedFolders,
+    folderFeedSortOrders: settings.folderFeedSortOrders,
+    folderSortOrder: settings.folderSortOrder,
+  };
+}
+
+function publishSettingsReferences(
+  settings: SubscriptionSettingsPort,
+  candidate: SubscriptionSettingsPort,
+): void {
+  settings.feeds = candidate.feeds;
+  settings.folders = candidate.folders;
+  settings.collapsedFolders = candidate.collapsedFolders;
+  settings.folderFeedSortOrders = candidate.folderFeedSortOrders;
+  settings.folderSortOrder = candidate.folderSortOrder;
+}
+
+function normalizeRequiredFolderPath(path: string): string {
+  const normalized = path.normalize("NFC").trim();
+  if (
+    !normalized ||
+    normalized.startsWith("/") ||
+    normalized.endsWith("/") ||
+    normalized.split("/").some((segment) => !segment.trim())
+  ) {
+    throw new SubscriptionServiceError("invalid-subscription-request");
+  }
+  return normalized;
+}
+
+function normalizeFolderName(name: string): string {
+  const normalized = name.normalize("NFC").trim();
+  if (!normalized || normalized.includes("/")) {
+    throw new SubscriptionServiceError("invalid-subscription-request");
+  }
+  return normalized;
+}
+
+function isFolderWithin(path: string | undefined, base: string): boolean {
+  return path === base || path?.startsWith(`${base}/`) === true;
+}
+
+function remapFolderPrefix(path: string, fromBase: string, toBase: string): string {
+  if (path === fromBase) return toBase;
+  if (!path.startsWith(`${fromBase}/`)) return path;
+  return `${toBase}${path.substring(fromBase.length)}`;
+}
+
+interface FolderMutationLocation {
+  folder: Folder;
+  siblings: Folder[];
+  index: number;
+  parentPath: string;
+}
+
+function findFolderLocationForMutation(
+  folders: Folder[],
+  path: string,
+): FolderMutationLocation | undefined {
+  const parts = path.split("/");
+  let siblings = folders;
+  const parents: string[] = [];
+  for (let depth = 0; depth < parts.length; depth += 1) {
+    const index = siblings.findIndex((folder) => folder.name === parts[depth]);
+    if (index < 0) return undefined;
+    const folder = siblings[index];
+    if (depth === parts.length - 1) {
+      return { folder, siblings, index, parentPath: parents.join("/") };
+    }
+    parents.push(folder.name);
+    siblings = folder.subfolders ?? [];
+  }
+  return undefined;
+}
+
+function findFolderNode(folders: Folder[], path: string): Folder | undefined {
+  return findFolderLocationForMutation(folders, path)?.folder;
+}
+
+function remapFolderSortKeys(
+  orders: RssDashboardSettings["folderFeedSortOrders"],
+  fromBase: string,
+  toBase: string,
+): RssDashboardSettings["folderFeedSortOrders"] {
+  if (orders === undefined) return undefined;
+  return Object.fromEntries(Object.entries(orders).map(([path, order]) => [
+    remapFolderPrefix(path, fromBase, toBase),
+    order,
+  ]));
+}
+
+function filterDeletedFolderSortKeys(
+  orders: RssDashboardSettings["folderFeedSortOrders"],
+  folderPath: string,
+): RssDashboardSettings["folderFeedSortOrders"] {
+  if (orders === undefined) return undefined;
+  return Object.fromEntries(
+    Object.entries(orders).filter(([path]) => !isFolderWithin(path, folderPath)),
+  );
 }
 
 function verifiedFeedDetails(request: VerifiedFeedSubscriptionRequest): {

@@ -114,6 +114,113 @@ function createMockManifest(): PluginManifest {
   };
 }
 
+describe("subscription settings candidate persistence", () => {
+  it("persists a complete isolated candidate before publishing service references", async () => {
+    const plugin = await createPluginInstance(createMockApp());
+    const settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+    settings.locale = "en";
+    settings.feeds = [
+      {
+        feedId: "first",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "First",
+        url: "https://example.com/first.xml",
+        folder: "Old",
+        items: [{
+          guid: "history-kept",
+          title: "History",
+          link: "https://example.com/history",
+          pubDate: "2026-07-28T00:00:00.000Z",
+          feedUrl: "https://example.com/first.xml",
+          feedTitle: "First",
+        }],
+        lastUpdated: 0,
+      },
+      {
+        feedId: "target",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "Target",
+        url: "https://example.com/target.xml",
+        folder: "New",
+        items: [],
+        lastUpdated: 0,
+      },
+    ];
+    settings.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ];
+    plugin.settings = settings;
+    const liveRefs = {
+      feeds: settings.feeds,
+      folders: settings.folders,
+      collapsedFolders: settings.collapsedFolders,
+      folderFeedSortOrders: settings.folderFeedSortOrders,
+      folderSortOrder: settings.folderSortOrder,
+    };
+    const releasePersist = createDeferred<void>();
+    let persistedCandidate: RssDashboardSettings | undefined;
+    const repository = (
+      plugin as unknown as {
+        feedStorageRepository: {
+          persistSettingsTransaction<T>(
+            previous: RssDashboardSettings,
+            candidate: RssDashboardSettings,
+            metadataPlan: unknown,
+            afterPersist: () => Promise<T>,
+          ): Promise<T>;
+        };
+      }
+    ).feedStorageRepository;
+    vi.spyOn(repository, "persistSettingsTransaction").mockImplementation(
+      async (_previous, candidate, _metadataPlan, afterPersist) => {
+        persistedCandidate = candidate;
+        await releasePersist.promise;
+        return await afterPersist();
+      },
+    );
+
+    const ordering = plugin.applySidebarOrdering({
+      kind: "feed-insert",
+      draggedUrl: "https://example.com/first.xml",
+      targetUrl: "https://example.com/target.xml",
+      placement: "before",
+    });
+    await flushPromises();
+
+    expect(plugin.settings).toBe(settings);
+    expect(settings.feeds).toBe(liveRefs.feeds);
+    expect(settings.folders).toBe(liveRefs.folders);
+    expect(settings.collapsedFolders).toBe(liveRefs.collapsedFolders);
+    expect(settings.folderFeedSortOrders).toBe(liveRefs.folderFeedSortOrders);
+    expect(settings.folderSortOrder).toBe(liveRefs.folderSortOrder);
+    expect(settings.feeds[0].folder).toBe("Old");
+    expect(persistedCandidate).toMatchObject({
+      locale: "en",
+      collection: settings.collection,
+      tikhub: settings.tikhub,
+      ai: settings.ai,
+    });
+    expect(persistedCandidate?.feeds[0]).toMatchObject({
+      feedId: "first",
+      folder: "New",
+      items: [{ guid: "history-kept" }],
+    });
+
+    releasePersist.resolve();
+    await expect(ordering).resolves.toMatchObject({ ok: true });
+    expect(settings.feeds).not.toBe(liveRefs.feeds);
+    expect(settings.feeds[0]).toMatchObject({
+      feedId: "first",
+      folder: "New",
+      items: [{ guid: "history-kept" }],
+    });
+    expect(plugin.settings).toBe(settings);
+  });
+});
+
 // Helper to create a plugin instance with mocks
 /** Typed accessor for private RssDashboardPlugin members accessed from tests. */
 type PluginPrivateAPI = {

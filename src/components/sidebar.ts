@@ -31,7 +31,6 @@ import { applyFeedSortOrder } from "../utils/sidebar-sort-utils";
 import { applyFolderSortOrder } from "../utils/sidebar-folder-sort-utils";
 import { MediaService } from "../services/media-service";
 import { MastodonService } from "../services/mastodon-service";
-import { normalizeXTopicSourceConfig } from "../sources/source-config";
 import type {
   FeedSubscriptionOptionsUpdateRequest,
   SidebarOrderingMutationRequest,
@@ -131,22 +130,6 @@ function remapFolderPath(path: string, fromBase: string, toBase: string): string
   return path.startsWith(`${fromBase}/`)
     ? `${toBase}${path.substring(fromBase.length)}`
     : path;
-}
-
-function isFolderPathWithin(path: string, base: string): boolean {
-  return path === base || path.startsWith(`${base}/`);
-}
-
-function findFolderInGraph(folders: Folder[], path: string): Folder | null {
-  const parts = path.split("/").filter(Boolean);
-  let current: Folder | undefined;
-  let level = folders;
-  for (const part of parts) {
-    current = level.find((folder) => folder.name === part);
-    if (!current) return null;
-    level = current.subfolders ?? [];
-  }
-  return current ?? null;
 }
 
 // FolderNameModal — Uses Obsidian's Modal class to prevent mobile focus bugs.
@@ -1990,104 +1973,19 @@ export class Sidebar {
     oldPath: string,
     newName: string,
   ): Promise<boolean> {
-    const parts = oldPath.split("/");
-    const parentPath = parts.slice(0, -1).join("/");
-    const folder = this.findFolderByPath(oldPath);
-    if (!folder) return false;
-
-    const newPath = parentPath ? `${parentPath}/${newName}` : newName;
-    const moves = this.settings.feeds
-      .filter((feed) =>
-        feed.sourceKind !== "x-topic" &&
-        !!feed.folder &&
-        isFolderPathWithin(feed.folder, oldPath)
-      )
-      .map((feed) => ({
-        feed,
-        oldFolder: feed.folder,
-        newFolder: remapFolderPath(feed.folder, oldPath, newPath),
-      }));
-    const completed: typeof moves = [];
-    const compensate = async (): Promise<boolean> => {
-      let complete = true;
-      for (const move of [...completed].reverse()) {
-        const restored = await this.updateSubscriptionOptions(
-          move.feed,
-          { folder: move.oldFolder },
-          false,
-        );
-        complete = restored && complete;
-      }
-      return complete;
-    };
-
-    for (const move of moves) {
-      if (!await this.updateSubscriptionOptions(
-        move.feed,
-        { folder: move.newFolder },
-        false,
-      )) {
-        await compensate();
+    if (!this.findFolderByPath(oldPath)) return false;
+    try {
+      const result = await this.plugin.applyFolderMutation({
+        kind: "rename",
+        folderPath: oldPath,
+        newName,
+      });
+      if (!result.ok) {
         new Notice(this.t("modal.feedManager.actionFailed"));
         this.render();
         return false;
       }
-      completed.push(move);
-    }
-
-    const feedsAfterSubscriptionMoves = this.settings.feeds;
-    const originalFolders = this.settings.folders;
-    const originalCollapsedFolders = this.settings.collapsedFolders;
-    const originalSortOrders = this.settings.folderFeedSortOrders;
-    const renamedFolders = structuredClone(originalFolders);
-    const renamedFolder = findFolderInGraph(renamedFolders, oldPath);
-    if (!renamedFolder) {
-      await compensate();
-      return false;
-    }
-    renamedFolder.name = newName;
-    renamedFolder.modifiedAt = Date.now();
-    if (parentPath) {
-      const parent = findFolderInGraph(renamedFolders, parentPath);
-      if (parent) parent.modifiedAt = Date.now();
-    }
-
-    const renamedFeeds = feedsAfterSubscriptionMoves.map((feed) => {
-      if (
-        feed.sourceKind !== "x-topic" ||
-        !feed.folder ||
-        !isFolderPathWithin(feed.folder, oldPath)
-      ) {
-        return feed;
-      }
-      const nextFolder = remapFolderPath(feed.folder, oldPath, newPath);
-      const config = normalizeXTopicSourceConfig(feed.sourceConfig);
-      return {
-        ...feed,
-        folder: nextFolder,
-        ...(config ? { sourceConfig: { ...config, folder: nextFolder } } : {}),
-      };
-    });
-    const renamedSortOrders = originalSortOrders === undefined
-      ? undefined
-      : Object.fromEntries(Object.entries(originalSortOrders).map(
-        ([path, order]) => [remapFolderPath(path, oldPath, newPath), order],
-      ));
-
-    this.settings.feeds = renamedFeeds;
-    this.settings.folders = renamedFolders;
-    this.settings.collapsedFolders = (originalCollapsedFolders ?? []).map(
-      (path) => remapFolderPath(path, oldPath, newPath),
-    );
-    this.settings.folderFeedSortOrders = renamedSortOrders;
-    try {
-      await this.plugin.saveSettings();
     } catch {
-      this.settings.feeds = feedsAfterSubscriptionMoves;
-      this.settings.folders = originalFolders;
-      this.settings.collapsedFolders = originalCollapsedFolders;
-      this.settings.folderFeedSortOrders = originalSortOrders;
-      await compensate();
       this.clearFolderPathCache();
       this.render();
       new Notice(this.t("modal.feedManager.actionFailed"));
@@ -2461,53 +2359,20 @@ export class Sidebar {
     }).open();
   }
 
-  private folderGraphWithoutPath(path: string): Folder[] {
-    const parts = path.split("/");
-    function removeRecursive(folders: Folder[], depth: number): Folder[] {
-      return folders.filter((folder: Folder) => {
-        if (folder.name === parts[depth]) {
-          if (depth === parts.length - 1) {
-            return false;
-          } else {
-            folder.subfolders = removeRecursive(folder.subfolders, depth + 1);
-            return true;
-          }
-        } else {
-          return true;
-        }
-      });
-    }
-    return removeRecursive(structuredClone(this.settings.folders), 0);
-  }
-
   private async deleteFolderAndSubscriptions(
     folderPath: string,
   ): Promise<boolean> {
-    const paths = new Set(this.getAllDescendantFolderPaths(folderPath));
-    const subscriptions = this.settings.feeds
-      .filter((feed) => feed.sourceKind !== "x-topic" && paths.has(feed.folder))
-      .map((feed) => feed.feedId ?? feed.url);
-    for (const sourceId of subscriptions) {
-      let removed = false;
-      try {
-        removed = await this.plugin.removeSubscription(sourceId, {
-          purgeCollection: false,
-        });
-      } catch {
-        removed = false;
-      }
-      if (!removed) {
+    try {
+      const result = await this.plugin.applyFolderMutation({
+        kind: "delete",
+        folderPath,
+      });
+      if (!result.ok) {
         new Notice(this.t("modal.feedManager.actionFailed"));
         this.render();
         return false;
       }
-    }
-    const originalFolders = this.settings.folders;
-    this.settings.folders = this.folderGraphWithoutPath(folderPath);
-    try {
-      await this.plugin.saveSettings();
     } catch {
-      this.settings.folders = originalFolders;
       this.clearFolderPathCache();
       this.render();
       new Notice(this.t("modal.feedManager.actionFailed"));

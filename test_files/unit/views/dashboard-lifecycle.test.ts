@@ -130,6 +130,7 @@ interface DashViewTestAPI {
       options: { purgeCollection: false },
     ) => Promise<boolean>
   >;
+  applyFolderMutation: Mock;
   saveSettings: Mock<() => Promise<void>>;
   handleDeleteFolder(folder: string): Promise<void>;
   syncCurrentFeedReference(): void;
@@ -156,12 +157,42 @@ async function makeView(
       );
       return true;
     }),
+    applyFolderMutation: vi.fn(async (request: {
+      kind: "delete";
+      folderPath: string;
+    }) => {
+      const parentPath = request.folderPath.split("/").slice(0, -1).join("/");
+      const within = (path: string): boolean =>
+        path === request.folderPath || path.startsWith(`${request.folderPath}/`);
+      const removedSourceIds: string[] = [];
+      settings.feeds = settings.feeds.flatMap((feed) => {
+        if (!within(feed.folder)) return [feed];
+        if (feed.sourceKind !== "x-topic") {
+          removedSourceIds.push(feed.feedId ?? feed.url);
+          return [];
+        }
+        return [{
+          ...feed,
+          folder: parentPath,
+          sourceConfig: { ...feed.sourceConfig, folder: parentPath },
+        } as Feed];
+      });
+      settings.folders = settings.folders.filter(
+        (folder) => folder.name !== request.folderPath,
+      );
+      return {
+        ok: true,
+        removedSourceIds,
+        topicDestinationFolder: parentPath,
+      };
+    }),
   };
   const leaf = { app } as unknown as import("obsidian").WorkspaceLeaf;
   const view = new RssDashboardView(leaf, plugin as never);
   view.render = vi.fn();
   const testView = view as unknown as DashViewTestAPI;
   testView.removeSubscription = plugin.removeSubscription;
+  testView.applyFolderMutation = plugin.applyFolderMutation;
   testView.saveSettings = plugin.saveSettings;
   return testView;
 }
@@ -676,10 +707,11 @@ describe("Dashboard lifecycle", () => {
       await view.handleDeleteFolder("Tech");
       expect(settings.folders.map((f) => f.name)).not.toContain("Tech");
       expect(settings.feeds.some((f) => f.folder === "Tech")).toBe(false);
-      expect(view.removeSubscription).toHaveBeenCalledWith(
-        "https://a.com/feed",
-        { purgeCollection: false },
-      );
+      expect(view.applyFolderMutation).toHaveBeenCalledWith({
+        kind: "delete",
+        folderPath: "Tech",
+      });
+      expect(view.removeSubscription).not.toHaveBeenCalled();
     });
 
     it("clears currentFolder if the deleted folder was active", async () => {
@@ -692,7 +724,7 @@ describe("Dashboard lifecycle", () => {
       expect(view.currentFolder).toBeNull();
     });
 
-    it("keeps the folder on partial removal and excludes X topics", async () => {
+    it("keeps the folder when the shared atomic delete route declines", async () => {
       const settings = cloneSettings();
       const first = makeFeed("https://a.com/feed", "Tech");
       const failed = makeFeed("https://b.com/feed", "Tech");
@@ -705,25 +737,20 @@ describe("Dashboard lifecycle", () => {
       settings.feeds = [first, failed, topic];
       settings.folders = [{ name: "Tech", subfolders: [], pinned: false }];
       const view = await makeView(settings);
-      view.removeSubscription.mockImplementation(async (sourceId: string) => {
-        if (sourceId === failed.url) return false;
-        settings.feeds = settings.feeds.filter(
-          (feed) => (feed.feedId ?? feed.url) !== sourceId,
-        );
-        return true;
+      view.applyFolderMutation.mockResolvedValueOnce({
+        ok: false,
+        reason: "dragged-folder-not-found",
       });
 
       await view.handleDeleteFolder("Tech");
 
-      expect(view.removeSubscription.mock.calls).toEqual([
-        [first.url, { purgeCollection: false }],
-        [failed.url, { purgeCollection: false }],
-      ]);
+      expect(view.applyFolderMutation).toHaveBeenCalledTimes(1);
+      expect(view.removeSubscription).not.toHaveBeenCalled();
       expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
       expect(settings.feeds).toContain(topic);
     });
 
-    it("restores the folder graph and resolves when the final save fails", async () => {
+    it("keeps the folder graph when the shared atomic delete route rejects", async () => {
       const settings = cloneSettings();
       const originalFolders = [
         { name: "Tech", subfolders: [], pinned: false },
@@ -731,12 +758,14 @@ describe("Dashboard lifecycle", () => {
       settings.feeds = [makeFeed("https://a.com/feed", "Tech")];
       settings.folders = originalFolders;
       const view = await makeView(settings);
-      view.saveSettings.mockRejectedValueOnce(new Error("disk full"));
+      view.applyFolderMutation.mockRejectedValueOnce(new Error("disk full"));
 
       await expect(view.handleDeleteFolder("Tech")).resolves.toBeUndefined();
 
       expect(settings.folders).toBe(originalFolders);
       expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
+      expect(view.removeSubscription).not.toHaveBeenCalled();
+      expect(view.saveSettings).not.toHaveBeenCalled();
     });
   });
 
