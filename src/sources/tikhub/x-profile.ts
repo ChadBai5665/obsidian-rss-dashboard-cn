@@ -53,7 +53,8 @@ export function parseXProfile(payload: unknown): XProfile {
 
     while (stack.length > 0) {
       const current = stack.pop();
-      if (!current || current.depth > MAX_WALK_DEPTH) continue;
+      if (!current) continue;
+      if (current.depth > MAX_WALK_DEPTH) throw malformedProfile();
       const value = current.value;
       if (!isObject(value)) continue;
       if (seen.has(value)) continue;

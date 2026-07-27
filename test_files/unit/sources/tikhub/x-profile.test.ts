@@ -155,4 +155,19 @@ describe("parseXProfile", () => {
       expect.objectContaining({ code: "malformed-profile" }),
     );
   });
+
+  it("rejects an over-depth duplicate hidden beside a shallow valid profile", () => {
+    let hiddenDuplicate: Record<string, unknown> = {
+      rest_id: "456",
+      legacy: { screen_name: "duplicate", name: "Duplicate" },
+    };
+    for (let depth = 0; depth < 34; depth += 1) {
+      hiddenDuplicate = { data: hiddenDuplicate };
+    }
+
+    expect(() => parseXProfile({
+      shallow: LEGACY_FIXTURE.data.user.result,
+      hiddenDuplicate,
+    })).toThrow(expect.objectContaining({ code: "malformed-profile" }));
+  });
 });
