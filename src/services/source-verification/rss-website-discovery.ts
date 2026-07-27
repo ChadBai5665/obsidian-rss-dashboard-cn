@@ -196,12 +196,12 @@ async function requestWithTimeout(
   options: RssWebsiteDiscoveryOptions,
 ): Promise<{ url: string; text: string; contentType?: string }> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timeout: number | undefined;
   try {
     return await Promise.race([
       options.request(url),
       new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(
+        timeout = window.setTimeout(
           () => reject(new RssWebsiteDiscoveryError("network-timeout")),
           timeoutMs,
         );
@@ -211,6 +211,6 @@ async function requestWithTimeout(
     if (error instanceof RssWebsiteDiscoveryError) throw error;
     throw new RssWebsiteDiscoveryError("network-request-failed");
   } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
+    if (timeout !== undefined) window.clearTimeout(timeout);
   }
 }

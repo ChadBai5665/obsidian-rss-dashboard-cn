@@ -33,6 +33,7 @@ describe("FeedManagerModal", () => {
       getActiveDashboardView: vi.fn(async () => null),
       exportOpml: vi.fn(),
       addFeed: vi.fn(async () => true),
+      openAddSourceModal: vi.fn(),
     };
 
     const openSpy = vi
@@ -57,5 +58,26 @@ describe("FeedManagerModal", () => {
 
     expect(openSpy).toHaveBeenCalledTimes(1);
     expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens verified onboarding from its add button", () => {
+    const app = obsidian.App.createMock();
+    const plugin = {
+      app,
+      settings: cloneSettings(),
+      saveSettings: vi.fn(async () => {}),
+      getActiveDashboardView: vi.fn(async () => null),
+      exportOpml: vi.fn(),
+      openAddSourceModal: vi.fn(),
+    };
+    const modal = new FeedManagerModal(
+      app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+
+    (modal.contentEl.querySelector(".feed-manager-add-button") as HTMLButtonElement).click();
+
+    expect(plugin.openAddSourceModal).toHaveBeenCalledWith();
   });
 });

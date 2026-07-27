@@ -9,6 +9,7 @@ import {
   type EventRef,
   type ObsidianProtocolData,
   apiVersion,
+  requestUrl,
 } from "obsidian";
 
 import { getSettingManager } from "./src/utils/settings-manager";
@@ -71,7 +72,10 @@ import { OpmlManager } from "./src/services/opml-manager";
 import { MediaService } from "./src/services/media-service";
 
 import { ImportOpmlModal } from "./src/modals/import-opml-modal";
-import { AddFeedModal } from "./src/modals/feed-manager/add-feed-modal";
+import {
+  AddSourceModal,
+  type AddSourceModalOptions,
+} from "./src/modals/source-onboarding/add-source-modal";
 import { StorageMigrationModal } from "./src/modals/storage-migration-modal";
 import {
   normalizeRefreshIntervalMinutes,
@@ -148,6 +152,9 @@ import type {
 import { TikHubRequestLedger } from "./src/sources/tikhub/request-ledger";
 import { TikHubRequestBudget } from "./src/sources/tikhub/request-budget";
 import { TikHubClient } from "./src/sources/tikhub/tikhub-client";
+import { XProfileResolver } from "./src/sources/tikhub/x-profile-resolver";
+import { discoverRssWebsite } from "./src/services/source-verification/rss-website-discovery";
+import { resolveYouTubeChannel } from "./src/services/source-verification/youtube-channel-resolver";
 import {
   XAccountAdapter,
   XAccountRefreshError,
@@ -2122,16 +2129,6 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  private buildUriAddFeedTitle(feedUrl: string): string {
-    try {
-      const parsed = new URL(feedUrl);
-      const hostname = parsed.hostname.replace(/^www\./i, "").trim();
-      return hostname || feedUrl;
-    } catch {
-      return feedUrl;
-    }
-  }
-
   private async handleAddFeedUriAction(
     params: ObsidianProtocolData,
   ): Promise<void> {
@@ -2153,30 +2150,11 @@ export default class RssDashboardPlugin extends Plugin {
 
     await this.activateView();
 
-    new AddFeedModal(
-      this.app,
-      this.settings.folders,
-      async (request) =>
-        await this.addFeed(
-          request.title,
-          request.url,
-          request.folder,
-          request.autoDeleteDuration,
-          request.maxItemsLimit,
-          request.scanInterval,
-          request.feedKeywordRules,
-          request.customTemplate,
-          request.excludeFromRefresh,
-          request.customTags,
-        ),
-      () => {
-        void this.refreshDashboardViews();
-      },
-      defaultFolder,
-      this,
-      decodedUrl,
-      this.buildUriAddFeedTitle(decodedUrl),
-    ).open();
+    this.openAddSourceModal({
+      initialKind: "rss-website",
+      initialInput: decodedUrl,
+      initialFolder: defaultFolder,
+    });
   }
 
   private applyMobileOptimizations(): void {
@@ -3913,6 +3891,80 @@ export default class RssDashboardPlugin extends Plugin {
       console.error("[RSS Dashboard] Verified subscription add failed.");
       return false;
     }
+  }
+
+  /** Opens the verified subscription workflow used by every public add entry. */
+  public openAddSourceModal(
+    initial?: Pick<
+      AddSourceModalOptions,
+      "initialKind" | "initialInput" | "initialFolder"
+    >,
+  ): AddSourceModal {
+    const requestText = async (url: string, signal: AbortSignal) => {
+      if (signal.aborted) throw new Error("source-verification-aborted");
+      const response = await requestUrl({
+        url,
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; Obsidian RSS Dashboard/0.1)",
+        },
+        throw: false,
+      });
+      if (signal.aborted) throw new Error("source-verification-aborted");
+      if (response.status < 200 || response.status >= 400) {
+        throw new Error("source-verification-request-failed");
+      }
+      return {
+        url,
+        text: response.text,
+        contentType: response.headers["content-type"],
+      };
+    };
+    const modal = new AddSourceModal(this.app, {
+      ...initial,
+      locale: this.settings.locale ?? "zh-CN",
+      verifyRss: async (input, signal) => await discoverRssWebsite(input, {
+        request: async (url) => await requestText(url, signal),
+      }),
+      verifyYouTube: async (input, signal) => await resolveYouTubeChannel(input, {
+        request: async (url) => await requestText(url, signal),
+      }),
+      verifyX: async (input, signal) => {
+        const connectionId = this.settings.tikhub.connectionId.toLowerCase();
+        const ledger = new TikHubRequestLedger(
+          this.app.vault,
+          this.settings.collection.dataFolder,
+          {
+            storageIdentity: `vault:${isUuid(connectionId) ? connectionId : "unconfigured"}`,
+          },
+        );
+        const budget = new TikHubRequestBudget({
+          ledger,
+          maxRequestsPerRun: this.settings.tikhub.maxRequestsPerRun,
+          maxRequestsPerDay: this.settings.tikhub.maxRequestsPerDay,
+        });
+        const client = new TikHubClient({
+          baseUrl: this.settings.tikhub.baseUrl,
+          timeoutMs: this.settings.tikhub.timeoutMs,
+          budget,
+        });
+        return await new XProfileResolver({
+          settings: this.settings.tikhub,
+          client,
+          secretStore: new DesktopSecretStore(),
+        }).resolve(input, signal);
+      },
+      onSubscribe: async (request) => await this.addVerifiedSubscription(request),
+      onOpenSettings: () => { void this.openSettingsToTab("tikhub"); },
+      xRequestCaps: {
+        run: this.settings.tikhub.maxRequestsPerRun,
+        day: this.settings.tikhub.maxRequestsPerDay,
+      },
+      defaultAutoDeleteDuration: this.settings.defaultAutoDeleteDuration,
+      defaultMaxItems: this.settings.maxItems,
+    });
+    modal.open();
+    return modal;
   }
 
   async removeSubscription(

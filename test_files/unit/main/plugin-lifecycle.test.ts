@@ -15,7 +15,7 @@ import type {
   RssDashboardSettings,
 } from "../../../src/types/types";
 import { DEFAULT_SETTINGS } from "../../../src/types/types";
-import { AddFeedModal } from "../../../src/modals/feed-manager/add-feed-modal";
+import { AddSourceModal } from "../../../src/modals/source-onboarding/add-source-modal";
 import { FeedStorageRollbackIncompleteError } from "../../../src/services/feed-storage-repository";
 
 // Mock functions for FeedParser - must be declared before mocks
@@ -1407,7 +1407,7 @@ describe("URI add-feed handling", () => {
 
   it("opens Add Feed modal with prefilled URL for browser URI route", async () => {
     const addFeedSpy = vi.spyOn(plugin, "addFeed");
-    const modalOpenSpy = vi.spyOn(AddFeedModal.prototype, "open");
+    const modalOpenSpy = vi.spyOn(AddSourceModal.prototype, "open");
 
     await plugin.onload();
     const handler = (
@@ -1422,7 +1422,7 @@ describe("URI add-feed handling", () => {
     expect(addFeedSpy).not.toHaveBeenCalled();
 
     const urlInput =
-      document.querySelector<HTMLInputElement>(".feed-url-input");
+      document.querySelector<HTMLInputElement>(".rss-source-identity-input");
     expect(urlInput?.value).toBe("https://example.com/feed.xml");
   });
 });

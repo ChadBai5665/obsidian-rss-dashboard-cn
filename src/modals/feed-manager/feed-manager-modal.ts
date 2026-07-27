@@ -2,7 +2,6 @@ import { Modal, App, Setting, setIcon, Notice } from "obsidian";
 import type RssDashboardPlugin from "../../../main";
 import { ImportOpmlModal } from "../import-opml-modal";
 import { shouldUseMobileSidebarLayout } from "../../utils/platform-utils";
-import { AddFeedModal, type AddFeedRequest } from "./add-feed-modal";
 import { createTranslator } from "../../i18n";
 
 export class FeedManagerModal extends Modal {
@@ -39,26 +38,7 @@ export class FeedManagerModal extends Modal {
     });
     addFeedBtn.createSpan({ text: t("modal.feedManager.add") });
     addFeedBtn.onclick = () => {
-      new AddFeedModal(
-        this.app,
-        this.plugin.settings.folders,
-        async (request: AddFeedRequest) =>
-          this.plugin.addFeed(
-            request.title,
-            request.url,
-            request.folder,
-            request.autoDeleteDuration,
-            request.maxItemsLimit,
-            request.scanInterval,
-            request.feedKeywordRules,
-            request.customTemplate,
-            request.excludeFromRefresh,
-            request.customTags,
-          ),
-        () => this.onOpen(),
-        "",
-        this.plugin,
-      ).open();
+      this.plugin.openAddSourceModal();
     };
 
     // Import OPML button

@@ -40,6 +40,7 @@ interface TestPlugin extends Partial<RssDashboardPlugin> {
   >;
   activeRefreshState?: Map<string, FeedRefreshState>;
   backgroundImportQueue?: FeedMetadata[];
+  openAddSourceModal: Mock;
 }
 
 /** Typed interface for Sidebar private member access */
@@ -130,7 +131,26 @@ describe("Sidebar Core", () => {
       settings,
       saveSettings: vi.fn().mockResolvedValue(undefined),
       updateArticlesReadBatch: vi.fn().mockResolvedValue(true),
+      openAddSourceModal: vi.fn(),
     };
+  });
+
+  it("opens verified onboarding from the sidebar add entry", () => {
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    );
+
+    (sidebar as unknown as { showAddFeedModal(folder: string): void })
+      .showAddFeedModal("Research");
+
+    expect(plugin.openAddSourceModal).toHaveBeenCalledWith({
+      initialFolder: "Research",
+    });
   });
 
   it("routes all-feed read changes through the status transaction batch", async () => {

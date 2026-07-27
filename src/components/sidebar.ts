@@ -12,7 +12,7 @@ import {
   createToolbarButton,
 } from "../utils/sidebar-icon-registry";
 import { collectFolderPaths } from "../utils/folder-paths";
-import { AddFeedModal, EditFeedModal } from "../modals/feed-manager-modal";
+import { EditFeedModal } from "../modals/feed-manager-modal";
 import { FolderAutoTagModal } from "../modals/feed-manager/folder-auto-tag-modal";
 import {
   buildFolderTagConfirmMessage,
@@ -3425,26 +3425,7 @@ export class Sidebar {
   }
 
   private showAddFeedModal(defaultFolder = "Uncategorized"): void {
-    new AddFeedModal(
-      this.app,
-      this.settings.folders,
-      async (request) =>
-        await this.callbacks.onAddFeed(
-          request.title,
-          request.url,
-          request.folder,
-          request.autoDeleteDuration,
-          request.maxItemsLimit,
-          request.scanInterval,
-          request.feedKeywordRules,
-          request.customTemplate,
-          request.excludeFromRefresh,
-          request.customTags,
-        ),
-      () => this.render(),
-      defaultFolder,
-      this.plugin,
-    ).open();
+    this.plugin.openAddSourceModal({ initialFolder: defaultFolder });
   }
 
   public showEditFeedModal(
