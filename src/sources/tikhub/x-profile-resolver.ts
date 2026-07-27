@@ -53,10 +53,14 @@ interface VerificationRecord {
   handle: string;
   restId: string;
   expiresAt: number;
-  consumed: boolean;
+  state: "available" | "reserved" | "consumed";
 }
 
 const verificationRecords = new WeakMap<XProfileVerificationProof, VerificationRecord>();
+const reservationRecords = new WeakMap<
+  XProfileVerificationReservation,
+  VerificationRecord
+>();
 
 /** Opaque, process-local capability. Its constructor cannot mint a usable proof. */
 export class XProfileVerificationProof {
@@ -67,11 +71,21 @@ export class XProfileVerificationProof {
 }
 
 function mintXProfileVerificationProof(
-  record: Omit<VerificationRecord, "consumed">,
+  record: Omit<VerificationRecord, "state">,
 ): XProfileVerificationProof {
   const proof = new XProfileVerificationProof(PROOF_AUTHORITY);
-  verificationRecords.set(proof, { ...record, consumed: false });
+  verificationRecords.set(proof, { ...record, state: "available" });
   return proof;
+}
+
+/** Opaque transaction handle for one in-progress durable settings write. */
+export class XProfileVerificationReservation {
+  constructor(authority: typeof PROOF_AUTHORITY) {
+    if (authority !== PROOF_AUTHORITY) {
+      throw new Error("Invalid X verification reservation");
+    }
+    Object.freeze(this);
+  }
 }
 
 export interface VerifiedXProfile {
@@ -79,28 +93,56 @@ export interface VerifiedXProfile {
   proof: XProfileVerificationProof;
 }
 
-/** Consumes a proof exactly once when its canonical handle + restId still match. */
-export function consumeXProfileVerificationProof(
+/** Reserves an eligible proof so concurrent consumers fail closed. */
+export function reserveXProfileVerificationProof(
   profile: XProfile,
   proof: unknown,
   now: Date,
-): boolean {
-  if (!(proof instanceof XProfileVerificationProof)) return false;
+): XProfileVerificationReservation | undefined {
+  if (!(proof instanceof XProfileVerificationProof)) return undefined;
   const record = verificationRecords.get(proof);
   const handle = normalizeXHandle(profile.handle);
   const nowMs = now.getTime();
   if (
     !record ||
-    record.consumed ||
+    record.state !== "available" ||
     !Number.isFinite(nowMs) ||
     nowMs >= record.expiresAt ||
     handle !== record.handle ||
     profile.restId !== record.restId
   ) {
-    return false;
+    return undefined;
   }
-  record.consumed = true;
-  return true;
+  record.state = "reserved";
+  const reservation = new XProfileVerificationReservation(PROOF_AUTHORITY);
+  reservationRecords.set(reservation, record);
+  return reservation;
+}
+
+/** Irreversibly consumes a reserved proof after the settings write commits. */
+export function commitXProfileVerificationReservation(
+  reservation: XProfileVerificationReservation,
+): void {
+  const record = reservationRecords.get(reservation);
+  if (!record || record.state !== "reserved") {
+    throw new Error("Invalid X verification reservation");
+  }
+  record.state = "consumed";
+  reservationRecords.delete(reservation);
+}
+
+/** Releases a failed write only while the original proof remains unexpired. */
+export function releaseXProfileVerificationReservation(
+  reservation: XProfileVerificationReservation,
+  now: Date,
+): void {
+  const record = reservationRecords.get(reservation);
+  if (!record || record.state !== "reserved") return;
+  const nowMs = now.getTime();
+  record.state = Number.isFinite(nowMs) && nowMs < record.expiresAt
+    ? "available"
+    : "consumed";
+  reservationRecords.delete(reservation);
 }
 
 export class XProfileResolver {

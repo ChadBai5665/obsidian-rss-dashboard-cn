@@ -562,6 +562,21 @@ function isActiveInitialImportProgress(
     progress?.status === "paused-limit";
 }
 
+function stoppedInitialImportResult(feed: Feed, fetchedAt: Date): FeedRefreshResult {
+  const stoppedFeed = cloneRefreshData(feed);
+  if (stoppedFeed.initialImportProgress) {
+    stoppedFeed.initialImportProgress.status = "stopped";
+  }
+  return {
+    feed: stoppedFeed,
+    previousItems: cloneRefreshData(stoppedFeed.items),
+    refreshedItems: [],
+    fetchedAt,
+    providerRequestCount: 0,
+    warnings: [],
+  };
+}
+
 function combineAbortSignals(
   primary: AbortSignal,
   secondary?: AbortSignal,
@@ -4839,41 +4854,102 @@ export default class RssDashboardPlugin extends Plugin {
     }
     bindFeedItemsToSourceIdentity(feed);
     const sourceId = feed.feedId ?? feed.url;
+    const currentAtStart = this.resolveCurrentFeedForRefresh(feed, sourceId);
     const attemptedAt = new Date();
     const ledger = this.getSourceRefreshLedger();
-    try {
-      await ledger.recordAttempt(sourceId, attemptedAt);
-    } catch {
-      throw new FeedRefreshPipelineError(
-        "state-failed",
-        "Refresh state is unavailable.",
-      );
+    const initialImportController =
+      currentAtStart.sourceKind === "x-account" &&
+        isActiveInitialImportProgress(currentAtStart.initialImportProgress)
+        ? new AbortController()
+        : undefined;
+    if (initialImportController) {
+      this.activeInitialImportControllers.set(sourceId, initialImportController);
     }
-
-    const attempt = new RefreshAttemptToken();
-    let result: FeedRefreshResult;
     try {
-      result = await this.refreshFeedWithTimeout(feed, attempt, sourceRegistry);
-      attempt.assertActive();
-    } catch (error) {
-      const failure = toFeedRefreshPipelineError(error);
-      await this.recordRefreshErrorSafely(
-        ledger,
-        sourceId,
-        attemptedAt,
-        failure,
-      );
-      throw failure;
-    }
-
-    if (!this.settings.collection.enabled) {
       try {
-        await ledger.recordSuccess(sourceId, result.fetchedAt);
+        await ledger.recordAttempt(sourceId, attemptedAt);
       } catch {
-        const failure = new FeedRefreshPipelineError(
+        throw new FeedRefreshPipelineError(
           "state-failed",
           "Refresh state is unavailable.",
         );
+      }
+
+      const currentFeed = this.resolveCurrentFeedForRefresh(
+        currentAtStart,
+        sourceId,
+      );
+      const feedForAttempt =
+        currentFeed.initialImportProgress !== undefined ||
+          feed.initialImportProgress !== undefined
+          ? currentFeed
+          : feed;
+      if (
+        initialImportController?.signal.aborted ||
+        (initialImportController &&
+          currentFeed.initialImportProgress?.status === "stopped")
+      ) {
+        return stoppedInitialImportResult(feedForAttempt, attemptedAt);
+      }
+
+      const attempt = new RefreshAttemptToken();
+      let result: FeedRefreshResult;
+      try {
+        result = await this.refreshFeedWithTimeout(
+          feedForAttempt,
+          attempt,
+          sourceRegistry,
+          initialImportController,
+        );
+        attempt.assertActive();
+      } catch (error) {
+        const failure = toFeedRefreshPipelineError(error);
+        await this.recordRefreshErrorSafely(
+          ledger,
+          sourceId,
+          attemptedAt,
+          failure,
+        );
+        throw failure;
+      }
+
+      if (!this.settings.collection.enabled) {
+        try {
+          await ledger.recordSuccess(sourceId, result.fetchedAt);
+        } catch {
+          const failure = new FeedRefreshPipelineError(
+            "state-failed",
+            "Refresh state is unavailable.",
+          );
+          await this.recordRefreshErrorSafely(
+            ledger,
+            sourceId,
+            attemptedAt,
+            failure,
+          );
+          throw failure;
+        }
+        return result;
+      }
+
+      try {
+        attempt.assertActive();
+        await this.getCollectionService().collectFeedRefresh({
+          feed: result.feed,
+          previousItems: result.previousItems,
+          refreshedItems: result.refreshedItems,
+          fetchedAt: result.fetchedAt,
+        });
+        attempt.assertActive();
+      } catch (error) {
+        const failure =
+          error instanceof FeedRefreshPipelineError &&
+          error.code === "timed-out"
+            ? error
+            : new FeedRefreshPipelineError(
+                "collection-failed",
+                "Collection persistence failed.",
+              );
         await this.recordRefreshErrorSafely(
           ledger,
           sourceId,
@@ -4883,35 +4959,24 @@ export default class RssDashboardPlugin extends Plugin {
         throw failure;
       }
       return result;
+    } finally {
+      if (
+        initialImportController &&
+        this.activeInitialImportControllers.get(sourceId) === initialImportController
+      ) {
+        this.activeInitialImportControllers.delete(sourceId);
+      }
     }
+  }
 
-    try {
-      attempt.assertActive();
-      await this.getCollectionService().collectFeedRefresh({
-        feed: result.feed,
-        previousItems: result.previousItems,
-        refreshedItems: result.refreshedItems,
-        fetchedAt: result.fetchedAt,
-      });
-      attempt.assertActive();
-    } catch (error) {
-      const failure =
-        error instanceof FeedRefreshPipelineError &&
-        error.code === "timed-out"
-          ? error
-          : new FeedRefreshPipelineError(
-              "collection-failed",
-              "Collection persistence failed.",
-            );
-      await this.recordRefreshErrorSafely(
-        ledger,
-        sourceId,
-        attemptedAt,
-        failure,
-      );
-      throw failure;
-    }
-    return result;
+  private resolveCurrentFeedForRefresh(feed: Feed, sourceId: string): Feed {
+    const matchingIds = this.settings.feeds.filter(
+      (candidate) => (candidate.feedId ?? candidate.url) === sourceId,
+    );
+    return matchingIds.find((candidate) => candidate.url === feed.url) ??
+      (matchingIds.length === 1 ? matchingIds[0] : undefined) ??
+      this.settings.feeds.find((candidate) => candidate.url === feed.url) ??
+      feed;
   }
 
   private async recordRefreshErrorSafely(
@@ -4934,11 +4999,17 @@ export default class RssDashboardPlugin extends Plugin {
     feed: Feed,
     attempt: RefreshAttemptToken,
     sourceRegistry: SourceRegistry,
+    initialImportController?: AbortController,
   ): Promise<FeedRefreshResult> {
     let timeoutId: number | null = null;
     try {
       return await Promise.race([
-        this.refreshFeedDirect(feed, attempt, sourceRegistry),
+        this.refreshFeedDirect(
+          feed,
+          attempt,
+          sourceRegistry,
+          initialImportController,
+        ),
         new Promise<FeedRefreshResult>((_, reject) => {
           timeoutId = window.setTimeout(() => {
             attempt.cancel();
@@ -4962,6 +5033,7 @@ export default class RssDashboardPlugin extends Plugin {
     feed: Feed,
     attempt: RefreshAttemptToken,
     sourceRegistry: SourceRegistry,
+    initialImportController?: AbortController,
   ): Promise<FeedRefreshResult> {
     const parserInput = cloneRefreshData(feed);
     parserInput.lastFetchError = undefined;
@@ -4985,33 +5057,22 @@ export default class RssDashboardPlugin extends Plugin {
       );
     }
     const fetchedAt = new Date();
-    const isActiveXImport = config.kind === "x-account" &&
-      isActiveInitialImportProgress(parserInput.initialImportProgress);
-    const stopController = isActiveXImport ? new AbortController() : undefined;
-    const sourceId = feed.feedId ?? feed.url;
-    if (stopController) {
-      this.activeInitialImportControllers.set(sourceId, stopController);
-    }
     const combined = combineAbortSignals(
       attempt.signal,
-      stopController?.signal,
+      initialImportController?.signal,
     );
     let output: SourceRefreshOutput;
     try {
       output = await sourceRegistry.refresh(config, {
         now: fetchedAt,
         signal: combined.signal,
-        ...(stopController ? { stopSignal: stopController.signal } : {}),
+        ...(initialImportController
+          ? { stopSignal: initialImportController.signal }
+          : {}),
         feed: parserInput,
       });
     } finally {
       combined.dispose();
-      if (
-        stopController &&
-        this.activeInitialImportControllers.get(sourceId) === stopController
-      ) {
-        this.activeInitialImportControllers.delete(sourceId);
-      }
     }
     const updatedFeed = output.feed;
     updatedFeed.feedId ??= parserInput.feedId;

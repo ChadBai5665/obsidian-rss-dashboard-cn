@@ -1611,6 +1611,65 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("stopped");
   });
 
+  it("registers the X history stop before refresh-state persistence can yield", async () => {
+    const source = createFeed({
+      feedId: "x-history-before-ledger",
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "x-history-before-ledger",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      url: "tikhub://x-account/openai",
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: {
+        status: "running",
+        pagesFetched: 1,
+        itemsImported: 1,
+        phase: "posts",
+        nextCursor: "next-page",
+      },
+    });
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let releaseAttempt!: () => void;
+    const attemptBlocked = new Promise<void>((resolve) => {
+      releaseAttempt = resolve;
+    });
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn(async () => await attemptBlocked),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+    const paidRefresh = vi.fn().mockResolvedValue({
+      feed: source,
+      items: source.items,
+      collectionItems: [],
+      providerRequestCount: 1,
+      warnings: [],
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+
+    const refresh = plugin.refreshSelectedFeed(source);
+    await flushMicrotasks();
+    await plugin.getSubscriptionService().stopInitialImport(source.feedId!);
+    releaseAttempt();
+    await refresh;
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("stopped");
+  });
+
   it("skips refresh when feedParser is not initialized yet", async () => {
     const plugin = createPluginWithSettings([createFeed()]);
     plugin.feedParser = undefined as unknown as TestFeedParser;

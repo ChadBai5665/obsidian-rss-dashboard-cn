@@ -5,6 +5,7 @@ import {
   createConfirmedCollectionPurge,
   type VerifiedFeedSubscriptionRequest,
   type VerifiedXSubscriptionRequest,
+  type XSubscriptionOptionsUpdateRequest,
 } from "../../../src/services/subscription-service";
 import {
   XProfileResolver,
@@ -773,6 +774,141 @@ describe("SubscriptionService", () => {
     expect(test.collectionService.collectFeedRefresh).not.toHaveBeenCalled();
   });
 
+  it("updates options on a legacy X account without proof or identity reset", async () => {
+    const previousItem = item("legacy-x-item", "2026-07-20T00:00:00.000Z");
+    const progress = {
+      status: "paused-limit" as const,
+      pagesFetched: 3,
+      itemsImported: 8,
+      phase: "replies" as const,
+      replyCursor: "reply-next",
+    };
+    const source = existingFeed({
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "legacy-feed",
+        handle: "openai",
+        displayName: "OpenAI identity",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X/Old",
+        topics: ["old"],
+      },
+      title: "OpenAI identity",
+      author: "OpenAI identity",
+      url: "tikhub://x-account/openai",
+      folder: "X/Old",
+      items: [previousItem],
+      lastUpdated: 123,
+      customTags: ["old"],
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: progress,
+      subscriptionStatus: "active",
+    });
+    const test = harness([source]);
+    const request: XSubscriptionOptionsUpdateRequest = {
+      kind: "x-account-options",
+      folder: "X/New",
+      tags: ["models"],
+      initialImportPolicy: { mode: "lookback-days", days: 30 },
+      includeReplies: true,
+      includeReposts: true,
+      autoDeleteDuration: 45,
+      maxItemsLimit: 12,
+      scanInterval: 6,
+      keywordRules: {
+        overrideGlobalRules: false,
+        includeLogic: "AND",
+        rules: [],
+      },
+      customTemplate: "X Template",
+      excludeFromRefresh: true,
+      paused: true,
+    };
+
+    const updated = await test.service.update("legacy-feed", request);
+
+    expect(updated).toMatchObject({
+      title: "OpenAI identity",
+      author: "OpenAI identity",
+      url: "tikhub://x-account/openai",
+      folder: "X/New",
+      customTags: ["models"],
+      initialImportPolicy: { mode: "lookback-days", days: 30 },
+      initialImportProgress: progress,
+      lastUpdated: 123,
+      autoDeleteDuration: 45,
+      maxItemsLimit: 12,
+      scanInterval: 6,
+      keywordRules: request.keywordRules,
+      customTemplate: "X Template",
+      excludeFromRefresh: true,
+      subscriptionStatus: "paused",
+      sourceConfig: {
+        kind: "x-account",
+        id: "legacy-feed",
+        handle: "openai",
+        displayName: "OpenAI identity",
+        includeReplies: true,
+        includeReposts: true,
+        folder: "X/New",
+        topics: ["models"],
+      },
+    });
+    expect(updated.sourceConfig).not.toHaveProperty("restId");
+    expect(updated.items).toEqual([previousItem]);
+    expect(test.collectionService.collectFeedRefresh).not.toHaveBeenCalled();
+  });
+
+  it("keeps X identity fields immutable on option-only updates", async () => {
+    const source = existingFeed({
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "legacy-feed",
+        handle: "openai",
+        restId: "44196397",
+        displayName: "OpenAI",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      title: "OpenAI",
+      author: "OpenAI",
+      url: "tikhub://x-account/openai",
+    });
+    const test = harness([source]);
+    const hostileOptions = {
+      kind: "x-account-options",
+      handle: "different",
+      restId: "999999",
+      displayName: "Different",
+      profile: { handle: "different", restId: "999999" },
+      includeReplies: true,
+    } as unknown as XSubscriptionOptionsUpdateRequest;
+
+    const updated = await test.service.update("legacy-feed", hostileOptions);
+
+    expect(updated).toMatchObject({
+      title: "OpenAI",
+      author: "OpenAI",
+      url: "tikhub://x-account/openai",
+      sourceConfig: {
+        handle: "openai",
+        restId: "44196397",
+        displayName: "OpenAI",
+        includeReplies: true,
+      },
+    });
+    expect(updated).not.toHaveProperty("autoDeleteDuration");
+    expect(updated).not.toHaveProperty("maxItemsLimit");
+    expect(updated).not.toHaveProperty("scanInterval");
+    expect(updated).not.toHaveProperty("excludeFromRefresh");
+    expect(updated).not.toHaveProperty("customTags");
+  });
+
   it("requires a fresh exact X proof, consumes it once, and rejects expiry or profile tampering", async () => {
     const first = harness();
     const request = xRequest();
@@ -808,6 +944,51 @@ describe("SubscriptionService", () => {
     delete plainRequest.verificationProof;
     await expect(plain.service.add(plainRequest as unknown as VerifiedXSubscriptionRequest))
       .rejects.toMatchObject({ code: "invalid-subscription-request" });
+  });
+
+  it("releases a reserved X proof when durable settings persistence fails", async () => {
+    const test = harness();
+    const request = xRequest();
+    test.saveSettings.mockRejectedValueOnce(new Error("settings unavailable"));
+
+    await expect(test.service.add(request)).rejects.toThrow(
+      "settings unavailable",
+    );
+    await expect(test.service.add(request)).resolves.toMatchObject({
+      sourceKind: "x-account",
+      sourceConfig: expect.objectContaining({
+        handle: "openai",
+        restId: "44196397",
+      }),
+    });
+
+    expect(test.settings.feeds).toHaveLength(1);
+  });
+
+  it("rejects concurrent reuse while an X proof is reserved by another save", async () => {
+    const request = xRequest();
+    const first = harness();
+    const concurrent = harness();
+    let markSaving!: () => void;
+    let releaseSave!: () => void;
+    const saving = new Promise<void>((resolve) => {
+      markSaving = resolve;
+    });
+    const blockedSave = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    first.saveSettings.mockImplementationOnce(async () => {
+      markSaving();
+      await blockedSave;
+    });
+
+    const firstAdd = first.service.add(request);
+    await saving;
+    await expect(concurrent.service.add(request)).rejects.toMatchObject({
+      code: "invalid-subscription-request",
+    });
+    releaseSave();
+    await expect(firstAdd).resolves.toMatchObject({ sourceKind: "x-account" });
   });
 
   it("defaults to history-preserving removal and requires a feed-bound purge capability", async () => {
