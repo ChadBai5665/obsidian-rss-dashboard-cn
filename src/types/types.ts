@@ -1,6 +1,10 @@
 import type { Locale, TranslationKey } from "../i18n/types";
 import type { SourceConfig, SourceKind } from "../sources/source-config";
 import type { AiSettings } from "../ai/ai-types";
+import type {
+  InitialImportPolicy,
+  InitialImportProgress,
+} from "../sources/initial-import-policy";
 
 export interface FeedItem {
   /** Stable collection identity once the item has entered the collection layer. */
@@ -113,6 +117,9 @@ export interface Feed {
    * Cleared (set to undefined) on the next successful fetch.
    */
   lastFetchError?: string;
+  initialImportPolicy?: InitialImportPolicy;
+  initialImportProgress?: InitialImportProgress;
+  subscriptionStatus?: "active" | "paused";
 }
 
 export type FeedRefreshStatus =

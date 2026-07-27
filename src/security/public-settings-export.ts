@@ -7,6 +7,7 @@ import {
   type SourceKind,
 } from "../sources/source-config";
 import { normalizeTikHubBaseUrl } from "../sources/tikhub/tikhub-types";
+import { normalizeInitialImportPolicy } from "../sources/initial-import-policy";
 
 const MAX_COLLECTION_ENTRIES = 5_000;
 const MAX_FOLDER_DEPTH = 16;
@@ -287,8 +288,20 @@ function copyFeeds(value: unknown): Record<string, unknown>[] {
     copyInteger(feed, output, "scanInterval", 1, MAX_SAFE_NUMBER);
     copyBoolean(feed, output, "excludeFromRefresh");
     copyNested(feed, output, "keywordRules", copyFeedKeywordRules);
+    copyNested(feed, output, "initialImportPolicy", copyInitialImportPolicy);
+    copyEnum(feed, output, "subscriptionStatus", new Set(["active", "paused"]));
     return output;
   });
+}
+
+function copyInitialImportPolicy(value: unknown): Record<string, unknown> {
+  const policy = normalizeInitialImportPolicy(value);
+  if (!policy) throw new PublicSettingsExportError("invalid-settings");
+  const output = createRecord();
+  output.mode = policy.mode;
+  if (policy.mode === "lookback-days") output.days = policy.days;
+  if (policy.mode === "since-date") output.since = policy.since;
+  return output;
 }
 
 function copySourceConfig(value: unknown): Record<string, unknown> {

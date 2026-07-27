@@ -755,6 +755,48 @@ describe("settings-loader", () => {
   // ── migrateSettings ──────────────────────────────────────────────────────────
 
   describe("migrateSettings", () => {
+    it("leaves legacy feeds without import fields completed instead of pending", async () => {
+      const { migrateSettings } =
+        await import("../../../src/utils/settings-loader");
+      const feed = createFeed();
+      const settings = {
+        ...DEFAULT_SETTINGS,
+        feeds: [feed],
+      } as RssDashboardSettings;
+
+      migrateSettings(settings);
+
+      expect(settings.feeds[0]).not.toHaveProperty("initialImportPolicy");
+      expect(settings.feeds[0]).not.toHaveProperty("initialImportProgress");
+      expect(settings.feeds[0].subscriptionStatus).toBeUndefined();
+    });
+
+    it("normalizes only supplied import fields and discards invalid progress", async () => {
+      const { migrateSettings } =
+        await import("../../../src/utils/settings-loader");
+      const feed = createFeed() as Feed & Record<string, unknown>;
+      feed.initialImportPolicy = { mode: "lookback-days", days: 14 };
+      feed.initialImportProgress = {
+        status: "running",
+        pagesFetched: -1,
+        itemsImported: 2,
+      };
+      feed.subscriptionStatus = "paused";
+      const settings = {
+        ...DEFAULT_SETTINGS,
+        feeds: [feed],
+      } as RssDashboardSettings;
+
+      migrateSettings(settings);
+
+      expect(settings.feeds[0].initialImportPolicy).toEqual({
+        mode: "lookback-days",
+        days: 14,
+      });
+      expect(settings.feeds[0]).not.toHaveProperty("initialImportProgress");
+      expect(settings.feeds[0].subscriptionStatus).toBe("paused");
+    });
+
     it("migrates savePath to articleSaving.defaultFolder", async () => {
       const { migrateSettings } =
         await import("../../../src/utils/settings-loader");
