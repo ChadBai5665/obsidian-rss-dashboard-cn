@@ -15,6 +15,9 @@ import {
   type SourceOnboardingKind,
 } from "./initial-import-control";
 import {
+  projectRssWebsiteVerification,
+  projectVerifiedXProfile,
+  projectYouTubeVerification,
   renderVerificationCard,
   type VerifiedSourceSnapshot,
 } from "./verification-card";
@@ -40,7 +43,7 @@ export interface AddSourceModalOptions {
   defaultMaxItems?: number;
 }
 
-type ModalStage = "choose" | "identify" | "checking" | "confirmed";
+type ModalStage = "choose" | "identify" | "checking" | "confirmed" | "failed";
 
 const FAILURE_KEYS: Readonly<Partial<Record<VerificationFailureCode, TranslationKey>>> = {
   "input-empty": "sourceOnboarding.failure.inputEmpty",
@@ -175,6 +178,7 @@ export class AddSourceModal extends Modal {
 
   private renderIdentify(): void {
     if (!this.kind) return;
+    this.importControl = undefined;
     this.renderHeader();
     const body = this.contentEl.createDiv({ cls: "rss-source-onboarding-body" });
     const identityRow = body.createDiv({ cls: "rss-source-identity-row" });
@@ -221,14 +225,16 @@ export class AddSourceModal extends Modal {
       attr: { "aria-live": "polite" },
     });
     this.renderVerificationResult(body, feedback);
-    this.renderSourceOptions(body);
-    this.importControl = renderInitialImportControl(body, {
-      locale: this.locale,
-      sourceKind: this.kind,
-      onChange: () => this.updateSubscribeButton(),
-    });
-    this.renderAdvancedSettings(body);
-    this.renderFooter();
+    if (this.canConfigureSubscription()) {
+      this.renderSourceOptions(body);
+      this.importControl = renderInitialImportControl(body, {
+        locale: this.locale,
+        sourceKind: this.kind,
+        onChange: () => this.updateSubscribeButton(),
+      });
+      this.renderAdvancedSettings(body);
+      this.renderFooter();
+    }
   }
 
   private renderHeader(): void {
@@ -292,7 +298,7 @@ export class AddSourceModal extends Modal {
             );
           }
         }
-        this.updateSubscribeButton();
+        this.render();
       });
     }
   }
@@ -368,7 +374,11 @@ export class AddSourceModal extends Modal {
       cls: "rss-source-field-label",
       text: this.t("sourceOnboarding.tags"),
     });
-    const tagInput = tags.createEl("input", { type: "text" });
+    const tagInput = tags.createEl("input", {
+      type: "text",
+      value: this.tags.join(", "),
+    });
+    tagInput.value = this.tags.join(", ");
     tagInput.addEventListener("input", () => {
       this.tags = tagInput.value.split(",").map((tag) => tag.trim()).filter(Boolean);
     });
@@ -412,7 +422,9 @@ export class AddSourceModal extends Modal {
 
     try {
       if (kind === "rss-website") {
-        const value = await this.options.verifyRss(input, this.lifecycle.signal);
+        const value = projectRssWebsiteVerification(
+          await this.options.verifyRss(input, this.lifecycle.signal),
+        );
         if (!this.isCurrent(epoch, token)) return;
         if (value.candidates.length === 0) {
           this.verification.fail(token, "feed-not-found");
@@ -432,13 +444,17 @@ export class AddSourceModal extends Modal {
           else this.verification.warn(token, snapshot, "empty-feed");
         }
       } else if (kind === "youtube") {
-        const value = await this.options.verifyYouTube(input, this.lifecycle.signal);
+        const value = projectYouTubeVerification(
+          await this.options.verifyYouTube(input, this.lifecycle.signal),
+        );
         if (!this.isCurrent(epoch, token)) return;
         const snapshot = Object.freeze({ kind, verification: value });
         if (value.hasEntries) this.verification.succeed(token, snapshot);
         else this.verification.warn(token, snapshot, "empty-feed");
       } else {
-        const value = await this.options.verifyX(input, this.lifecycle.signal);
+        const value = projectVerifiedXProfile(
+          await this.options.verifyX(input, this.lifecycle.signal),
+        );
         if (!this.isCurrent(epoch, token)) return;
         this.verification.succeed(token, Object.freeze({ kind, verification: value }));
       }
@@ -447,7 +463,9 @@ export class AddSourceModal extends Modal {
       this.verification.fail(token, failureCode(error, kind));
     }
     if (!this.isCurrent(epoch, token)) return;
-    this.stage = "confirmed";
+    this.stage = this.verification.snapshot().status === "failure"
+      ? "failed"
+      : "confirmed";
     this.render();
   }
 
@@ -460,7 +478,9 @@ export class AddSourceModal extends Modal {
     this.stage = "checking";
     this.render();
     try {
-      const value = await this.options.verifyRss(candidateUrl, this.lifecycle.signal);
+      const value = projectRssWebsiteVerification(
+        await this.options.verifyRss(candidateUrl, this.lifecycle.signal),
+      );
       if (!this.isCurrent(epoch, token)) return;
       const selected = value.selected ??
         (value.candidates.length === 1
@@ -471,7 +491,7 @@ export class AddSourceModal extends Modal {
       } else {
         const selectedVerification = value.selected
           ? value
-          : Object.freeze({ ...value, selected: Object.freeze({ ...selected }) });
+          : projectRssWebsiteVerification({ ...value, selected });
         const snapshot = Object.freeze({
           kind: "rss-website" as const,
           verification: selectedVerification,
@@ -488,7 +508,9 @@ export class AddSourceModal extends Modal {
       this.verification.fail(token, failureCode(error, "rss-website"));
     }
     if (!this.isCurrent(epoch, token)) return;
-    this.stage = "confirmed";
+    this.stage = this.verification.snapshot().status === "failure"
+      ? "failed"
+      : "confirmed";
     this.render();
   }
 
@@ -505,6 +527,11 @@ export class AddSourceModal extends Modal {
     this.contentEl.querySelector(".rss-source-verification-card")?.remove();
     this.contentEl.querySelector(".rss-source-candidate-list")?.remove();
     this.contentEl.querySelector(".rss-source-empty-warning")?.remove();
+    this.contentEl.querySelector(".rss-source-x-options")?.remove();
+    this.contentEl.querySelector(".rss-source-initial-import")?.remove();
+    this.contentEl.querySelector(".rss-source-advanced")?.remove();
+    this.contentEl.querySelector(".rss-source-onboarding-footer")?.remove();
+    this.importControl = undefined;
     const feedback = this.contentEl.querySelector<HTMLElement>(".rss-source-feedback");
     feedback?.empty();
     this.updateSubscribeButton();
@@ -519,6 +546,15 @@ export class AddSourceModal extends Modal {
 
   private canSubscribe(): boolean {
     return !this.subscribing && this.verification.canSubscribe() && this.importControl?.getPolicy() !== undefined;
+  }
+
+  private canConfigureSubscription(): boolean {
+    const state = this.verification.snapshot();
+    return state.status === "success" || (
+      state.status === "warning" &&
+      state.code === "empty-feed" &&
+      state.accepted
+    );
   }
 
   private async subscribe(): Promise<void> {

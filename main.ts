@@ -3885,12 +3885,23 @@ export default class RssDashboardPlugin extends Plugin {
   ): Promise<boolean> {
     try {
       await this.getSubscriptionService().add(request);
-      await this.refreshDashboardViews();
-      return true;
     } catch {
       console.error("[RSS Dashboard] Verified subscription add failed.");
       return false;
     }
+    try {
+      await this.refreshDashboardViews();
+    } catch {
+      console.error(
+        "[RSS Dashboard] Verified subscription saved; dashboard refresh deferred.",
+      );
+      void Promise.resolve().then(async () => {
+        await this.refreshDashboardViews().catch(() => {
+          console.error("[RSS Dashboard] Deferred dashboard refresh failed.");
+        });
+      });
+    }
+    return true;
   }
 
   /** Opens the verified subscription workflow used by every public add entry. */

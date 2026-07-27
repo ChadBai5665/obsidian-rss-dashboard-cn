@@ -67,6 +67,8 @@
 .rss-source-onboarding-modal .rss-source-availability-note,
 .rss-source-onboarding-modal .rss-source-verified-url,
 .rss-source-onboarding-modal .rss-source-latest-entry,
+.rss-source-onboarding-modal .rss-source-latest-pub-date,
+.rss-source-onboarding-modal .rss-source-verification-meta,
 .rss-source-onboarding-modal .rss-source-candidate-option div {
   color: var(--text-muted);
   overflow-wrap: anywhere;

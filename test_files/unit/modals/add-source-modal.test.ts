@@ -14,6 +14,7 @@ const youtube: YouTubeChannelVerification = Object.freeze({
   channelUrl: "https://www.youtube.com/channel/UC1234567890123456789012",
   feedUrl: "https://www.youtube.com/feeds/videos.xml?channel_id=UC1234567890123456789012",
   latestTitle: "Latest video",
+  latestPubDate: "2026-07-27T08:30:00.000Z",
   hasEntries: true,
 });
 
@@ -80,7 +81,55 @@ describe("AddSourceModal", () => {
     confirmedInput.value = "https://www.youtube.com/@Changed";
     confirmedInput.dispatchEvent(new Event("input"));
     expect(modal.contentEl.querySelector(".rss-source-verification-card")).toBeNull();
-    expect((modal.contentEl.querySelector(".rss-source-subscribe-button") as HTMLButtonElement).disabled).toBe(true);
+    expect(modal.contentEl.querySelector(".rss-source-initial-import")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-advanced")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).toBeNull();
+  });
+
+  it("keeps initial and failed X identification minimal and retryable", async () => {
+    const verified = {
+      profile: {
+        restId: "123",
+        handle: "openai",
+        displayName: "OpenAI",
+        verified: true,
+      },
+      proof: Object.freeze({}),
+    } as unknown as VerifiedXProfile;
+    const verifyX = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error("secret"), { code: "not-found" }))
+      .mockResolvedValueOnce(verified);
+    const modal = new AddSourceModal(obsidian.App.createMock(), options({
+      initialKind: "x-account",
+      verifyX,
+    }));
+    modal.open();
+
+    expect(modal.contentEl.querySelector(".rss-source-x-options")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-initial-import")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-advanced")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).toBeNull();
+
+    const input = modal.contentEl.querySelector(".rss-source-identity-input") as HTMLInputElement;
+    input.value = "@openai";
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(".rss-source-detect-button") as HTMLButtonElement).click();
+    await flush();
+
+    expect(modal.contentEl.dataset.stage).toBe("failed");
+    expect(modal.contentEl.textContent).toContain("没有找到这个 X 账号");
+    expect(modal.contentEl.querySelector(".rss-source-x-options")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-initial-import")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-advanced")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).toBeNull();
+
+    (modal.contentEl.querySelector(".rss-source-detect-button") as HTMLButtonElement).click();
+    await flush();
+    expect(modal.contentEl.dataset.stage).toBe("confirmed");
+    expect(modal.contentEl.querySelector(".rss-source-x-options")).not.toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-initial-import")).not.toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-advanced")).not.toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).not.toBeNull();
   });
 
   it("requires an explicit warning acceptance for an empty RSS feed", async () => {
@@ -104,17 +153,24 @@ describe("AddSourceModal", () => {
     (modal.contentEl.querySelector(".rss-source-detect-button") as HTMLButtonElement).click();
     await flush();
 
-    const subscribe = modal.contentEl.querySelector(".rss-source-subscribe-button") as HTMLButtonElement;
-    expect(subscribe.disabled).toBe(true);
-    const warning = modal.contentEl.querySelector(".rss-source-empty-warning input") as HTMLInputElement;
+    expect(modal.contentEl.querySelector(".rss-source-initial-import")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-advanced")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).toBeNull();
+    let warning = modal.contentEl.querySelector(".rss-source-empty-warning input") as HTMLInputElement;
     warning.checked = true;
     warning.dispatchEvent(new Event("change"));
+    let subscribe = modal.contentEl.querySelector(".rss-source-subscribe-button") as HTMLButtonElement;
     expect(subscribe.disabled).toBe(false);
+    expect(modal.contentEl.querySelector(".rss-source-initial-import")).not.toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-advanced")).not.toBeNull();
+    warning = modal.contentEl.querySelector(".rss-source-empty-warning input") as HTMLInputElement;
     warning.checked = false;
     warning.dispatchEvent(new Event("change"));
-    expect(subscribe.disabled).toBe(true);
+    expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).toBeNull();
+    warning = modal.contentEl.querySelector(".rss-source-empty-warning input") as HTMLInputElement;
     warning.checked = true;
     warning.dispatchEvent(new Event("change"));
+    subscribe = modal.contentEl.querySelector(".rss-source-subscribe-button") as HTMLButtonElement;
     expect(subscribe.disabled).toBe(false);
     subscribe.click();
     await flush();
@@ -158,7 +214,7 @@ describe("AddSourceModal", () => {
     (modal.contentEl.querySelector(".rss-source-detect-button") as HTMLButtonElement).click();
     await flush();
     expect(modal.contentEl.querySelectorAll(".rss-source-candidate-option")).toHaveLength(2);
-    expect((modal.contentEl.querySelector(".rss-source-subscribe-button") as HTMLButtonElement).disabled).toBe(true);
+    expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).toBeNull();
     (modal.contentEl.querySelectorAll(".rss-source-candidate-option input")[1] as HTMLInputElement).click();
     await flush();
     expect((modal.contentEl.querySelector(".rss-source-subscribe-button") as HTMLButtonElement).disabled).toBe(false);
@@ -169,15 +225,16 @@ describe("AddSourceModal", () => {
   });
 
   it("shows verified X identity, defaults replies/reposts off, and confirms all history", async () => {
+    const profile = {
+      restId: "123",
+      handle: "openai",
+      displayName: "OpenAI",
+      avatarUrl: "https://example.com/avatar.png",
+      description: "AI research",
+      verified: true,
+    };
     const verified = {
-      profile: Object.freeze({
-        restId: "123",
-        handle: "openai",
-        displayName: "OpenAI",
-        avatarUrl: "https://example.com/avatar.png",
-        description: "AI research",
-        verified: true,
-      }),
+      profile,
       proof: Object.freeze({}),
     } as unknown as VerifiedXProfile;
     const onSubscribe = vi.fn(async () => true);
@@ -194,6 +251,11 @@ describe("AddSourceModal", () => {
     await flush();
     expect(modal.contentEl.textContent).toContain("OpenAI");
     expect(modal.contentEl.textContent).toContain("@openai");
+    expect(modal.contentEl.textContent).toContain("账号状态：可访问");
+    expect(modal.contentEl.textContent).toContain("认证状态：已认证");
+    profile.displayName = "Mutated name";
+    profile.description = "Mutated description";
+    expect(modal.contentEl.textContent).not.toContain("Mutated");
     expect((modal.contentEl.querySelector('[data-option="include-replies"]') as HTMLInputElement).checked).toBe(false);
     expect((modal.contentEl.querySelector('[data-option="include-reposts"]') as HTMLInputElement).checked).toBe(false);
 
@@ -209,12 +271,131 @@ describe("AddSourceModal", () => {
     await flush();
     expect(onSubscribe).toHaveBeenCalledWith(expect.objectContaining({
       kind: "x-account",
-      profile: verified.profile,
+      profile: expect.objectContaining({
+        restId: "123",
+        handle: "openai",
+        displayName: "OpenAI",
+        description: "AI research",
+      }),
       verificationProof: verified.proof,
       includeReplies: false,
       includeReposts: false,
       confirmedAllAvailable: true,
     }));
+    const request = onSubscribe.mock.calls[0][0];
+    expect(request.profile).not.toBe(profile);
+    expect(Object.isFrozen(request.profile)).toBe(true);
+  });
+
+  it("keeps advanced tags visible after verification redraws and source changes", async () => {
+    const rss: RssWebsiteVerification = {
+      inputUrl: "https://example.com/feed.xml",
+      siteUrl: "https://example.com/feed.xml",
+      candidates: [{ url: "https://example.com/feed.xml", title: "Example", format: "rss" }],
+      selected: { url: "https://example.com/feed.xml", title: "Example", format: "rss" },
+      hasEntries: true,
+    };
+    const modal = new AddSourceModal(obsidian.App.createMock(), options({
+      initialKind: "youtube",
+      verifyRss: vi.fn(async () => rss),
+    }));
+    modal.open();
+    let input = modal.contentEl.querySelector(".rss-source-identity-input") as HTMLInputElement;
+    input.value = "@OpenAI";
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(".rss-source-detect-button") as HTMLButtonElement).click();
+    await flush();
+
+    const tagInput = modal.contentEl.querySelectorAll<HTMLInputElement>(
+      ".rss-source-advanced input[type='text']",
+    )[1];
+    tagInput.value = "ai, research";
+    tagInput.dispatchEvent(new Event("input"));
+
+    input = modal.contentEl.querySelector(".rss-source-identity-input") as HTMLInputElement;
+    input.value = "@OpenAIResearch";
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(".rss-source-detect-button") as HTMLButtonElement).click();
+    await flush();
+
+    const redrawnTagInput = modal.contentEl.querySelectorAll<HTMLInputElement>(
+      ".rss-source-advanced input[type='text']",
+    )[1];
+    expect(redrawnTagInput.value).toBe("ai, research");
+
+    (modal.contentEl.querySelector(".rss-source-back-button") as HTMLButtonElement).click();
+    (modal.contentEl.querySelector('[data-source-kind="rss-website"]') as HTMLButtonElement).click();
+    input = modal.contentEl.querySelector(".rss-source-identity-input") as HTMLInputElement;
+    input.value = rss.inputUrl;
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(".rss-source-detect-button") as HTMLButtonElement).click();
+    await flush();
+    const switchedTagInput = modal.contentEl.querySelectorAll<HTMLInputElement>(
+      ".rss-source-advanced input[type='text']",
+    )[1];
+    expect(switchedTagInput.value).toBe("ai, research");
+  });
+
+  it("renders public verification metadata and isolates RSS snapshots from adapter mutation", async () => {
+    const verification: RssWebsiteVerification = {
+      inputUrl: "https://example.com",
+      siteUrl: "https://example.com",
+      candidates: [{ url: "https://example.com/feed.xml", title: "Example Feed", format: "rss" }],
+      selected: { url: "https://example.com/feed.xml", title: "Example Feed", format: "rss" },
+      latestTitle: "Original article",
+      latestPubDate: "2026-07-26T12:00:00.000Z",
+      hasEntries: true,
+    };
+    const onSubscribe = vi.fn(async () => true);
+    const modal = new AddSourceModal(obsidian.App.createMock(), options({
+      initialKind: "rss-website",
+      verifyRss: vi.fn(async () => verification),
+      onSubscribe,
+    }));
+    modal.open();
+    const input = modal.contentEl.querySelector(".rss-source-identity-input") as HTMLInputElement;
+    input.value = verification.inputUrl;
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(".rss-source-detect-button") as HTMLButtonElement).click();
+    await flush();
+
+    verification.candidates[0].title = "Mutated candidate";
+    if (verification.selected) verification.selected.title = "Mutated selected";
+    verification.latestTitle = "Mutated article";
+    expect(modal.contentEl.textContent).toContain("来源类型：RSS / 网站");
+    expect(modal.contentEl.textContent).toContain("发布时间：2026-07-26T12:00:00.000Z");
+    expect(modal.contentEl.textContent).toContain("Example Feed");
+    expect(modal.contentEl.textContent).toContain("Original article");
+    expect(modal.contentEl.textContent).not.toContain("Mutated");
+
+    (modal.contentEl.querySelector(".rss-source-subscribe-button") as HTMLButtonElement).click();
+    await flush();
+    const request = onSubscribe.mock.calls[0][0];
+    expect(request.verification).not.toBe(verification);
+    expect(request.verification.selected?.title).toBe("Example Feed");
+    expect(request.verification.candidates[0].title).toBe("Example Feed");
+    expect(request.verification.latestTitle).toBe("Original article");
+    expect(Object.isFrozen(request.verification)).toBe(true);
+    expect(Object.isFrozen(request.verification.candidates)).toBe(true);
+    expect(Object.isFrozen(request.verification.candidates[0])).toBe(true);
+    expect(Object.isFrozen(request.verification.selected)).toBe(true);
+  });
+
+  it("renders a YouTube channel URL and latest publication metadata", async () => {
+    const modal = new AddSourceModal(obsidian.App.createMock(), options({
+      initialKind: "youtube",
+    }));
+    modal.open();
+    const input = modal.contentEl.querySelector(".rss-source-identity-input") as HTMLInputElement;
+    input.value = "@OpenAI";
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(".rss-source-detect-button") as HTMLButtonElement).click();
+    await flush();
+
+    expect(modal.contentEl.textContent).toContain("来源类型：YouTube");
+    expect(modal.contentEl.textContent).toContain(youtube.channelUrl);
+    expect(modal.contentEl.textContent).not.toContain(youtube.feedUrl);
+    expect(modal.contentEl.textContent).toContain("发布时间：2026-07-27T08:30:00.000Z");
   });
 
   it("localizes verification failures and offers settings for TikHub failures", async () => {
@@ -312,8 +493,7 @@ describe("AddSourceModal", () => {
       verifyYouTube,
     }));
     modal.open();
-    const details = modal.contentEl.querySelector(".rss-source-advanced") as HTMLDetailsElement;
-    expect(details.open).toBe(false);
+    expect(modal.contentEl.querySelector(".rss-source-advanced")).toBeNull();
     const input = modal.contentEl.querySelector(".rss-source-identity-input") as HTMLInputElement;
     input.value = "@OpenAI";
     input.dispatchEvent(new Event("input"));
@@ -323,6 +503,8 @@ describe("AddSourceModal", () => {
     expect(verifyYouTube).toHaveBeenCalledTimes(1);
     expect(modal.contentEl.querySelector(".rss-source-verification-card")?.getAttribute("role"))
       .toBe("status");
+    const details = modal.contentEl.querySelector(".rss-source-advanced") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
     const confirmedInput = modal.contentEl.querySelector(".rss-source-identity-input") as HTMLInputElement;
     confirmedInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(modal.containerEl.isConnected).toBe(false);

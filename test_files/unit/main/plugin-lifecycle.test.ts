@@ -17,6 +17,7 @@ import type {
 import { DEFAULT_SETTINGS } from "../../../src/types/types";
 import { AddSourceModal } from "../../../src/modals/source-onboarding/add-source-modal";
 import { FeedStorageRollbackIncompleteError } from "../../../src/services/feed-storage-repository";
+import type { VerifiedSubscriptionRequest } from "../../../src/services/subscription-service";
 
 // Mock functions for FeedParser - must be declared before mocks
 const mockParseFeed = vi.fn<(url: string) => Promise<Feed>>();
@@ -1424,6 +1425,44 @@ describe("URI add-feed handling", () => {
     const urlInput =
       document.querySelector<HTMLInputElement>(".rss-source-identity-input");
     expect(urlInput?.value).toBe("https://example.com/feed.xml");
+  });
+});
+
+describe("addVerifiedSubscription()", () => {
+  it("reports durable success when dashboard refresh fails and retries the view later", async () => {
+    const plugin = await createPluginInstance(createMockApp());
+    const add = vi.fn(async (_request: VerifiedSubscriptionRequest) => undefined);
+    vi.spyOn(
+      plugin as unknown as {
+        getSubscriptionService: () => {
+          add: (request: VerifiedSubscriptionRequest) => Promise<void>;
+        };
+      },
+      "getSubscriptionService",
+    ).mockReturnValue({ add });
+    vi.spyOn(plugin, "refreshDashboardViews")
+      .mockRejectedValueOnce(new Error("secret refresh detail"))
+      .mockResolvedValueOnce(undefined);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request: VerifiedSubscriptionRequest = {
+      kind: "youtube",
+      verification: {
+        channelId: "UC1234567890123456789012",
+        channelName: "OpenAI",
+        channelUrl: "https://www.youtube.com/channel/UC1234567890123456789012",
+        feedUrl: "https://www.youtube.com/feeds/videos.xml?channel_id=UC1234567890123456789012",
+        hasEntries: true,
+      },
+      tags: [],
+      initialImportPolicy: { mode: "lookback-days", days: 7 },
+    };
+
+    await expect(plugin.addVerifiedSubscription(request)).resolves.toBe(true);
+    await flushPromises();
+
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(plugin.refreshDashboardViews).toHaveBeenCalledTimes(2);
+    expect(errorLog.mock.calls.flat().join(" ")).not.toContain("secret refresh detail");
   });
 });
 
