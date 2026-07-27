@@ -128,6 +128,16 @@ export class TikHubClient {
     );
   }
 
+  async fetchUserProfile<T = unknown>(
+    input: TikHubUserRequest,
+  ): Promise<TikHubResult<T>> {
+    return await this.request<T>(
+      "/api/v1/twitter/web/fetch_user_profile",
+      { screen_name: requireNonBlank(input.handle, "account handle") },
+      input,
+    );
+  }
+
   async fetchUserReplies<T = unknown>(
     input: TikHubUserRequest,
   ): Promise<TikHubResult<T>> {

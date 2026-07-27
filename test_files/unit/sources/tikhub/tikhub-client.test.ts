@@ -22,6 +22,7 @@ function success(data: unknown = { items: [1] }, requestId = "req-safe-123") {
 
 function createHarness(
   response: Awaited<ReturnType<TikHubTransport>> = success(),
+  baseUrl = "https://api.tikhub.dev",
 ) {
   const markAttempted = vi.fn();
   const releaseUnused = vi.fn();
@@ -49,7 +50,7 @@ function createHarness(
     return response;
   });
   const client = new TikHubClient({
-    baseUrl: "https://api.tikhub.dev",
+    baseUrl,
     timeoutMs: 20_000,
     budget,
     transport,
@@ -108,6 +109,12 @@ describe("TikHubClient exact request contract", () => {
 
   it.each([
     {
+      name: "user profile",
+      invoke: (client: TikHubClient) =>
+        client.fetchUserProfile({ apiKey: API_KEY, handle: "openai" }),
+      url: "https://api.tikhub.dev/api/v1/twitter/web/fetch_user_profile?screen_name=openai",
+    },
+    {
       name: "user posts",
       invoke: (client: TikHubClient) =>
         client.fetchUserPosts({ apiKey: API_KEY, handle: "openai" }),
@@ -158,6 +165,16 @@ describe("TikHubClient exact request contract", () => {
     expect(test.reserve).toHaveBeenCalledWith(1);
     expect(test.markAttempted).toHaveBeenCalledTimes(1);
     expect(test.releaseUnused).toHaveBeenCalledTimes(1);
+  });
+
+  it("joins the official profile path onto the selected international preset", async () => {
+    const test = createHarness(success(), "https://api.tikhub.io");
+
+    await test.client.fetchUserProfile({ apiKey: API_KEY, handle: "openai" });
+
+    expect(test.requests[0]?.url).toBe(
+      "https://api.tikhub.io/api/v1/twitter/web/fetch_user_profile?screen_name=openai",
+    );
   });
 
   it("includes a non-empty cursor and omits an empty cursor instead of serializing undefined", async () => {
