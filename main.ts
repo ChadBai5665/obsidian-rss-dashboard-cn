@@ -88,6 +88,7 @@ import { CollectionRepository } from "./src/collection/collection-repository";
 import { DailyIndexService } from "./src/collection/daily-index-service";
 import { CollectionService } from "./src/services/collection-service";
 import {
+  isSubscriptionRemovalPending,
   SubscriptionService,
   type RemoveSubscriptionOptions,
   type VerifiedSubscriptionRequest,
@@ -4670,6 +4671,7 @@ export default class RssDashboardPlugin extends Plugin {
     sourceRegistry: SourceRegistry,
   ): Promise<void> {
     const result = await this.refreshFeedPipeline(feed, sourceRegistry);
+    if (!result) return;
     this.mergeRefreshedFeed(result.feed);
 
     await this.validateSavedArticles({ suppressCollectionBroadcast: true });
@@ -4816,6 +4818,7 @@ export default class RssDashboardPlugin extends Plugin {
 
     try {
       const result = await this.refreshFeedPipeline(currentFeed, sourceRegistry);
+      if (!result) return;
       this.mergeRefreshedFeed(result.feed);
     } catch (error) {
       const isTimedOut =
@@ -4845,7 +4848,7 @@ export default class RssDashboardPlugin extends Plugin {
   private async refreshFeedPipeline(
     feed: Feed,
     sourceRegistry: SourceRegistry,
-  ): Promise<FeedRefreshResult> {
+  ): Promise<FeedRefreshResult | null> {
     this.feedStorageRepository.ensureFeedIds(this.settings);
     if (!feed.feedId) {
       feed.feedId = this.settings.feeds.find(
@@ -4854,6 +4857,7 @@ export default class RssDashboardPlugin extends Plugin {
     }
     bindFeedItemsToSourceIdentity(feed);
     const sourceId = feed.feedId ?? feed.url;
+    if (isSubscriptionRemovalPending(this.settings, sourceId)) return null;
     const persistedAtStart = this.findCurrentFeedForRefresh(feed, sourceId);
     const currentAtStart = persistedAtStart ?? feed;
     const attemptedAt = new Date();
@@ -4875,6 +4879,8 @@ export default class RssDashboardPlugin extends Plugin {
           "Refresh state is unavailable.",
         );
       }
+
+      if (isSubscriptionRemovalPending(this.settings, sourceId)) return null;
 
       const persistedCurrent = this.findCurrentFeedForRefresh(
         currentAtStart,

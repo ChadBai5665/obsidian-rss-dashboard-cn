@@ -3,6 +3,7 @@ import {
   SubscriptionService,
   SubscriptionServiceError,
   createConfirmedCollectionPurge,
+  isSubscriptionRemovalPending,
   type VerifiedFeedSubscriptionRequest,
   type VerifiedXSubscriptionRequest,
   type XSubscriptionOptionsUpdateRequest,
@@ -1093,7 +1094,67 @@ describe("SubscriptionService", () => {
     releaseSave();
     await priorMutation;
     await removal;
+    expect(abortInitialImport).toHaveBeenCalledTimes(2);
     expect(test.settings.feeds).toEqual([]);
+  });
+
+  it("keeps a shared removal intent until failure cleanup completes", async () => {
+    const test = harness([existingFeed()]);
+    test.saveSettings.mockRejectedValueOnce(new Error("config save failed"));
+
+    const removal = test.service.remove("legacy-feed", {
+      purgeCollection: false,
+    });
+
+    expect(isSubscriptionRemovalPending(test.settings, "legacy-feed")).toBe(true);
+    await expect(removal).rejects.toThrow("config save failed");
+    expect(isSubscriptionRemovalPending(test.settings, "legacy-feed")).toBe(false);
+    expect(test.settings.feeds).toHaveLength(1);
+  });
+
+  it("clears the removal intent when the synchronous abort hook fails", async () => {
+    const test = harness([existingFeed()], {
+      abortInitialImport: () => {
+        throw new Error("abort hook failed");
+      },
+    });
+
+    const removal = test.service.remove("legacy-feed", {
+      purgeCollection: false,
+    });
+
+    await expect(removal).rejects.toThrow("abort hook failed");
+    expect(isSubscriptionRemovalPending(test.settings, "legacy-feed")).toBe(false);
+    expect(test.settings.feeds).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      label: "invalid options",
+      feedId: "legacy-feed",
+      options: undefined as never,
+      code: "invalid-subscription-request",
+    },
+    {
+      label: "invalid purge confirmation",
+      feedId: "legacy-feed",
+      options: { purgeCollection: true } as never,
+      code: "purge-confirmation-required",
+    },
+    {
+      label: "nonexistent source",
+      feedId: "missing-feed",
+      options: { purgeCollection: false } as const,
+      code: "subscription-not-found",
+    },
+  ])("does not leave a removal intent for $label", async ({ feedId, options, code }) => {
+    const test = harness([existingFeed()]);
+
+    const removal = test.service.remove(feedId, options);
+
+    expect(isSubscriptionRemovalPending(test.settings, feedId)).toBe(false);
+    await expect(removal).rejects.toMatchObject({ code });
+    expect(isSubscriptionRemovalPending(test.settings, feedId)).toBe(false);
   });
 
   it("restores collection and source configuration when the final purge config save fails", async () => {

@@ -166,6 +166,46 @@ export interface SubscriptionServiceDependencies {
 }
 
 const lifecycleMutationQueues = new WeakMap<object, Promise<void>>();
+const pendingRemovalIntents = new WeakMap<
+  object,
+  Map<string, Set<symbol>>
+>();
+
+export function isSubscriptionRemovalPending(
+  settings: object,
+  feedId: string,
+): boolean {
+  return (pendingRemovalIntents.get(settings)?.get(feedId)?.size ?? 0) > 0;
+}
+
+function registerRemovalIntent(settings: object, feedId: string): symbol {
+  const token = Symbol(feedId);
+  let sourceIntents = pendingRemovalIntents.get(settings);
+  if (!sourceIntents) {
+    sourceIntents = new Map();
+    pendingRemovalIntents.set(settings, sourceIntents);
+  }
+  let tokens = sourceIntents.get(feedId);
+  if (!tokens) {
+    tokens = new Set();
+    sourceIntents.set(feedId, tokens);
+  }
+  tokens.add(token);
+  return token;
+}
+
+function clearRemovalIntent(
+  settings: object,
+  feedId: string,
+  token: symbol,
+): void {
+  const sourceIntents = pendingRemovalIntents.get(settings);
+  const tokens = sourceIntents?.get(feedId);
+  if (!sourceIntents || !tokens) return;
+  tokens.delete(token);
+  if (tokens.size === 0) sourceIntents.delete(feedId);
+  if (sourceIntents.size === 0) pendingRemovalIntents.delete(settings);
+}
 
 export class SubscriptionService {
   private readonly now: () => Date;
@@ -372,24 +412,24 @@ export class SubscriptionService {
     feedId: string,
     options: RemoveSubscriptionOptions,
   ): Promise<void> {
-    this.dependencies.abortInitialImport?.(feedId);
-    return await this.enqueueMutation(
-      async () => await this.removeUnlocked(feedId, options),
-    );
+    this.removalIndex(feedId, options);
+    const intent = registerRemovalIntent(this.dependencies.settings, feedId);
+    try {
+      this.dependencies.abortInitialImport?.(feedId);
+      return await this.enqueueMutation(async () => {
+        this.dependencies.abortInitialImport?.(feedId);
+        await this.removeUnlocked(feedId, options);
+      });
+    } finally {
+      clearRemovalIntent(this.dependencies.settings, feedId, intent);
+    }
   }
 
   private async removeUnlocked(
     feedId: string,
     options: RemoveSubscriptionOptions,
   ): Promise<void> {
-    const index = this.feedIndex(feedId);
-    if (
-      options.purgeCollection &&
-      (!(options.confirmation instanceof ConfirmedCollectionPurge) ||
-        !options.confirmation.matches(feedId))
-    ) {
-      throw new SubscriptionServiceError("purge-confirmation-required");
-    }
+    const index = this.removalIndex(feedId, options);
 
     const candidate = cloneFeeds(this.dependencies.settings.feeds);
     candidate.splice(index, 1);
@@ -410,6 +450,28 @@ export class SubscriptionService {
       }
       throw saveError;
     }
+  }
+
+  private removalIndex(
+    feedId: string,
+    options: RemoveSubscriptionOptions,
+  ): number {
+    const index = this.feedIndex(feedId);
+    if (
+      !options ||
+      typeof options !== "object" ||
+      (options.purgeCollection !== true && options.purgeCollection !== false)
+    ) {
+      throw new SubscriptionServiceError("invalid-subscription-request");
+    }
+    if (
+      options.purgeCollection &&
+      (!(options.confirmation instanceof ConfirmedCollectionPurge) ||
+        !options.confirmation.matches(feedId))
+    ) {
+      throw new SubscriptionServiceError("purge-confirmation-required");
+    }
+    return index;
   }
 
   private async addFeedSubscription(

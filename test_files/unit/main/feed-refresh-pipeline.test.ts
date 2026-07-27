@@ -14,7 +14,10 @@ import type { FeedSourceConfig } from "../../../src/sources/source-config";
 import { createTranslator } from "../../../src/i18n";
 import { XTopicRefreshError } from "../../../src/sources/tikhub/x-topic-adapter";
 import { createXPostCollectedItemId } from "../../../src/collection/item-identity";
-import { createConfirmedCollectionPurge } from "../../../src/services/subscription-service";
+import {
+  SubscriptionService,
+  createConfirmedCollectionPurge,
+} from "../../../src/services/subscription-service";
 
 let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
@@ -1795,6 +1798,239 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(commit).toHaveBeenCalledOnce();
     expect(paidRefresh).not.toHaveBeenCalled();
     expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds).toEqual([]);
+  });
+
+  it.each([
+    { label: "default", purgeCollection: false },
+    { label: "purge", purgeCollection: true },
+  ])(
+    "blocks a queue-delayed $label removal before the refresh registers its X controller",
+    async ({ purgeCollection }) => {
+      const source = createActiveXImportFeed(
+        `x-history-queued-${purgeCollection ? "purge" : "default"}`,
+      );
+      const plugin = createPluginWithSettings([source]);
+      plugin.settings.tikhub = {
+        ...plugin.settings.tikhub,
+        enabled: true,
+        connectionId: "11111111-1111-4111-8111-111111111111",
+      };
+      let markSaveStarted!: () => void;
+      let releaseSave!: () => void;
+      const saveStarted = new Promise<void>((resolve) => {
+        markSaveStarted = resolve;
+      });
+      const saveBlocked = new Promise<void>((resolve) => {
+        releaseSave = resolve;
+      });
+      plugin.saveSettings = vi.fn()
+        .mockImplementationOnce(async () => {
+          markSaveStarted();
+          await saveBlocked;
+        })
+        .mockResolvedValue(undefined);
+      const paidRefresh = vi.fn().mockResolvedValue({
+        feed: source,
+        items: source.items,
+        collectionItems: source.items,
+        providerRequestCount: 1,
+        warnings: [],
+      });
+      plugin.createSourceRegistryForRun = vi.fn(() => ({
+        refresh: paidRefresh,
+      }) as unknown as SourceRegistry);
+      const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+      const commit = vi.fn().mockResolvedValue(undefined);
+      const removeSource = vi.fn().mockResolvedValue({
+        days: [],
+        commit,
+        rollback: vi.fn().mockResolvedValue(undefined),
+      });
+      plugin.getCollectionService = vi.fn(() => ({
+        collectFeedRefresh,
+        removeSource,
+      }));
+      const firstService = plugin.getSubscriptionService();
+      const removingService = plugin.getSubscriptionService();
+
+      const priorMutation = firstService.setPaused(source.feedId!, false);
+      await saveStarted;
+      const removal = removingService.remove(
+        source.feedId!,
+        purgeCollection
+          ? {
+              purgeCollection: true,
+              confirmation: createConfirmedCollectionPurge(source.feedId!),
+            }
+          : { purgeCollection: false },
+      );
+      const refresh = plugin.refreshSelectedFeed(source);
+      await flushMicrotasks();
+
+      expect(paidRefresh).not.toHaveBeenCalled();
+      expect(collectFeedRefresh).not.toHaveBeenCalled();
+
+      releaseSave();
+      await priorMutation;
+      await removal;
+      await refresh;
+
+      expect(paidRefresh).not.toHaveBeenCalled();
+      expect(collectFeedRefresh).not.toHaveBeenCalled();
+      expect(removeSource).toHaveBeenCalledTimes(purgeCollection ? 1 : 0);
+      expect(commit).toHaveBeenCalledTimes(purgeCollection ? 1 : 0);
+      expect(plugin.settings.feeds).toEqual([]);
+    },
+  );
+
+  it("allows refresh again after a queue-delayed removal fails and clears its intent", async () => {
+    const source = createActiveXImportFeed("x-history-failed-removal");
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let markSaveStarted!: () => void;
+    let releaseSave!: () => void;
+    const saveStarted = new Promise<void>((resolve) => {
+      markSaveStarted = resolve;
+    });
+    const saveBlocked = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    plugin.saveSettings = vi.fn()
+      .mockImplementationOnce(async () => {
+        markSaveStarted();
+        await saveBlocked;
+      })
+      .mockRejectedValueOnce(new Error("removal save failed"))
+      .mockResolvedValue(undefined);
+    const paidRefresh = vi.fn().mockResolvedValue({
+      feed: source,
+      items: source.items,
+      collectionItems: source.items,
+      providerRequestCount: 1,
+      warnings: [],
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getCollectionService = vi.fn(() => ({
+      collectFeedRefresh,
+      removeSource: vi.fn(),
+    }));
+    const firstService = plugin.getSubscriptionService();
+    const removingService = plugin.getSubscriptionService();
+
+    const priorMutation = firstService.setPaused(source.feedId!, false);
+    await saveStarted;
+    const removal = removingService.remove(source.feedId!, {
+      purgeCollection: false,
+    });
+    const blockedRefresh = plugin.refreshSelectedFeed(source);
+    await flushMicrotasks();
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+
+    releaseSave();
+    await priorMutation;
+    await expect(removal).rejects.toThrow("removal save failed");
+    await blockedRefresh;
+    expect(plugin.settings.feeds).toHaveLength(1);
+
+    await plugin.refreshSelectedFeed(plugin.settings.feeds[0]);
+
+    expect(paidRefresh).toHaveBeenCalledOnce();
+    expect(collectFeedRefresh).toHaveBeenCalledOnce();
+    expect(plugin.settings.feeds).toHaveLength(1);
+  });
+
+  it("rechecks a cross-instance removal intent after the ledger before provider work", async () => {
+    const source = createActiveXImportFeed("x-history-ledger-removal-intent");
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let markSaveStarted!: () => void;
+    let releaseSave!: () => void;
+    const saveStarted = new Promise<void>((resolve) => {
+      markSaveStarted = resolve;
+    });
+    const saveBlocked = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    plugin.saveSettings = vi.fn()
+      .mockImplementationOnce(async () => {
+        markSaveStarted();
+        await saveBlocked;
+      })
+      .mockResolvedValue(undefined);
+    let markAttemptStarted!: () => void;
+    let releaseAttempt!: () => void;
+    const attemptStarted = new Promise<void>((resolve) => {
+      markAttemptStarted = resolve;
+    });
+    const attemptBlocked = new Promise<void>((resolve) => {
+      releaseAttempt = resolve;
+    });
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn(async () => {
+        markAttemptStarted();
+        await attemptBlocked;
+      }),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+    const paidRefresh = vi.fn();
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+    const collectFeedRefresh = vi.fn();
+    const collectionService = {
+      collectFeedRefresh,
+      removeSource: vi.fn().mockResolvedValue({
+        days: [],
+        commit: vi.fn().mockResolvedValue(undefined),
+        rollback: vi.fn().mockResolvedValue(undefined),
+      }),
+    };
+    plugin.getCollectionService = vi.fn(() => collectionService);
+    const queueOwner = plugin.getSubscriptionService();
+    const removingService = new SubscriptionService({
+      settings: plugin.settings,
+      defaults: {
+        autoDeleteDuration: plugin.settings.defaultAutoDeleteDuration,
+        maxItems: plugin.settings.maxItems,
+      },
+      parseFeed: vi.fn(),
+      collectionService,
+      ensureFolder: vi.fn(),
+      saveSettings: async () => await plugin.saveSettings(),
+    });
+
+    const priorMutation = queueOwner.setPaused(source.feedId!, false);
+    await saveStarted;
+    const refresh = plugin.refreshSelectedFeed(source);
+    await attemptStarted;
+    const removal = removingService.remove(source.feedId!, {
+      purgeCollection: false,
+    });
+    releaseAttempt();
+    await refresh;
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds).toHaveLength(1);
+
+    releaseSave();
+    await priorMutation;
+    await removal;
     expect(plugin.settings.feeds).toEqual([]);
   });
 
