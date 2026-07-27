@@ -4,7 +4,7 @@ import type { SourceConfig } from "./source-config";
 export interface SourceRefreshContext {
   now: Date;
   signal?: AbortSignal;
-  /** Present for the legacy feed adapter; X adapters use only typed config. */
+  /** Isolated snapshot of the currently persisted feed, when one exists. */
   feed?: Feed;
 }
 
@@ -20,6 +20,8 @@ export interface SourceRefreshOutput {
   items: FeedItem[];
   providerRequestCount: number;
   warnings: string[];
+  /** Complete items fetched in this run, before the feed cache is retained. */
+  collectionItems?: FeedItem[];
   linkedPageGroups?: LinkedPageGroupData[];
 }
 

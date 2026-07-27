@@ -3,14 +3,18 @@ import { mergeCollectedItems } from "../../../../src/collection/collection-merge
 import { normalizeFeedItem } from "../../../../src/collection/feed-normalizer";
 import type { XAccountSourceConfig } from "../../../../src/sources/source-config";
 import { SourceRegistry } from "../../../../src/sources/source-registry";
+import type { InitialImportProgress } from "../../../../src/sources/initial-import-policy";
 import {
   TikHubClient,
   TikHubClientError,
 } from "../../../../src/sources/tikhub/tikhub-client";
+import type { TikHubTimelineParseResult } from "../../../../src/sources/tikhub/tikhub-parser";
 import type {
   TikHubBudgetReservation,
   TikHubRequestBudgetLike,
 } from "../../../../src/sources/tikhub/request-budget";
+import { TikHubRequestBudgetError } from "../../../../src/sources/tikhub/request-budget";
+import { TikHubRequestLedgerError } from "../../../../src/sources/tikhub/request-ledger";
 import {
   XAccountAdapter,
   XAccountRefreshError,
@@ -21,6 +25,7 @@ import {
   type XAccountFeedItem,
 } from "../../../../src/sources/tikhub/x-feed-mapper";
 import type { XPost } from "../../../../src/sources/tikhub/x-post";
+import type { Feed } from "../../../../src/types/types";
 import accountFixture from "../../../fixtures/tikhub/synthetic/account-edge-cases.json";
 
 const CONNECTION_ID = "d4eb3f58-b672-4f73-b9f3-9cd2f0e57a8d";
@@ -70,15 +75,25 @@ function harness(options: {
   accountPosts?: XPost[];
   replyPosts?: XPost[];
   userPostsError?: Error;
+  postPages?: Array<TikHubTimelineParseResult | Error>;
+  replyPages?: Array<TikHubTimelineParseResult | Error>;
 } = {}) {
   const get = vi.fn(async () => options.apiKey ?? API_KEY);
+  let postPageIndex = 0;
+  let replyPageIndex = 0;
   const fetchUserPosts = vi.fn(async () => {
     if (options.userPostsError) throw options.userPostsError;
+    const page = options.postPages?.[postPageIndex++];
+    if (page instanceof Error) throw page;
+    if (page) return { data: page };
     return { data: payload(options.accountPosts ?? [post()]) };
   });
-  const fetchUserReplies = vi.fn(async () => ({
-    data: payload(options.replyPosts ?? []),
-  }));
+  const fetchUserReplies = vi.fn(async () => {
+    const page = options.replyPages?.[replyPageIndex++];
+    if (page instanceof Error) throw page;
+    if (page) return { data: page };
+    return { data: payload(options.replyPosts ?? []) };
+  });
   const client: XAccountTikHubClient = { fetchUserPosts, fetchUserReplies };
   const adapter = new XAccountAdapter({
     client,
@@ -86,11 +101,49 @@ function harness(options: {
     connectionId:
       options.connectionId === undefined ? CONNECTION_ID : options.connectionId,
     parseTimeline: (value) => {
-      const valuePosts = (value as { posts?: XPost[] }).posts ?? [];
-      return { posts: valuePosts, warnings: [], candidateCount: valuePosts.length };
+      const page = value as Partial<TikHubTimelineParseResult>;
+      const valuePosts = page.posts ?? [];
+      return {
+        posts: valuePosts,
+        warnings: page.warnings ?? [],
+        candidateCount: page.candidateCount ?? valuePosts.length,
+        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+      };
     },
   });
   return { adapter, client, fetchUserPosts, fetchUserReplies, get };
+}
+
+function page(
+  posts: XPost[],
+  nextCursor?: string,
+): TikHubTimelineParseResult {
+  return {
+    posts,
+    warnings: [],
+    candidateCount: posts.length,
+    ...(nextCursor === undefined ? {} : { nextCursor }),
+  };
+}
+
+function importFeed(options: {
+  config?: XAccountSourceConfig;
+  progress?: InitialImportProgress;
+  posts?: XPost[];
+  policy?: Feed["initialImportPolicy"];
+} = {}): Feed {
+  const config = options.config ?? account();
+  const mapped = mapXAccountPostsToFeed(config, options.posts ?? [], NOW);
+  return {
+    ...mapped.feed,
+    items: mapped.items,
+    initialImportPolicy: options.policy ?? { mode: "all-available" },
+    initialImportProgress: options.progress ?? {
+      status: "pending",
+      pagesFetched: 0,
+      itemsImported: 0,
+    },
+  };
 }
 
 describe("XAccountAdapter requests and filtering", () => {
@@ -360,6 +413,36 @@ describe("XAccountAdapter requests and filtering", () => {
     }
   });
 
+  it("rejects an accessor-backed parser cursor without executing it", async () => {
+    let getterReads = 0;
+    const parsed = {
+      posts: [post()],
+      warnings: [],
+      candidateCount: 1,
+    } as TikHubTimelineParseResult;
+    Object.defineProperty(parsed, "nextCursor", {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        return "private-cursor";
+      },
+    });
+    const adapter = new XAccountAdapter({
+      client: {
+        fetchUserPosts: vi.fn(async () => ({ data: {} })),
+        fetchUserReplies: vi.fn(async () => ({ data: {} })),
+      },
+      secretStore: { get: vi.fn(async () => API_KEY) },
+      connectionId: CONNECTION_ID,
+      parseTimeline: () => parsed,
+    });
+
+    await expect(adapter.refresh(account(), { now: NOW })).rejects.toMatchObject({
+      code: "invalid-x-timeline",
+    });
+    expect(getterReads).toBe(0);
+  });
+
   it("never executes XPost accessors or reads inherited post data", async () => {
     let getterReads = 0;
     const getterPost = { ...post({ id: "501" }) } as XPost;
@@ -395,6 +478,220 @@ describe("XAccountAdapter requests and filtering", () => {
       "Skipped an invalid parsed X post.",
       "Skipped an invalid parsed X post.",
     ]);
+  });
+});
+
+describe("XAccountAdapter bounded first import", () => {
+  it("follows cursors, deduplicates pages, and completes with the full current batch", async () => {
+    const test = harness({
+      postPages: [
+        page([
+          post({ id: "3", createdAt: "2026-07-22T07:00:00.000Z" }),
+          post({ id: "2", createdAt: "2026-07-21T07:00:00.000Z", text: "older copy" }),
+        ], "page-2"),
+        page([
+          post({ id: "2", createdAt: "2026-07-21T07:00:00.000Z", text: "newer copy" }),
+          post({ id: "1", createdAt: "2026-07-20T07:00:00.000Z" }),
+        ]),
+      ],
+    });
+
+    const result = await test.adapter.refresh(account(), {
+      now: NOW,
+      feed: importFeed(),
+    });
+
+    expect(test.fetchUserPosts).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      cursor: "page-2",
+    }));
+    expect(result.feed.initialImportProgress).toMatchObject({
+      status: "completed",
+      pagesFetched: 2,
+      itemsImported: 3,
+      earliestImportedAt: "2026-07-20T07:00:00.000Z",
+    });
+    expect(result.collectionItems?.map((item) => item.guid)).toEqual(["3", "2", "1"]);
+    expect(result.items.map((item) => item.guid)).toEqual(["3", "2", "1"]);
+    expect(result.items.find((item) => item.guid === "2")).toMatchObject({
+      plainText: "newer copy",
+    });
+  });
+
+  it("stops at the selected date cutoff and does not request another page", async () => {
+    const test = harness({
+      postPages: [
+        page([post({ id: "3", createdAt: "2026-07-20T08:00:00.000Z" })], "page-2"),
+        page([
+          post({ id: "2", createdAt: "2026-07-15T08:00:00.000Z" }),
+          post({ id: "1", createdAt: "2026-07-15T07:59:59.999Z" }),
+        ], "page-3"),
+      ],
+    });
+
+    const result = await test.adapter.refresh(account(), {
+      now: NOW,
+      feed: importFeed({ policy: { mode: "lookback-days", days: 7 } }),
+    });
+
+    expect(test.fetchUserPosts).toHaveBeenCalledTimes(2);
+    expect(result.collectionItems?.map((item) => item.guid)).toEqual(["3", "2"]);
+    expect(result.feed.initialImportProgress).toMatchObject({
+      status: "completed",
+      pagesFetched: 2,
+      itemsImported: 2,
+    });
+    expect(result.feed.initialImportProgress).not.toHaveProperty("nextCursor");
+  });
+
+  it("terminates a repeated-cursor loop with a safe warning", async () => {
+    const test = harness({
+      postPages: [
+        page([post({ id: "3" })], "page-2"),
+        page([post({ id: "2" })], "page-2"),
+      ],
+    });
+
+    const result = await test.adapter.refresh(account(), {
+      now: NOW,
+      feed: importFeed(),
+    });
+
+    expect(test.fetchUserPosts).toHaveBeenCalledTimes(2);
+    expect(result.feed.initialImportProgress).toMatchObject({
+      status: "completed",
+      pagesFetched: 2,
+    });
+    expect(result.warnings.length).toBeGreaterThan(0);
+    expect(JSON.stringify(result.warnings)).not.toContain("page-2");
+  });
+
+  it.each([
+    new TikHubRequestBudgetError(),
+    new TikHubRequestLedgerError("daily-limit", "daily unavailable"),
+  ])("checkpoints a successful partial batch when a later page cannot be reserved", async (limitError) => {
+    const test = harness({
+      postPages: [
+        page([post({ id: "3" })], "resume-page"),
+        limitError,
+      ],
+    });
+
+    const result = await test.adapter.refresh(account(), {
+      now: NOW,
+      feed: importFeed(),
+    });
+
+    expect(test.fetchUserPosts).toHaveBeenCalledTimes(2);
+    expect(result.providerRequestCount).toBe(1);
+    expect(result.collectionItems?.map((item) => item.guid)).toEqual(["3"]);
+    expect(result.feed.initialImportProgress).toMatchObject({
+      status: "paused-limit",
+      pagesFetched: 1,
+      itemsImported: 1,
+      nextCursor: "resume-page",
+    });
+  });
+
+  it("resumes from the persisted cursor and merges the historical cache", async () => {
+    const historical = post({ id: "3", createdAt: "2026-07-21T07:00:00.000Z" });
+    const test = harness({
+      postPages: [page([
+        post({ id: "3", createdAt: "2026-07-21T07:00:00.000Z", text: "overlap" }),
+        post({ id: "2", createdAt: "2026-07-20T07:00:00.000Z" }),
+      ])],
+    });
+    const feed = importFeed({
+      posts: [historical],
+      progress: {
+        status: "paused-limit",
+        pagesFetched: 1,
+        itemsImported: 1,
+        earliestImportedAt: historical.createdAt,
+        nextCursor: "persisted-cursor",
+      },
+    });
+
+    const result = await test.adapter.refresh(account(), { now: NOW, feed });
+
+    expect(test.fetchUserPosts).toHaveBeenCalledWith(expect.objectContaining({
+      cursor: "persisted-cursor",
+    }));
+    expect(result.feed.items.map((item) => item.guid)).toEqual(["3", "2"]);
+    expect(result.collectionItems?.map((item) => item.guid)).toEqual(["3", "2"]);
+    expect(result.feed.initialImportProgress).toMatchObject({
+      status: "completed",
+      pagesFetched: 2,
+      itemsImported: 2,
+      earliestImportedAt: "2026-07-20T07:00:00.000Z",
+    });
+  });
+
+  it("paginates replies independently and counts every successful page", async () => {
+    const config = account({ includeReplies: true });
+    const test = harness({
+      postPages: [page([post({ id: "3" })])],
+      replyPages: [
+        page([post({ id: "2", inReplyToId: "1" })], "reply-page-2"),
+        page([post({ id: "1", inReplyToId: "0" })]),
+      ],
+    });
+
+    const result = await test.adapter.refresh(config, {
+      now: NOW,
+      feed: importFeed({ config }),
+    });
+
+    expect(test.fetchUserPosts).toHaveBeenCalledOnce();
+    expect(test.fetchUserReplies).toHaveBeenCalledTimes(2);
+    expect(test.fetchUserReplies).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      cursor: "reply-page-2",
+    }));
+    expect(result.providerRequestCount).toBe(3);
+    expect(result.feed.initialImportProgress).toMatchObject({
+      status: "completed",
+      pagesFetched: 3,
+      itemsImported: 3,
+    });
+  });
+
+  it("keeps a stopped import on the normal one-page daily refresh path", async () => {
+    const config = account({ includeReplies: true });
+    const test = harness({
+      postPages: [page([post({ id: "3" })], "ignored-post-cursor")],
+      replyPages: [page([post({ id: "2", inReplyToId: "1" })], "ignored-reply-cursor")],
+    });
+    const feed = importFeed({
+      config,
+      progress: { status: "stopped", pagesFetched: 4, itemsImported: 8 },
+    });
+
+    const result = await test.adapter.refresh(config, { now: NOW, feed });
+
+    expect(test.fetchUserPosts).toHaveBeenCalledOnce();
+    expect(test.fetchUserReplies).toHaveBeenCalledOnce();
+    expect(result.providerRequestCount).toBe(2);
+    expect(result.feed.initialImportProgress).toEqual(feed.initialImportProgress);
+  });
+
+  it("keeps completed and legacy daily refreshes to one posts page plus optional one replies page", async () => {
+    for (const progress of [
+      undefined,
+      { status: "completed", pagesFetched: 2, itemsImported: 2 } as const,
+    ]) {
+      const config = account({ includeReplies: true });
+      const test = harness({
+        postPages: [page([post({ id: "3" })], "ignored-post-cursor")],
+        replyPages: [page([post({ id: "2", inReplyToId: "1" })], "ignored-reply-cursor")],
+      });
+      const feed = importFeed({ config });
+      if (progress === undefined) delete feed.initialImportProgress;
+      else feed.initialImportProgress = progress;
+
+      await test.adapter.refresh(config, { now: NOW, feed });
+
+      expect(test.fetchUserPosts).toHaveBeenCalledOnce();
+      expect(test.fetchUserReplies).toHaveBeenCalledOnce();
+    }
   });
 });
 
@@ -517,6 +814,7 @@ describe("X account feed mapping", () => {
     ], NOW);
 
     expect(mapped.items.map((item) => item.guid)).toEqual(["10", "9", "8", "7"]);
+    expect(mapped.feed.items.map((item) => item.guid)).toEqual(["10", "9", "8", "7"]);
   });
 
   it("keeps X identity stable across handle/source changes while metrics merge", () => {

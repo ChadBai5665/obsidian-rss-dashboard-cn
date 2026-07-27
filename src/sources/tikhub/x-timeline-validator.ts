@@ -34,6 +34,7 @@ const RELATION_KEYS = [
 ] as const;
 const MAX_POSTS = 100_000;
 const MAX_TEXT_LENGTH = 1_000_000;
+const MAX_CURSOR_LENGTH = 4_096;
 const INVALID_POST_WARNING = "Skipped an invalid parsed X post.";
 
 export class InvalidXTimelineError extends Error {
@@ -48,12 +49,20 @@ export class InvalidXTimelineError extends Error {
 /** Validates and clones the parser seam before account/topic semantics run. */
 export function validateParsedXTimeline(value: unknown): TikHubTimelineParseResult {
   const record = plainRecord(value);
-  if (!record || !hasExactKeys(record, ["posts", "warnings", "candidateCount"])) {
+  if (
+    !record ||
+    (!hasExactKeys(record, ["posts", "warnings", "candidateCount"]) &&
+      !hasExactKeys(record, ["posts", "warnings", "candidateCount", "nextCursor"]))
+  ) {
     throw new InvalidXTimelineError();
   }
   const postsValue = ownData(record, "posts");
   const warningsValue = ownData(record, "warnings");
   const candidateCount = ownData(record, "candidateCount");
+  const hasNextCursor = Object.prototype.hasOwnProperty.call(record, "nextCursor");
+  const nextCursor = hasNextCursor
+    ? ownData(record, "nextCursor")
+    : undefined;
   const posts = denseOwnArray(postsValue, MAX_POSTS);
   const warnings = denseOwnArray(warningsValue, MAX_POSTS);
   if (
@@ -61,7 +70,8 @@ export function validateParsedXTimeline(value: unknown): TikHubTimelineParseResu
     !warnings ||
     typeof candidateCount !== "number" ||
     !Number.isSafeInteger(candidateCount) ||
-    candidateCount < 0
+    candidateCount < 0 ||
+    (hasNextCursor && !isPrintableCursor(nextCursor))
   ) {
     throw new InvalidXTimelineError();
   }
@@ -89,7 +99,29 @@ export function validateParsedXTimeline(value: unknown): TikHubTimelineParseResu
     if (post) safePosts.push(post);
     else safeWarnings.push(INVALID_POST_WARNING);
   }
-  return { posts: safePosts, warnings: safeWarnings, candidateCount };
+  return {
+    posts: safePosts,
+    warnings: safeWarnings,
+    candidateCount,
+    ...(hasNextCursor && typeof nextCursor === "string" ? { nextCursor } : {}),
+  };
+}
+
+function isPrintableCursor(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_CURSOR_LENGTH
+  ) return false;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint === undefined ||
+      codePoint <= 31 ||
+      (codePoint >= 127 && codePoint <= 159)
+    ) return false;
+  }
+  return true;
 }
 
 function validatedPost(value: unknown): XPost | undefined {

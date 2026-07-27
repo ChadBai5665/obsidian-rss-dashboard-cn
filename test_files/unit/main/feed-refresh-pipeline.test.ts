@@ -845,6 +845,59 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(ledger.recordError).not.toHaveBeenCalled();
   });
 
+  it("collects the complete X import batch while retaining the adapter cache snapshot", async () => {
+    const config = {
+      kind: "x-account" as const,
+      id: "x-account-openai",
+      handle: "openai",
+      includeReplies: false,
+      includeReposts: false,
+      folder: "X",
+      topics: [],
+    };
+    const source = createFeed({
+      feedId: config.id,
+      sourceKind: config.kind,
+      sourceConfig: config,
+      title: "@openai",
+      url: "tikhub://x-account/openai",
+      items: [createItem({ guid: "old", feedUrl: "tikhub://x-account/openai" })],
+    });
+    const completeBatch = ["3", "2", "1"].map((guid) => createItem({
+      guid,
+      link: `https://x.com/openai/status/${guid}`,
+      feedTitle: "@openai",
+      feedUrl: source.url,
+    }));
+    const retained = { ...source, items: [completeBatch[0]], lastUpdated: 2 };
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = { ...plugin.settings.tikhub, enabled: true };
+    const refresh = vi.fn(async (_config: FeedSourceConfig, context: { feed?: Feed }) => {
+      expect(context.feed).toEqual(source);
+      expect(context.feed).not.toBe(source);
+      return {
+        feed: retained,
+        items: retained.items,
+        collectionItems: completeBatch,
+        providerRequestCount: 2,
+        warnings: [],
+      };
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({ refresh }) as unknown as SourceRegistry);
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+
+    await plugin.refreshFeeds([source]);
+
+    expect(collectFeedRefresh).toHaveBeenCalledWith({
+      feed: retained,
+      previousItems: source.items,
+      refreshedItems: completeBatch,
+      fetchedAt: expect.any(Date),
+    });
+    expect(plugin.settings.feeds[0].items.map((entry) => entry.guid)).toEqual(["3"]);
+  });
+
   it("records parser errors without touching collection persistence", async () => {
     const source = createFeed({ feedId: "source-a" });
     const plugin = createPluginWithSettings([source]);

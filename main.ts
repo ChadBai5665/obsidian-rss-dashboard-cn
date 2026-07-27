@@ -4939,7 +4939,7 @@ export default class RssDashboardPlugin extends Plugin {
     const output = await sourceRegistry.refresh(config, {
       now: fetchedAt,
       signal: attempt.signal,
-      ...(config.kind === "feed" ? { feed: parserInput } : {}),
+      feed: parserInput,
     });
     const updatedFeed = output.feed;
     updatedFeed.feedId ??= parserInput.feedId;
@@ -4959,7 +4959,7 @@ export default class RssDashboardPlugin extends Plugin {
     return {
       feed: updatedFeed,
       previousItems,
-      refreshedItems: updatedFeed.items,
+      refreshedItems: output.collectionItems ?? updatedFeed.items,
       fetchedAt,
       providerRequestCount: output.providerRequestCount,
       warnings: [...output.warnings],
