@@ -11,6 +11,8 @@ export interface InitialImportProgress {
   pagesFetched: number;
   itemsImported: number;
   earliestImportedAt?: string;
+  /** Explicit X timeline phase; keeps a reply-only checkpoint from replaying posts. */
+  phase?: "posts" | "replies";
   nextCursor?: string;
   replyCursor?: string;
 }
@@ -86,10 +88,12 @@ export function normalizeInitialImportProgress(
     itemsImported: itemsImported.value,
   };
   const earliestImportedAt = optionalString(record, "earliestImportedAt");
+  const phase = optionalPhase(record, "phase");
   const nextCursor = optionalCursor(record, "nextCursor");
   const replyCursor = optionalCursor(record, "replyCursor");
   if (
     earliestImportedAt.invalid ||
+    phase.invalid ||
     nextCursor.invalid ||
     replyCursor.invalid
   ) {
@@ -98,9 +102,21 @@ export function normalizeInitialImportProgress(
   if (earliestImportedAt.value !== undefined) {
     output.earliestImportedAt = earliestImportedAt.value;
   }
+  if (phase.value !== undefined) output.phase = phase.value;
   if (nextCursor.value !== undefined) output.nextCursor = nextCursor.value;
   if (replyCursor.value !== undefined) output.replyCursor = replyCursor.value;
   return output;
+}
+
+function optionalPhase(
+  record: Record<string, unknown>,
+  key: string,
+): { invalid: boolean; value?: "posts" | "replies" } {
+  const field = ownData(record, key);
+  if (!field.present) return { invalid: field.accessor };
+  return field.value === "posts" || field.value === "replies"
+    ? { invalid: false, value: field.value }
+    : { invalid: true };
 }
 
 export function filterItemsForInitialImport(

@@ -6,6 +6,10 @@ import {
   type VerifiedFeedSubscriptionRequest,
   type VerifiedXSubscriptionRequest,
 } from "../../../src/services/subscription-service";
+import {
+  XProfileResolver,
+  type VerifiedXProfile,
+} from "../../../src/sources/tikhub/x-profile-resolver";
 import type { Feed, FeedItem } from "../../../src/types/types";
 
 const NOW = new Date("2026-07-28T12:00:00.000Z");
@@ -78,15 +82,43 @@ function youtubeRequest(): VerifiedFeedSubscriptionRequest {
   };
 }
 
+let currentXVerification: VerifiedXProfile;
+
+async function mintXVerification(
+  handle = "openai",
+  restId = "44196397",
+  now: Date = NOW,
+): Promise<VerifiedXProfile> {
+  const resolver = new XProfileResolver({
+    settings: {
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      baseUrl: "https://example.invalid",
+      timeoutMs: 20_000,
+      maxRequestsPerRun: 40,
+      maxRequestsPerDay: 100,
+    },
+    secretStore: { get: async () => "unit-test-key" },
+    client: {
+      fetchUserProfile: async () => ({
+        data: {
+          result: {
+            rest_id: restId,
+            legacy: { screen_name: handle, name: handle },
+          },
+        },
+      }),
+    },
+    now: () => now,
+  });
+  return await resolver.resolve(handle);
+}
+
 function xRequest(handle = "OpenAI"): VerifiedXSubscriptionRequest {
   return {
     kind: "x-account",
-    profile: {
-      restId: "44196397",
-      handle,
-      displayName: "OpenAI",
-      verified: true,
-    },
+    profile: { ...currentXVerification.profile, handle },
+    verificationProof: currentXVerification.proof,
     includeReplies: true,
     includeReposts: false,
     folder: "X",
@@ -128,7 +160,11 @@ function harness(initialFeeds: Feed[] = []) {
   }));
   const collectionService = {
     collectFeedRefresh: vi.fn(async () => []),
-    removeSource: vi.fn(async () => []),
+    removeSource: vi.fn(async () => ({
+      days: [],
+      commit: vi.fn(async () => undefined),
+      rollback: vi.fn(async () => undefined),
+    })),
   };
   const saveSettings = vi.fn(async () => {
     snapshots.push(structuredClone(settings.feeds));
@@ -156,8 +192,9 @@ function harness(initialFeeds: Feed[] = []) {
   };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.restoreAllMocks();
+  currentXVerification = await mintXVerification();
 });
 
 describe("SubscriptionService", () => {
@@ -262,14 +299,14 @@ describe("SubscriptionService", () => {
     [
       "canonical feed URL",
       existingFeed({ url: "https://EXAMPLE.com/feed.xml#fragment" }),
-      rssRequest(),
+      () => rssRequest(),
     ],
     [
       "YouTube channel ID",
       existingFeed({
         url: `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`,
       }),
-      youtubeRequest(),
+      () => youtubeRequest(),
     ],
     [
       "lowercase X handle",
@@ -286,12 +323,12 @@ describe("SubscriptionService", () => {
         },
         url: "tikhub://x-account/openai",
       }),
-      xRequest("OPENAI"),
+      () => xRequest("OPENAI"),
     ],
-  ])("rejects a duplicate by %s", async (_label, stored, request) => {
+  ])("rejects a duplicate by %s", async (_label, stored, createRequest) => {
     const test = harness([stored]);
 
-    await expect(test.service.add(request)).rejects.toMatchObject({
+    await expect(test.service.add(createRequest())).rejects.toMatchObject({
       code: "duplicate-subscription",
     });
 
@@ -393,6 +430,52 @@ describe("SubscriptionService", () => {
     });
   });
 
+  it("aborts the active historical run before persisting stopped progress", async () => {
+    const source = existingFeed({
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "legacy-feed",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      url: "tikhub://x-account/openai",
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: {
+        status: "running",
+        pagesFetched: 1,
+        itemsImported: 3,
+        phase: "posts",
+        nextCursor: "next-page",
+      },
+    });
+    const test = harness([source]);
+    const abortInitialImport = vi.fn();
+    const service = new SubscriptionService({
+      settings: test.settings,
+      defaults: { autoDeleteDuration: 30, maxItems: 1 },
+      parseFeed: test.parseFeed,
+      collectionService: test.collectionService,
+      ensureFolder: test.ensureFolder,
+      saveSettings: test.saveSettings,
+      now: () => NOW,
+      createFeedId: () => "unused-id",
+      abortInitialImport,
+    });
+
+    await service.stopInitialImport("legacy-feed");
+
+    expect(abortInitialImport).toHaveBeenCalledWith("legacy-feed");
+    expect(test.settings.feeds[0].initialImportProgress).toMatchObject({
+      status: "stopped",
+      phase: "posts",
+      nextCursor: "next-page",
+    });
+  });
+
   it("retries a failed RSS collection checkpoint from its untrimmed saved items", async () => {
     const recoverable = existingFeed({
       autoDeleteDuration: 30,
@@ -441,6 +524,292 @@ describe("SubscriptionService", () => {
     expect(test.settings.feeds[0].subscriptionStatus).toBe("active");
   });
 
+  it("serializes different-source candidates so a failed save cannot cross-roll back a later mutation", async () => {
+    const sourceA = existingFeed({ feedId: "source-a" });
+    const sourceB = existingFeed({
+      feedId: "source-b",
+      url: "https://second.example/feed.xml",
+    });
+    const test = harness([sourceA, sourceB]);
+    let rejectFirst!: (error: Error) => void;
+    const firstSave = new Promise<void>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    test.saveSettings
+      .mockImplementationOnce(() => firstSave)
+      .mockResolvedValueOnce(undefined);
+    const secondService = new SubscriptionService({
+      settings: test.settings,
+      defaults: { autoDeleteDuration: 30, maxItems: 1 },
+      parseFeed: test.parseFeed,
+      collectionService: test.collectionService,
+      ensureFolder: test.ensureFolder,
+      saveSettings: test.saveSettings,
+      now: () => NOW,
+      createFeedId: () => "unused-id",
+    });
+
+    const first = test.service.setPaused("source-a", true);
+    await Promise.resolve();
+    const second = secondService.setPaused("source-b", true);
+    await Promise.resolve();
+    expect(test.saveSettings).toHaveBeenCalledTimes(1);
+
+    rejectFirst(new Error("first save failed"));
+    await expect(first).rejects.toThrow("first save failed");
+    await expect(second).resolves.toMatchObject({ subscriptionStatus: "paused" });
+
+    expect(test.settings.feeds).toMatchObject([
+      { feedId: "source-a", subscriptionStatus: "active" },
+      { feedId: "source-b", subscriptionStatus: "paused" },
+    ]);
+  });
+
+  it("applies every editable option while preserving identity, cache, progress, and status", async () => {
+    const source = existingFeed({
+      items: [item("kept", "2026-07-20T00:00:00.000Z")],
+      autoDeleteDuration: 30,
+      maxItemsLimit: 10,
+      scanInterval: 1,
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: { status: "completed", pagesFetched: 1, itemsImported: 1 },
+      subscriptionStatus: "paused",
+    });
+    const test = harness([source]);
+
+    const updated = await test.service.update("legacy-feed", rssRequest({
+      verification: {
+        inputUrl: source.url,
+        siteUrl: "https://legacy.example/",
+        candidates: [{ url: source.url, title: "Legacy", format: "rss" }],
+        selected: { url: source.url, title: "Legacy", format: "rss" },
+        hasEntries: true,
+      },
+      selectedCandidateUrl: source.url,
+      displayName: "Edited",
+      folder: "Edited Folder",
+      tags: ["edited"],
+      initialImportPolicy: { mode: "lookback-days", days: 30 },
+      autoDeleteDuration: 90,
+      maxItemsLimit: 25,
+      scanInterval: 12,
+      keywordRules: {
+        overrideGlobalRules: true,
+        includeLogic: "OR",
+        rules: [{
+          id: "rule-1",
+          type: "include",
+          keyword: "AI",
+          matchMode: "partial",
+          applyToTitle: true,
+          applyToSummary: false,
+          applyToContent: false,
+          enabled: true,
+          createdAt: 1,
+        }],
+      },
+      customTemplate: "Custom",
+      excludeFromRefresh: true,
+      mediaType: "podcast",
+    }));
+
+    expect(updated).toMatchObject({
+      title: "Edited",
+      folder: "Edited Folder",
+      customTags: ["edited"],
+      autoDeleteDuration: 90,
+      maxItemsLimit: 25,
+      scanInterval: 12,
+      customTemplate: "Custom",
+      excludeFromRefresh: true,
+      mediaType: "podcast",
+      subscriptionStatus: "paused",
+      initialImportProgress: source.initialImportProgress,
+    });
+    expect(updated.items).toEqual(source.items);
+    expect(updated.keywordRules).toEqual({
+      overrideGlobalRules: true,
+      includeLogic: "OR",
+      rules: [{
+        id: "rule-1",
+        type: "include",
+        keyword: "AI",
+        matchMode: "partial",
+        applyToTitle: true,
+        applyToSummary: false,
+        applyToContent: false,
+        enabled: true,
+        createdAt: 1,
+      }],
+    });
+  });
+
+  it("accepts a reverified canonical feed change and rejects a duplicate target", async () => {
+    const duplicate = existingFeed({
+      feedId: "duplicate",
+      url: "https://duplicate.example/feed.xml",
+    });
+    const test = harness([
+      existingFeed({ subscriptionStatus: "paused" }),
+      duplicate,
+    ]);
+    test.parseFeed.mockImplementation(async (_url, seed) => ({
+      ...seed,
+      title: "Parser title",
+      siteUrl: "https://changed.example/",
+      items: test.selectedItems,
+      mediaType: "article",
+      customTemplate: "parser-template",
+      lastUpdated: NOW.getTime(),
+    }));
+    const changed = rssRequest({
+      verification: {
+        inputUrl: "https://changed.example/",
+        siteUrl: "https://changed.example/",
+        candidates: [{ url: "https://changed.example/feed.xml", title: "Changed", format: "rss" }],
+        selected: { url: "https://changed.example/feed.xml", title: "Changed", format: "rss" },
+        hasEntries: true,
+      },
+      selectedCandidateUrl: "https://changed.example/feed.xml",
+      mediaType: "podcast",
+      customTemplate: "",
+    });
+
+    await expect(test.service.update("legacy-feed", changed)).resolves.toMatchObject({
+      feedId: "legacy-feed",
+      url: "https://changed.example/feed.xml",
+      mediaType: "podcast",
+      customTemplate: undefined,
+      subscriptionStatus: "paused",
+      initialImportProgress: expect.objectContaining({ status: "completed" }),
+    });
+
+    const duplicateRequest = rssRequest({
+      verification: {
+        inputUrl: duplicate.url,
+        siteUrl: "https://duplicate.example/",
+        candidates: [{ url: duplicate.url, title: "Duplicate", format: "rss" }],
+        selected: { url: duplicate.url, title: "Duplicate", format: "rss" },
+        hasEntries: true,
+      },
+      selectedCandidateUrl: duplicate.url,
+    });
+    await expect(test.service.update("legacy-feed", duplicateRequest)).rejects
+      .toMatchObject({ code: "duplicate-subscription" });
+  });
+
+  it("uses a fresh X proof for an account identity change and applies all X options", async () => {
+    const previousItem = item("old-account-item", "2026-07-20T00:00:00.000Z");
+    const source = existingFeed({
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "legacy-feed",
+        handle: "openai",
+        restId: "44196397",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      url: "tikhub://x-account/openai",
+      items: [previousItem],
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: { status: "completed", pagesFetched: 2, itemsImported: 1 },
+      subscriptionStatus: "paused",
+    });
+    const verification = await mintXVerification("anthropic", "999999");
+    const test = harness([source]);
+    const request: VerifiedXSubscriptionRequest = {
+      kind: "x-account",
+      profile: { ...verification.profile, displayName: "Anthropic" },
+      verificationProof: verification.proof,
+      includeReplies: true,
+      includeReposts: true,
+      folder: "X/New",
+      tags: ["models"],
+      initialImportPolicy: { mode: "lookback-days", days: 30 },
+      autoDeleteDuration: 45,
+      maxItemsLimit: 12,
+      scanInterval: 6,
+      keywordRules: {
+        overrideGlobalRules: false,
+        includeLogic: "AND",
+        rules: [],
+      },
+      customTemplate: "X Template",
+      excludeFromRefresh: true,
+      mediaType: "podcast",
+    };
+
+    const updated = await test.service.update("legacy-feed", request);
+
+    expect(updated).toMatchObject({
+      feedId: "legacy-feed",
+      url: "tikhub://x-account/anthropic",
+      folder: "X/New",
+      customTags: ["models"],
+      autoDeleteDuration: 45,
+      maxItemsLimit: 12,
+      scanInterval: 6,
+      keywordRules: request.keywordRules,
+      customTemplate: "X Template",
+      excludeFromRefresh: true,
+      mediaType: "podcast",
+      subscriptionStatus: "paused",
+      sourceConfig: {
+        handle: "anthropic",
+        restId: "999999",
+        includeReplies: true,
+        includeReposts: true,
+      },
+      initialImportProgress: {
+        status: "pending",
+        pagesFetched: 0,
+        itemsImported: 0,
+      },
+    });
+    expect(updated.items).toEqual([]);
+    expect(test.collectionService.collectFeedRefresh).not.toHaveBeenCalled();
+  });
+
+  it("requires a fresh exact X proof, consumes it once, and rejects expiry or profile tampering", async () => {
+    const first = harness();
+    const request = xRequest();
+    await first.service.add(request);
+
+    const reused = harness();
+    await expect(reused.service.add(request)).rejects.toMatchObject({
+      code: "invalid-subscription-request",
+    });
+
+    const exact = await mintXVerification("openai", "44196397");
+    const tampered = harness();
+    await expect(tampered.service.add({
+      ...xRequest(),
+      profile: { ...exact.profile, restId: "different" },
+      verificationProof: exact.proof,
+    })).rejects.toMatchObject({ code: "invalid-subscription-request" });
+
+    const expiredVerification = await mintXVerification(
+      "expired",
+      "999",
+      new Date(NOW.getTime() - 10 * 60 * 1000),
+    );
+    const expired = harness();
+    await expect(expired.service.add({
+      ...xRequest(),
+      profile: expiredVerification.profile,
+      verificationProof: expiredVerification.proof,
+    })).rejects.toMatchObject({ code: "invalid-subscription-request" });
+
+    const plain = harness();
+    const plainRequest = { ...xRequest() } as Record<string, unknown>;
+    delete plainRequest.verificationProof;
+    await expect(plain.service.add(plainRequest as unknown as VerifiedXSubscriptionRequest))
+      .rejects.toMatchObject({ code: "invalid-subscription-request" });
+  });
+
   it("defaults to history-preserving removal and requires a feed-bound purge capability", async () => {
     const source = existingFeed();
     const test = harness([source]);
@@ -466,6 +835,12 @@ describe("SubscriptionService", () => {
     ).rejects.toMatchObject({ code: "purge-confirmation-required" });
 
     const confirmation = createConfirmedCollectionPurge("legacy-feed");
+    const commit = vi.fn(async () => undefined);
+    test.collectionService.removeSource.mockResolvedValueOnce({
+      days: [],
+      commit,
+      rollback: vi.fn(async () => undefined),
+    });
     await test.service.remove("legacy-feed", {
       purgeCollection: true,
       confirmation,
@@ -473,6 +848,68 @@ describe("SubscriptionService", () => {
     expect(test.collectionService.removeSource).toHaveBeenCalledWith(
       "legacy-feed",
     );
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it("restores collection and source configuration when the final purge config save fails", async () => {
+    const source = existingFeed();
+    const test = harness([source]);
+    const originalFeeds = test.settings.feeds;
+    const rollback = vi.fn(async () => undefined);
+    test.collectionService.removeSource.mockResolvedValueOnce({
+      days: [],
+      commit: vi.fn(async () => undefined),
+      rollback,
+    });
+    test.saveSettings.mockRejectedValueOnce(new Error("config save failed"));
+
+    await expect(test.service.remove("legacy-feed", {
+      purgeCollection: true,
+      confirmation: createConfirmedCollectionPurge("legacy-feed"),
+    })).rejects.toThrow("config save failed");
+
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(test.settings.feeds).toBe(originalFeeds);
+    expect(test.settings.feeds).toEqual([source]);
+  });
+
+  it("keeps the source configuration when collection purge fails before config commit", async () => {
+    const source = existingFeed();
+    const test = harness([source]);
+    const originalFeeds = test.settings.feeds;
+    test.collectionService.removeSource.mockRejectedValueOnce(
+      new Error("collection purge failed"),
+    );
+
+    await expect(test.service.remove("legacy-feed", {
+      purgeCollection: true,
+      confirmation: createConfirmedCollectionPurge("legacy-feed"),
+    })).rejects.toThrow("collection purge failed");
+
+    expect(test.settings.feeds).toBe(originalFeeds);
+    expect(test.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a safe combined error if config-save compensation also fails", async () => {
+    const test = harness([existingFeed()]);
+    const rollback = vi.fn(async () => { throw new Error("unsafe rollback detail"); });
+    test.collectionService.removeSource.mockResolvedValueOnce({
+      days: [],
+      commit: vi.fn(async () => undefined),
+      rollback,
+    });
+    test.saveSettings.mockRejectedValueOnce(new Error("unsafe save detail"));
+
+    const error = await test.service.remove("legacy-feed", {
+      purgeCollection: true,
+      confirmation: createConfirmedCollectionPurge("legacy-feed"),
+    }).catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      message: "Subscription purge failed and rollback was incomplete",
+    });
+    expect(String(error)).not.toContain("unsafe save detail");
+    expect(String(error)).not.toContain("unsafe rollback detail");
   });
 
   it("uses stable service error codes", () => {

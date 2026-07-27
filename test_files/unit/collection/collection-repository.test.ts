@@ -498,8 +498,16 @@ describe("CollectionRepository", () => {
     const removed = await repository.removeBySourceId("feed-1");
 
     expect(removed).toEqual([
-      { localDate: "2026-07-21", remainingItems: [retained] },
-      { localDate: "2026-07-22", remainingItems: [] },
+      {
+        localDate: "2026-07-21",
+        previousItems: [createItem({ id: "removed-1" }), retained],
+        remainingItems: [retained],
+      },
+      {
+        localDate: "2026-07-22",
+        previousItems: [createItem({ id: "removed-2" })],
+        remainingItems: [],
+      },
     ]);
     expect(await repository.listByDate("2026-07-21")).toEqual([retained]);
     expect(await repository.listByDate("2026-07-22")).toEqual([]);
@@ -523,6 +531,36 @@ describe("CollectionRepository", () => {
     await expect(adapter.read("Saved/removed-1.md")).resolves.toBe("saved note");
     expect(adapter.removedPaths.some((path) => path.endsWith("removed-1.md")))
       .toBe(false);
+  });
+
+  it("restores collection JSONL and the item index from a completed source-removal receipt", async () => {
+    const { adapter, repository } = createHarness();
+    const removedItem = createItem({ id: "removed-1" });
+    const retained = createItem({ id: "retained", sourceId: "feed-2" });
+    await repository.upsertDaily([removedItem, retained], "2026-07-21");
+
+    const receipt = await repository.removeBySourceId("feed-1");
+    await repository.restoreRemovedSource(receipt);
+
+    expect(await repository.listByDate("2026-07-21")).toEqual([
+      removedItem,
+      retained,
+    ]);
+    expect(
+      JSON.parse(await adapter.read(`${DATA_ROOT}/state/item-index.json`)),
+    ).toEqual({
+      schemaVersion: 1,
+      items: {
+        "removed-1": {
+          earliestDate: "2026-07-21",
+          latestDate: "2026-07-21",
+        },
+        retained: {
+          earliestDate: "2026-07-21",
+          latestDate: "2026-07-21",
+        },
+      },
+    });
   });
 
   it("rolls back earlier collection days when a later source-removal rewrite fails", async () => {

@@ -13,6 +13,11 @@ import {
   normalizeXHandle,
 } from "../sources/source-config";
 import type { XProfile } from "../sources/tikhub/x-profile";
+import {
+  consumeXProfileVerificationProof,
+  type XProfileVerificationProof,
+} from "../sources/tikhub/x-profile-resolver";
+import type { CollectionRemovalReceipt } from "./collection-service";
 import type {
   Feed,
   FeedItem,
@@ -49,6 +54,7 @@ export type VerifiedFeedSubscriptionRequest =
 export type VerifiedXSubscriptionRequest = {
   kind: "x-account";
   profile: XProfile;
+  verificationProof: XProfileVerificationProof;
   includeReplies: boolean;
   includeReposts: boolean;
   /** Required when the paid X all-history option was explicitly confirmed. */
@@ -116,7 +122,7 @@ interface CollectionServicePort {
     refreshedItems: FeedItem[];
     fetchedAt: Date;
   }): Promise<unknown>;
-  removeSource(sourceId: string): Promise<unknown>;
+  removeSource(sourceId: string): Promise<CollectionRemovalReceipt>;
 }
 
 export interface SubscriptionServiceDependencies {
@@ -132,7 +138,10 @@ export interface SubscriptionServiceDependencies {
   now?: () => Date;
   createFeedId?: () => string;
   prepareFeed?: (feed: Feed) => Feed;
+  abortInitialImport?: (feedId: string) => void;
 }
+
+const lifecycleMutationQueues = new WeakMap<object, Promise<void>>();
 
 export class SubscriptionService {
   private readonly now: () => Date;
@@ -144,12 +153,17 @@ export class SubscriptionService {
   }
 
   async add(request: VerifiedSubscriptionRequest): Promise<Feed> {
+    return await this.enqueueMutation(async () => await this.addUnlocked(request));
+  }
+
+  private async addUnlocked(request: VerifiedSubscriptionRequest): Promise<Feed> {
     const key = requestKey(request);
     if (this.hasDuplicate(key)) {
       throw new SubscriptionServiceError("duplicate-subscription");
     }
     const feedId = this.uniqueFeedId();
     if (request.kind === "x-account") {
+      this.consumeXVerification(request);
       const feed = this.buildXFeed(request, feedId);
       if (feed.folder) await this.dependencies.ensureFolder(feed.folder);
       this.assertPublicationAvailable(request, feedId);
@@ -166,37 +180,51 @@ export class SubscriptionService {
     feedId: string,
     request: VerifiedSubscriptionRequest,
   ): Promise<Feed> {
+    return await this.enqueueMutation(
+      async () => await this.updateUnlocked(feedId, request),
+    );
+  }
+
+  private async updateUnlocked(
+    feedId: string,
+    request: VerifiedSubscriptionRequest,
+  ): Promise<Feed> {
     const index = this.feedIndex(feedId);
     const previous = this.dependencies.settings.feeds[index];
     const key = requestKey(request);
     if (this.hasDuplicate(key, feedId)) {
       throw new SubscriptionServiceError("duplicate-subscription");
     }
-    if (existingFeedKey(previous) !== key) {
-      throw new SubscriptionServiceError("invalid-subscription-request");
-    }
-
     const policy = validPolicy(request.initialImportPolicy);
     const folder = normalizedFolder(request.folder);
+    const identityChanged = existingFeedKey(previous) !== key ||
+      xRestIdChanged(previous, request);
+
+    if (request.kind === "x-account") {
+      this.consumeXVerification(request);
+    }
+    if (identityChanged && request.kind !== "x-account") {
+      return await this.addFeedSubscription(request, feedId, previous);
+    }
+
     let updated: Feed;
     if (request.kind === "x-account") {
       const replacement = this.buildXFeed(request, feedId);
+      const previousAccount = normalizeXAccountSourceConfig(previous.sourceConfig);
+      const sameProviderIdentity = previousAccount?.restId !== undefined &&
+        previousAccount.restId === request.profile.restId;
       updated = {
         ...replacement,
-        items: previous.items,
-        lastUpdated: previous.lastUpdated,
+        items: identityChanged && !sameProviderIdentity ? [] : previous.items,
+        lastUpdated: identityChanged && !sameProviderIdentity ? 0 : previous.lastUpdated,
         initialImportPolicy: policy,
-        initialImportProgress: previous.initialImportProgress,
+        initialImportProgress: identityChanged && !sameProviderIdentity
+          ? initialProgress("pending")
+          : previous.initialImportProgress,
         subscriptionStatus: previous.subscriptionStatus ?? "active",
       };
     } else {
-      updated = {
-        ...previous,
-        title: normalizedTitle(request.displayName) ?? previous.title,
-        folder,
-        customTags: [...request.tags],
-        initialImportPolicy: policy,
-      };
+      updated = applyEditableFeedOptions(previous, request, policy, folder, this.dependencies);
     }
     if (folder) await this.dependencies.ensureFolder(folder);
     const candidate = cloneFeeds(this.dependencies.settings.feeds);
@@ -206,25 +234,41 @@ export class SubscriptionService {
   }
 
   async setPaused(feedId: string, paused: boolean): Promise<Feed> {
-    return await this.updateFeed(feedId, (feed) => ({
-      ...feed,
-      subscriptionStatus: paused ? "paused" : "active",
-    }));
+    return await this.enqueueMutation(async () =>
+      await this.updateFeed(feedId, (feed) => ({
+        ...feed,
+        subscriptionStatus: paused ? "paused" : "active",
+      }))
+    );
   }
 
   async stopInitialImport(feedId: string): Promise<Feed> {
-    return await this.updateImportStatus(feedId, "stopped");
+    this.dependencies.abortInitialImport?.(feedId);
+    return await this.enqueueMutation(
+      async () => await this.updateImportStatus(feedId, "stopped"),
+    );
   }
 
   async resumeInitialImport(feedId: string): Promise<Feed> {
-    const feed = this.dependencies.settings.feeds[this.feedIndex(feedId)];
-    if (feed.sourceKind === undefined || feed.sourceKind === "feed") {
-      return await this.resumeFeedImport(feedId, feed);
-    }
-    return await this.updateImportStatus(feedId, "pending");
+    return await this.enqueueMutation(async () => {
+      const feed = this.dependencies.settings.feeds[this.feedIndex(feedId)];
+      if (feed.sourceKind === undefined || feed.sourceKind === "feed") {
+        return await this.resumeFeedImport(feedId, feed);
+      }
+      return await this.updateImportStatus(feedId, "pending");
+    });
   }
 
   async remove(
+    feedId: string,
+    options: RemoveSubscriptionOptions,
+  ): Promise<void> {
+    return await this.enqueueMutation(
+      async () => await this.removeUnlocked(feedId, options),
+    );
+  }
+
+  private async removeUnlocked(
     feedId: string,
     options: RemoveSubscriptionOptions,
   ): Promise<void> {
@@ -239,15 +283,29 @@ export class SubscriptionService {
 
     const candidate = cloneFeeds(this.dependencies.settings.feeds);
     candidate.splice(index, 1);
-    await this.commitFeeds(candidate);
-    if (options.purgeCollection) {
-      await this.dependencies.collectionService.removeSource(feedId);
+    if (!options.purgeCollection) {
+      await this.commitFeeds(candidate);
+      return;
+    }
+
+    const removal = await this.dependencies.collectionService.removeSource(feedId);
+    try {
+      await this.commitFeeds(candidate);
+      await removal.commit();
+    } catch (saveError) {
+      try {
+        await removal.rollback();
+      } catch {
+        throw new Error("Subscription purge failed and rollback was incomplete");
+      }
+      throw saveError;
     }
   }
 
   private async addFeedSubscription(
     request: VerifiedFeedSubscriptionRequest,
     feedId: string,
+    previous?: Feed,
   ): Promise<Feed> {
     const verified = verifiedFeedDetails(request);
     if (!verified.hasEntries && request.acceptedEmptyFeedWarning !== true) {
@@ -286,7 +344,7 @@ export class SubscriptionService {
         includeLogic: "AND",
         rules: [],
       },
-      subscriptionStatus: "active",
+      subscriptionStatus: previous?.subscriptionStatus ?? "active",
       initialImportPolicy: policy,
       initialImportProgress: initialProgress("pending"),
     };
@@ -302,26 +360,38 @@ export class SubscriptionService {
       siteUrl: verified.siteUrl,
       folder,
       items: selected,
-      mediaType: request.kind === "youtube" ? "video" : parsed.mediaType ?? request.mediaType ?? "article",
+      mediaType:
+        request.kind === "youtube"
+          ? "video"
+          : previous
+            ? request.mediaType ?? parsed.mediaType ?? "article"
+            : parsed.mediaType ?? request.mediaType ?? "article",
       autoDeleteDuration,
       maxItemsLimit,
       scanInterval: request.scanInterval ?? parsed.scanInterval ?? 0,
       excludeFromRefresh:
         request.excludeFromRefresh ?? parsed.excludeFromRefresh ?? false,
-      customTemplate: request.customTemplate || parsed.customTemplate,
+      customTemplate:
+        request.customTemplate === undefined
+          ? parsed.customTemplate
+          : normalizedTitle(request.customTemplate),
       customTags: [...request.tags],
       keywordRules: request.keywordRules ?? parsed.keywordRules ?? seed.keywordRules,
-      subscriptionStatus: "active",
+      subscriptionStatus: previous?.subscriptionStatus ?? "active",
       initialImportPolicy: policy,
       initialImportProgress: initialProgress("pending"),
     });
 
     if (folder) await this.dependencies.ensureFolder(folder);
-    this.assertPublicationAvailable(request, feedId);
-    await this.commitFeeds([
-      ...cloneFeeds(this.dependencies.settings.feeds),
-      pending,
-    ]);
+    if (previous) {
+      await this.replacePublishedFeed(feedId, pending);
+    } else {
+      this.assertPublicationAvailable(request, feedId);
+      await this.commitFeeds([
+        ...cloneFeeds(this.dependencies.settings.feeds),
+        pending,
+      ]);
+    }
 
     try {
       await this.dependencies.collectionService.collectFeedRefresh({
@@ -371,6 +441,7 @@ export class SubscriptionService {
     const sourceConfig = createXAccountSourceConfig({
       id: feedId,
       handle,
+      restId: request.profile.restId,
       displayName: normalizedTitle(request.displayName) ?? request.profile.displayName,
       includeReplies: request.includeReplies,
       includeReposts: request.includeReposts,
@@ -387,7 +458,19 @@ export class SubscriptionService {
       items: [],
       lastUpdated: 0,
       author: sourceConfig.displayName ?? `@${handle}`,
-      mediaType: "article",
+      mediaType: request.mediaType ?? "article",
+      autoDeleteDuration: numberOrDefault(
+        request.autoDeleteDuration,
+        this.dependencies.defaults.autoDeleteDuration,
+      ),
+      maxItemsLimit: numberOrDefault(
+        request.maxItemsLimit,
+        this.dependencies.defaults.maxItems,
+      ),
+      scanInterval: request.scanInterval ?? 0,
+      keywordRules: cloneKeywordRules(request.keywordRules),
+      customTemplate: request.customTemplate || undefined,
+      excludeFromRefresh: request.excludeFromRefresh === true,
       customTags: [...request.tags],
       subscriptionStatus: "active",
       initialImportPolicy: policy,
@@ -552,6 +635,33 @@ export class SubscriptionService {
       throw error;
     }
   }
+
+  private consumeXVerification(request: VerifiedXSubscriptionRequest): void {
+    if (
+      !consumeXProfileVerificationProof(
+        request.profile,
+        request.verificationProof,
+        this.now(),
+      )
+    ) {
+      throw new SubscriptionServiceError("invalid-subscription-request");
+    }
+  }
+
+  private async enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const owner = this.dependencies.settings;
+    const prior = lifecycleMutationQueues.get(owner) ?? Promise.resolve();
+    const running = prior.catch(() => undefined).then(operation);
+    const settled = running.then(() => undefined, () => undefined);
+    lifecycleMutationQueues.set(owner, settled);
+    try {
+      return await running;
+    } finally {
+      if (lifecycleMutationQueues.get(owner) === settled) {
+        lifecycleMutationQueues.delete(owner);
+      }
+    }
+  }
 }
 
 function verifiedFeedDetails(request: VerifiedFeedSubscriptionRequest): {
@@ -598,7 +708,7 @@ function verifiedFeedDetails(request: VerifiedFeedSubscriptionRequest): {
 function requestKey(request: VerifiedSubscriptionRequest): string {
   if (request.kind === "x-account") {
     const handle = normalizeXHandle(request.profile.handle);
-    if (!handle) {
+    if (!handle || !/^\d{1,30}$/u.test(request.profile.restId)) {
       throw new SubscriptionServiceError("invalid-subscription-request");
     }
     return `x:${handle}`;
@@ -610,6 +720,54 @@ function requestKey(request: VerifiedSubscriptionRequest): string {
   const feedUrl = verifiedFeedDetails(request).feedUrl;
   const channelId = youtubeChannelId(feedUrl);
   return channelId ? `youtube:${channelId}` : `feed:${feedUrl}`;
+}
+
+function xRestIdChanged(
+  previous: Feed,
+  request: VerifiedSubscriptionRequest,
+): boolean {
+  if (request.kind !== "x-account") return false;
+  const account = normalizeXAccountSourceConfig(previous.sourceConfig);
+  return account?.restId !== request.profile.restId;
+}
+
+function applyEditableFeedOptions(
+  previous: Feed,
+  request: VerifiedFeedSubscriptionRequest,
+  policy: InitialImportPolicy,
+  folder: string,
+  dependencies: SubscriptionServiceDependencies,
+): Feed {
+  return {
+    ...previous,
+    title: normalizedTitle(request.displayName) ?? previous.title,
+    folder,
+    customTags: [...request.tags],
+    initialImportPolicy: policy,
+    autoDeleteDuration: numberOrDefault(
+      request.autoDeleteDuration,
+      previous.autoDeleteDuration ?? dependencies.defaults.autoDeleteDuration,
+    ),
+    maxItemsLimit: numberOrDefault(
+      request.maxItemsLimit,
+      previous.maxItemsLimit ?? dependencies.defaults.maxItems,
+    ),
+    scanInterval: request.scanInterval ?? previous.scanInterval ?? 0,
+    keywordRules: request.keywordRules === undefined
+      ? previous.keywordRules
+      : cloneKeywordRules(request.keywordRules),
+    customTemplate: request.customTemplate || undefined,
+    excludeFromRefresh: request.excludeFromRefresh === true,
+    mediaType: request.kind === "youtube"
+      ? "video"
+      : request.mediaType ?? previous.mediaType ?? "article",
+  };
+}
+
+function cloneKeywordRules(
+  value: FeedKeywordRulesSettings | undefined,
+): FeedKeywordRulesSettings | undefined {
+  return value === undefined ? undefined : structuredClone(value);
 }
 
 function existingFeedKey(feed: Feed): string {

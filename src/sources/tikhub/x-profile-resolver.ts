@@ -41,20 +41,84 @@ export interface XProfileResolverOptions {
   settings: TikHubSettings;
   client: XProfileTikHubClient;
   secretStore: XProfileSecretStore;
+  now?: () => Date;
+  verificationTtlMs?: number;
+}
+
+const PROOF_AUTHORITY = Symbol("x-profile-verification-authority");
+const DEFAULT_VERIFICATION_TTL_MS = 5 * 60 * 1_000;
+const MAX_VERIFICATION_TTL_MS = 10 * 60 * 1_000;
+
+interface VerificationRecord {
+  handle: string;
+  restId: string;
+  expiresAt: number;
+  consumed: boolean;
+}
+
+const verificationRecords = new WeakMap<XProfileVerificationProof, VerificationRecord>();
+
+/** Opaque, process-local capability. Its constructor cannot mint a usable proof. */
+export class XProfileVerificationProof {
+  constructor(authority: typeof PROOF_AUTHORITY) {
+    if (authority !== PROOF_AUTHORITY) throw new Error("Invalid X verification proof");
+    Object.freeze(this);
+  }
+}
+
+function mintXProfileVerificationProof(
+  record: Omit<VerificationRecord, "consumed">,
+): XProfileVerificationProof {
+  const proof = new XProfileVerificationProof(PROOF_AUTHORITY);
+  verificationRecords.set(proof, { ...record, consumed: false });
+  return proof;
+}
+
+export interface VerifiedXProfile {
+  profile: Readonly<XProfile>;
+  proof: XProfileVerificationProof;
+}
+
+/** Consumes a proof exactly once when its canonical handle + restId still match. */
+export function consumeXProfileVerificationProof(
+  profile: XProfile,
+  proof: unknown,
+  now: Date,
+): boolean {
+  if (!(proof instanceof XProfileVerificationProof)) return false;
+  const record = verificationRecords.get(proof);
+  const handle = normalizeXHandle(profile.handle);
+  const nowMs = now.getTime();
+  if (
+    !record ||
+    record.consumed ||
+    !Number.isFinite(nowMs) ||
+    nowMs >= record.expiresAt ||
+    handle !== record.handle ||
+    profile.restId !== record.restId
+  ) {
+    return false;
+  }
+  record.consumed = true;
+  return true;
 }
 
 export class XProfileResolver {
   private readonly settings: TikHubSettings;
   private readonly client: XProfileTikHubClient;
   private readonly secretStore: XProfileSecretStore;
+  private readonly now: () => Date;
+  private readonly verificationTtlMs: number;
 
   constructor(options: XProfileResolverOptions) {
     this.settings = options.settings;
     this.client = options.client;
     this.secretStore = options.secretStore;
+    this.now = options.now ?? (() => new Date());
+    this.verificationTtlMs = validVerificationTtl(options.verificationTtlMs);
   }
 
-  async resolve(handle: string, signal?: AbortSignal): Promise<XProfile> {
+  async resolve(handle: string, signal?: AbortSignal): Promise<VerifiedXProfile> {
     if (!this.settings.enabled) throw resolverError("tikhub-disabled");
     const normalizedHandle = normalizeXHandle(handle);
     if (!normalizedHandle) throw resolverError("provider-failure");
@@ -101,7 +165,19 @@ export class XProfileResolver {
         throw resolverError("provider-failure");
       }
       if (profile.handle !== normalizedHandle) throw resolverError("not-found");
-      return profile;
+      const verifiedAt = this.now().getTime();
+      if (!Number.isFinite(verifiedAt)) throw resolverError("provider-failure");
+      const safeProfile = Object.freeze({
+        ...profile,
+      });
+      return {
+        profile: safeProfile,
+        proof: mintXProfileVerificationProof({
+          handle: normalizedHandle,
+          restId: safeProfile.restId,
+          expiresAt: verifiedAt + this.verificationTtlMs,
+        }),
+      };
     } finally {
       secretValue = undefined;
       apiKey = undefined;
@@ -109,6 +185,18 @@ export class XProfileResolver {
       profile = undefined;
     }
   }
+}
+
+function validVerificationTtl(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_VERIFICATION_TTL_MS;
+  if (
+    !Number.isSafeInteger(value) ||
+    value <= 0 ||
+    value > MAX_VERIFICATION_TTL_MS
+  ) {
+    throw new Error("Invalid X verification TTL");
+  }
+  return value;
 }
 
 function mapClientError(error: unknown): XProfileResolverError {

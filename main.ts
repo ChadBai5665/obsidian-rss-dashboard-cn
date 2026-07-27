@@ -554,6 +554,36 @@ class RefreshAttemptToken {
   }
 }
 
+function isActiveInitialImportProgress(
+  progress: Feed["initialImportProgress"],
+): boolean {
+  return progress?.status === "pending" ||
+    progress?.status === "running" ||
+    progress?.status === "paused-limit";
+}
+
+function combineAbortSignals(
+  primary: AbortSignal,
+  secondary?: AbortSignal,
+): { signal: AbortSignal; dispose: () => void } {
+  if (!secondary) return { signal: primary, dispose: () => undefined };
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  if (primary.aborted || secondary.aborted) {
+    controller.abort();
+    return { signal: controller.signal, dispose: () => undefined };
+  }
+  primary.addEventListener("abort", abort, { once: true });
+  secondary.addEventListener("abort", abort, { once: true });
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      primary.removeEventListener("abort", abort);
+      secondary.removeEventListener("abort", abort);
+    },
+  };
+}
+
 function cloneRefreshData<T>(value: T, seen = new WeakMap<object, object>()): T {
   if (Array.isArray(value)) {
     const entries = value as unknown[];
@@ -733,6 +763,7 @@ export default class RssDashboardPlugin extends Plugin {
   // overwrite one another while either backing store is slow.
   private statusTransactionQueue: Promise<void> = Promise.resolve();
   private settingsImportQueue: Promise<void> = Promise.resolve();
+  private readonly activeInitialImportControllers = new Map<string, AbortController>();
   private isUnloading = false;
   private static readonly FEED_REFRESH_RENDER_THROTTLE_MS = 250;
   private readonly feedStorageRepository: FeedStorageRepository;
@@ -1173,6 +1204,10 @@ export default class RssDashboardPlugin extends Plugin {
       ),
       dailyIndex: new DailyIndexService(this.app.vault, dailyIndexFolder),
       ledger: this.getSourceRefreshLedger(),
+      isSourceActive: (sourceId) =>
+        this.settings.feeds.some(
+          (feed) => (feed.feedId ?? feed.url) === sourceId,
+        ),
     });
     this.collectionService = { dataRoot, dailyIndexFolder, service };
     return service;
@@ -1204,6 +1239,9 @@ export default class RssDashboardPlugin extends Plugin {
           this.settings.media,
           this.settings.folders,
         ),
+      abortInitialImport: (feedId) => {
+        this.activeInitialImportControllers.get(feedId)?.abort();
+      },
     });
   }
 
@@ -2527,6 +2565,10 @@ export default class RssDashboardPlugin extends Plugin {
     if (!this.tryBeginRefreshSession()) return;
     try {
       this.cancelPendingStartupRefresh();
+      if (this.isDirectSourceRefreshBlocked(feed)) {
+        this.notify("plugin.refresh.allSelectedExcluded");
+        return;
+      }
       if (!this.feedParser) {
         console.warn(
           "[RSS dashboard] Feed parser not initialized; skipping refresh.",
@@ -4533,7 +4575,15 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private isFeedExcludedFromRefresh(feed: Feed): boolean {
-    return feed.excludeFromRefresh === true || feed.subscriptionStatus === "paused";
+    return feed.excludeFromRefresh === true || this.isDirectSourceRefreshBlocked(feed);
+  }
+
+  private isDirectSourceRefreshBlocked(feed: Feed): boolean {
+    if (feed.subscriptionStatus === "paused") return true;
+    const progress = feed.initialImportProgress;
+    return (feed.sourceKind === undefined || feed.sourceKind === "feed") &&
+      progress !== undefined &&
+      progress.status !== "completed";
   }
 
   private getRefreshableFeeds(feeds: Feed[]): Feed[] {
@@ -4581,11 +4631,20 @@ export default class RssDashboardPlugin extends Plugin {
       (f) => f.url === updatedFeed.url,
     );
     if (index >= 0) {
+      const current = this.settings.feeds[index];
+      const stoppedProgress =
+        current.initialImportProgress?.status === "stopped" &&
+        updatedFeed.initialImportProgress?.status !== "stopped"
+          ? current.initialImportProgress
+          : updatedFeed.initialImportProgress;
       this.settings.feeds[index] = {
         ...updatedFeed,
+        ...(stoppedProgress ? { initialImportProgress: stoppedProgress } : {}),
         excludeFromRefresh:
           updatedFeed.excludeFromRefresh ??
-          this.settings.feeds[index].excludeFromRefresh,
+          current.excludeFromRefresh,
+        subscriptionStatus:
+          current.subscriptionStatus ?? updatedFeed.subscriptionStatus,
       };
     }
   }
@@ -4926,11 +4985,34 @@ export default class RssDashboardPlugin extends Plugin {
       );
     }
     const fetchedAt = new Date();
-    const output = await sourceRegistry.refresh(config, {
-      now: fetchedAt,
-      signal: attempt.signal,
-      feed: parserInput,
-    });
+    const isActiveXImport = config.kind === "x-account" &&
+      isActiveInitialImportProgress(parserInput.initialImportProgress);
+    const stopController = isActiveXImport ? new AbortController() : undefined;
+    const sourceId = feed.feedId ?? feed.url;
+    if (stopController) {
+      this.activeInitialImportControllers.set(sourceId, stopController);
+    }
+    const combined = combineAbortSignals(
+      attempt.signal,
+      stopController?.signal,
+    );
+    let output: SourceRefreshOutput;
+    try {
+      output = await sourceRegistry.refresh(config, {
+        now: fetchedAt,
+        signal: combined.signal,
+        ...(stopController ? { stopSignal: stopController.signal } : {}),
+        feed: parserInput,
+      });
+    } finally {
+      combined.dispose();
+      if (
+        stopController &&
+        this.activeInitialImportControllers.get(sourceId) === stopController
+      ) {
+        this.activeInitialImportControllers.delete(sourceId);
+      }
+    }
     const updatedFeed = output.feed;
     updatedFeed.feedId ??= parserInput.feedId;
     bindFeedItemsToSourceIdentity(updatedFeed);

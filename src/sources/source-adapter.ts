@@ -4,6 +4,8 @@ import type { SourceConfig } from "./source-config";
 export interface SourceRefreshContext {
   now: Date;
   signal?: AbortSignal;
+  /** User stop for a historical import, distinct from timeout cancellation. */
+  stopSignal?: AbortSignal;
   /** Isolated snapshot of the currently persisted feed, when one exists. */
   feed?: Feed;
 }

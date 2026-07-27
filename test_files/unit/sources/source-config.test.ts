@@ -38,6 +38,18 @@ describe("X source configuration", () => {
     expect(input.topics).toEqual([" AI ", "ai", "研究"]);
   });
 
+  it("preserves the verified provider restId needed to distinguish X identity changes", () => {
+    const config = createXAccountSourceConfig({
+      handle: "OpenAI",
+      restId: "44196397",
+    });
+
+    expect(config.restId).toBe("44196397");
+    expect(normalizeXAccountSourceConfig(config)?.restId).toBe("44196397");
+    expect(normalizeXAccountSourceConfig({ ...config, restId: "bad id" }))
+      .toBeUndefined();
+  });
+
   it.each([
     "@OpenAI",
     "open ai",

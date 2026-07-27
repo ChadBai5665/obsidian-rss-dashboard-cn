@@ -356,6 +356,7 @@ export class SourceRegistry {
     const adapterContext: SourceRefreshContext = {
       now: context.now,
       ...(context.signal ? { signal: context.signal } : {}),
+      ...(context.stopSignal ? { stopSignal: context.stopSignal } : {}),
       ...(context.feed ? { feed: cloneFeedSnapshot(context.feed) } : {}),
     };
     const output = await this.get(normalizedConfig.kind).refresh(

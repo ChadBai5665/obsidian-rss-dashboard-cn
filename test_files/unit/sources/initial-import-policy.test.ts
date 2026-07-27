@@ -66,6 +66,7 @@ describe("initial import policy", () => {
       pagesFetched: 3,
       itemsImported: 12,
       earliestImportedAt: "2026-07-25T00:00:00.000Z",
+      phase: "replies",
       nextCursor: "next-page",
       replyCursor: "reply-page",
     };

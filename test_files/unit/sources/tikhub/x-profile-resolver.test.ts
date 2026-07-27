@@ -58,15 +58,19 @@ function harness(options: {
 }
 
 describe("XProfileResolver", () => {
-  it("reads the UUID-bound key immediately before resolving and retains no secret", async () => {
+  it("returns a short-lived opaque verification with the safe profile projection", async () => {
     const test = harness();
 
-    await expect(test.resolver.resolve("openai")).resolves.toEqual({
+    const verified = await test.resolver.resolve("openai");
+
+    expect(verified.profile).toEqual({
       restId: "123",
       handle: "openai",
       displayName: "OpenAI",
       verified: false,
     });
+    expect(verified.proof).toBeDefined();
+    expect(JSON.stringify(verified.proof)).toBe("{}");
     expect(test.events).toEqual([
       `get:${CONNECTION_ID}`,
       "fetch:openai",

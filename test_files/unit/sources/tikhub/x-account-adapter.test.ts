@@ -654,6 +654,62 @@ describe("XAccountAdapter bounded first import", () => {
     });
   });
 
+  it("resumes a reply-phase checkpoint without restarting completed post pagination", async () => {
+    const config = account({ includeReplies: true });
+    const test = harness({
+      postPages: [page([post({ id: "99" })])],
+      replyPages: [page([post({ id: "2", inReplyToId: "1" })])],
+    });
+    const feed = importFeed({
+      config,
+      progress: {
+        status: "pending",
+        pagesFetched: 2,
+        itemsImported: 4,
+        phase: "replies",
+        replyCursor: "reply-resume",
+      } as InitialImportProgress,
+    });
+
+    const result = await test.adapter.refresh(config, { now: NOW, feed });
+
+    expect(test.fetchUserPosts).not.toHaveBeenCalled();
+    expect(test.fetchUserReplies).toHaveBeenCalledOnce();
+    expect(test.fetchUserReplies).toHaveBeenCalledWith(expect.objectContaining({
+      cursor: "reply-resume",
+    }));
+    expect(result.feed.initialImportProgress).toMatchObject({
+      status: "completed",
+      pagesFetched: 3,
+      itemsImported: 5,
+    });
+  });
+
+  it("stops before another paid page and returns the fetched page with its next cursor", async () => {
+    const stop = new AbortController();
+    const test = harness();
+    test.fetchUserPosts.mockImplementationOnce(async () => {
+      stop.abort();
+      return { data: page([post({ id: "3" })], "page-after-stop") };
+    });
+
+    const result = await test.adapter.refresh(account(), {
+      now: NOW,
+      feed: importFeed(),
+      stopSignal: stop.signal,
+    } as Parameters<XAccountAdapter["refresh"]>[1]);
+
+    expect(test.fetchUserPosts).toHaveBeenCalledOnce();
+    expect(result.collectionItems?.map((entry) => entry.guid)).toEqual(["3"]);
+    expect(result.feed.initialImportProgress).toMatchObject({
+      status: "stopped",
+      pagesFetched: 1,
+      itemsImported: 1,
+      phase: "posts",
+      nextCursor: "page-after-stop",
+    });
+  });
+
   it("keeps a stopped import on the normal one-page daily refresh path", async () => {
     const config = account({ includeReplies: true });
     const test = harness({

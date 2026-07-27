@@ -101,6 +101,7 @@ interface TestPlugin {
   refreshOnOpenIfNeeded: () => Promise<void>;
   saveSettings: (options?: { forceAllShards?: boolean; forceMetadata?: boolean }) => Promise<void>;
   createSourceRegistryForRun: () => SourceRegistry;
+  getSubscriptionService: () => import("../../../src/services/subscription-service").SubscriptionService;
 }
 
 function createPluginWithSettings(feeds: Feed[]): TestPlugin {
@@ -1495,6 +1496,119 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.feedParser.refreshFeed).toHaveBeenCalledWith(
       expect.objectContaining({ feedId: "active-source" }),
     );
+  });
+
+  it("excludes a paused subscription from Dashboard single-source refresh", async () => {
+    const paused = createFeed({
+      feedId: "paused-source",
+      subscriptionStatus: "paused",
+    });
+    const plugin = createPluginWithSettings([paused]);
+
+    await plugin.manualRefreshSourceById("paused-source");
+
+    expect(plugin.feedParser.refreshFeed).not.toHaveBeenCalled();
+    expect(plugin.feedParser.refreshAllFeeds).not.toHaveBeenCalled();
+    expect(plugin.saveData).not.toHaveBeenCalled();
+  });
+
+  it("does not let an ordinary feed refresh trim or replace a failed first-import checkpoint", async () => {
+    const checkpointItems = [
+      createItem({ guid: "checkpoint-new" }),
+      createItem({ guid: "checkpoint-old", pubDate: "2020-01-01T00:00:00.000Z" }),
+    ];
+    const failed = createFeed({
+      feedId: "failed-first-import",
+      sourceKind: "feed",
+      sourceConfig: { kind: "feed" },
+      items: checkpointItems,
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: {
+        status: "failed",
+        pagesFetched: 0,
+        itemsImported: 0,
+      },
+    });
+    const plugin = createPluginWithSettings([failed]);
+    plugin.feedParser.refreshFeed.mockResolvedValue({
+      ...failed,
+      items: [createItem({ guid: "replacement" })],
+      initialImportProgress: undefined,
+    });
+
+    await plugin.manualRefreshSourceById("failed-first-import");
+
+    expect(plugin.feedParser.refreshFeed).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds[0].items).toEqual(checkpointItems);
+    expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("failed");
+  });
+
+  it("aborts an in-flight X history run and rejects a late completed generation over stopped", async () => {
+    const source = createFeed({
+      feedId: "x-history",
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "x-history",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      url: "tikhub://x-account/openai",
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: {
+        status: "running",
+        pagesFetched: 1,
+        itemsImported: 1,
+        phase: "posts",
+        nextCursor: "next-page",
+      },
+    });
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let observedStopSignal: AbortSignal | undefined;
+    let markStarted!: () => void;
+    let finishLate!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const late = new Promise<void>((resolve) => { finishLate = resolve; });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: vi.fn(async (_config, context) => {
+        observedStopSignal = context.stopSignal;
+        markStarted();
+        await late;
+        return {
+          feed: {
+            ...source,
+            initialImportProgress: {
+              status: "completed",
+              pagesFetched: 9,
+              itemsImported: 9,
+            },
+          },
+          items: source.items,
+          collectionItems: [],
+          providerRequestCount: 1,
+          warnings: [],
+        };
+      }),
+    }) as unknown as SourceRegistry);
+
+    const refresh = plugin.refreshSelectedFeed(source);
+    await started;
+    await plugin.getSubscriptionService().stopInitialImport("x-history");
+
+    expect(observedStopSignal?.aborted).toBe(true);
+    expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("stopped");
+
+    finishLate();
+    await refresh;
+    expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("stopped");
   });
 
   it("skips refresh when feedParser is not initialized yet", async () => {

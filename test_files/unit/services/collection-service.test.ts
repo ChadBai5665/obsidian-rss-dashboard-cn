@@ -66,7 +66,11 @@ function collected(source: FeedItem, fetchedAt: Date): CollectedItem {
   };
 }
 
-function harness(options: { bootstrapped?: boolean; stored?: boolean } = {}) {
+function harness(options: {
+  bootstrapped?: boolean;
+  stored?: boolean;
+  isSourceActive?: (sourceId: string) => boolean;
+} = {}) {
   const events: string[] = [];
   const repository = {
     upsertDaily: vi.fn(async (items: CollectedItem[]) => {
@@ -77,12 +81,20 @@ function harness(options: { bootstrapped?: boolean; stored?: boolean } = {}) {
       .fn()
       .mockResolvedValue(options.stored ?? options.bootstrapped ?? false),
     removeBySourceId: vi.fn(async () => []),
+    restoreRemovedSource: vi.fn(async () => undefined),
   };
   const dailyIndex = {
     writeDailyIndex: vi.fn(async () => {
       events.push("markdown");
       return "信息收集/每日采集/2026-07-21.md";
     }),
+    snapshotDailyIndex: vi.fn(async (localDate: string) => ({
+      localDate,
+      path: `信息收集/每日采集/${localDate}.md`,
+      existed: true,
+      content: `before:${localDate}`,
+    })),
+    restoreDailyIndex: vi.fn(async () => undefined),
   };
   const ledger = {
     getState: vi.fn(async () =>
@@ -111,12 +123,16 @@ function harness(options: { bootstrapped?: boolean; stored?: boolean } = {}) {
         : {}),
     };
   });
-  const service = new CollectionService({
+  const dependencies = {
     repository,
     dailyIndex,
     ledger,
     normalize,
-  });
+    ...(options.isSourceActive
+      ? { isSourceActive: options.isSourceActive }
+      : {}),
+  };
+  const service = new CollectionService(dependencies);
 
   return { service, repository, dailyIndex, ledger, normalize, events };
 }
@@ -126,15 +142,15 @@ describe("CollectionService", () => {
     const test = harness();
     const remaining = collected(item({ guid: "retained" }), NOW);
     test.repository.removeBySourceId.mockResolvedValue([
-      { localDate: "2026-07-20", remainingItems: [remaining] },
-      { localDate: "2026-07-21", remainingItems: [] },
+      { localDate: "2026-07-20", previousItems: [remaining], remainingItems: [remaining] },
+      { localDate: "2026-07-21", previousItems: [], remainingItems: [] },
     ]);
 
     const removed = await test.service.removeSource("source-1");
 
-    expect(removed).toEqual([
-      { localDate: "2026-07-20", remainingItems: [remaining] },
-      { localDate: "2026-07-21", remainingItems: [] },
+    expect(removed.days).toEqual([
+      { localDate: "2026-07-20", previousItems: [remaining], remainingItems: [remaining] },
+      { localDate: "2026-07-21", previousItems: [], remainingItems: [] },
     ]);
     expect(test.repository.removeBySourceId).toHaveBeenCalledWith("source-1");
     expect(test.dailyIndex.writeDailyIndex.mock.calls).toEqual([
@@ -142,6 +158,88 @@ describe("CollectionService", () => {
       [{ localDate: "2026-07-21", items: [] }],
     ]);
     expect(test.ledger.recordSuccess).not.toHaveBeenCalled();
+  });
+
+  it("holds the collection mutation queue until the purge owner commits its config", async () => {
+    const test = harness();
+    test.repository.removeBySourceId.mockResolvedValue([]);
+
+    const removal = await test.service.removeSource("source-1");
+    const collection = test.service.collectFeedRefresh({
+      feed: feed([item({ guid: "after-purge" })]),
+      previousItems: [],
+      refreshedItems: [item({ guid: "after-purge" })],
+      fetchedAt: NOW,
+    });
+    await Promise.resolve();
+
+    expect(test.repository.upsertDaily).not.toHaveBeenCalled();
+    await removal.commit();
+    await collection;
+    expect(test.repository.upsertDaily).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a stale queued refresh after the purge owner removes its source config", async () => {
+    let active = true;
+    const test = harness({ isSourceActive: () => active });
+    test.repository.removeBySourceId.mockResolvedValue([]);
+
+    const removal = await test.service.removeSource("source-1");
+    const staleCollection = test.service.collectFeedRefresh({
+      feed: feed([item({ guid: "stale-after-purge" })]),
+      previousItems: [],
+      refreshedItems: [item({ guid: "stale-after-purge" })],
+      fetchedAt: NOW,
+    });
+    active = false;
+    await removal.commit();
+
+    await expect(staleCollection).rejects.toThrow(
+      "Collection source is no longer active",
+    );
+    expect(test.repository.upsertDaily).not.toHaveBeenCalled();
+  });
+
+  it("restores collection, item index, and every daily index when purge regeneration fails", async () => {
+    const test = harness();
+    const removedItem = collected(item({ guid: "removed" }), NOW);
+    const days = [{
+      localDate: "2026-07-21",
+      previousItems: [removedItem],
+      remainingItems: [],
+    }];
+    test.repository.removeBySourceId.mockResolvedValue(days);
+    test.dailyIndex.writeDailyIndex.mockRejectedValueOnce(new Error("daily write failed"));
+
+    await expect(test.service.removeSource("source-1")).rejects.toThrow(
+      "daily write failed",
+    );
+
+    expect(test.repository.restoreRemovedSource).toHaveBeenCalledWith(days);
+    expect(test.dailyIndex.restoreDailyIndex).toHaveBeenCalledWith({
+      localDate: "2026-07-21",
+      path: "信息收集/每日采集/2026-07-21.md",
+      existed: true,
+      content: "before:2026-07-21",
+    });
+  });
+
+  it("surfaces a safe combined error when purge compensation is incomplete", async () => {
+    const test = harness();
+    const days = [{ localDate: "2026-07-21", previousItems: [], remainingItems: [] }];
+    test.repository.removeBySourceId.mockResolvedValue(days);
+    test.dailyIndex.writeDailyIndex.mockRejectedValueOnce(new Error("unsafe primary detail"));
+    test.repository.restoreRemovedSource.mockRejectedValueOnce(
+      new Error("unsafe rollback detail"),
+    );
+
+    const error = await test.service.removeSource("source-1").catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      message: "Source purge failed and rollback was incomplete",
+    });
+    expect(String(error)).not.toContain("unsafe primary detail");
+    expect(String(error)).not.toContain("unsafe rollback detail");
   });
 
   it("observes every in-window topic result so a later daily upsert can mark it rediscovered", async () => {

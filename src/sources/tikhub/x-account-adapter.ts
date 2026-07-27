@@ -160,14 +160,18 @@ export class XAccountAdapter implements SourceAdapter<XAccountSourceConfig> {
     const warnings: string[] = [];
     const importedPosts: XPost[] = [];
     let pausedAtLimit = false;
+    let stoppedByUser = false;
 
     const fetchPages = async (
       kind: "posts" | "replies",
       initialCursor: string | undefined,
-    ): Promise<{ completed: boolean; cursor?: string }> => {
+    ): Promise<{ completed: boolean; stopped: boolean; cursor?: string }> => {
       let cursor = initialCursor;
       const seenCursors = new Set(cursor ? [cursor] : []);
       while (true) {
+        if (context.stopSignal?.aborted) {
+          return { completed: false, stopped: true, ...(cursor ? { cursor } : {}) };
+        }
         let parsed: ReturnType<TimelineParser>;
         try {
           parsed = await this.fetchTimelinePage(
@@ -178,11 +182,14 @@ export class XAccountAdapter implements SourceAdapter<XAccountSourceConfig> {
             cursor,
           );
         } catch (error) {
+          if (context.stopSignal?.aborted) {
+            return { completed: false, stopped: true, ...(cursor ? { cursor } : {}) };
+          }
           if (!isInsufficientBudget(error) || progress.pagesFetched === 0) {
             throw error;
           }
           pausedAtLimit = true;
-          return { completed: false, ...(cursor ? { cursor } : {}) };
+          return { completed: false, stopped: false, ...(cursor ? { cursor } : {}) };
         }
 
         providerRequestCount += 1;
@@ -198,36 +205,50 @@ export class XAccountAdapter implements SourceAdapter<XAccountSourceConfig> {
           context.now,
         );
         importedPosts.push(...selected.posts);
+        if (context.stopSignal?.aborted) {
+          return {
+            completed: false,
+            stopped: true,
+            ...(parsed.nextCursor ? { cursor: parsed.nextCursor } : {}),
+          };
+        }
         if (selected.crossedCutoff || !parsed.nextCursor) {
-          return { completed: true };
+          return { completed: true, stopped: false };
         }
         if (seenCursors.has(parsed.nextCursor)) {
           warnings.push("Stopped X pagination because a cursor repeated.");
-          return { completed: true };
+          return { completed: true, stopped: false };
         }
         seenCursors.add(parsed.nextCursor);
         cursor = parsed.nextCursor;
       }
     };
 
-    const resumeAfterPosts =
+    const resumeAfterPosts = previousProgress.phase === "replies" || (
+      previousProgress.phase === undefined &&
       config.includeReplies &&
       previousProgress.status !== "pending" &&
       previousProgress.pagesFetched > 0 &&
-      previousProgress.nextCursor === undefined;
+      previousProgress.nextCursor === undefined
+    );
     if (!resumeAfterPosts) {
+      progress.phase = "posts";
       const postResult = await fetchPages("posts", previousProgress.nextCursor);
       if (postResult.completed) delete progress.nextCursor;
       else if (postResult.cursor) progress.nextCursor = postResult.cursor;
+      stoppedByUser = postResult.stopped;
+      if (postResult.completed && config.includeReplies) progress.phase = "replies";
     }
 
-    if (!pausedAtLimit && config.includeReplies) {
+    if (!pausedAtLimit && !stoppedByUser && config.includeReplies) {
+      progress.phase = "replies";
       const replyResult = await fetchPages(
         "replies",
         previousProgress.replyCursor,
       );
       if (replyResult.completed) delete progress.replyCursor;
       else if (replyResult.cursor) progress.replyCursor = replyResult.cursor;
+      stoppedByUser = replyResult.stopped;
     }
 
     const currentPosts = filterAccountPosts(config, importedPosts);
@@ -237,7 +258,12 @@ export class XAccountAdapter implements SourceAdapter<XAccountSourceConfig> {
       context.now,
       context.feed,
     );
-    progress.status = pausedAtLimit ? "paused-limit" : "completed";
+    progress.status = stoppedByUser
+      ? "stopped"
+      : pausedAtLimit
+        ? "paused-limit"
+        : "completed";
+    if (progress.status === "completed") delete progress.phase;
     const previouslyCachedIds = new Set(
       context.feed?.items.map((item) => item.guid) ?? [],
     );
@@ -273,7 +299,7 @@ export class XAccountAdapter implements SourceAdapter<XAccountSourceConfig> {
     const input: TikHubUserRequest = {
       apiKey,
       handle: config.handle,
-      signal: context.signal,
+      signal: context.signal ?? context.stopSignal,
       ...(cursor ? { cursor } : {}),
     };
     const payload = (await this.callClient(() =>

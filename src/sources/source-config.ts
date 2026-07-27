@@ -8,6 +8,8 @@ export interface XAccountSourceConfig {
   kind: "x-account";
   id: string;
   handle: string;
+  /** Verified provider identity; absent only on legacy account subscriptions. */
+  restId?: string;
   displayName?: string;
   includeReplies: boolean;
   includeReposts: boolean;
@@ -34,6 +36,7 @@ export type SourceConfig =
 export interface CreateXAccountSourceConfigInput {
   id?: string;
   handle: string;
+  restId?: string;
   displayName?: string;
   includeReplies?: boolean;
   includeReposts?: boolean;
@@ -174,10 +177,15 @@ export function normalizeXAccountSourceConfig(
   const displayName = hasOwn(value, "displayName")
     ? normalizedText(value.displayName)
     : undefined;
+  const restId = hasOwn(value, "restId")
+    ? normalizedRestId(value.restId)
+    : undefined;
+  if (hasOwn(value, "restId") && !restId) return undefined;
   return {
     kind: "x-account",
     id,
     handle,
+    ...(restId ? { restId } : {}),
     ...(displayName ? { displayName } : {}),
     includeReplies: value.includeReplies,
     includeReposts: value.includeReposts,
@@ -260,6 +268,7 @@ export function createXAccountSourceConfig(
     kind: "x-account",
     id: input.id ?? `x-account-${handle}`,
     handle,
+    ...(input.restId === undefined ? {} : { restId: input.restId }),
     displayName: input.displayName,
     includeReplies: input.includeReplies === true,
     includeReposts: input.includeReposts === true,
@@ -268,6 +277,12 @@ export function createXAccountSourceConfig(
   });
   if (!result) throw new Error("Invalid X account source configuration");
   return result;
+}
+
+function normalizedRestId(value: unknown): string | undefined {
+  return typeof value === "string" && /^\d{1,30}$/u.test(value)
+    ? value
+    : undefined;
 }
 
 export function createXTopicSourceConfig(

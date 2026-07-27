@@ -27,6 +27,7 @@ interface PreparedRewrite {
 
 export interface RemovedCollectionDay {
   localDate: string;
+  previousItems: CollectedItem[];
   remainingItems: CollectedItem[];
 }
 
@@ -219,7 +220,11 @@ export class CollectionRepository {
         before: serializeCollection(parsed.items),
         after: serializeCollection(remainingItems),
       });
-      affected.push({ localDate, remainingItems });
+      affected.push({
+        localDate,
+        previousItems: parsed.items,
+        remainingItems,
+      });
     }
 
     if (affected.length === 0) return [];
@@ -258,6 +263,85 @@ export class CollectionRepository {
     }
 
     return affected;
+  }
+
+  async restoreRemovedSource(days: RemovedCollectionDay[]): Promise<void> {
+    if (days.length === 0) return;
+    await this.withRootAccessLock(async () => {
+      const uniqueDates = new Set<string>();
+      for (const day of days) {
+        assertLocalDate(day.localDate);
+        if (uniqueDates.has(day.localDate)) {
+          throw new Error("Invalid source removal receipt");
+        }
+        uniqueDates.add(day.localDate);
+      }
+
+      await this.loadIndex();
+      const dates = await this.collectionDates();
+      const restorationByDate = new Map(days.map((day) => [day.localDate, day]));
+      const itemsByDate = new Map<string, CollectedItem[]>();
+      const rewrites: PreparedRewrite[] = [];
+
+      for (const localDate of dates) {
+        const path = this.dailyPath(localDate);
+        const parsed = await this.readCollection(path);
+        const receipt = restorationByDate.get(localDate);
+        if (!receipt) {
+          itemsByDate.set(localDate, parsed.items);
+          continue;
+        }
+        if (
+          serializeCollection(parsed.items) !==
+          serializeCollection(receipt.remainingItems)
+        ) {
+          throw new Error("Source removal receipt no longer owns collection generation");
+        }
+        itemsByDate.set(localDate, receipt.previousItems);
+        rewrites.push({
+          path,
+          before: serializeCollection(parsed.items),
+          after: serializeCollection(receipt.previousItems),
+        });
+      }
+
+      if (rewrites.length !== days.length) {
+        throw new Error("Source removal receipt is incomplete");
+      }
+
+      const restoredIndex = EMPTY_INDEX();
+      for (const localDate of dates) {
+        for (const item of itemsByDate.get(localDate) ?? []) {
+          updateIndexEntry(restoredIndex, item.id, localDate);
+        }
+      }
+
+      const completed: PreparedRewrite[] = [];
+      try {
+        for (const rewrite of rewrites) {
+          await this.atomicWrite(rewrite.path, rewrite.after);
+          completed.push(rewrite);
+        }
+        await this.writeIndex(restoredIndex);
+      } catch (restoreError) {
+        const rollbackErrors: unknown[] = [];
+        for (const rewrite of completed.reverse()) {
+          try {
+            await this.atomicWrite(rewrite.path, rewrite.before);
+          } catch (rollbackError) {
+            rollbackErrors.push(rollbackError);
+          }
+        }
+        if (rollbackErrors.length > 0) {
+          throw combinedError(
+            "Source restoration failed and rollback was incomplete",
+            restoreError,
+            rollbackErrors,
+          );
+        }
+        throw restoreError;
+      }
+    });
   }
 
   async listByDate(localDate: string): Promise<CollectedItem[]> {
