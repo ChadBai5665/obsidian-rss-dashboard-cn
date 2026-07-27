@@ -1475,6 +1475,28 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(getNoticeMessages(consoleLogSpy)).toEqual([]);
   });
 
+  it("excludes paused subscriptions from automatic and manual refresh without deleting them", async () => {
+    const paused = createFeed({
+      feedId: "paused-source",
+      subscriptionStatus: "paused",
+    });
+    const active = createFeed({
+      feedId: "active-source",
+      title: "Active",
+      url: "https://example.com/active.xml",
+    });
+    const plugin = createPluginWithSettings([paused, active]);
+    plugin.feedParser.refreshFeed.mockResolvedValue({ ...active });
+
+    await plugin.refreshFeeds();
+
+    expect(plugin.settings.feeds).toHaveLength(2);
+    expect(plugin.feedParser.refreshFeed).toHaveBeenCalledTimes(1);
+    expect(plugin.feedParser.refreshFeed).toHaveBeenCalledWith(
+      expect.objectContaining({ feedId: "active-source" }),
+    );
+  });
+
   it("skips refresh when feedParser is not initialized yet", async () => {
     const plugin = createPluginWithSettings([createFeed()]);
     plugin.feedParser = undefined as unknown as TestFeedParser;

@@ -1,4 +1,5 @@
 import type { CollectedItem } from "../collection/collected-item";
+import type { RemovedCollectionDay } from "../collection/collection-repository";
 import {
   createFeedItemMaterialFingerprint,
   normalizeFeedItem,
@@ -12,6 +13,7 @@ interface CollectionRepositoryPort {
     localDate: string,
   ): Promise<CollectedItem[]>;
   hasItemsForSource(sourceId: string): Promise<boolean>;
+  removeBySourceId(sourceId: string): Promise<RemovedCollectionDay[]>;
 }
 
 interface DailyIndexPort {
@@ -47,6 +49,26 @@ export class CollectionService {
     fetchedAt: Date;
   }): Promise<CollectedItem[]> {
     const operation = this.collectionQueue.then(() => this.collect(input));
+    this.collectionQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await operation;
+  }
+
+  async removeSource(sourceId: string): Promise<RemovedCollectionDay[]> {
+    const operation = this.collectionQueue.then(async () => {
+      const affected = await this.dependencies.repository.removeBySourceId(
+        sourceId,
+      );
+      for (const day of affected) {
+        await this.dependencies.dailyIndex.writeDailyIndex({
+          localDate: day.localDate,
+          items: day.remainingItems,
+        });
+      }
+      return affected;
+    });
     this.collectionQueue = operation.then(
       () => undefined,
       () => undefined,

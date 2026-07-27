@@ -1,0 +1,484 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  SubscriptionService,
+  SubscriptionServiceError,
+  createConfirmedCollectionPurge,
+  type VerifiedFeedSubscriptionRequest,
+  type VerifiedXSubscriptionRequest,
+} from "../../../src/services/subscription-service";
+import type { Feed, FeedItem } from "../../../src/types/types";
+
+const NOW = new Date("2026-07-28T12:00:00.000Z");
+const CHANNEL_ID = "UCabcdefghijklmnopqrstuv";
+
+function item(guid: string, pubDate: string): FeedItem {
+  return {
+    title: guid,
+    link: `https://example.com/${guid}`,
+    description: guid,
+    pubDate,
+    guid,
+    read: false,
+    starred: false,
+    tags: [],
+    feedTitle: "Example",
+    feedUrl: "https://example.com/feed.xml",
+    coverImage: "",
+  };
+}
+
+function rssRequest(
+  overrides: Partial<VerifiedFeedSubscriptionRequest> = {},
+): VerifiedFeedSubscriptionRequest {
+  return {
+    kind: "rss-website",
+    verification: {
+      inputUrl: "https://example.com/",
+      siteUrl: "https://example.com/",
+      candidates: [
+        {
+          url: "https://example.com/feed.xml",
+          title: "Example",
+          format: "rss",
+        },
+      ],
+      selected: {
+        url: "https://example.com/feed.xml",
+        title: "Example",
+        format: "rss",
+      },
+      latestTitle: "new",
+      latestPubDate: "2026-07-28T10:00:00.000Z",
+      hasEntries: true,
+    },
+    selectedCandidateUrl: "https://example.com/feed.xml",
+    displayName: "Example custom",
+    folder: "Reading/RSS",
+    tags: ["research"],
+    initialImportPolicy: { mode: "lookback-days", days: 7 },
+    ...overrides,
+  } as VerifiedFeedSubscriptionRequest;
+}
+
+function youtubeRequest(): VerifiedFeedSubscriptionRequest {
+  return {
+    kind: "youtube",
+    verification: {
+      channelId: CHANNEL_ID,
+      channelName: "Example channel",
+      channelUrl: `https://www.youtube.com/channel/${CHANNEL_ID}`,
+      feedUrl: `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`,
+      latestTitle: "Video",
+      latestPubDate: "2026-07-28T10:00:00.000Z",
+      hasEntries: true,
+    },
+    folder: "Videos",
+    tags: ["youtube"],
+    initialImportPolicy: { mode: "lookback-days", days: 7 },
+  };
+}
+
+function xRequest(handle = "OpenAI"): VerifiedXSubscriptionRequest {
+  return {
+    kind: "x-account",
+    profile: {
+      restId: "44196397",
+      handle,
+      displayName: "OpenAI",
+      verified: true,
+    },
+    includeReplies: true,
+    includeReposts: false,
+    folder: "X",
+    tags: ["ai"],
+    initialImportPolicy: { mode: "all-available" },
+    confirmedAllAvailable: true,
+  };
+}
+
+function existingFeed(overrides: Partial<Feed> = {}): Feed {
+  return {
+    feedId: "legacy-feed",
+    sourceKind: "feed",
+    sourceConfig: { kind: "feed" },
+    title: "Legacy",
+    url: "https://legacy.example/feed.xml",
+    folder: "Legacy",
+    items: [],
+    lastUpdated: 1,
+    subscriptionStatus: "active",
+    ...overrides,
+  };
+}
+
+function harness(initialFeeds: Feed[] = []) {
+  const settings = { feeds: initialFeeds };
+  const snapshots: Feed[][] = [];
+  const selectedItems = [
+    item("new", "2026-07-28T10:00:00.000Z"),
+    item("within", "2026-07-24T10:00:00.000Z"),
+    item("old", "2026-07-19T10:00:00.000Z"),
+  ];
+  const parseFeed = vi.fn(async (_url: string, seed: Feed) => ({
+    ...seed,
+    title: seed.title || "Parsed",
+    siteUrl: "https://example.com/",
+    items: selectedItems,
+    lastUpdated: NOW.getTime(),
+  }));
+  const collectionService = {
+    collectFeedRefresh: vi.fn(async () => []),
+    removeSource: vi.fn(async () => []),
+  };
+  const saveSettings = vi.fn(async () => {
+    snapshots.push(structuredClone(settings.feeds));
+  });
+  const ensureFolder = vi.fn(async () => undefined);
+  const service = new SubscriptionService({
+    settings,
+    defaults: { autoDeleteDuration: 30, maxItems: 1 },
+    parseFeed,
+    collectionService,
+    ensureFolder,
+    saveSettings,
+    now: () => NOW,
+    createFeedId: () => "new-feed-id",
+  });
+  return {
+    service,
+    settings,
+    snapshots,
+    selectedItems,
+    parseFeed,
+    collectionService,
+    saveSettings,
+    ensureFolder,
+  };
+}
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("SubscriptionService", () => {
+  it("publishes a recoverable pending RSS source, collects the complete selected history, then retains the cache", async () => {
+    const test = harness();
+
+    const added = await test.service.add(rssRequest());
+
+    expect(added).toMatchObject({
+      feedId: "new-feed-id",
+      url: "https://example.com/feed.xml",
+      siteUrl: "https://example.com/",
+      title: "Example custom",
+      folder: "Reading/RSS",
+      customTags: ["research"],
+      subscriptionStatus: "active",
+      initialImportPolicy: { mode: "lookback-days", days: 7 },
+      initialImportProgress: {
+        status: "completed",
+        pagesFetched: 1,
+        itemsImported: 2,
+        earliestImportedAt: "2026-07-24T10:00:00.000Z",
+      },
+    });
+    expect(added.items.map((entry) => entry.guid)).toEqual(["new"]);
+    expect(test.parseFeed).toHaveBeenCalledWith(
+      "https://example.com/feed.xml",
+      expect.objectContaining({ autoDeleteDuration: 0, maxItemsLimit: 0 }),
+    );
+    expect(test.ensureFolder).toHaveBeenCalledWith("Reading/RSS");
+    expect(test.collectionService.collectFeedRefresh).toHaveBeenCalledWith({
+      feed: expect.objectContaining({
+        feedId: "new-feed-id",
+        initialImportProgress: expect.objectContaining({ status: "pending" }),
+      }),
+      previousItems: [],
+      refreshedItems: test.selectedItems.slice(0, 2),
+      fetchedAt: NOW,
+    });
+    expect(test.snapshots).toHaveLength(2);
+    expect(test.snapshots[0][0].items).toHaveLength(2);
+    expect(test.snapshots[0][0].initialImportProgress?.status).toBe("pending");
+    expect(test.snapshots[1][0].items).toHaveLength(1);
+    expect(test.snapshots[1][0].initialImportProgress?.status).toBe("completed");
+  });
+
+  it("retains an untrimmed failed checkpoint when initial collection persistence fails", async () => {
+    const test = harness();
+    test.collectionService.collectFeedRefresh.mockRejectedValueOnce(
+      new Error("disk full"),
+    );
+
+    await expect(test.service.add(rssRequest())).rejects.toThrow("disk full");
+
+    expect(test.settings.feeds[0].items).toHaveLength(2);
+    expect(test.settings.feeds[0].initialImportProgress).toMatchObject({
+      status: "failed",
+      itemsImported: 0,
+    });
+    expect(test.snapshots.at(-1)?.[0].initialImportProgress?.status).toBe(
+      "failed",
+    );
+  });
+
+  it("does not add pending import state to pre-existing feeds", async () => {
+    const legacy = existingFeed();
+    const test = harness([legacy]);
+
+    await test.service.add(xRequest());
+
+    expect(test.settings.feeds[0]).toStrictEqual(legacy);
+    expect(test.settings.feeds[0]).not.toHaveProperty("initialImportPolicy");
+    expect(test.settings.feeds[0]).not.toHaveProperty("initialImportProgress");
+  });
+
+  it("keeps unrelated typed sources from blocking a new feed subscription", async () => {
+    const topic = existingFeed({
+      feedId: "topic-ai",
+      sourceKind: "x-topic",
+      sourceConfig: {
+        kind: "x-topic",
+        id: "topic-ai",
+        name: "AI",
+        includeKeywords: ["AI"],
+        excludeKeywords: [],
+        priorityAccounts: [],
+        windowDays: 7,
+        folder: "Topics",
+      },
+      url: "tikhub://x-topic/topic-ai",
+    });
+    const test = harness([topic]);
+
+    await expect(test.service.add(rssRequest())).resolves.toMatchObject({
+      feedId: "new-feed-id",
+    });
+
+    expect(test.settings.feeds[0]).toStrictEqual(topic);
+  });
+
+  it.each([
+    [
+      "canonical feed URL",
+      existingFeed({ url: "https://EXAMPLE.com/feed.xml#fragment" }),
+      rssRequest(),
+    ],
+    [
+      "YouTube channel ID",
+      existingFeed({
+        url: `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`,
+      }),
+      youtubeRequest(),
+    ],
+    [
+      "lowercase X handle",
+      existingFeed({
+        sourceKind: "x-account",
+        sourceConfig: {
+          kind: "x-account",
+          id: "existing-x",
+          handle: "openai",
+          includeReplies: false,
+          includeReposts: false,
+          folder: "X",
+          topics: [],
+        },
+        url: "tikhub://x-account/openai",
+      }),
+      xRequest("OPENAI"),
+    ],
+  ])("rejects a duplicate by %s", async (_label, stored, request) => {
+    const test = harness([stored]);
+
+    await expect(test.service.add(request)).rejects.toMatchObject({
+      code: "duplicate-subscription",
+    });
+
+    expect(test.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("rechecks canonical ownership after concurrent verification work", async () => {
+    const test = harness();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    test.parseFeed.mockImplementation(async (_url: string, seed: Feed) => {
+      await gate;
+      return { ...seed, items: test.selectedItems, lastUpdated: NOW.getTime() };
+    });
+
+    const first = test.service.add(rssRequest());
+    const second = test.service.add(rssRequest());
+    await Promise.resolve();
+    release();
+    const results = await Promise.allSettled([first, second]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toEqual([
+      expect.objectContaining({
+        reason: expect.objectContaining({ code: "duplicate-subscription" }),
+      }),
+    ]);
+    expect(test.settings.feeds).toHaveLength(1);
+  });
+
+  it("constructs an X feed with a production-reachable pending import checkpoint", async () => {
+    const test = harness();
+
+    const added = await test.service.add(xRequest());
+
+    expect(added).toMatchObject({
+      feedId: "new-feed-id",
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "new-feed-id",
+        handle: "openai",
+        includeReplies: true,
+        includeReposts: false,
+        folder: "X",
+        topics: ["ai"],
+      },
+      url: "tikhub://x-account/openai",
+      subscriptionStatus: "active",
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: {
+        status: "pending",
+        pagesFetched: 0,
+        itemsImported: 0,
+      },
+    });
+    expect(test.parseFeed).not.toHaveBeenCalled();
+  });
+
+  it("pauses refresh and stops or resumes import without discarding cursors", async () => {
+    const source = existingFeed({
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "legacy-feed",
+        handle: "openai",
+        includeReplies: true,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      url: "tikhub://x-account/openai",
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: {
+        status: "running",
+        pagesFetched: 3,
+        itemsImported: 40,
+        nextCursor: "posts-secret",
+        replyCursor: "replies-secret",
+      },
+    });
+    const test = harness([source]);
+
+    await test.service.setPaused("legacy-feed", true);
+    await test.service.stopInitialImport("legacy-feed");
+    await test.service.resumeInitialImport("legacy-feed");
+
+    expect(test.settings.feeds[0]).toMatchObject({
+      subscriptionStatus: "paused",
+      initialImportProgress: {
+        status: "pending",
+        pagesFetched: 3,
+        itemsImported: 40,
+        nextCursor: "posts-secret",
+        replyCursor: "replies-secret",
+      },
+    });
+  });
+
+  it("retries a failed RSS collection checkpoint from its untrimmed saved items", async () => {
+    const recoverable = existingFeed({
+      autoDeleteDuration: 30,
+      maxItemsLimit: 1,
+      items: [
+        item("new", "2026-07-28T10:00:00.000Z"),
+        item("within", "2026-07-24T10:00:00.000Z"),
+      ],
+      initialImportPolicy: { mode: "lookback-days", days: 7 },
+      initialImportProgress: {
+        status: "failed",
+        pagesFetched: 0,
+        itemsImported: 0,
+      },
+    });
+    const test = harness([recoverable]);
+
+    const resumed = await test.service.resumeInitialImport("legacy-feed");
+
+    expect(test.collectionService.collectFeedRefresh).toHaveBeenCalledWith({
+      feed: expect.objectContaining({ feedId: "legacy-feed" }),
+      previousItems: [],
+      refreshedItems: recoverable.items,
+      fetchedAt: NOW,
+    });
+    expect(resumed.items.map((entry) => entry.guid)).toEqual(["new"]);
+    expect(resumed.initialImportProgress).toMatchObject({
+      status: "completed",
+      pagesFetched: 1,
+      itemsImported: 2,
+      earliestImportedAt: "2026-07-24T10:00:00.000Z",
+    });
+  });
+
+  it("restores the exact feed graph when settings persistence fails", async () => {
+    const source = existingFeed();
+    const original = [source];
+    const test = harness(original);
+    test.saveSettings.mockRejectedValueOnce(new Error("save failed"));
+
+    await expect(test.service.setPaused("legacy-feed", true)).rejects.toThrow(
+      "save failed",
+    );
+
+    expect(test.settings.feeds).toBe(original);
+    expect(test.settings.feeds[0].subscriptionStatus).toBe("active");
+  });
+
+  it("defaults to history-preserving removal and requires a feed-bound purge capability", async () => {
+    const source = existingFeed();
+    const test = harness([source]);
+
+    await test.service.remove("legacy-feed", { purgeCollection: false });
+
+    expect(test.settings.feeds).toEqual([]);
+    expect(test.collectionService.removeSource).not.toHaveBeenCalled();
+
+    test.settings.feeds = [source];
+    await expect(
+      test.service.remove("legacy-feed", {
+        purgeCollection: true,
+      } as never),
+    ).rejects.toMatchObject({ code: "purge-confirmation-required" });
+    expect(test.settings.feeds).toEqual([source]);
+
+    await expect(
+      test.service.remove("legacy-feed", {
+        purgeCollection: true,
+        confirmation: createConfirmedCollectionPurge("different-feed"),
+      }),
+    ).rejects.toMatchObject({ code: "purge-confirmation-required" });
+
+    const confirmation = createConfirmedCollectionPurge("legacy-feed");
+    await test.service.remove("legacy-feed", {
+      purgeCollection: true,
+      confirmation,
+    });
+    expect(test.collectionService.removeSource).toHaveBeenCalledWith(
+      "legacy-feed",
+    );
+  });
+
+  it("uses stable service error codes", () => {
+    expect(new SubscriptionServiceError("subscription-not-found")).toMatchObject({
+      code: "subscription-not-found",
+      name: "SubscriptionServiceError",
+    });
+  });
+});

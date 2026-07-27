@@ -25,6 +25,11 @@ interface PreparedRewrite {
   after: string;
 }
 
+export interface RemovedCollectionDay {
+  localDate: string;
+  remainingItems: CollectedItem[];
+}
+
 interface QuarantineJournal {
   schemaVersion: 1;
   stage: "prepared" | "committed";
@@ -183,6 +188,76 @@ export class CollectionRepository {
       }
     }
     return false;
+  }
+
+  async removeBySourceId(sourceId: string): Promise<RemovedCollectionDay[]> {
+    if (!sourceId.trim()) throw new Error("Invalid collection source id");
+    return await this.withRootAccessLock(async () =>
+      await this.removeBySourceIdUnlocked(sourceId),
+    );
+  }
+
+  private async removeBySourceIdUnlocked(
+    sourceId: string,
+  ): Promise<RemovedCollectionDay[]> {
+    await this.loadIndex();
+    const dates = await this.collectionDates();
+    const itemsByDate = new Map<string, CollectedItem[]>();
+    const rewrites: PreparedRewrite[] = [];
+    const affected: RemovedCollectionDay[] = [];
+
+    for (const localDate of dates) {
+      const path = this.dailyPath(localDate);
+      const parsed = await this.readCollection(path);
+      const remainingItems = parsed.items.filter(
+        (item) => item.sourceId !== sourceId,
+      );
+      itemsByDate.set(localDate, remainingItems);
+      if (remainingItems.length === parsed.items.length) continue;
+      rewrites.push({
+        path,
+        before: serializeCollection(parsed.items),
+        after: serializeCollection(remainingItems),
+      });
+      affected.push({ localDate, remainingItems });
+    }
+
+    if (affected.length === 0) return [];
+
+    const nextIndex = EMPTY_INDEX();
+    for (const localDate of dates) {
+      for (const item of itemsByDate.get(localDate) ?? []) {
+        updateIndexEntry(nextIndex, item.id, localDate);
+      }
+    }
+
+    const completed: PreparedRewrite[] = [];
+    try {
+      for (const rewrite of rewrites) {
+        await this.atomicWrite(rewrite.path, rewrite.after);
+        completed.push(rewrite);
+      }
+      await this.writeIndex(nextIndex);
+    } catch (removeError) {
+      const rollbackErrors: unknown[] = [];
+      for (const rewrite of completed.reverse()) {
+        try {
+          await this.atomicWrite(rewrite.path, rewrite.before);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+      }
+      if (rollbackErrors.length > 0) {
+        throw combinedError(
+          "Source removal failed and rollback was incomplete",
+          removeError,
+          rollbackErrors,
+        );
+      }
+      throw removeError;
+    }
+
+    return affected;
   }
 
   async listByDate(localDate: string): Promise<CollectedItem[]> {

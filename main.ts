@@ -87,6 +87,11 @@ import { SourceRefreshLedger } from "./src/refresh/source-refresh-ledger";
 import { CollectionRepository } from "./src/collection/collection-repository";
 import { DailyIndexService } from "./src/collection/daily-index-service";
 import { CollectionService } from "./src/services/collection-service";
+import {
+  SubscriptionService,
+  type RemoveSubscriptionOptions,
+  type VerifiedSubscriptionRequest,
+} from "./src/services/subscription-service";
 import { isTimeoutFeedError } from "./src/services/feed-parser/feed-errors";
 import {
   bindFeedItemsToSourceIdentity,
@@ -1171,6 +1176,35 @@ export default class RssDashboardPlugin extends Plugin {
     });
     this.collectionService = { dataRoot, dailyIndexFolder, service };
     return service;
+  }
+
+  private getSubscriptionService(): SubscriptionService {
+    return new SubscriptionService({
+      settings: this.settings,
+      defaults: {
+        autoDeleteDuration: this.settings.defaultAutoDeleteDuration,
+        maxItems: this.settings.maxItems,
+      },
+      parseFeed: async (url, seed) =>
+        await this.feedParser.parseFeed(url, seed, { allowEmpty: true }),
+      collectionService: this.getCollectionService(),
+      ensureFolder: async (folder) => {
+        if (folder) {
+          await this.ensureFolderExists(folder, {
+            saveSettings: false,
+            refreshView: false,
+          });
+        }
+      },
+      saveSettings: async () => await this.saveSettings(),
+      prepareFeed: (feed) =>
+        MediaService.applyMediaTags(
+          feed,
+          this.settings.availableTags,
+          this.settings.media,
+          this.settings.folders,
+        ),
+    });
   }
 
   /**
@@ -3767,116 +3801,72 @@ export default class RssDashboardPlugin extends Plugin {
   ) {
     const showNotice = options?.showNotice !== false;
     try {
-      if (this.settings.feeds.some((f) => f.url === url)) {
-        if (showNotice) {
-          this.notify("plugin.feedDuplicate");
-        }
-        return false;
-      }
-
       let mediaType: "article" | "video" | "podcast" = "article";
       if (folder === this.settings.media.defaultYouTubeFolder) {
         mediaType = "video";
       } else if (folder === this.settings.media.defaultPodcastFolder) {
         mediaType = "podcast";
       }
-
-      const newFeed: Feed = {
-        title,
-        url,
-        folder,
-        items: [],
-        lastUpdated: Date.now(),
-        autoDeleteDuration:
-          typeof autoDeleteDuration === "number"
-            ? autoDeleteDuration
-            : this.settings.defaultAutoDeleteDuration,
-        maxItemsLimit:
-          typeof maxItemsLimit === "number"
-            ? maxItemsLimit
-            : this.settings.maxItems,
-        scanInterval: typeof scanInterval === "number" ? scanInterval : 0,
-        excludeFromRefresh: excludeFromRefresh === true,
-        mediaType: mediaType,
-        customTemplate: customTemplate || undefined,
-        customTags:
-          Array.isArray(customTags) && customTags.length > 0
-            ? [...customTags]
-            : undefined,
-        keywordRules: feedKeywordRules || {
-          overrideGlobalRules: false,
-          includeLogic: "AND",
-          rules: [],
+      await this.getSubscriptionService().add({
+        kind: "rss-website",
+        verification: {
+          inputUrl: url,
+          siteUrl: url,
+          candidates: [{ url, title, format: "rss" }],
+          selected: { url, title, format: "rss" },
+          hasEntries: true,
         },
-      };
+        selectedCandidateUrl: url,
+        displayName: title,
+        folder,
+        tags: Array.isArray(customTags) ? [...customTags] : [],
+        // URI and OPML callers retain their existing current-feed behavior.
+        initialImportPolicy: { mode: "all-available" },
+        autoDeleteDuration,
+        maxItemsLimit,
+        scanInterval,
+        keywordRules: feedKeywordRules,
+        customTemplate,
+        excludeFromRefresh,
+        mediaType,
+      });
 
-      // Try to parse the feed BEFORE adding it to settings
-      try {
-        const parsedFeed = await this.feedParser.parseFeed(url, newFeed, {
-          allowEmpty: true,
-        });
-        const feedToStore: Feed = {
-          ...newFeed,
-          ...parsedFeed,
-          autoDeleteDuration:
-            typeof parsedFeed.autoDeleteDuration === "number"
-              ? parsedFeed.autoDeleteDuration
-              : newFeed.autoDeleteDuration,
-          maxItemsLimit:
-            typeof parsedFeed.maxItemsLimit === "number"
-              ? parsedFeed.maxItemsLimit
-              : newFeed.maxItemsLimit,
-          scanInterval:
-            typeof parsedFeed.scanInterval === "number"
-              ? parsedFeed.scanInterval
-              : newFeed.scanInterval,
-          excludeFromRefresh:
-            parsedFeed.excludeFromRefresh ?? newFeed.excludeFromRefresh,
-          customTemplate: parsedFeed.customTemplate ?? newFeed.customTemplate,
-          customTags: parsedFeed.customTags ?? newFeed.customTags,
-          keywordRules: parsedFeed.keywordRules ?? newFeed.keywordRules,
-        };
-        if (feedToStore.folder) {
-          await this.ensureFolderExists(feedToStore.folder, {
-            saveSettings: false,
-            refreshView: false,
-          });
-        }
-
-        // Re-apply tags after ensureFolderExists so folder auto-tags resolve
-        // against the current folder tree (parseFeed also tags, but may run
-        // before missing folder paths are created).
-        const feedWithTags = MediaService.applyMediaTags(
-          feedToStore,
-          this.settings.availableTags,
-          this.settings.media,
-          this.settings.folders,
-        );
-
-        // Only add to settings if parsing succeeded
-        this.settings.feeds.push(feedWithTags);
-        await this.saveSettings();
-
-        const view = await this.getActiveDashboardView();
-        if (view) {
-          void view.refresh();
-        }
-        if (showNotice) {
-          this.notify("plugin.feedAdded", { feed: title });
-        }
-        return true;
-      } catch (error) {
-        if (showNotice) {
-          console.error("[RSS Dashboard] Feed parse failed:", error);
-          this.notify("plugin.feedAddFailed");
-        }
-        return false;
-      }
-    } catch (error) {
+      const view = await this.getActiveDashboardView();
+      if (view) void view.refresh();
+      if (showNotice) this.notify("plugin.feedAdded", { feed: title });
+      return true;
+    } catch {
       if (showNotice) {
-        console.error("[RSS Dashboard] Feed add failed:", error);
+        console.error("[RSS Dashboard] Feed add failed.");
         this.notify("plugin.feedAddFailed");
       }
+      return false;
+    }
+  }
+
+  async addVerifiedSubscription(
+    request: VerifiedSubscriptionRequest,
+  ): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().add(request);
+      await this.refreshDashboardViews();
+      return true;
+    } catch {
+      console.error("[RSS Dashboard] Verified subscription add failed.");
+      return false;
+    }
+  }
+
+  async removeSubscription(
+    feedId: string,
+    options: RemoveSubscriptionOptions,
+  ): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().remove(feedId, options);
+      await this.refreshDashboardViews();
+      return true;
+    } catch {
+      console.error("[RSS Dashboard] Subscription removal failed.");
       return false;
     }
   }
@@ -4543,7 +4533,7 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private isFeedExcludedFromRefresh(feed: Feed): boolean {
-    return feed.excludeFromRefresh === true;
+    return feed.excludeFromRefresh === true || feed.subscriptionStatus === "paused";
   }
 
   private getRefreshableFeeds(feeds: Feed[]): Feed[] {

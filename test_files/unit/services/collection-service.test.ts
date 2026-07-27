@@ -6,6 +6,8 @@ import { CollectionRepository } from "../../../src/collection/collection-reposit
 import { DailyIndexService } from "../../../src/collection/daily-index-service";
 import type { Feed, FeedItem } from "../../../src/types/types";
 
+const NOW = new Date("2026-07-21T12:00:00.000Z");
+
 function item(overrides: Partial<FeedItem> = {}): FeedItem {
   return {
     title: "Article",
@@ -74,6 +76,7 @@ function harness(options: { bootstrapped?: boolean; stored?: boolean } = {}) {
     hasItemsForSource: vi
       .fn()
       .mockResolvedValue(options.stored ?? options.bootstrapped ?? false),
+    removeBySourceId: vi.fn(async () => []),
   };
   const dailyIndex = {
     writeDailyIndex: vi.fn(async () => {
@@ -119,6 +122,28 @@ function harness(options: { bootstrapped?: boolean; stored?: boolean } = {}) {
 }
 
 describe("CollectionService", () => {
+  it("regenerates every affected daily index after an explicit source purge", async () => {
+    const test = harness();
+    const remaining = collected(item({ guid: "retained" }), NOW);
+    test.repository.removeBySourceId.mockResolvedValue([
+      { localDate: "2026-07-20", remainingItems: [remaining] },
+      { localDate: "2026-07-21", remainingItems: [] },
+    ]);
+
+    const removed = await test.service.removeSource("source-1");
+
+    expect(removed).toEqual([
+      { localDate: "2026-07-20", remainingItems: [remaining] },
+      { localDate: "2026-07-21", remainingItems: [] },
+    ]);
+    expect(test.repository.removeBySourceId).toHaveBeenCalledWith("source-1");
+    expect(test.dailyIndex.writeDailyIndex.mock.calls).toEqual([
+      [{ localDate: "2026-07-20", items: [remaining] }],
+      [{ localDate: "2026-07-21", items: [] }],
+    ]);
+    expect(test.ledger.recordSuccess).not.toHaveBeenCalled();
+  });
+
   it("observes every in-window topic result so a later daily upsert can mark it rediscovered", async () => {
     const unchanged = item({
       guid: "200",
