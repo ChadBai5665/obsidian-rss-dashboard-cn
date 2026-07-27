@@ -34,8 +34,11 @@ export interface MediaFolderDefaults {
   defaultRssFolder?: string;
 }
 
+const YOUTUBE_CHANNEL_ID = /^UC[A-Za-z0-9_-]{22}$/u;
+
 function isYouTubePageUrl(url: string): boolean {
   if (!url) return false;
+  if (YOUTUBE_CHANNEL_ID.test(url)) return true;
   if (!MediaService.isYouTubeFeed(url)) return false;
   if (url.includes("youtube.com/feeds/videos.xml")) return false;
   return true;

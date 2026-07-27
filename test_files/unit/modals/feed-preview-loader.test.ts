@@ -40,4 +40,18 @@ describe("resolveAndLoadPreview", () => {
     expect(result.isMastodonConversion).toBe(false);
     expect(getDefaultFolderForResolvedFeed(result, {})).toBe("Videos");
   });
+
+  it("resolves raw YouTube channel IDs as video subscriptions", async () => {
+    const { getDefaultFolderForResolvedFeed, resolveAndLoadPreview } =
+      await import("../../../src/modals/feed-manager/feed-preview-loader");
+    vi.spyOn(MediaService, "getYouTubeRssFeed").mockResolvedValue(
+      "https://www.youtube.com/feeds/videos.xml?channel_id=UC_x5XG1OV2P6uZZ5FSM9Ttw",
+    );
+
+    const result = await resolveAndLoadPreview("UC_x5XG1OV2P6uZZ5FSM9Ttw");
+
+    expect(result.detectedType).toBe("youtube");
+    expect(result.isMastodonConversion).toBe(false);
+    expect(getDefaultFolderForResolvedFeed(result, {})).toBe("Videos");
+  });
 });
