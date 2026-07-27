@@ -6,6 +6,7 @@ import {
   isSubscriptionRemovalPending,
   type VerifiedFeedSubscriptionRequest,
   type VerifiedXSubscriptionRequest,
+  type SubscriptionUpdateRequest,
   type XSubscriptionOptionsUpdateRequest,
 } from "../../../src/services/subscription-service";
 import {
@@ -648,6 +649,49 @@ describe("SubscriptionService", () => {
         createdAt: 1,
       }],
     });
+  });
+
+  it("updates feed options without parsing or re-verifying its identity", async () => {
+    const previousItem = item("kept", "2026-07-20T00:00:00.000Z");
+    const progress = {
+      status: "completed" as const,
+      pagesFetched: 2,
+      itemsImported: 1,
+    };
+    const source = existingFeed({
+      items: [previousItem],
+      initialImportPolicy: { mode: "lookback-days", days: 7 },
+      initialImportProgress: progress,
+      customTags: ["old"],
+      autoDeleteDuration: 30,
+      maxItemsLimit: 10,
+      subscriptionStatus: "active",
+    });
+    const test = harness([source]);
+    const request = {
+      kind: "feed-options",
+      folder: "Research",
+      tags: ["edited"],
+      autoDeleteDuration: 90,
+      maxItemsLimit: 25,
+      paused: true,
+    } as unknown as SubscriptionUpdateRequest;
+
+    const updated = await test.service.update("legacy-feed", request);
+
+    expect(updated).toMatchObject({
+      feedId: "legacy-feed",
+      url: "https://legacy.example/feed.xml",
+      folder: "Research",
+      customTags: ["edited"],
+      autoDeleteDuration: 90,
+      maxItemsLimit: 25,
+      subscriptionStatus: "paused",
+      initialImportProgress: progress,
+    });
+    expect(updated.items).toEqual([previousItem]);
+    expect(test.parseFeed).not.toHaveBeenCalled();
+    expect(test.ensureFolder).toHaveBeenCalledWith("Research");
   });
 
   it("accepts a reverified canonical feed change and rejects a duplicate target", async () => {

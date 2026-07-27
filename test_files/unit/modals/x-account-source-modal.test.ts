@@ -35,7 +35,7 @@ describe("XAccountSourceModal", () => {
     expect(modal.modalEl.classList).toContain("rss-dashboard-form-modal");
     expect(
       modal.contentEl.querySelectorAll(".rss-dashboard-form-field"),
-    ).toHaveLength(6);
+    ).toHaveLength(8);
     expect(
       modal.contentEl.querySelectorAll(".rss-dashboard-form-actions"),
     ).toHaveLength(1);
@@ -142,5 +142,87 @@ describe("XAccountSourceModal", () => {
     Array.from(modal.contentEl.querySelectorAll("button"))
       .find((button) => button.textContent === "取消")!.click();
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("routes a changed handle back to verified onboarding instead of saving options", async () => {
+    const existing = createXAccountSourceConfig({
+      id: "x-account-openai",
+      handle: "openai",
+      displayName: "OpenAI",
+      folder: "AI",
+      topics: ["模型"],
+    });
+    const onSave = vi.fn(async () => {});
+    const onIdentityChange = vi.fn();
+    const modal = new XAccountSourceModal(new obsidian.App(), {
+      locale: "zh-CN",
+      maxRequestsPerRun: 40,
+      maxRequestsPerDay: 100,
+      existing,
+      existingAccounts: [existing],
+      onSave,
+      onIdentityChange,
+    });
+    modal.open();
+
+    const handle = setting(modal, "X 账号").querySelector<HTMLInputElement>("input")!;
+    handle.value = "AnthropicAI";
+    handle.dispatchEvent(new Event("input"));
+    Array.from(modal.contentEl.querySelectorAll("button"))
+      .find((candidate) => candidate.textContent === "保存")!.click();
+    await flushPromises();
+
+    expect(onIdentityChange).toHaveBeenCalledWith("anthropicai");
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("saves unchanged identity as an option-only edit", async () => {
+    const existing = createXAccountSourceConfig({
+      id: "x-account-openai",
+      handle: "openai",
+      displayName: "OpenAI",
+      folder: "AI",
+      topics: ["模型"],
+    });
+    const onSave = vi.fn(async () => {});
+    const onIdentityChange = vi.fn();
+    const modal = new XAccountSourceModal(new obsidian.App(), {
+      locale: "zh-CN",
+      maxRequestsPerRun: 40,
+      maxRequestsPerDay: 100,
+      existing,
+      existingRetention: { autoDeleteDuration: 30, maxItemsLimit: 100 },
+      existingAccounts: [existing],
+      onSave,
+      onIdentityChange,
+    });
+    modal.open();
+
+    expect(
+      setting(modal, "显示名称").querySelector<HTMLInputElement>("input")!.readOnly,
+    ).toBe(true);
+    const folder = setting(modal, "文件夹").querySelector<HTMLInputElement>("input")!;
+    folder.value = "Research";
+    folder.dispatchEvent(new Event("input"));
+    const retention = setting(modal, "自动删除").querySelector<HTMLInputElement>("input")!;
+    retention.value = "90";
+    retention.dispatchEvent(new Event("input"));
+    const maxItems = setting(modal, "最大条目数").querySelector<HTMLInputElement>("input")!;
+    maxItems.value = "250";
+    maxItems.dispatchEvent(new Event("input"));
+    Array.from(modal.contentEl.querySelectorAll("button"))
+      .find((candidate) => candidate.textContent === "保存")!.click();
+    await flushPromises();
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "x-account-openai",
+        handle: "openai",
+        folder: "Research",
+        topics: ["模型"],
+      }),
+      { autoDeleteDuration: 90, maxItemsLimit: 250 },
+    );
+    expect(onIdentityChange).not.toHaveBeenCalled();
   });
 });

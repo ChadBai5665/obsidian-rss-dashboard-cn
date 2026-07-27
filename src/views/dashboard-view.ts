@@ -855,7 +855,7 @@ export class RssDashboardView extends ItemView {
           onAddSubfolder: this.handleAddSubfolder.bind(this),
           onAddFeed: this.handleAddFeed.bind(this),
           onEditFeed: this.handleEditFeed.bind(this),
-          onDeleteFeed: this.handleDeleteFeed.bind(this),
+          onDeleteFeed: (feed) => { void this.handleDeleteFeed(feed); },
           onDeleteFolder: this.handleDeleteFolder.bind(this),
           onRefreshFeeds: this.handleRefreshFeeds.bind(this),
           onUpdateFeed: this.handleUpdateFeed.bind(this),
@@ -3051,16 +3051,13 @@ export class RssDashboardView extends ItemView {
     void this.render();
   }
 
-  private handleDeleteFeed(feed: Feed): void {
-    this.plugin.settings.feeds = this.plugin.settings.feeds.filter(
-      (f: Feed) => f !== feed,
+  private async handleDeleteFeed(feed: Feed): Promise<void> {
+    const removed = await this.plugin.removeSubscription(
+      feed.feedId ?? feed.url,
+      { purgeCollection: false },
     );
-    void this.plugin.saveSettings();
-
-    if (this.currentFeed === feed) {
-      this.currentFeed = null;
-    }
-
+    if (!removed) return;
+    if (this.currentFeed === feed) this.currentFeed = null;
     void this.render();
   }
 
@@ -3157,7 +3154,7 @@ export class RssDashboardView extends ItemView {
         onAddSubfolder: this.handleAddSubfolder.bind(this),
         onAddFeed: this.handleAddFeed.bind(this),
         onEditFeed: this.handleEditFeed.bind(this),
-        onDeleteFeed: this.handleDeleteFeed.bind(this),
+        onDeleteFeed: (feed) => { void this.handleDeleteFeed(feed); },
         onDeleteFolder: this.handleDeleteFolder.bind(this),
         onRefreshFeeds: this.handleRefreshFeeds.bind(this),
         onUpdateFeed: this.handleUpdateFeed.bind(this),

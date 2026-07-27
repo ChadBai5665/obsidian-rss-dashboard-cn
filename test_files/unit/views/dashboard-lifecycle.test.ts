@@ -123,7 +123,8 @@ interface DashViewTestAPI {
     foldersToCollapse: string[],
     foldersToExpand: string[],
   ): void;
-  handleDeleteFeed(feed: Feed): void;
+  handleDeleteFeed(feed: Feed): Promise<void>;
+  removeSubscription: ReturnType<typeof vi.fn>;
   handleDeleteFolder(folder: string): void;
   syncCurrentFeedReference(): void;
   getAllDescendantFolders(folderPath: string): string[];
@@ -140,11 +141,22 @@ async function makeView(
   const { RssDashboardView } =
     await import("../../../src/views/dashboard-view");
   const app = new App();
-  const plugin = { settings, saveSettings: vi.fn(async () => {}) };
+  const plugin = {
+    settings,
+    saveSettings: vi.fn(async () => {}),
+    removeSubscription: vi.fn(async (sourceId: string) => {
+      settings.feeds = settings.feeds.filter(
+        (feed) => (feed.feedId ?? feed.url) !== sourceId,
+      );
+      return true;
+    }),
+  };
   const leaf = { app } as unknown as import("obsidian").WorkspaceLeaf;
   const view = new RssDashboardView(leaf, plugin as never);
   view.render = vi.fn();
-  return view as unknown as DashViewTestAPI;
+  const testView = view as unknown as DashViewTestAPI;
+  testView.removeSubscription = plugin.removeSubscription;
+  return testView;
 }
 
 describe("Dashboard lifecycle", () => {
@@ -627,9 +639,11 @@ describe("Dashboard lifecycle", () => {
       const feed2 = makeFeed("https://b.com/feed");
       settings.feeds = [feed1, feed2];
       const view = await makeView(settings);
-      view.handleDeleteFeed(feed1);
+      await view.handleDeleteFeed(feed1);
       expect(settings.feeds).toHaveLength(1);
       expect(settings.feeds[0].url).toBe("https://b.com/feed");
+      expect(view.removeSubscription)
+        .toHaveBeenCalledWith("https://a.com/feed", { purgeCollection: false });
     });
 
     it("clears currentFeed if the deleted feed was active", async () => {
@@ -638,7 +652,7 @@ describe("Dashboard lifecycle", () => {
       settings.feeds = [feed];
       const view = await makeView(settings);
       view.currentFeed = feed;
-      view.handleDeleteFeed(feed);
+      await view.handleDeleteFeed(feed);
       expect(view.currentFeed).toBeNull();
     });
   });

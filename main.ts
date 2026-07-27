@@ -95,6 +95,7 @@ import {
   isSubscriptionRemovalPending,
   SubscriptionService,
   type RemoveSubscriptionOptions,
+  type SubscriptionUpdateRequest,
   type VerifiedSubscriptionRequest,
 } from "./src/services/subscription-service";
 import { isTimeoutFeedError } from "./src/services/feed-parser/feed-errors";
@@ -3904,12 +3905,60 @@ export default class RssDashboardPlugin extends Plugin {
     return true;
   }
 
+  async updateSubscription(
+    feedId: string,
+    request: SubscriptionUpdateRequest,
+  ): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().update(feedId, request);
+      await this.refreshDashboardViews();
+      return true;
+    } catch {
+      console.error("[RSS Dashboard] Subscription update failed.");
+      return false;
+    }
+  }
+
+  async setSubscriptionPaused(feedId: string, paused: boolean): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().setPaused(feedId, paused);
+      await this.refreshDashboardViews();
+      return true;
+    } catch {
+      console.error("[RSS Dashboard] Subscription pause update failed.");
+      return false;
+    }
+  }
+
+  async stopSubscriptionInitialImport(feedId: string): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().stopInitialImport(feedId);
+      await this.refreshDashboardViews();
+      return true;
+    } catch {
+      console.error("[RSS Dashboard] Historical import stop failed.");
+      return false;
+    }
+  }
+
+  async resumeSubscriptionInitialImport(feedId: string): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().resumeInitialImport(feedId);
+      await this.refreshDashboardViews();
+      return true;
+    } catch {
+      console.error("[RSS Dashboard] Historical import resume failed.");
+      return false;
+    }
+  }
+
   /** Opens the verified subscription workflow used by every public add entry. */
   public openAddSourceModal(
     initial?: Pick<
       AddSourceModalOptions,
       "initialKind" | "initialInput" | "initialFolder"
     >,
+    existingFeedId?: string,
   ): AddSourceModal {
     const requestText = async (url: string, signal: AbortSignal) => {
       if (signal.aborted) throw new Error("source-verification-aborted");
@@ -3965,7 +4014,9 @@ export default class RssDashboardPlugin extends Plugin {
           secretStore: new DesktopSecretStore(),
         }).resolve(input, signal);
       },
-      onSubscribe: async (request) => await this.addVerifiedSubscription(request),
+      onSubscribe: async (request) => existingFeedId
+        ? await this.updateSubscription(existingFeedId, request)
+        : await this.addVerifiedSubscription(request),
       onOpenSettings: () => { void this.openSettingsToTab("tikhub"); },
       xRequestCaps: {
         run: this.settings.tikhub.maxRequestsPerRun,

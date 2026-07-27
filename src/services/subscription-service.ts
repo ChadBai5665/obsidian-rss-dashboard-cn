@@ -85,9 +85,27 @@ export interface XSubscriptionOptionsUpdateRequest {
   paused?: boolean;
 }
 
+/** Patch-only feed settings update. The canonical URL is intentionally absent. */
+export interface FeedSubscriptionOptionsUpdateRequest {
+  kind: "feed-options";
+  displayName?: string;
+  folder?: string;
+  tags?: string[];
+  initialImportPolicy?: InitialImportPolicy;
+  autoDeleteDuration?: number;
+  maxItemsLimit?: number;
+  scanInterval?: number;
+  keywordRules?: FeedKeywordRulesSettings;
+  customTemplate?: string;
+  excludeFromRefresh?: boolean;
+  mediaType?: "article" | "video" | "podcast";
+  paused?: boolean;
+}
+
 export type SubscriptionUpdateRequest =
   | VerifiedSubscriptionRequest
-  | XSubscriptionOptionsUpdateRequest;
+  | XSubscriptionOptionsUpdateRequest
+  | FeedSubscriptionOptionsUpdateRequest;
 
 export type SubscriptionServiceErrorCode =
   | "duplicate-subscription"
@@ -259,6 +277,9 @@ export class SubscriptionService {
     if (request.kind === "x-account-options") {
       return await this.updateXOptions(index, previous, request);
     }
+    if (request.kind === "feed-options") {
+      return await this.updateFeedOptions(index, previous, request);
+    }
     const key = requestKey(request);
     if (this.hasDuplicate(key, feedId)) {
       throw new SubscriptionServiceError("duplicate-subscription");
@@ -371,6 +392,72 @@ export class SubscriptionService {
       ...(request.excludeFromRefresh === undefined
         ? {}
         : { excludeFromRefresh: request.excludeFromRefresh }),
+      ...(request.paused === undefined
+        ? {}
+        : { subscriptionStatus: request.paused ? "paused" : "active" }),
+    };
+    if (folder) await this.dependencies.ensureFolder(folder);
+    const candidate = cloneFeeds(this.dependencies.settings.feeds);
+    candidate[index] = updated;
+    await this.commitFeeds(candidate);
+    return updated;
+  }
+
+  private async updateFeedOptions(
+    index: number,
+    previous: Feed,
+    request: FeedSubscriptionOptionsUpdateRequest,
+  ): Promise<Feed> {
+    if (previous.sourceKind === "x-account" || previous.sourceKind === "x-topic") {
+      throw new SubscriptionServiceError("invalid-subscription-request");
+    }
+    const folder = request.folder === undefined
+      ? previous.folder
+      : normalizedFolder(request.folder);
+    const updated: Feed = {
+      ...previous,
+      ...(request.displayName === undefined
+        ? {}
+        : { title: normalizedTitle(request.displayName) ?? previous.title }),
+      folder,
+      ...(request.tags === undefined
+        ? {}
+        : { customTags: [...request.tags] }),
+      ...(request.initialImportPolicy === undefined
+        ? {}
+        : { initialImportPolicy: validPolicy(request.initialImportPolicy) }),
+      ...(request.autoDeleteDuration === undefined
+        ? {}
+        : {
+            autoDeleteDuration: numberOrDefault(
+              request.autoDeleteDuration,
+              previous.autoDeleteDuration ??
+                this.dependencies.defaults.autoDeleteDuration,
+            ),
+          }),
+      ...(request.maxItemsLimit === undefined
+        ? {}
+        : {
+            maxItemsLimit: numberOrDefault(
+              request.maxItemsLimit,
+              previous.maxItemsLimit ?? this.dependencies.defaults.maxItems,
+            ),
+          }),
+      ...(request.scanInterval === undefined
+        ? {}
+        : { scanInterval: request.scanInterval }),
+      ...(request.keywordRules === undefined
+        ? {}
+        : { keywordRules: cloneKeywordRules(request.keywordRules) }),
+      ...(request.customTemplate === undefined
+        ? {}
+        : { customTemplate: normalizedTitle(request.customTemplate) }),
+      ...(request.excludeFromRefresh === undefined
+        ? {}
+        : { excludeFromRefresh: request.excludeFromRefresh }),
+      ...(request.mediaType === undefined
+        ? {}
+        : { mediaType: request.mediaType }),
       ...(request.paused === undefined
         ? {}
         : { subscriptionStatus: request.paused ? "paused" : "active" }),

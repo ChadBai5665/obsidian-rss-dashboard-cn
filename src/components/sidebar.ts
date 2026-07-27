@@ -12,7 +12,7 @@ import {
   createToolbarButton,
 } from "../utils/sidebar-icon-registry";
 import { collectFolderPaths } from "../utils/folder-paths";
-import { EditFeedModal } from "../modals/feed-manager-modal";
+import { FeedManagerModal } from "../modals/feed-manager-modal";
 import { FolderAutoTagModal } from "../modals/feed-manager/folder-auto-tag-modal";
 import {
   buildFolderTagConfirmMessage,
@@ -3429,19 +3429,13 @@ export class Sidebar {
   }
 
   public showEditFeedModal(
-    feed: Feed,
-    options?: {
+    _feed: Feed,
+    _options?: {
       expandSection?: "per-feed" | "rules";
       highlightSection?: "per-feed" | "rules";
     },
   ): void {
-    new EditFeedModal(
-      this.app,
-      this.plugin,
-      feed,
-      () => this.render(),
-      options,
-    ).open();
+    new FeedManagerModal(this.app, this.plugin).open();
   }
 
   private showFolderAutoTagModal(folderPath: string): void {

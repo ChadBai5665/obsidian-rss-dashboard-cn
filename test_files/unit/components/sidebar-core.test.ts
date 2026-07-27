@@ -23,6 +23,7 @@ import {
 } from "../../../src/types/types";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import type RssDashboardPlugin from "../../../main";
+import { FeedManagerModal } from "../../../src/modals/feed-manager/feed-manager-modal";
 
 installObsidianDomPolyfills();
 
@@ -151,6 +152,31 @@ describe("Sidebar Core", () => {
     expect(plugin.openAddSourceModal).toHaveBeenCalledWith({
       initialFolder: "Research",
     });
+  });
+
+  it("routes sidebar subscription editing to the unified external manager", () => {
+    const open = vi.spyOn(FeedManagerModal.prototype, "open")
+      .mockImplementation(() => {});
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    );
+    const selected = {
+      feedId: "feed-1",
+      title: "Feed",
+      url: "https://example.com/feed.xml",
+      folder: "Research",
+      items: [],
+      lastUpdated: 0,
+    } as Feed;
+
+    sidebar.showEditFeedModal(selected);
+
+    expect(open).toHaveBeenCalledTimes(1);
   });
 
   it("routes all-feed read changes through the status transaction batch", async () => {
