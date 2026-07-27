@@ -12,7 +12,6 @@ const COMMON_FEED_PATHS = [
   "/atom.xml",
   "/index.xml",
 ] as const;
-const MAX_DECLARED_CANDIDATES = 10;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const SUPPORTED_ALTERNATE_TYPES = new Set([
   "application/rss+xml",
@@ -95,9 +94,13 @@ async function validateCandidates(
   options: RssWebsiteDiscoveryOptions,
 ): Promise<ValidatedCandidate[]> {
   const candidates: ValidatedCandidate[] = [];
+  const seenFinalUrls = new Set<string>();
   for (const candidate of urls) {
     const validated = await validateCandidate(candidate.url, candidate.title, options);
-    if (validated) candidates.push(validated);
+    if (validated && !seenFinalUrls.has(validated.url)) {
+      seenFinalUrls.add(validated.url);
+      candidates.push(validated);
+    }
   }
   return candidates;
 }
@@ -131,7 +134,6 @@ function declaredFeedUrls(
   const candidates: Array<{ url: string; title: string }> = [];
 
   for (const link of Array.from(doc.querySelectorAll("link[rel][type][href]"))) {
-    if (candidates.length >= MAX_DECLARED_CANDIDATES) break;
     const rel = (link.getAttribute("rel") || "").toLowerCase().split(/\s+/u);
     const type = (link.getAttribute("type") || "").toLowerCase().split(";", 1)[0].trim();
     if (!rel.includes("alternate") || !SUPPORTED_ALTERNATE_TYPES.has(type)) continue;

@@ -9,6 +9,10 @@ export type { FeedPreviewData } from "./types.js";
 
 const BARE_AMPERSAND_REGEX =
   /&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)/g;
+const SUPPORTED_JSON_FEED_VERSIONS = new Set([
+  "https://jsonfeed.org/version/1",
+  "https://jsonfeed.org/version/1.1",
+]);
 export function parseFeedPreviewFromXmlText(
   xmlText: string,
   feedUrl: string,
@@ -130,7 +134,9 @@ function parseJsonFeedPreview(
     return null;
   }
 
-  if (!feed.version?.startsWith("https://jsonfeed.org/")) return null;
+  if (!feed.version || !SUPPORTED_JSON_FEED_VERSIONS.has(feed.version)) {
+    return null;
+  }
 
   const firstItem = feed.items?.[0];
   return {

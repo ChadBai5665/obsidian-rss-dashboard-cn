@@ -71,4 +71,17 @@ describe("feed preview parsing", () => {
   it("returns null for empty xml text", () => {
     expect(parseFeedPreviewFromXmlText("", "https://example.com/feed.xml")).toBeNull();
   });
+
+  it("rejects an unsupported JSON Feed version URL", () => {
+    const parsed = parseFeedPreviewFromXmlText(
+      JSON.stringify({
+        version: "https://jsonfeed.org/version/not-supported",
+        title: "Not a feed",
+        items: [{ id: "not-an-entry", title: "Ignored" }],
+      }),
+      "https://example.com/feed.json",
+    );
+
+    expect(parsed).toBeNull();
+  });
 });

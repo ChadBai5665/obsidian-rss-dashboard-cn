@@ -99,6 +99,52 @@ describe("RSS and website discovery", () => {
     expect(result.selected).toEqual(result.candidates[0]);
   });
 
+  it("discovers a valid declared feed after ten invalid declarations", async () => {
+    const declarations = Array.from(
+      { length: 11 },
+      (_value, index) =>
+        `<link rel="alternate" type="application/rss+xml" href="/feed-${index + 1}.xml">`,
+    ).join("\n");
+    const result = await discoverRssWebsite("https://example.com", {
+      request: async (url) => {
+        if (url === "https://example.com/") {
+          return { url, text: `<html><head>${declarations}</head></html>` };
+        }
+        return {
+          url,
+          text: url === "https://example.com/feed-11.xml" ? RSS : "not a feed",
+        };
+      },
+    });
+
+    expect(result.candidates).toEqual([
+      { url: "https://example.com/feed-11.xml", title: "Example RSS", format: "rss" },
+    ]);
+    expect(result.selected).toEqual(result.candidates[0]);
+  });
+
+  it("deduplicates declarations that redirect to the same final feed URL", async () => {
+    const result = await discoverRssWebsite("https://example.com", {
+      request: async (url) => {
+        if (url === "https://example.com/") {
+          return {
+            url,
+            text: `<html><head>
+              <link rel="alternate" type="application/rss+xml" title="First" href="/first.xml">
+              <link rel="alternate" type="application/rss+xml" title="Second" href="/second.xml">
+            </head></html>`,
+          };
+        }
+        return { url: "https://feeds.example.com/shared.xml", text: RSS };
+      },
+    });
+
+    expect(result.candidates).toEqual([
+      { url: "https://feeds.example.com/shared.xml", title: "First", format: "rss" },
+    ]);
+    expect(result.selected).toEqual(result.candidates[0]);
+  });
+
   it("tries only common feed paths when a page declares none", async () => {
     const requests: string[] = [];
     const result = await discoverRssWebsite("https://example.com/blog", {
