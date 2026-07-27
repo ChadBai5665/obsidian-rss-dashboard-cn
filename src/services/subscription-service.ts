@@ -372,6 +372,7 @@ export class SubscriptionService {
     feedId: string,
     options: RemoveSubscriptionOptions,
   ): Promise<void> {
+    this.dependencies.abortInitialImport?.(feedId);
     return await this.enqueueMutation(
       async () => await this.removeUnlocked(feedId, options),
     );

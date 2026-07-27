@@ -14,6 +14,7 @@ import type { FeedSourceConfig } from "../../../src/sources/source-config";
 import { createTranslator } from "../../../src/i18n";
 import { XTopicRefreshError } from "../../../src/sources/tikhub/x-topic-adapter";
 import { createXPostCollectedItemId } from "../../../src/collection/item-identity";
+import { createConfirmedCollectionPurge } from "../../../src/services/subscription-service";
 
 let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
@@ -64,6 +65,31 @@ function createFeed(overrides: Partial<Feed> = {}): Feed {
     mediaType: "article",
     ...overrides,
   };
+}
+
+function createActiveXImportFeed(feedId: string): Feed {
+  return createFeed({
+    feedId,
+    sourceKind: "x-account",
+    sourceConfig: {
+      kind: "x-account",
+      id: feedId,
+      handle: "openai",
+      includeReplies: false,
+      includeReposts: false,
+      folder: "X",
+      topics: [],
+    },
+    url: "tikhub://x-account/openai",
+    initialImportPolicy: { mode: "all-available" },
+    initialImportProgress: {
+      status: "running",
+      pagesFetched: 1,
+      itemsImported: 1,
+      phase: "posts",
+      nextCursor: "next-page",
+    },
+  });
 }
 
 interface TestFeedParser {
@@ -1668,6 +1694,185 @@ describe("refreshFeeds() pipeline behavior", () => {
 
     expect(paidRefresh).not.toHaveBeenCalled();
     expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("stopped");
+  });
+
+  it("does not call the X provider when default removal deletes the source during the ledger gate", async () => {
+    const source = createActiveXImportFeed("x-history-default-delete");
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let markAttemptStarted!: () => void;
+    let releaseAttempt!: () => void;
+    const attemptStarted = new Promise<void>((resolve) => {
+      markAttemptStarted = resolve;
+    });
+    const attemptBlocked = new Promise<void>((resolve) => {
+      releaseAttempt = resolve;
+    });
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn(async () => {
+        markAttemptStarted();
+        await attemptBlocked;
+      }),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+    const paidRefresh = vi.fn().mockResolvedValue({
+      feed: source,
+      items: source.items,
+      collectionItems: source.items,
+      providerRequestCount: 1,
+      warnings: [],
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getCollectionService = vi.fn(() => ({
+      collectFeedRefresh,
+      removeSource: vi.fn(),
+    }));
+
+    const refresh = plugin.refreshSelectedFeed(source);
+    await attemptStarted;
+    await plugin.getSubscriptionService().remove(source.feedId!, {
+      purgeCollection: false,
+    });
+    releaseAttempt();
+    await refresh;
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds).toEqual([]);
+  });
+
+  it("does not call the X provider when purge removal finishes before provider start", async () => {
+    const source = createActiveXImportFeed("x-history-purge-delete");
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const removeSource = vi.fn().mockResolvedValue({
+      days: [],
+      commit,
+      rollback: vi.fn().mockResolvedValue(undefined),
+    });
+    plugin.getCollectionService = vi.fn(() => ({
+      collectFeedRefresh,
+      removeSource,
+    }));
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn(async () => {
+        await plugin.getSubscriptionService().remove(source.feedId!, {
+          purgeCollection: true,
+          confirmation: createConfirmedCollectionPurge(source.feedId!),
+        });
+      }),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+    const paidRefresh = vi.fn().mockResolvedValue({
+      feed: source,
+      items: source.items,
+      collectionItems: source.items,
+      providerRequestCount: 1,
+      warnings: [],
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+
+    await plugin.refreshSelectedFeed(source);
+
+    expect(removeSource).toHaveBeenCalledWith(source.feedId);
+    expect(commit).toHaveBeenCalledOnce();
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds).toEqual([]);
+  });
+
+  it("does not start an unpersisted active X initial-import snapshot", async () => {
+    const source = createActiveXImportFeed("x-history-unpersisted");
+    const plugin = createPluginWithSettings([]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    const paidRefresh = vi.fn();
+    const collectFeedRefresh = vi.fn();
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+
+    await plugin.refreshSelectedFeed(source);
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds).toEqual([]);
+  });
+
+  it("does not fall back to stale X input after a persisted source disappears at the ledger gate", async () => {
+    const source = createActiveXImportFeed("x-history-disappeared");
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn(async () => {
+        plugin.settings.feeds = [];
+      }),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+    const paidRefresh = vi.fn();
+    const collectFeedRefresh = vi.fn();
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+
+    await plugin.refreshSelectedFeed(source);
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds).toEqual([]);
+  });
+
+  it("keeps refreshing an unpersisted legacy RSS snapshot passed explicitly", async () => {
+    const source = createFeed({
+      feedId: undefined,
+      sourceKind: undefined,
+      sourceConfig: undefined,
+      initialImportPolicy: undefined,
+      initialImportProgress: undefined,
+    });
+    const plugin = createPluginWithSettings([]);
+    const refreshed = { ...source, lastUpdated: 2 };
+    plugin.feedParser.refreshFeed.mockResolvedValue(refreshed);
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+
+    await plugin.refreshSelectedFeed(source);
+
+    expect(plugin.feedParser.refreshFeed).toHaveBeenCalledOnce();
+    expect(collectFeedRefresh).toHaveBeenCalledWith({
+      feed: refreshed,
+      previousItems: source.items,
+      refreshedItems: refreshed.items,
+      fetchedAt: expect.any(Date),
+    });
+    expect(plugin.settings.feeds).toEqual([]);
   });
 
   it("skips refresh when feedParser is not initialized yet", async () => {

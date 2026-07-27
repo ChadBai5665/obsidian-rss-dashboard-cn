@@ -4854,7 +4854,8 @@ export default class RssDashboardPlugin extends Plugin {
     }
     bindFeedItemsToSourceIdentity(feed);
     const sourceId = feed.feedId ?? feed.url;
-    const currentAtStart = this.resolveCurrentFeedForRefresh(feed, sourceId);
+    const persistedAtStart = this.findCurrentFeedForRefresh(feed, sourceId);
+    const currentAtStart = persistedAtStart ?? feed;
     const attemptedAt = new Date();
     const ledger = this.getSourceRefreshLedger();
     const initialImportController =
@@ -4875,22 +4876,33 @@ export default class RssDashboardPlugin extends Plugin {
         );
       }
 
-      const currentFeed = this.resolveCurrentFeedForRefresh(
+      const persistedCurrent = this.findCurrentFeedForRefresh(
         currentAtStart,
         sourceId,
       );
+      const sourceDisappeared = persistedAtStart !== undefined &&
+        persistedCurrent === undefined;
+      const unpersistedActiveXImport = persistedAtStart === undefined &&
+        initialImportController !== undefined;
+      if (
+        sourceDisappeared ||
+        unpersistedActiveXImport ||
+        initialImportController?.signal.aborted ||
+        (initialImportController &&
+          persistedCurrent?.initialImportProgress?.status === "stopped")
+      ) {
+        return stoppedInitialImportResult(
+          persistedCurrent ?? currentAtStart,
+          attemptedAt,
+        );
+      }
+
+      const currentFeed = persistedCurrent ?? feed;
       const feedForAttempt =
         currentFeed.initialImportProgress !== undefined ||
           feed.initialImportProgress !== undefined
           ? currentFeed
           : feed;
-      if (
-        initialImportController?.signal.aborted ||
-        (initialImportController &&
-          currentFeed.initialImportProgress?.status === "stopped")
-      ) {
-        return stoppedInitialImportResult(feedForAttempt, attemptedAt);
-      }
 
       const attempt = new RefreshAttemptToken();
       let result: FeedRefreshResult;
@@ -4969,14 +4981,16 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  private resolveCurrentFeedForRefresh(feed: Feed, sourceId: string): Feed {
+  private findCurrentFeedForRefresh(
+    feed: Feed,
+    sourceId: string,
+  ): Feed | undefined {
     const matchingIds = this.settings.feeds.filter(
       (candidate) => (candidate.feedId ?? candidate.url) === sourceId,
     );
     return matchingIds.find((candidate) => candidate.url === feed.url) ??
       (matchingIds.length === 1 ? matchingIds[0] : undefined) ??
-      this.settings.feeds.find((candidate) => candidate.url === feed.url) ??
-      feed;
+      this.settings.feeds.find((candidate) => candidate.url === feed.url);
   }
 
   private async recordRefreshErrorSafely(

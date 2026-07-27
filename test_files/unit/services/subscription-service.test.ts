@@ -144,7 +144,10 @@ function existingFeed(overrides: Partial<Feed> = {}): Feed {
   };
 }
 
-function harness(initialFeeds: Feed[] = []) {
+function harness(
+  initialFeeds: Feed[] = [],
+  options: { abortInitialImport?: (feedId: string) => void } = {},
+) {
   const settings = { feeds: initialFeeds };
   const snapshots: Feed[][] = [];
   const selectedItems = [
@@ -180,6 +183,7 @@ function harness(initialFeeds: Feed[] = []) {
     saveSettings,
     now: () => NOW,
     createFeedId: () => "new-feed-id",
+    abortInitialImport: options.abortInitialImport,
   });
   return {
     service,
@@ -1030,6 +1034,66 @@ describe("SubscriptionService", () => {
       "legacy-feed",
     );
     expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      label: "default",
+      options: { purgeCollection: false } as const,
+    },
+    {
+      label: "purge",
+      options: {
+        purgeCollection: true,
+        confirmation: createConfirmedCollectionPurge("legacy-feed"),
+      } as const,
+    },
+  ])("aborts an active import synchronously before queued $label removal", async ({ options }) => {
+    const abortInitialImport = vi.fn();
+    const test = harness([
+      existingFeed({
+        sourceKind: "x-account",
+        sourceConfig: {
+          kind: "x-account",
+          id: "legacy-feed",
+          handle: "openai",
+          includeReplies: false,
+          includeReposts: false,
+          folder: "X",
+          topics: [],
+        },
+        initialImportPolicy: { mode: "all-available" },
+        initialImportProgress: {
+          status: "running",
+          pagesFetched: 1,
+          itemsImported: 1,
+        },
+      }),
+    ], { abortInitialImport });
+    let markSaveStarted!: () => void;
+    let releaseSave!: () => void;
+    const saveStarted = new Promise<void>((resolve) => {
+      markSaveStarted = resolve;
+    });
+    const saveBlocked = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    test.saveSettings.mockImplementationOnce(async () => {
+      markSaveStarted();
+      await saveBlocked;
+    });
+
+    const priorMutation = test.service.setPaused("legacy-feed", true);
+    await saveStarted;
+    const removal = test.service.remove("legacy-feed", options);
+
+    expect(abortInitialImport).toHaveBeenCalledWith("legacy-feed");
+    expect(test.settings.feeds).toHaveLength(1);
+
+    releaseSave();
+    await priorMutation;
+    await removal;
+    expect(test.settings.feeds).toEqual([]);
   });
 
   it("restores collection and source configuration when the final purge config save fails", async () => {
