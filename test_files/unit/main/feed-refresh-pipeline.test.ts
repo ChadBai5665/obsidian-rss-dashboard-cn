@@ -1699,9 +1699,11 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("stopped");
   });
 
-  it("does not call the X provider when default removal deletes the source during the ledger gate", async () => {
+  it("does not persist refresh completion when default removal deletes the source during the ledger gate", async () => {
     const source = createActiveXImportFeed("x-history-default-delete");
     const plugin = createPluginWithSettings([source]);
+    const initialRefreshTimestamp = plugin.settings.lastRefreshTimestamp;
+    const saveSettingsSpy = vi.spyOn(plugin, "saveSettings");
     plugin.settings.tikhub = {
       ...plugin.settings.tikhub,
       enabled: true,
@@ -1749,6 +1751,9 @@ describe("refreshFeeds() pipeline behavior", () => {
 
     expect(paidRefresh).not.toHaveBeenCalled();
     expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.validateSavedArticles).not.toHaveBeenCalled();
+    expect(saveSettingsSpy).toHaveBeenCalledOnce();
+    expect(plugin.settings.lastRefreshTimestamp).toBe(initialRefreshTimestamp);
     expect(plugin.settings.feeds).toEqual([]);
   });
 

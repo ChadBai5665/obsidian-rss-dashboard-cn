@@ -4890,8 +4890,8 @@ export default class RssDashboardPlugin extends Plugin {
         persistedCurrent === undefined;
       const unpersistedActiveXImport = persistedAtStart === undefined &&
         initialImportController !== undefined;
+      if (sourceDisappeared) return null;
       if (
-        sourceDisappeared ||
         unpersistedActiveXImport ||
         initialImportController?.signal.aborted ||
         (initialImportController &&
