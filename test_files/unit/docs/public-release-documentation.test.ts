@@ -68,4 +68,68 @@ describe("public release documentation", () => {
     expect(scorecard).not.toContain(obsoleteCommunityListing);
     expect(scorecard).not.toMatch(unfinished);
   });
+
+  it("documents the public-caption boundary without substituting metadata or speech recognition", () => {
+    const readme = read("README.md");
+    const privacy = read("docs/PRIVACY.zh-CN.md");
+    const troubleshooting = read("docs/TROUBLESHOOTING.zh-CN.md");
+
+    for (const document of [readme, privacy, troubleshooting]) {
+      expect(document).toContain("公开人工字幕");
+      expect(document).toContain("自动生成字幕");
+      expect(document).toMatch(/标题.*简介.*不会.*字幕/su);
+      expect(document).toMatch(/没有.*公开字幕.*无字幕/su);
+    }
+
+    expect(readme).toContain("不伪造字幕");
+    expect(readme).toContain("Whisper");
+    expect(readme).toContain("ASR");
+    expect(readme).toContain("FFmpeg");
+    expect(readme).toContain("Python");
+    expect(readme).toContain("Bun");
+    expect(readme).toContain("字幕 SaaS");
+  });
+
+  it("documents the optional yt-dlp process boundary and never presents it as required", () => {
+    const install = read("docs/INSTALL.zh-CN.md");
+    const privacy = read("docs/PRIVACY.zh-CN.md");
+    const security = read("docs/SECURITY.md");
+    const troubleshooting = read("docs/TROUBLESHOOTING.zh-CN.md");
+
+    for (const document of [install, privacy, security]) {
+      expect(document).toContain("可选本地回退");
+      expect(document).toContain("execFile");
+      expect(document).toContain("不启用 shell");
+      expect(document).toMatch(/不读取.*Cookie/su);
+      expect(document).toMatch(/不使用.*浏览器.*登录/su);
+      expect(document).toMatch(/不下载.*视频.*音频/su);
+    }
+
+    expect(install).toContain("yt-dlp --version");
+    expect(install).toContain("不会自动安装或更新");
+    expect(install).toMatch(/不是.*必需/su);
+    expect(install).toMatch(/固定.*参数/su);
+    expect(install).toMatch(/不写入.*输出文件/su);
+    expect(troubleshooting).toContain("yt-dlp --version");
+  });
+
+  it("documents browser-login separation and transcript cache lifecycle", () => {
+    const readme = read("README.md");
+    const install = read("docs/INSTALL.zh-CN.md");
+    const privacy = read("docs/PRIVACY.zh-CN.md");
+    const troubleshooting = read("docs/TROUBLESHOOTING.zh-CN.md");
+
+    for (const document of [readme, privacy, troubleshooting]) {
+      expect(document).toContain("系统默认浏览器");
+      expect(document).toMatch(/内嵌预览.*登录状态.*不相通/su);
+    }
+
+    expect(privacy).toContain(".rss-dashboard-data/content/{itemId}.md");
+    expect(privacy).toContain("youtube-transcript");
+    expect(privacy).toMatch(/读取.*缓存.*不会.*网络请求/su);
+    expect(privacy).toMatch(/重新获取字幕.*原子/su);
+    expect(privacy).toMatch(/schemaVersion 1.*继续读取.*不重写/su);
+    expect(install).toMatch(/字幕缓存.*原地保留/su);
+    expect(readme).toMatch(/重新获取字幕.*替换.*缓存/su);
+  });
 });

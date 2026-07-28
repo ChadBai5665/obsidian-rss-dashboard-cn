@@ -38,6 +38,20 @@ RSS Dashboard CN `0.1.0` 当前采用手动安装。你需要拿到同一版本�
 4. 只有需要手动摘要、翻译、核心观点或深度分析时才添加 AI 连接。
 5. TikHub 和 AI 密钥保存在知识库之外；未配置密钥不会影响普通采集。
 
+### 可选的 YouTube 字幕回退
+
+插件内置的公开字幕路径是首选，支持 YouTube 当前公开提供的人工字幕和自动生成字幕。`yt-dlp` 只是桌面端的可选本地回退，不是安装或使用插件的必需条件；插件不会自动安装或更新它，也不会在恢复本地字幕缓存时运行它。
+
+如果 macOS 上已经自行安装了 `yt-dlp`，可以在终端只检查版本：
+
+```bash
+yt-dlp --version
+```
+
+插件只用 Node.js `execFile` 调用找到的可执行文件，使用固定且不含用户命令文本的参数，不启用 shell。该回退只读取公开字幕元数据：不读取 Cookie，不使用浏览器登录，不下载视频或音频，不写入媒体、字幕或其他输出文件。它不是浏览器登录的替代方案。
+
+本版本不包含 Whisper、ASR、FFmpeg、Python、Bun 或字幕 SaaS。视频没有公开字幕时，安装 `yt-dlp` 也不等于能生成字幕。
+
 ## 更新
 
 已经完成首次安装后，推荐使用仓库提供的非破坏性本地更新器：
@@ -62,6 +76,7 @@ npm run install:local -- --target "/path/to/vault/.obsidian/plugins/rss-dashboar
 
 - 插件设置 `data.json`；
 - 知识库根目录的 `.rss-dashboard-data/` 采集记录、缓存、索引和状态；
+- `.rss-dashboard-data/content/` 下的全文与 YouTube 字幕缓存原地保留；
 - `信息收集/` 及其他目录中已经保存的 Markdown；
 - 知识库之外的 TikHub 与 AI 外部密钥文件。
 
