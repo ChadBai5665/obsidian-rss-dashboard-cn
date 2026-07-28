@@ -141,6 +141,7 @@ const MAX_PENDING_CHOICE_SETS = 100;
 export class YouTubeTranscriptService {
   private readonly inFlight = new Map<string, SharedWork>();
   private readonly pendingChoices = new Map<string, PendingChoiceSet>();
+  private readonly currentGenerations = new Map<string, symbol>();
   private readonly choiceTtlMs: number;
   private readonly maxPendingChoiceSets: number;
   private choiceSequence = 0;
@@ -178,6 +179,7 @@ export class YouTubeTranscriptService {
           { ...request, signal: sharedSignal },
           resourceKey,
           operationGeneration,
+          pendingGenerationAtStart,
         ),
       () => {
         const pending = this.pendingChoices.get(resourceKey);
@@ -189,6 +191,9 @@ export class YouTubeTranscriptService {
         ) {
           this.deletePendingChoiceSet(resourceKey);
         }
+        if (request.trackId === undefined) {
+          this.clearGeneration(resourceKey, operationGeneration);
+        }
       },
     );
   }
@@ -197,6 +202,7 @@ export class YouTubeTranscriptService {
     request: YouTubeTranscriptRequest,
     key: string,
     operationGeneration: symbol,
+    pendingGenerationAtStart: symbol | undefined,
   ): Promise<YouTubeTranscriptServiceResult> {
     let ownedChoiceGeneration = operationGeneration;
     try {
@@ -215,7 +221,9 @@ export class YouTubeTranscriptService {
           },
         );
         if (cachedResult) {
-          this.deletePendingChoiceSet(key);
+          if (pendingGenerationAtStart !== undefined) {
+            this.deletePendingChoiceSet(key, pendingGenerationAtStart);
+          }
           return cachedResult;
         }
       }
@@ -242,6 +250,9 @@ export class YouTubeTranscriptService {
           );
         } catch (error) {
           const primary = normalizeProviderError(error);
+          if (this.currentGenerations.get(key) !== pendingSet.generation) {
+            throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+          }
           if (
             registered.track.source !== "innertube" ||
             !isFallbackEligible(primary.code)
@@ -258,6 +269,7 @@ export class YouTubeTranscriptService {
       }
 
       this.deletePendingChoiceSet(key);
+      this.currentGenerations.set(key, operationGeneration);
       try {
         return await this.runProvider(
           request,
@@ -268,6 +280,9 @@ export class YouTubeTranscriptService {
         );
       } catch (error) {
         const primary = normalizeProviderError(error);
+        if (this.currentGenerations.get(key) !== operationGeneration) {
+          throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+        }
         if (!isFallbackEligible(primary.code)) throw primary;
         return await this.runFallback(
           request,
@@ -277,7 +292,7 @@ export class YouTubeTranscriptService {
         );
       }
     } catch (error) {
-      this.clearPendingChoices(key, ownedChoiceGeneration);
+      this.clearGeneration(key, ownedChoiceGeneration);
       throw error;
     }
   }
@@ -333,7 +348,7 @@ export class YouTubeTranscriptService {
         await this.repairMetadata(request.itemId, path);
       },
     );
-    this.clearPendingChoices(key, operationGeneration);
+    this.clearGeneration(key, operationGeneration);
     return { status: "ready", source: "fresh", content };
   }
 
@@ -380,6 +395,9 @@ export class YouTubeTranscriptService {
     provider: TranscriptProvider,
     tracks: readonly YouTubeCaptionTrack[],
   ): YouTubeTranscriptServiceResult {
+    if (this.currentGenerations.get(key) !== operationGeneration) {
+      throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+    }
     const registered = new Map<string, RegisteredChoice>();
     const choices = tracks.map((candidate) => {
       const id = `track-${++this.choiceSequence}`;
@@ -394,7 +412,7 @@ export class YouTubeTranscriptService {
     });
     this.deletePendingChoiceSet(key);
     const expirationTimer = window.setTimeout(() => {
-      this.clearPendingChoices(key, operationGeneration);
+      this.clearGeneration(key, operationGeneration);
     }, this.choiceTtlMs);
     this.pendingChoices.set(key, {
       generation: operationGeneration,
@@ -522,6 +540,13 @@ export class YouTubeTranscriptService {
     this.deletePendingChoiceSet(key, generation);
   }
 
+  private clearGeneration(key: string, generation: symbol): void {
+    this.clearPendingChoices(key, generation);
+    if (this.currentGenerations.get(key) === generation) {
+      this.currentGenerations.delete(key);
+    }
+  }
+
   private deletePendingChoiceSet(key: string, generation?: symbol): void {
     const pending = this.pendingChoices.get(key);
     if (
@@ -532,6 +557,9 @@ export class YouTubeTranscriptService {
     }
     window.clearTimeout(pending.expirationTimer);
     this.pendingChoices.delete(key);
+    if (this.currentGenerations.get(key) === pending.generation) {
+      this.currentGenerations.delete(key);
+    }
   }
 }
 

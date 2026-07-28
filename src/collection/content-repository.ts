@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { normalizePath, type DataAdapter, type Vault } from "obsidian";
 import { isValidYouTubeVideoId } from "../youtube-transcript/transcript-types";
 
@@ -31,8 +32,13 @@ export type CachedItemContent =
 export interface ContentItemTransaction {
   read(): Promise<CachedItemContent | null>;
   write(content: CachedItemContent): Promise<string>;
-  remove(): Promise<void>;
   pathFor(): string;
+}
+
+interface ActiveContentTransaction {
+  vault: object;
+  key: string;
+  active: boolean;
 }
 
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/;
@@ -51,6 +57,9 @@ const TRANSCRIPT_FIELDS = new Set([
   "text",
 ]);
 const vaultItemQueues = new WeakMap<object, Map<string, Promise<void>>>();
+const activeContentTransactions = new AsyncLocalStorage<
+  readonly ActiveContentTransaction[]
+>();
 let transactionSequence = 0;
 
 /**
@@ -87,9 +96,8 @@ export class ContentRepository {
 
   async remove(itemId: string): Promise<void> {
     assertStableItemId(itemId);
-    await this.transaction(itemId, async (transaction) =>
-      await transaction.remove(),
-    );
+    this.assertNotReentrant(itemId);
+    await this.withItemLock(itemId, async () => await this.removeInternal(itemId));
   }
 
   pathFor(itemId: string): string {
@@ -106,21 +114,61 @@ export class ContentRepository {
     operation: (transaction: ContentItemTransaction) => Promise<T>,
   ): Promise<T> {
     assertStableItemId(itemId);
+    this.assertNotReentrant(itemId);
     return await this.withItemLock(itemId, async () => {
+      let active = true;
+      const assertActive = () => {
+        if (!active) throw new Error("Content transaction has ended");
+      };
       const transaction: ContentItemTransaction = Object.freeze({
-        read: async () => await this.readInternal(itemId),
+        read: async () => {
+          assertActive();
+          return await this.readInternal(itemId);
+        },
         write: async (content: CachedItemContent) => {
+          assertActive();
           assertCachedItemContent(content);
           if (content.itemId !== itemId) {
             throw new Error("Content transaction item mismatch");
           }
           return await this.writeInternal(content);
         },
-        remove: async () => await this.removeInternal(itemId),
-        pathFor: () => this.contentPath(itemId),
+        pathFor: () => {
+          assertActive();
+          return this.contentPath(itemId);
+        },
       });
-      return await operation(transaction);
+      const inherited = activeContentTransactions.getStore() ?? [];
+      const context: ActiveContentTransaction = {
+        vault: this.vault,
+        key: this.itemLockKey(itemId),
+        active: true,
+      };
+      try {
+        return await activeContentTransactions.run(
+          [...inherited, context],
+          async () => await operation(transaction),
+        );
+      } finally {
+        active = false;
+        context.active = false;
+      }
     });
+  }
+
+  private assertNotReentrant(itemId: string): void {
+    const key = this.itemLockKey(itemId);
+    if (
+      (activeContentTransactions.getStore() ?? []).some(
+        (entry) => entry.active && entry.vault === this.vault && entry.key === key,
+      )
+    ) {
+      throw new Error("Reentrant content transaction is not allowed");
+    }
+  }
+
+  private itemLockKey(itemId: string): string {
+    return `${this.dataRoot}\0${itemId}`;
   }
 
   private async withItemLock<T>(
@@ -129,7 +177,7 @@ export class ContentRepository {
   ): Promise<T> {
     const queues = vaultItemQueues.get(this.vault) ?? new Map<string, Promise<void>>();
     vaultItemQueues.set(this.vault, queues);
-    const key = `${this.dataRoot}\0${itemId}`;
+    const key = this.itemLockKey(itemId);
     const prior = queues.get(key) ?? Promise.resolve();
     const running = prior.catch(() => undefined).then(operation);
     const settled = running.then(() => undefined, () => undefined);

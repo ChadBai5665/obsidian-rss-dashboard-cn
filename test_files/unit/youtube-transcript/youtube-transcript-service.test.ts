@@ -1122,4 +1122,158 @@ describe("YouTubeTranscriptService", () => {
     ).rejects.toMatchObject({ code: "temporarily-unavailable" });
     expect(fetchCalls).toBe(1);
   });
+
+  it("prevents an older delayed language refresh from registering over a newer generation", async () => {
+    let releaseOlder!: (tracks: YouTubeCaptionTrack[]) => void;
+    let markOlderStarted!: () => void;
+    const olderStarted = new Promise<void>((resolve) => {
+      markOlderStarted = resolve;
+    });
+    const olderTracks = [
+      track({ languageCode: "en-US", languageName: "Older English US" }),
+      track({
+        languageCode: "en-GB",
+        languageName: "Older English UK",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-GB",
+      }),
+    ];
+    const newerTracks = [
+      track({ languageCode: "zh-CN", languageName: "新中文 A" }),
+      track({
+        languageCode: "zh-TW",
+        languageName: "新中文 B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=zh-TW",
+      }),
+    ];
+    let listCalls = 0;
+    const innerTube: TranscriptProvider = {
+      async listTracks() {
+        listCalls += 1;
+        if (listCalls === 1) {
+          markOlderStarted();
+          return await new Promise<YouTubeCaptionTrack[]>((resolve) => {
+            releaseOlder = resolve;
+          });
+        }
+        return newerTracks;
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+    };
+    const { service } = createService({ innerTube });
+    const older = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "en",
+    });
+    await olderStarted;
+    const newer = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "zh",
+    });
+    if (newer.status !== "selection-required") throw new Error("expected choices");
+    releaseOlder(olderTracks);
+
+    await expect(older).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: newer.tracks[0].id,
+      }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { languageName: "新中文 A" },
+    });
+  });
+
+  it("prevents an older delayed fallback from replacing newer InnerTube choices", async () => {
+    let innerCalls = 0;
+    const newerTracks = [
+      track({ languageCode: "zh-CN", languageName: "新中文 A" }),
+      track({
+        languageCode: "zh-TW",
+        languageName: "新中文 B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=zh-TW",
+      }),
+    ];
+    const innerTube: TranscriptProvider = {
+      async listTracks() {
+        innerCalls += 1;
+        if (innerCalls === 1) {
+          throw new YouTubeTranscriptError("temporarily-unavailable");
+        }
+        return newerTracks;
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+    };
+    let releaseFallback!: (tracks: YouTubeCaptionTrack[]) => void;
+    let markFallbackStarted!: () => void;
+    const fallbackStarted = new Promise<void>((resolve) => {
+      markFallbackStarted = resolve;
+    });
+    class DelayedFallbackProvider extends FakeOptionalProvider {
+      override async listTracks(): Promise<YouTubeCaptionTrack[]> {
+        this.listCalls += 1;
+        markFallbackStarted();
+        return await new Promise<YouTubeCaptionTrack[]>((resolve) => {
+          releaseFallback = resolve;
+        });
+      }
+
+      override async fetchTrack(selectedTrack: YouTubeCaptionTrack) {
+        this.fetchCalls += 1;
+        return transcript(selectedTrack);
+      }
+    }
+    const ytDlp = new DelayedFallbackProvider(true);
+    const { service } = createService({ innerTube, ytDlp });
+    const older = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "en",
+    });
+    await fallbackStarted;
+    const newer = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "zh",
+    });
+    if (newer.status !== "selection-required") throw new Error("expected choices");
+    releaseFallback([
+      track({
+        source: "yt-dlp",
+        languageCode: "en-US",
+        languageName: "Older fallback US",
+      }),
+      track({
+        source: "yt-dlp",
+        languageCode: "en-GB",
+        languageName: "Older fallback UK",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-GB",
+      }),
+    ]);
+
+    await expect(older).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: newer.tracks[0].id,
+      }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { languageName: "新中文 A" },
+    });
+    expect(ytDlp.listCalls).toBe(1);
+    expect(ytDlp.fetchCalls).toBe(0);
+  });
 });

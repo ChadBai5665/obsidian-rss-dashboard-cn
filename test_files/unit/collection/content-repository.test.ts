@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ContentRepository,
   type CachedItemContent,
+  type ContentItemTransaction,
   type FullTextCachedItemContent,
   type YouTubeTranscriptCachedItemContent,
 } from "../../../src/collection/content-repository";
@@ -388,6 +389,59 @@ describe("ContentRepository", () => {
       const stored = await transcriptRepository.read(ITEM_ID);
       expect(stored?.contentBasis).toBe(expectedBasis);
       expect(metadataBasis).toBe(expectedBasis);
+    },
+  );
+
+  it("revokes an escaped transaction handle after success and failure", async () => {
+    const repository = createRepository(new InMemoryAdapter());
+    let successfulHandle: ContentItemTransaction | undefined;
+    await repository.transaction(ITEM_ID, async (transaction) => {
+      successfulHandle = transaction;
+      await transaction.write(createContent());
+    });
+    await expect(successfulHandle?.read()).rejects.toThrow(
+      "Content transaction has ended",
+    );
+    await expect(
+      successfulHandle?.write(createContent({ text: "escaped write" })),
+    ).rejects.toThrow("Content transaction has ended");
+
+    let failedHandle: ContentItemTransaction | undefined;
+    await expect(
+      repository.transaction(ITEM_ID, async (transaction) => {
+        failedHandle = transaction;
+        throw new Error("callback failed");
+      }),
+    ).rejects.toThrow("callback failed");
+    await expect(failedHandle?.read()).rejects.toThrow(
+      "Content transaction has ended",
+    );
+
+    await expect(
+      repository.transaction(ITEM_ID, async (transaction) =>
+        await transaction.write(createContent({ text: "next transaction" })),
+      ),
+    ).resolves.toBe(`${DATA_ROOT}/content/${ITEM_ID}.md`);
+  });
+
+  it.each(["read", "write", "transaction"] as const)(
+    "fails fast when a transaction callback re-enters public %s",
+    async (operation) => {
+      const repository = createRepository(new InMemoryAdapter());
+
+      await expect(
+        repository.transaction(ITEM_ID, async () => {
+          if (operation === "read") return await repository.read(ITEM_ID);
+          if (operation === "write") {
+            return await repository.write(createContent());
+          }
+          return await repository.transaction(ITEM_ID, async () => undefined);
+        }),
+      ).rejects.toThrow("Reentrant content transaction is not allowed");
+
+      await expect(repository.write(createContent())).resolves.toBe(
+        `${DATA_ROOT}/content/${ITEM_ID}.md`,
+      );
     },
   );
 });
