@@ -1301,8 +1301,6 @@ export default class RssDashboardPlugin extends Plugin {
       };
     }
 
-    this.youtubeTranscriptRuntime?.service.dispose();
-
     const contentRepository = new ContentRepository(
       this.app.vault,
       dataRoot,
@@ -1331,8 +1329,11 @@ export default class RssDashboardPlugin extends Plugin {
       metadataRepository,
       clock: () => new Date(),
     });
-    this.youtubeTranscriptRuntime = { dataRoot, service, contentRepository };
-    return { ...this.youtubeTranscriptRuntime, identity: dataRoot };
+    const previous = this.youtubeTranscriptRuntime;
+    const candidate = { dataRoot, service, contentRepository };
+    this.youtubeTranscriptRuntime = candidate;
+    previous?.service.dispose();
+    return { ...candidate, identity: dataRoot };
   }
 
   private getSubscriptionService(): SubscriptionService {

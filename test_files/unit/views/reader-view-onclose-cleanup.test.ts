@@ -133,6 +133,17 @@ describe("ReaderView onClose cleanup", () => {
   it("aborts and destroys the inline transcript panel on close", async () => {
     let request: YouTubeTranscriptRequest | undefined;
     const never = new Promise<never>(() => undefined);
+    const transcriptRuntime = {
+      identity: "test-root",
+      service: {
+        get: vi.fn(async (nextRequest: YouTubeTranscriptRequest) => {
+          request = nextRequest;
+          return await never;
+        }),
+        revokeChoiceSet: vi.fn(),
+      },
+      contentRepository: { read: vi.fn(async () => null) },
+    };
     const transcriptReader = new ReaderView(
       mockLeaf as never,
       { ...DEFAULT_SETTINGS, useWebViewer: false },
@@ -141,17 +152,7 @@ describe("ReaderView onClose cleanup", () => {
       vi.fn(),
       {
         youtubeTranscript: {
-          resolveRuntime: () => ({
-            identity: "test-root",
-            service: {
-              get: vi.fn(async (nextRequest: YouTubeTranscriptRequest) => {
-                request = nextRequest;
-                return await never;
-              }),
-              revokeChoiceSet: vi.fn(),
-            },
-            contentRepository: { read: vi.fn(async () => null) },
-          }),
+          resolveRuntime: () => transcriptRuntime,
         },
       },
     );

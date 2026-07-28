@@ -70,6 +70,11 @@ function createPanel(options: {
   const openExternal = vi.fn();
   const onReady = vi.fn();
   const revokeChoiceSet = vi.fn();
+  const runtime = {
+    identity: "test-root",
+    service: { get, revokeChoiceSet } satisfies YouTubeTranscriptPanelService,
+    loadCached,
+  };
   const panel = new YouTubeTranscriptPanel({
     container,
     locale: "en",
@@ -78,11 +83,7 @@ function createPanel(options: {
       videoId: VIDEO_ID,
       sourceUrl: `https://www.youtube.com/watch?v=${VIDEO_ID}`,
     },
-    resolveRuntime: () => ({
-      identity: "test-root",
-      service: { get, revokeChoiceSet } satisfies YouTubeTranscriptPanelService,
-      loadCached,
-    }),
+    resolveRuntime: () => runtime,
     openExternal,
     onReady,
   });
@@ -351,15 +352,16 @@ describe("YouTubeTranscriptPanel", () => {
       ],
     } as const));
     const container = document.createElement("div");
+    const runtime = {
+      identity: "root-a",
+      service: { get, revokeChoiceSet },
+      loadCached: async () => null,
+    };
     const panel = new YouTubeTranscriptPanel({
       container,
       locale: "en",
       request: { itemId: ITEM_ID, videoId: VIDEO_ID },
-      resolveRuntime: () => ({
-        identity: "root-a",
-        service: { get, revokeChoiceSet },
-        loadCached: async () => null,
-      }),
+      resolveRuntime: () => runtime,
       openExternal: vi.fn(),
     } as never);
 
@@ -377,13 +379,201 @@ describe("YouTubeTranscriptPanel", () => {
     expect(container.textContent).toContain("YouTube transcript");
     expect(onReady).toHaveBeenCalledTimes(1);
 
-    panel.refreshLocalization(createTranslator("zh-CN"));
+    panel.refreshLocalization(createTranslator("zh-CN"), "zh-CN");
 
     expect(container.textContent).toContain("YouTube 字幕");
     expect(container.textContent).toContain("A durable public transcript.");
     expect(container.textContent).toContain("重新获取字幕");
+    expect(
+      container.querySelector(".rss-youtube-transcript-meta")?.textContent,
+    ).toContain(new Date(transcript().fetchedAt).toLocaleString("zh-CN"));
     expect(loadCached).toHaveBeenCalledTimes(1);
     expect(get).not.toHaveBeenCalled();
     expect(onReady).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops an in-flight ready result when the data-root runtime changes", async () => {
+    const pending = deferred<YouTubeTranscriptServiceResult>();
+    const rootAGet = vi.fn(async () => await pending.promise);
+    const rootBGet = vi.fn(async () => ({
+      status: "ready" as const,
+      source: "fresh" as const,
+      content: transcript({ text: "New root only." }),
+    }));
+    let runtime = {
+      identity: "root-a",
+      service: { get: rootAGet, revokeChoiceSet: vi.fn() },
+      loadCached: vi.fn(async () => null),
+    };
+    const container = document.createElement("div");
+    const onReady = vi.fn();
+    const panel = new YouTubeTranscriptPanel({
+      container,
+      locale: "en",
+      request: { itemId: ITEM_ID, videoId: VIDEO_ID },
+      resolveRuntime: () => runtime,
+      openExternal: vi.fn(),
+      onReady,
+    });
+
+    const fetching = panel.fetch();
+    runtime = {
+      identity: "root-b",
+      service: { get: rootBGet, revokeChoiceSet: vi.fn() },
+      loadCached: vi.fn(async () => null),
+    };
+    pending.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript({ text: "Stale root transcript." }),
+    });
+    await fetching;
+
+    expect(state(container)).toBe("idle");
+    expect(container.textContent).not.toContain("Stale root transcript.");
+    expect(onReady).not.toHaveBeenCalled();
+    expect(rootBGet).not.toHaveBeenCalled();
+  });
+
+  it("drops an in-flight result when the runtime is replaced at the same data root", async () => {
+    const pending = deferred<YouTubeTranscriptServiceResult>();
+    let runtime = {
+      identity: "root-a",
+      service: {
+        get: vi.fn(async () => await pending.promise),
+        revokeChoiceSet: vi.fn(),
+      },
+      loadCached: vi.fn(async () => null),
+    };
+    const container = document.createElement("div");
+    const onReady = vi.fn();
+    const panel = new YouTubeTranscriptPanel({
+      container,
+      locale: "en",
+      request: { itemId: ITEM_ID, videoId: VIDEO_ID },
+      resolveRuntime: () => runtime,
+      openExternal: vi.fn(),
+      onReady,
+    });
+
+    const fetching = panel.fetch();
+    runtime = {
+      identity: "root-a",
+      service: { get: vi.fn(), revokeChoiceSet: vi.fn() },
+      loadCached: vi.fn(async () => null),
+    };
+    pending.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript({ text: "Stale same-root transcript." }),
+    });
+    await fetching;
+
+    expect(state(container)).toBe("idle");
+    expect(container.textContent).not.toContain("Stale same-root transcript.");
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  it("drops a stale cache when the data root changes during cache restore", async () => {
+    const cached = deferred<YouTubeTranscriptCachedItemContent | null>();
+    let runtime = {
+      identity: "root-a",
+      service: { get: vi.fn(), revokeChoiceSet: vi.fn() },
+      loadCached: vi.fn(async () => await cached.promise),
+    };
+    const container = document.createElement("div");
+    const onReady = vi.fn();
+    const panel = new YouTubeTranscriptPanel({
+      container,
+      locale: "en",
+      request: { itemId: ITEM_ID, videoId: VIDEO_ID },
+      resolveRuntime: () => runtime,
+      openExternal: vi.fn(),
+      onReady,
+    });
+
+    const restoring = panel.showCached();
+    runtime = {
+      identity: "root-b",
+      service: { get: vi.fn(), revokeChoiceSet: vi.fn() },
+      loadCached: vi.fn(async () => null),
+    };
+    cached.resolve(transcript({ text: "Stale cached transcript." }));
+    await restoring;
+
+    expect(state(container)).toBe("idle");
+    expect(container.textContent).not.toContain("Stale cached transcript.");
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  it("drops an in-flight failure when the data-root runtime changes", async () => {
+    const pending = deferred<YouTubeTranscriptServiceResult>();
+    let runtime = {
+      identity: "root-a",
+      service: {
+        get: vi.fn(async () => await pending.promise),
+        revokeChoiceSet: vi.fn(),
+      },
+      loadCached: vi.fn(async () => null),
+    };
+    const container = document.createElement("div");
+    const panel = new YouTubeTranscriptPanel({
+      container,
+      locale: "en",
+      request: { itemId: ITEM_ID, videoId: VIDEO_ID },
+      resolveRuntime: () => runtime,
+      openExternal: vi.fn(),
+    });
+
+    const fetching = panel.fetch();
+    runtime = {
+      identity: "root-b",
+      service: { get: vi.fn(), revokeChoiceSet: vi.fn() },
+      loadCached: vi.fn(async () => null),
+    };
+    pending.reject(new YouTubeTranscriptServiceError("timeout"));
+    await fetching;
+
+    expect(state(container)).toBe("idle");
+    expect(container.textContent).not.toContain("timed out");
+  });
+
+  it("shows a current error instead of stale text when runtime resolution becomes invalid", async () => {
+    const pending = deferred<YouTubeTranscriptServiceResult>();
+    let invalid = false;
+    const runtime = {
+      identity: "root-a",
+      service: {
+        get: vi.fn(async () => await pending.promise),
+        revokeChoiceSet: vi.fn(),
+      },
+      loadCached: vi.fn(async () => null),
+    };
+    const container = document.createElement("div");
+    const onReady = vi.fn();
+    const panel = new YouTubeTranscriptPanel({
+      container,
+      locale: "en",
+      request: { itemId: ITEM_ID, videoId: VIDEO_ID },
+      resolveRuntime: () => {
+        if (invalid) throw new Error("Invalid data root");
+        return runtime;
+      },
+      openExternal: vi.fn(),
+      onReady,
+    });
+
+    const fetching = panel.fetch();
+    invalid = true;
+    pending.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript({ text: "Stale invalid-root text." }),
+    });
+    await fetching;
+
+    expect(state(container)).toBe("temporarily-unavailable");
+    expect(container.textContent).not.toContain("Stale invalid-root text.");
+    expect(onReady).not.toHaveBeenCalled();
   });
 });

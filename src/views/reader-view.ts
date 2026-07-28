@@ -1147,6 +1147,7 @@ export class ReaderView extends ItemView {
     this.videoPlayer?.refreshLocalization(this.settings.locale ?? "zh-CN");
     this.transcriptPanel?.refreshLocalization(
       createTranslator(this.settings.locale ?? "zh-CN"),
+      this.settings.locale ?? "zh-CN",
     );
     this.updateToggleButtons();
   }

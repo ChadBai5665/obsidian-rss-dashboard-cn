@@ -171,6 +171,7 @@ describe("runtime transcript HTTPS transport", () => {
     await expect(pending).rejects.toThrow("Transcript request aborted");
     expect(request.destroy).toHaveBeenCalled();
     expect(request.disarmTimeout).toHaveBeenCalledTimes(1);
+    request.emit("close");
     expect(request.listenerCount("error")).toBe(0);
   });
 
@@ -228,6 +229,8 @@ describe("runtime transcript HTTPS transport", () => {
     })).rejects.toThrow("Invalid transcript response body");
     expect(request.destroy).toHaveBeenCalledTimes(1);
     expect(request.disarmTimeout).toHaveBeenCalledTimes(1);
+    request.emit("close");
+    response.emit("close");
     expect(response.listenerCount("data")).toBe(0);
     expect(response.listenerCount("end")).toBe(0);
     expect(response.listenerCount("error")).toBe(0);
@@ -254,6 +257,8 @@ describe("runtime transcript HTTPS transport", () => {
       headers: {},
     })).rejects.toThrow("Transcript response failed");
     expect(request.disarmTimeout).toHaveBeenCalledTimes(1);
+    request.emit("close");
+    response.emit("close");
     expect(request.listenerCount("error")).toBe(0);
     expect(response.listenerCount("data")).toBe(0);
     expect(response.listenerCount("end")).toBe(0);
@@ -275,6 +280,7 @@ describe("runtime transcript HTTPS transport", () => {
     await expect(pending).rejects.toThrow("Transcript request timed out");
     expect(request.destroy).toHaveBeenCalledTimes(1);
     expect(request.disarmTimeout).toHaveBeenCalledTimes(1);
+    request.emit("close");
     expect(request.listenerCount("error")).toBe(0);
   });
 
@@ -304,9 +310,110 @@ describe("runtime transcript HTTPS transport", () => {
     })).rejects.toThrow("Invalid transcript response body");
     expect(request.destroy).toHaveBeenCalledTimes(1);
     expect(request.disarmTimeout).toHaveBeenCalledTimes(1);
+    request.emit("close");
+    response.emit("close");
     expect(response.listenerCount("data")).toBe(0);
     expect(response.listenerCount("end")).toBe(0);
     expect(response.listenerCount("error")).toBe(0);
     concat.mockRestore();
+  });
+
+  it("keeps a terminal request error sink until close after caller abort", async () => {
+    const request = new FakeRequest();
+    let hadTerminalSink = false;
+    request.destroy.mockImplementation(() => {
+      queueMicrotask(() => {
+        hadTerminalSink = request.listenerCount("error") > 0;
+        if (hadTerminalSink) request.emit("error", new Error("ECONNRESET"));
+        request.emit("close");
+      });
+    });
+    const transport = createRuntimeTranscriptHttpTransport({
+      request: vi.fn<RuntimeTranscriptRequestFactory>(() => request),
+    });
+    const controller = new AbortController();
+    const pending = transport({
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      method: "GET",
+      headers: {},
+      signal: controller.signal,
+    });
+
+    controller.abort();
+
+    await expect(pending).rejects.toThrow("Transcript request aborted");
+    await Promise.resolve();
+    expect(hadTerminalSink).toBe(true);
+    expect(request.listenerCount("error")).toBe(0);
+  });
+
+  it("sinks late request and response errors after invalid chunks destroy the socket", async () => {
+    const request = new FakeRequest();
+    let response!: FakeResponse;
+    let requestSinkPresent = false;
+    let responseSinkPresent = false;
+    request.destroy.mockImplementation(() => {
+      queueMicrotask(() => {
+        requestSinkPresent = request.listenerCount("error") > 0;
+        responseSinkPresent = response.listenerCount("error") > 0;
+        if (requestSinkPresent) request.emit("error", new Error("ECONNRESET"));
+        if (responseSinkPresent) response.emit("error", new Error("aborted"));
+        request.emit("close");
+        response.emit("close");
+      });
+    });
+    const transport = createRuntimeTranscriptHttpTransport({
+      request: vi.fn<RuntimeTranscriptRequestFactory>(
+        (_url, _options, onResponse) => {
+          response = new FakeResponse(200, {});
+          queueMicrotask(() => {
+            onResponse(response);
+            response.emit("data", { invalid: true });
+          });
+          return request;
+        },
+      ),
+    });
+
+    await expect(transport({
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      method: "GET",
+      headers: {},
+    })).rejects.toThrow("Invalid transcript response body");
+    await Promise.resolve();
+
+    expect(requestSinkPresent).toBe(true);
+    expect(responseSinkPresent).toBe(true);
+    expect(request.listenerCount("error")).toBe(0);
+    expect(response.listenerCount("error")).toBe(0);
+  });
+
+  it("destroys a constructed request when request.end throws synchronously", async () => {
+    const request = new FakeRequest();
+    let hadTerminalSink = false;
+    request.end.mockImplementationOnce(() => {
+      throw new Error("end failed");
+    });
+    request.destroy.mockImplementation(() => {
+      queueMicrotask(() => {
+        hadTerminalSink = request.listenerCount("error") > 0;
+        if (hadTerminalSink) request.emit("error", new Error("ECONNRESET"));
+        request.emit("close");
+      });
+    });
+    const transport = createRuntimeTranscriptHttpTransport({
+      request: vi.fn<RuntimeTranscriptRequestFactory>(() => request),
+    });
+
+    await expect(transport({
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      method: "GET",
+      headers: {},
+    })).rejects.toThrow("Transcript request failed");
+    await Promise.resolve();
+
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    expect(hadTerminalSink).toBe(true);
+    expect(request.listenerCount("error")).toBe(0);
   });
 });

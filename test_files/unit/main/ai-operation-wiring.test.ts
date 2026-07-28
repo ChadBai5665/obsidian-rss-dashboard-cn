@@ -149,6 +149,14 @@ describe("production AI operation wiring", () => {
     };
     const first = privatePlugin.getYouTubeTranscriptRuntime();
     const disposeFirst = vi.spyOn(first.service, "dispose");
+    let rootObservedDuringDispose: string | undefined;
+    disposeFirst.mockImplementation(() => {
+      rootObservedDuringDispose = (
+        test.plugin as unknown as {
+          youtubeTranscriptRuntime: { dataRoot: string } | null;
+        }
+      ).youtubeTranscriptRuntime?.dataRoot;
+    });
     test.settings.collection.dataFolder = ".rss-dashboard-data-next";
 
     const current = privatePlugin.getYouTubeTranscriptRuntime();
@@ -162,10 +170,63 @@ describe("production AI operation wiring", () => {
     expect(current).not.toBe(first);
     expect(current.dataRoot).toBe(".rss-dashboard-data-next");
     expect(disposeFirst).toHaveBeenCalledTimes(1);
+    expect(rootObservedDuringDispose).toBe(".rss-dashboard-data-next");
     expect(modalOptions.contentSelector.contentRepository).toBe(
       current.contentRepository,
     );
     modal?.close();
+  });
+
+  it("keeps the old transcript runtime intact when a candidate data root is invalid", async () => {
+    const test = harness();
+    const privatePlugin = test.plugin as unknown as {
+      youtubeTranscriptRuntime: {
+        dataRoot: string;
+        service: {
+          dispose(): void;
+          get(request: {
+            itemId: string;
+            videoId: string;
+            refresh?: boolean;
+          }): Promise<unknown>;
+        };
+        contentRepository: unknown;
+      } | null;
+      getYouTubeTranscriptRuntime(): {
+        dataRoot: string;
+        service: {
+          dispose(): void;
+          get(request: {
+            itemId: string;
+            videoId: string;
+            refresh?: boolean;
+          }): Promise<unknown>;
+        };
+        contentRepository: unknown;
+      };
+    };
+    const original = privatePlugin.getYouTubeTranscriptRuntime();
+    const disposeOriginal = vi.spyOn(original.service, "dispose");
+    const originalField = privatePlugin.youtubeTranscriptRuntime;
+    test.settings.collection.dataFolder = "../invalid-root";
+
+    expect(() => privatePlugin.getYouTubeTranscriptRuntime()).toThrow(
+      "Invalid data root",
+    );
+
+    expect(disposeOriginal).not.toHaveBeenCalled();
+    expect(privatePlugin.youtubeTranscriptRuntime).toBe(originalField);
+    test.settings.collection.dataFolder = original.dataRoot;
+    const restored = privatePlugin.getYouTubeTranscriptRuntime();
+    expect(restored.service).toBe(original.service);
+    expect(restored.contentRepository).toBe(original.contentRepository);
+    await expect(
+      restored.service.get({
+        itemId: "invalid-item-id",
+        videoId: "dQw4w9WgXcQ",
+        refresh: true,
+      }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
   });
 
   it("opens AI settings before constructing secrets or touching vault content when no connection is enabled", () => {

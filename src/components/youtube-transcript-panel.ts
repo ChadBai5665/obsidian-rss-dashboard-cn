@@ -22,7 +22,7 @@ export interface YouTubeTranscriptPanelController {
   fetch(): Promise<void>;
   refresh(): Promise<void>;
   selectTrack(trackId: string): Promise<void>;
-  refreshLocalization(translator: Translator): void;
+  refreshLocalization(translator: Translator, locale: Locale): void;
   abort(): void;
   destroy(): void;
 }
@@ -85,6 +85,7 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
   private readonly root: HTMLElement;
   private readonly dom: Document;
   private t: Translator;
+  private locale: Locale;
   private activeController: AbortController | null = null;
   private runtimeIdentity: string | null = null;
   private choiceLease: {
@@ -97,6 +98,7 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
 
   constructor(private readonly options: YouTubeTranscriptPanelOptions) {
     this.t = createTranslator(options.locale);
+    this.locale = options.locale;
     this.dom = options.container.ownerDocument;
     this.root = this.dom.createElement("section");
     this.root.className = "rss-youtube-transcript-panel";
@@ -115,7 +117,7 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     } catch {
       content = null;
     }
-    if (!this.isCurrent(operation)) return;
+    if (!this.confirmRuntime(runtime, operation)) return;
     if (!content || !this.matchesRequest(content)) {
       this.renderIdle();
       return;
@@ -141,9 +143,10 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     );
   }
 
-  refreshLocalization(translator: Translator): void {
+  refreshLocalization(translator: Translator, locale: Locale): void {
     if (this.destroyed) return;
     this.t = translator;
+    this.locale = locale;
     this.renderSnapshot();
   }
 
@@ -193,11 +196,11 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
         ...(request.trackId === undefined ? {} : { trackId: request.trackId }),
         signal: controller.signal,
       });
-      if (!this.isCurrent(operation)) return;
+      if (!this.confirmRuntime(runtime, operation)) return;
       this.activeController = null;
       this.renderResult(result, runtime.service);
     } catch (error) {
-      if (!this.isCurrent(operation)) return;
+      if (!this.confirmRuntime(runtime, operation)) return;
       this.activeController = null;
       this.renderError(error);
     }
@@ -271,7 +274,7 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     const fetched = new Date(content.fetchedAt);
     const fetchedText = Number.isNaN(fetched.getTime())
       ? content.fetchedAt
-      : fetched.toLocaleString(this.options.locale);
+      : fetched.toLocaleString(this.locale);
     meta.textContent = this.t("transcript.meta", {
       language: content.languageName,
       time: fetchedText,
@@ -416,6 +419,40 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
 
   private isCurrent(operation: number): boolean {
     return !this.destroyed && operation === this.operationSequence;
+  }
+
+  private confirmRuntime(
+    expected: YouTubeTranscriptPanelRuntime,
+    operation: number,
+  ): boolean {
+    if (!this.isCurrent(operation)) return false;
+    let resolved: {
+      runtime: YouTubeTranscriptPanelRuntime;
+      changed: boolean;
+    };
+    try {
+      resolved = this.resolveRuntime();
+    } catch {
+      if (!this.isCurrent(operation)) return false;
+      this.operationSequence += 1;
+      this.activeController?.abort();
+      this.activeController = null;
+      this.revokeChoiceLease();
+      this.renderError(
+        new YouTubeTranscriptServiceError("temporarily-unavailable"),
+      );
+      return false;
+    }
+    if (
+      resolved.changed ||
+      resolved.runtime.identity !== expected.identity ||
+      resolved.runtime.service !== expected.service
+    ) {
+      this.activeController = null;
+      if (!this.destroyed) this.renderIdle();
+      return false;
+    }
+    return this.isCurrent(operation);
   }
 
   private resolveRuntime(): {

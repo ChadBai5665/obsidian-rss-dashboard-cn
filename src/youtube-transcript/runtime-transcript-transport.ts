@@ -13,6 +13,7 @@ export interface RuntimeTranscriptResponse {
   on(event: "data", listener: (chunk: unknown) => void): this;
   on(event: "end", listener: () => void): this;
   on(event: "error", listener: (error: Error) => void): this;
+  once(event: "close", listener: () => void): this;
   off(event: "data", listener: (chunk: unknown) => void): this;
   off(event: "end", listener: () => void): this;
   off(event: "error", listener: (error: Error) => void): this;
@@ -20,6 +21,7 @@ export interface RuntimeTranscriptResponse {
 
 export interface RuntimeTranscriptRequest {
   on(event: "error", listener: (error: Error) => void): this;
+  once(event: "close", listener: () => void): this;
   off(event: "error", listener: (error: Error) => void): this;
   armTimeout(timeoutMs: number, listener: () => void): this;
   disarmTimeout(): void;
@@ -73,6 +75,10 @@ const defaultRequest: RuntimeTranscriptRequestFactory = (
   const wrapper: RuntimeTranscriptRequest = {
     on: (event, listener) => {
       client.on(event, listener);
+      return wrapper;
+    },
+    once: (event, listener) => {
+      client.once(event, listener);
       return wrapper;
     },
     off: (event, listener) => {
@@ -132,8 +138,46 @@ export function createRuntimeTranscriptHttpTransport(
       let onResponseData: ((chunk: unknown) => void) | undefined;
       let onResponseEnd: (() => void) | undefined;
       let onResponseError: ((error: Error) => void) | undefined;
+      let terminationRequested = false;
+      let requestTerminationSinkInstalled = false;
+      let responseTerminationSinkInstalled = false;
+      const terminalErrorSink = (): void => undefined;
+      const installTerminationSinks = (): void => {
+        if (request && !requestTerminationSinkInstalled) {
+          try {
+            request.on("error", terminalErrorSink);
+            requestTerminationSinkInstalled = true;
+            request.once("close", () => {
+              try {
+                request?.off("error", terminalErrorSink);
+              } catch {
+                // The emitter is already terminating; no further action exists.
+              }
+              requestTerminationSinkInstalled = false;
+            });
+          } catch {
+            // A closing request may reject listener installation.
+          }
+        }
+        if (response && !responseTerminationSinkInstalled) {
+          try {
+            response.on("error", terminalErrorSink);
+            responseTerminationSinkInstalled = true;
+            response.once("close", () => {
+              try {
+                response?.off("error", terminalErrorSink);
+              } catch {
+                // The emitter is already terminating; no further action exists.
+              }
+              responseTerminationSinkInstalled = false;
+            });
+          } catch {
+            // A closing response may reject listener installation.
+          }
+        }
+      };
       const onRequestError = (error: Error): void => {
-        finish(stableError(error, "Transcript request failed"));
+        terminate(stableError(error, "Transcript request failed"));
       };
       const cleanup = (): void => {
         input.signal?.removeEventListener("abort", onAbort);
@@ -166,11 +210,16 @@ export function createRuntimeTranscriptHttpTransport(
         else if (value) resolve(value);
         else reject(new Error("Transcript request failed"));
       };
-      const onAbort = (): void => {
+      const terminate = (error: Error): void => {
         if (settled) return;
-        const error = new Error("Transcript request aborted");
+        terminationRequested = true;
+        installTerminationSinks();
         finish(error);
         safelyDestroy(request);
+      };
+      const onAbort = (): void => {
+        if (settled) return;
+        terminate(new Error("Transcript request aborted"));
       };
 
       try {
@@ -183,8 +232,7 @@ export function createRuntimeTranscriptHttpTransport(
             try {
               const status = nextResponse.statusCode;
               if (!Number.isInteger(status) || status === undefined || status < 100 || status > 599) {
-                finish(new Error("Invalid transcript response status"));
-                safelyDestroy(request);
+                terminate(new Error("Invalid transcript response status"));
                 return;
               }
               const rawHeaders = nextResponse.headers;
@@ -194,8 +242,7 @@ export function createRuntimeTranscriptHttpTransport(
                 typeof declaredLength === "string" &&
                 Number.parseInt(declaredLength, 10) > maxResponseBytes
               ) {
-                finish(new Error("Transcript response is too large"));
-                safelyDestroy(request);
+                terminate(new Error("Transcript response is too large"));
                 return;
               }
               const chunks: Buffer[] = [];
@@ -206,14 +253,12 @@ export function createRuntimeTranscriptHttpTransport(
                   const buffer = toBuffer(chunk);
                   bytes += buffer.byteLength;
                   if (bytes > maxResponseBytes) {
-                    finish(new Error("Transcript response is too large"));
-                    safelyDestroy(request);
+                    terminate(new Error("Transcript response is too large"));
                     return;
                   }
                   chunks.push(buffer);
                 } catch (error) {
-                  finish(stableError(error, "Invalid transcript response body"));
-                  safelyDestroy(request);
+                  terminate(stableError(error, "Invalid transcript response body"));
                 }
               };
               onResponseEnd = () => {
@@ -225,34 +270,33 @@ export function createRuntimeTranscriptHttpTransport(
                     text: Buffer.concat(chunks, bytes).toString("utf8"),
                   });
                 } catch (error) {
-                  finish(stableError(error, "Invalid transcript response body"));
-                  safelyDestroy(request);
+                  terminate(stableError(error, "Invalid transcript response body"));
                 }
               };
               onResponseError = (error) => {
                 if (settled) return;
-                finish(stableError(error, "Transcript response failed"));
-                safelyDestroy(request);
+                terminate(stableError(error, "Transcript response failed"));
               };
               nextResponse.on("data", onResponseData);
               nextResponse.on("end", onResponseEnd);
               nextResponse.on("error", onResponseError);
             } catch (error) {
-              finish(stableError(error, "Invalid transcript response headers"));
-              safelyDestroy(request);
+              terminate(stableError(error, "Invalid transcript response headers"));
             }
           },
         );
         if (settled) {
+          if (terminationRequested) {
+            installTerminationSinks();
+            safelyDestroy(request);
+          }
           cleanup();
           return;
         }
         request.on("error", onRequestError);
         request.armTimeout(timeoutMs, () => {
           if (settled) return;
-          const error = new Error("Transcript request timed out");
-          finish(error);
-          safelyDestroy(request);
+          terminate(new Error("Transcript request timed out"));
         });
         input.signal?.addEventListener("abort", onAbort, { once: true });
         if (input.signal?.aborted) {
@@ -261,7 +305,7 @@ export function createRuntimeTranscriptHttpTransport(
         }
         request.end(input.body);
       } catch (error) {
-        finish(stableError(error, "Transcript request failed"));
+        terminate(stableError(error, "Transcript request failed"));
       }
     });
   };
