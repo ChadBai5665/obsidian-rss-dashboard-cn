@@ -1839,5 +1839,12 @@
     "line": 724,
     "fingerprint": "sha256:523af3579745f25af202877ab727c185afb1cc18871b515f13ae7f25b91c5b26",
     "reason": "Security transport test intentionally uses a reserved example credential URL to verify redirect rejection."
+  },
+  {
+    "path": "test_files/unit/ai/ai-operation-task-coordinator.test.ts",
+    "rule": "credential-value",
+    "line": 30,
+    "fingerprint": "sha256:509f8b8b24b0367ed3f4a53c702168986e264e1aab22be6f59498edd5140c61e",
+    "reason": "Security test fixture defines a synthetic credential canary for coordinator state, listener, and error isolation tests."
   }
 ]
