@@ -88,6 +88,7 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
   private locale: Locale;
   private activeController: AbortController | null = null;
   private runtimeIdentity: string | null = null;
+  private runtimeService: YouTubeTranscriptPanelService | null = null;
   private choiceLease: {
     service: YouTubeTranscriptPanelService;
     choiceSetId: string;
@@ -109,7 +110,9 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
 
   async showCached(): Promise<void> {
     if (this.destroyed) return;
-    const { runtime } = this.resolveRuntime();
+    const resolved = this.resolveRuntimeEntry();
+    if (!resolved) return;
+    const { runtime } = resolved;
     const operation = ++this.operationSequence;
     let content: YouTubeTranscriptCachedItemContent | null;
     try {
@@ -134,8 +137,9 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
   }
 
   async selectTrack(trackId: string): Promise<void> {
-    if (!trackId) return;
-    const resolved = this.resolveRuntime();
+    if (this.destroyed || !trackId) return;
+    const resolved = this.resolveRuntimeEntry();
+    if (!resolved) return;
     await this.runRequest(
       resolved.changed ? {} : { trackId },
       resolved.changed ? "checking" : "fetching",
@@ -177,7 +181,11 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     fixedRuntime?: YouTubeTranscriptPanelRuntime,
   ): Promise<void> {
     if (this.destroyed) return;
-    const runtime = fixedRuntime ?? this.resolveRuntime().runtime;
+    const resolved = fixedRuntime === undefined
+      ? this.resolveRuntimeEntry()
+      : { runtime: fixedRuntime, changed: false };
+    if (!resolved) return;
+    const { runtime } = resolved;
     this.activeController?.abort();
     if (request.trackId === undefined) this.revokeChoiceLease();
     const controller = new AbortController();
@@ -430,46 +438,66 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
       runtime: YouTubeTranscriptPanelRuntime;
       changed: boolean;
     };
-    try {
-      resolved = this.resolveRuntime();
-    } catch {
-      if (!this.isCurrent(operation)) return false;
-      this.operationSequence += 1;
-      this.activeController?.abort();
-      this.activeController = null;
-      this.revokeChoiceLease();
-      this.renderError(
-        new YouTubeTranscriptServiceError("temporarily-unavailable"),
-      );
-      return false;
-    }
+    const current = this.resolveRuntimeEntry();
+    if (!current) return false;
+    resolved = current;
     if (
       resolved.changed ||
       resolved.runtime.identity !== expected.identity ||
       resolved.runtime.service !== expected.service
     ) {
-      this.activeController = null;
-      if (!this.destroyed) this.renderIdle();
+      if (!resolved.changed) {
+        this.invalidateRuntime("idle");
+        this.rememberRuntime(resolved.runtime);
+      }
       return false;
     }
     return this.isCurrent(operation);
   }
 
-  private resolveRuntime(): {
+  private resolveRuntimeEntry(): {
     runtime: YouTubeTranscriptPanelRuntime;
     changed: boolean;
-  } {
-    const runtime = this.options.resolveRuntime();
-    const changed =
-      this.runtimeIdentity !== null && this.runtimeIdentity !== runtime.identity;
-    if (changed) {
-      this.operationSequence += 1;
-      this.activeController?.abort();
-      this.activeController = null;
-      this.revokeChoiceLease();
+  } | null {
+    if (this.destroyed) return null;
+    let runtime: YouTubeTranscriptPanelRuntime;
+    try {
+      runtime = this.options.resolveRuntime();
+    } catch {
+      this.invalidateRuntime("error");
+      return null;
     }
-    this.runtimeIdentity = runtime.identity;
+    const changed = this.runtimeService !== null && (
+      this.runtimeIdentity !== runtime.identity ||
+      this.runtimeService !== runtime.service
+    );
+    if (changed) {
+      this.invalidateRuntime("idle");
+    }
+    this.rememberRuntime(runtime);
     return { runtime, changed };
+  }
+
+  private rememberRuntime(runtime: YouTubeTranscriptPanelRuntime): void {
+    this.runtimeIdentity = runtime.identity;
+    this.runtimeService = runtime.service;
+  }
+
+  private invalidateRuntime(nextState: "idle" | "error"): void {
+    this.operationSequence += 1;
+    this.activeController?.abort();
+    this.activeController = null;
+    this.revokeChoiceLease();
+    this.runtimeIdentity = null;
+    this.runtimeService = null;
+    if (this.destroyed) return;
+    if (nextState === "idle") {
+      this.renderIdle();
+      return;
+    }
+    this.renderError(
+      new YouTubeTranscriptServiceError("temporarily-unavailable"),
+    );
   }
 
   private revokeChoiceLease(): void {

@@ -375,6 +375,34 @@ describe("ReaderView explicit full-text content cache", () => {
     expect(document.body.querySelector(".modal")).toBeNull();
   });
 
+  it("keeps displaying a YouTube item when transcript runtime resolution fails", async () => {
+    const reader = createReader({
+      youtubeTranscript: {
+        resolveRuntime: () => {
+          throw new Error("Invalid data root");
+        },
+      },
+    });
+    const item = makeItem({
+      title: "Still readable video",
+      link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      mediaType: "video",
+      videoId: "dQw4w9WgXcQ",
+    });
+    await reader.onOpen();
+
+    await expect(reader.displayItem(item)).resolves.toBeUndefined();
+
+    const reading = (reader as unknown as { readingContainer: HTMLElement })
+      .readingContainer;
+    expect(reading.textContent).toContain("Still readable video");
+    expect(
+      reading
+        .querySelector<HTMLElement>(".rss-youtube-transcript-panel")
+        ?.getAttribute("data-state"),
+    ).toBe("temporarily-unavailable");
+  });
+
   it("fetches only after the inline action and updates the visible content basis", async () => {
     const pending = deferred<YouTubeTranscriptServiceResult>();
     const requests: YouTubeTranscriptRequest[] = [];

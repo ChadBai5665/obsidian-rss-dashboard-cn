@@ -158,6 +158,53 @@ describe("YouTubeTranscriptPanel", () => {
     expect(container.querySelector(".rss-youtube-transcript-refresh")).not.toBeNull();
   });
 
+  it.each([
+    ["showCached", (panel: YouTubeTranscriptPanel) => panel.showCached()],
+    ["fetch", (panel: YouTubeTranscriptPanel) => panel.fetch()],
+    ["refresh", (panel: YouTubeTranscriptPanel) => panel.refresh()],
+    ["selectTrack", (panel: YouTubeTranscriptPanel) => panel.selectTrack("track-a")],
+  ] as const)(
+    "contains an initial runtime resolver failure from %s",
+    async (_name, invoke) => {
+      const container = document.createElement("div");
+      const panel = new YouTubeTranscriptPanel({
+        container,
+        locale: "en",
+        request: { itemId: ITEM_ID, videoId: VIDEO_ID },
+        resolveRuntime: () => {
+          throw new Error("Invalid data root");
+        },
+        openExternal: vi.fn(),
+      });
+
+      await expect(invoke(panel)).resolves.toBeUndefined();
+
+      expect(state(container)).toBe("temporarily-unavailable");
+      expect(container.querySelector(".rss-youtube-transcript-error")).not.toBeNull();
+    },
+  );
+
+  it("contains a runtime resolver failure from a void button handler", async () => {
+    const container = document.createElement("div");
+    new YouTubeTranscriptPanel({
+      container,
+      locale: "en",
+      request: { itemId: ITEM_ID, videoId: VIDEO_ID },
+      resolveRuntime: () => {
+        throw new Error("Invalid data root");
+      },
+      openExternal: vi.fn(),
+    });
+
+    container
+      .querySelector<HTMLButtonElement>(".rss-youtube-transcript-fetch")
+      ?.click();
+
+    await vi.waitFor(() =>
+      expect(state(container)).toBe("temporarily-unavailable"),
+    );
+  });
+
   it("uses opaque service track ids for equal-priority language choice", async () => {
     const get = vi
       .fn<YouTubeTranscriptPanelService["get"]>()
@@ -369,6 +416,95 @@ describe("YouTubeTranscriptPanel", () => {
     panel.destroy();
 
     expect(revokeChoiceSet).toHaveBeenCalledWith("opaque-choice-set-a");
+  });
+
+  it("revokes a same-root stale language choice before the replacement service settles", async () => {
+    const rootARevoke = vi.fn();
+    const rootAGet = vi.fn(async () => ({
+      status: "selection-required",
+      choiceSetId: "opaque-choice-set-a",
+      tracks: [
+        {
+          id: "opaque-track-a",
+          languageCode: "en",
+          languageName: "English",
+          isGenerated: false,
+          provider: "innertube",
+        },
+      ],
+    } as const));
+    const rootBResult = deferred<YouTubeTranscriptServiceResult>();
+    const rootBGet = vi.fn(async () => await rootBResult.promise);
+    let runtime = {
+      identity: "root-a",
+      service: { get: rootAGet, revokeChoiceSet: rootARevoke },
+      loadCached: vi.fn(async () => null),
+    };
+    const container = document.createElement("div");
+    const panel = new YouTubeTranscriptPanel({
+      container,
+      locale: "en",
+      request: { itemId: ITEM_ID, videoId: VIDEO_ID },
+      resolveRuntime: () => runtime,
+      openExternal: vi.fn(),
+    });
+    await panel.fetch();
+    expect(state(container)).toBe("language-choice");
+
+    runtime = {
+      identity: "root-a",
+      service: { get: rootBGet, revokeChoiceSet: vi.fn() },
+      loadCached: vi.fn(async () => null),
+    };
+    const selecting = panel.selectTrack("opaque-track-a");
+    const revokedBeforeReplacementSettled = rootARevoke.mock.calls.length === 1;
+    const replacementRequest = rootBGet.mock.calls[0]?.[0];
+    rootBResult.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript({ text: "Replacement runtime transcript." }),
+    });
+    await selecting;
+
+    expect(revokedBeforeReplacementSettled).toBe(true);
+    expect(rootARevoke).toHaveBeenCalledWith("opaque-choice-set-a");
+    expect(replacementRequest).not.toHaveProperty("trackId");
+  });
+
+  it("clears a ready transcript when refresh runtime resolution fails", async () => {
+    let resolverFails = false;
+    const runtime = {
+      identity: "root-a",
+      service: {
+        get: vi.fn(async () => ({
+          status: "ready" as const,
+          source: "fresh" as const,
+          content: transcript({ text: "Old ready transcript." }),
+        })),
+        revokeChoiceSet: vi.fn(),
+      },
+      loadCached: vi.fn(async () => null),
+    };
+    const container = document.createElement("div");
+    const panel = new YouTubeTranscriptPanel({
+      container,
+      locale: "en",
+      request: { itemId: ITEM_ID, videoId: VIDEO_ID },
+      resolveRuntime: () => {
+        if (resolverFails) throw new Error("Invalid data root");
+        return runtime;
+      },
+      openExternal: vi.fn(),
+    });
+    await panel.fetch();
+    expect(container.textContent).toContain("Old ready transcript.");
+
+    resolverFails = true;
+    await expect(panel.refresh()).resolves.toBeUndefined();
+
+    expect(state(container)).toBe("temporarily-unavailable");
+    expect(container.textContent).not.toContain("Old ready transcript.");
+    expect(runtime.service.get).toHaveBeenCalledTimes(1);
   });
 
   it("re-renders cached transcript localization without cache, service, or onReady side effects", async () => {
