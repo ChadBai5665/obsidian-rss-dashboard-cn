@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AiConnection } from "../../../../src/ai/ai-types";
 import { createAiConnection } from "../../../../src/ai/provider-presets";
 import { createTextGenerationProvider } from "../../../../src/ai/providers/provider-factory";
-import type { AiTransport } from "../../../../src/ai/providers/text-generation-provider";
+import type { AiStreamingTransport } from "../../../../src/ai/providers/text-generation-provider";
 import { DesktopSecretStore } from "../../../../src/security/desktop-secret-store";
 
 const API_KEY = "factory-secret-key";
@@ -41,10 +41,11 @@ describe("AI provider factory", () => {
     providerKind,
     url,
   ) => {
-    const transport = vi.fn<AiTransport>(() => Promise.resolve({
+    const transport = vi.fn<AiStreamingTransport>(() => Promise.resolve({
       status: 200,
       headers: {},
-      json: { choices: [{ message: { content: "ok" } }] },
+      contentType: "application/json",
+      bodyText: JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
     }));
     const provider = await createTextGenerationProvider(
       createAiConnection({
@@ -59,11 +60,14 @@ describe("AI provider factory", () => {
 
     await provider.generate({ system: "system", user: "user", maxOutputTokens: 512 });
 
-    expect(transport).toHaveBeenCalledWith(expect.objectContaining({ url }));
+    expect(transport).toHaveBeenCalledOnce();
+    expect(transport.mock.calls[0]?.[0]).toEqual(expect.objectContaining({ url }));
+    expect(transport.mock.calls[0]?.[1]).toEqual(expect.any(Function));
     const body = JSON.parse(transport.mock.calls[0]?.[0].body ?? "{}");
     expect(body).toMatchObject({
       model: "MiniMax-M3",
       max_completion_tokens: 512,
+      stream: true,
     });
     expect(body).not.toHaveProperty("max_tokens");
   });
@@ -76,12 +80,13 @@ describe("AI provider factory", () => {
         return API_KEY;
       }),
     };
-    const transport = vi.fn<AiTransport>(() => {
+    const transport = vi.fn<AiStreamingTransport>(() => {
       events.push("transport");
       return Promise.resolve({
         status: 200,
         headers: {},
-        json: { choices: [{ message: { content: "ok" } }] },
+        contentType: "application/json",
+        bodyText: JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
       });
     });
 
@@ -108,7 +113,7 @@ describe("AI provider factory", () => {
   it.each([undefined, "", "  ", "key\nheader"]) (
     "rejects a missing or invalid external key without transport: %j",
     async (apiKey) => {
-      const transport = vi.fn<AiTransport>();
+      const transport = vi.fn<AiStreamingTransport>();
       await expect(createTextGenerationProvider(
         connection(),
         { get: vi.fn(async () => apiKey) },
@@ -120,7 +125,7 @@ describe("AI provider factory", () => {
 
   it("rejects invalid connection metadata before reading the key or making transport", async () => {
     const get = vi.fn(async () => API_KEY);
-    const transport = vi.fn<AiTransport>();
+    const transport = vi.fn<AiStreamingTransport>();
     await expect(createTextGenerationProvider(
       connection({ protocol: "anthropic-messages" }),
       { get },
@@ -140,7 +145,7 @@ describe("AI provider factory", () => {
 
   it("rejects a disabled connection and a secret-store failure before transport", async () => {
     const disabledGet = vi.fn(async () => API_KEY);
-    const transport = vi.fn<AiTransport>();
+    const transport = vi.fn<AiStreamingTransport>();
     await expect(createTextGenerationProvider(
       connection({ enabled: false }),
       { get: disabledGet },
@@ -163,7 +168,7 @@ describe("AI provider factory", () => {
   });
 
   it("fails closed on a hostile secret-store thenable without leaking or transporting", async () => {
-    const transport = vi.fn<AiTransport>();
+    const transport = vi.fn<AiStreamingTransport>();
     const hostile = Object.create(null) as Record<string, unknown>;
     Object.defineProperty(hostile, "then", {
       get() {
@@ -185,18 +190,20 @@ describe("AI provider factory", () => {
 
   it("selects both protocols and gives store:false only to the explicit OpenAI capability", async () => {
     const requests: Array<{ body: string; url: string }> = [];
-    const transport = vi.fn<AiTransport>((request) => {
+    const transport = vi.fn<AiStreamingTransport>((request) => {
       requests.push(request);
       return request.url.endsWith("/v1/messages")
         ? {
             status: 200,
             headers: {},
-            json: { content: [{ type: "text", text: "claude" }] },
+            contentType: "application/json",
+            bodyText: JSON.stringify({ content: [{ type: "text", text: "claude" }] }),
           }
         : {
             status: 200,
             headers: {},
-            json: { choices: [{ message: { content: "openai" } }] },
+            contentType: "application/json",
+            bodyText: JSON.stringify({ choices: [{ message: { content: "openai" } }] }),
           };
     });
     const secretStore = { get: vi.fn(async () => API_KEY) };
@@ -252,7 +259,8 @@ describe("AI provider factory", () => {
           return {
             status: 200,
             headers: {},
-            json: { choices: [{ message: { content: "ok" } }] },
+            contentType: "application/json",
+            bodyText: JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
           };
         },
       },
@@ -274,10 +282,11 @@ describe("AI provider factory", () => {
       randomSuffix: () => "factory-integration",
     });
     await store.set("11111111-1111-4111-8111-111111111111", API_KEY);
-    const transport = vi.fn<AiTransport>(() => ({
+    const transport = vi.fn<AiStreamingTransport>(() => ({
       status: 200,
       headers: {},
-      json: { choices: [{ message: { content: "safe result" } }] },
+      contentType: "application/json",
+      bodyText: JSON.stringify({ choices: [{ message: { content: "safe result" } }] }),
     }));
 
     const provider = await createTextGenerationProvider(

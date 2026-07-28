@@ -329,6 +329,21 @@ export function resultWithOptionalMetadata(
   return result;
 }
 
+/** Parses the bounded plain-JSON shape shared by legacy and streaming fallbacks. */
+export function parseBoundedAiJsonText(text: string): unknown {
+  if (text.length > MAX_AI_RESPONSE_CHARACTERS) {
+    throw providerResponseTooLarge();
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseUnknownJson(text);
+  } catch {
+    throw malformedProviderResponse();
+  }
+  assertBoundedPlainJson(parsed);
+  return parsed;
+}
+
 function extractSafeResponse(response: unknown, apiKey: string): SafeAiResponse {
   const record = plainDataRecord(response);
   if (!record) throw malformedProviderResponse();
@@ -348,16 +363,7 @@ function extractSafeResponse(response: unknown, apiKey: string): SafeAiResponse 
   const text = ownData(record, "text");
   const json = ownData(record, "json");
   if (typeof text === "string") {
-    if (text.length > MAX_AI_RESPONSE_CHARACTERS) {
-      throw providerResponseTooLarge();
-    }
-    let parsed: unknown;
-    try {
-      parsed = parseUnknownJson(text);
-    } catch {
-      throw malformedProviderResponse();
-    }
-    assertBoundedPlainJson(parsed);
+    const parsed = parseBoundedAiJsonText(text);
     return { status, json: parsed, requestId };
   }
   if (json !== undefined) {

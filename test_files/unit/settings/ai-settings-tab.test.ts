@@ -343,9 +343,11 @@ describe("renderAiSettingsTab", () => {
   it("keeps the global paid-test gate active until an aborted draft request settles", async () => {
     const underlying = deferred<{
       status: number;
-      json: { choices: Array<{ message: { content: string } }> };
+      headers: Record<string, string>;
+      contentType: string;
+      bodyText: string;
     }>();
-    const transport = vi.fn(() => underlying.promise);
+    const transport = vi.fn((_request, _onChunk) => underlying.promise);
     const providerFactory = vi.fn(async (
       connection: ReturnType<typeof createAiConnection>,
       secretStore: { get(connectionId: string): Promise<string | undefined> },
@@ -374,7 +376,9 @@ describe("renderAiSettingsTab", () => {
 
     underlying.resolve({
       status: 200,
-      json: { choices: [{ message: { content: "OK" } }] },
+      headers: {},
+      contentType: "application/json",
+      bodyText: JSON.stringify({ choices: [{ message: { content: "OK" } }] }),
     });
     await result;
     await flushPromises();
@@ -756,9 +760,11 @@ describe("renderAiSettingsTab", () => {
     document.body.empty();
     const underlying = deferred<{
       status: number;
-      json: { choices: Array<{ message: { content: string } }> };
+      headers: Record<string, string>;
+      contentType: string;
+      bodyText: string;
     }>();
-    const transport = vi.fn(() => underlying.promise);
+    const transport = vi.fn((_request, _onChunk) => underlying.promise);
     const providerFactory = vi.fn(async (
       connection: ReturnType<typeof createAiConnection>,
       secretStore: { get(connectionId: string): Promise<string | undefined> },

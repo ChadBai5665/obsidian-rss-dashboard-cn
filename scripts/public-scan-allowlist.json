@@ -184,7 +184,7 @@
   {
     "path": "test_files/unit/ai/ai-privacy-boundary.test.ts",
     "rule": "home-path",
-    "line": 50,
+    "line": 82,
     "fingerprint": "sha256:3d06c0b2dceff914a7d86a3d2497565a87fca29a4aff8a101de837e3d30a56fc",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
@@ -240,64 +240,36 @@
   {
     "path": "test_files/unit/ai/providers/anthropic-messages-provider.test.ts",
     "rule": "credential-value",
-    "line": 10,
+    "line": 11,
     "fingerprint": "sha256:93fc409eecffaaea87d68c63342e14121cb70a33e998b00280256a1335f3a9e7",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/providers/anthropic-messages-provider.test.ts",
     "rule": "credential-value",
-    "line": 48,
+    "line": 135,
     "fingerprint": "sha256:ddecffd61175e66d3f9b90c9b39e106434cb510db27a97b7636efa82cc9b9821",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/providers/anthropic-messages-provider.test.ts",
     "rule": "credential-value",
-    "line": 59,
+    "line": 359,
     "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
     "rule": "credential-value",
-    "line": 15,
+    "line": 11,
     "fingerprint": "sha256:52fdc7ea68a6789880c4f20e7a0540bf6de5fa9fc208865f0d538b29828158a0",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
     "rule": "credential-value",
-    "line": 52,
+    "line": 76,
     "fingerprint": "sha256:ddecffd61175e66d3f9b90c9b39e106434cb510db27a97b7636efa82cc9b9821",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
-    "rule": "credential-value",
-    "line": 176,
-    "fingerprint": "sha256:a62525d830ee12dc577d3e266cb1466d2c000cbf745a06ae919a32a16ca97bd4",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
-    "rule": "credential-value",
-    "line": 226,
-    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
-    "rule": "credential-value",
-    "line": 250,
-    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/ai/providers/openai-chat-provider.test.ts",
-    "rule": "credential-value",
-    "line": 272,
-    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {

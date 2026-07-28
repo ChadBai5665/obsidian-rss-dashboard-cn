@@ -16,6 +16,38 @@ vi.mock("../../../src/security/desktop-secret-store", () => ({
   },
 }));
 
+vi.mock("../../../src/ai/providers/streaming-ai-transport", async () => {
+  const actual = await vi.importActual<typeof import(
+    "../../../src/ai/providers/streaming-ai-transport"
+  )>("../../../src/ai/providers/streaming-ai-transport");
+  const obsidianModule = await import("obsidian");
+  return {
+    ...actual,
+    createNodeAiStreamingTransport: () => async (
+      request: {
+        url: string;
+        method: "POST";
+        headers: Record<string, string>;
+        body: string;
+      },
+    ) => {
+      const response = await obsidianModule.requestUrl({
+        url: request.url,
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        throw: false,
+      });
+      return {
+        status: response.status,
+        headers: response.headers,
+        contentType: "application/json",
+        bodyText: response.text,
+      };
+    },
+  };
+});
+
 import RssDashboardPlugin from "../../../main";
 import { AnalysisRepository } from "../../../src/ai/analysis-repository";
 import { createAiConnection } from "../../../src/ai/provider-presets";
@@ -1523,7 +1555,7 @@ describe("AI privacy boundary", () => {
     expect(body).toMatchObject({
       model: "selected-model",
       max_tokens: 4096,
-      stream: false,
+      stream: true,
     });
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({ role: "system" });
