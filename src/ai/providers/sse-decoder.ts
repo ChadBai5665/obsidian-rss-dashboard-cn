@@ -15,6 +15,7 @@ export class BoundedSseDecoder {
   private readonly decoder = new TextDecoder("utf-8", { fatal: true });
   private state: DecoderState = "open";
   private carry = "";
+  private skipLeadingLf = false;
   private eventName: string | undefined;
   private dataLines: string[] = [];
   private dataCharacters = 0;
@@ -46,12 +47,11 @@ export class BoundedSseDecoder {
 
     const events = this.consumeDecoded(decoded);
     if (this.carry.length > 0) {
-      const finalLine = this.carry.endsWith("\r")
-        ? this.carry.slice(0, -1)
-        : this.carry;
+      const finalLine = this.carry;
       this.carry = "";
       this.consumeLine(finalLine, events);
     }
+    this.skipLeadingLf = false;
     this.dispatchEvent(events);
     this.state = "finished";
     return events;
@@ -59,23 +59,57 @@ export class BoundedSseDecoder {
 
   private consumeDecoded(decoded: string): ServerSentEvent[] {
     const events: ServerSentEvent[] = [];
-    const buffer = this.carry + decoded;
-    let lineStart = 0;
-    let lineEnd = buffer.indexOf("\n", lineStart);
+    let segmentStart = 0;
 
-    while (lineEnd !== -1) {
-      let line = buffer.slice(lineStart, lineEnd);
-      if (line.endsWith("\r")) line = line.slice(0, -1);
-      this.consumeLine(line, events);
-      lineStart = lineEnd + 1;
-      lineEnd = buffer.indexOf("\n", lineStart);
+    if (this.skipLeadingLf && decoded.length > 0) {
+      if (decoded.charCodeAt(0) === 0x0a) segmentStart = 1;
+      this.skipLeadingLf = false;
     }
 
-    this.carry = buffer.slice(lineStart);
-    if (this.carry.length > MAX_SSE_CARRY_CHARACTERS) {
-      return this.fail("SSE carry limit exceeded");
+    for (let index = segmentStart; index < decoded.length; index += 1) {
+      const codeUnit = decoded.charCodeAt(index);
+      if (codeUnit !== 0x0a && codeUnit !== 0x0d) continue;
+
+      this.appendSegment(decoded, segmentStart, index, true, events);
+      if (codeUnit === 0x0d) {
+        if (decoded.charCodeAt(index + 1) === 0x0a) {
+          index += 1;
+        } else if (index + 1 === decoded.length) {
+          this.skipLeadingLf = true;
+        }
+      }
+      segmentStart = index + 1;
     }
+
+    this.appendSegment(decoded, segmentStart, decoded.length, false, events);
     return events;
+  }
+
+  private appendSegment(
+    source: string,
+    start: number,
+    end: number,
+    terminatesLine: boolean,
+    events: ServerSentEvent[],
+  ): void {
+    const combinedLength = this.carry.length + (end - start);
+    const limit = terminatesLine
+      ? MAX_SSE_LINE_CHARACTERS
+      : MAX_SSE_CARRY_CHARACTERS;
+    if (combinedLength > limit) {
+      this.fail(
+        terminatesLine
+          ? "SSE line limit exceeded"
+          : "SSE carry limit exceeded",
+      );
+    }
+
+    if (end > start) this.carry += source.slice(start, end);
+    if (!terminatesLine) return;
+
+    const line = this.carry;
+    this.carry = "";
+    this.consumeLine(line, events);
   }
 
   private consumeLine(line: string, events: ServerSentEvent[]): void {
@@ -139,6 +173,13 @@ export class BoundedSseDecoder {
 
   private fail(message: string): never {
     this.state = "failed";
+    this.carry = "";
+    this.skipLeadingLf = false;
+    this.eventName = undefined;
+    this.dataLines = [];
+    this.dataCharacters = 0;
+    this.eventCharacters = 0;
+    this.eventCount = 0;
     throw new Error(message);
   }
 }

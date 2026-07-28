@@ -15,14 +15,19 @@ function bytes(value: string): Uint8Array {
   return encoder.encode(value);
 }
 
-function expectFailure(operation: () => unknown, message: string): void {
+function captureFailure(operation: () => unknown, message: string): Error {
   try {
     operation();
-    throw new Error("expected SSE decoding to fail");
   } catch (error) {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe(message);
+    return error as Error;
   }
+  throw new Error("expected SSE decoding to fail");
+}
+
+function expectFailure(operation: () => unknown, message: string): void {
+  captureFailure(operation, message);
 }
 
 describe("BoundedSseDecoder", () => {
@@ -33,12 +38,12 @@ describe("BoundedSseDecoder", () => {
 
     expect(decoder.push(encoded.slice(0, emojiStart + 1))).toEqual([]);
     expect(decoder.push(new Uint8Array())).toEqual([]);
-    expect(decoder.push(encoded.slice(emojiStart + 1, encoded.length - 1))).toEqual(
-      [],
-    );
-    expect(decoder.push(encoded.slice(encoded.length - 1))).toEqual([
+    expect(
+      decoder.push(encoded.slice(emojiStart + 1, encoded.length - 1)),
+    ).toEqual([
       { event: "answer", data: "你🙂好" },
     ]);
+    expect(decoder.push(encoded.slice(encoded.length - 1))).toEqual([]);
     expect(decoder.finish()).toEqual([]);
   });
 
@@ -77,6 +82,62 @@ describe("BoundedSseDecoder", () => {
 
     expect(decoder.push(bytes("event: final\ndata: tail"))).toEqual([]);
     expect(decoder.finish()).toEqual([{ event: "final", data: "tail" }]);
+  });
+
+  it("treats bare CR as a line ending and dispatches on a bare CR blank line", () => {
+    const decoder = new BoundedSseDecoder();
+
+    expect(
+      decoder.push(bytes("event: first\rdata: one\r\rdata: two\r")),
+    ).toEqual([{ event: "first", data: "one" }]);
+    expect(decoder.finish()).toEqual([{ data: "two" }]);
+  });
+
+  it("accepts an exact-ceiling line across split CRLF without retaining CR", () => {
+    const decoder = new BoundedSseDecoder();
+    const value = "x".repeat(MAX_SSE_LINE_CHARACTERS - "data: ".length);
+
+    expect(decoder.push(bytes(`data: ${value}`))).toEqual([]);
+    expect(decoder.push(bytes("\r"))).toEqual([]);
+    expect(decoder.push(new Uint8Array())).toEqual([]);
+    expect(decoder.push(bytes("\n"))).toEqual([]);
+    expect(decoder.push(bytes("\r"))).toEqual([{ data: value }]);
+    expect(decoder.push(bytes("\n"))).toEqual([]);
+    expect(decoder.finish()).toEqual([]);
+  });
+
+  it("rejects a split CRLF line one character above the line ceiling", () => {
+    const decoder = new BoundedSseDecoder();
+    const exactLine = "x".repeat(MAX_SSE_LINE_CHARACTERS);
+
+    expect(decoder.push(bytes(exactLine))).toEqual([]);
+    expectFailure(
+      () => decoder.push(bytes("x\r\n")),
+      "SSE line limit exceeded",
+    );
+  });
+
+  it("applies an initial BOM once and preserves NUL as ordinary data", () => {
+    const decoder = new BoundedSseDecoder();
+
+    expect(
+      decoder.push(
+        bytes("\uFEFFdata: a\u0000b\n\uFEFFdata: ignored\ndata: c\n\n"),
+      ),
+    ).toEqual([{ data: "a\u0000b\nc" }]);
+  });
+
+  it("uses the last event field and omits an explicitly empty event name", () => {
+    const decoder = new BoundedSseDecoder();
+
+    expect(
+      decoder.push(
+        bytes(
+          "event: first\nevent: second\ndata: one\n\n" +
+            "event: retained\nevent:\ndata: two\n\n",
+        ),
+      ),
+    ).toEqual([{ event: "second", data: "one" }, { data: "two" }]);
   });
 
   it("rejects malformed and incomplete UTF-8 without exposing input bytes", () => {
@@ -141,5 +202,38 @@ describe("BoundedSseDecoder", () => {
       () => decoder.push(bytes("data: x\n\n".repeat(MAX_SSE_EVENTS + 1))),
       "SSE event count limit exceeded",
     );
+  });
+
+  it("rejects finish or push after successful finish with a stable error", () => {
+    const decoder = new BoundedSseDecoder();
+
+    expect(decoder.finish()).toEqual([]);
+    expectFailure(() => decoder.finish(), "SSE decoder is not open");
+    expectFailure(
+      () => decoder.push(bytes("data: ignored\n\n")),
+      "SSE decoder is not open",
+    );
+  });
+
+  it("clears bounded state after failure and remains terminal", () => {
+    const decoder = new BoundedSseDecoder();
+    const sentinel = "private-payload-sentinel";
+    expect(
+      decoder.push(bytes(`event: answer\ndata: ${sentinel}\n`)),
+    ).toEqual([]);
+
+    const failure = captureFailure(
+      () =>
+        decoder.push(bytes("x".repeat(MAX_SSE_CARRY_CHARACTERS + 1))),
+      "SSE carry limit exceeded",
+    );
+    expect(failure.message).not.toContain(sentinel);
+    expect(JSON.stringify(decoder)).not.toContain(sentinel);
+    expect(JSON.stringify(decoder).length).toBeLessThan(1_024);
+    expectFailure(
+      () => decoder.push(bytes("data: ignored\n\n")),
+      "SSE decoder is not open",
+    );
+    expectFailure(() => decoder.finish(), "SSE decoder is not open");
   });
 });
