@@ -3,6 +3,7 @@ import { renderAnalysisMarkdown } from "./analysis-markdown";
 import {
   analysisArtifactPathItemId,
   parseAnalysisMarkdown,
+  parseAnalysisArtifactPath,
   type AiAnalysisArtifact,
 } from "./analysis-markdown-parser";
 import {
@@ -92,11 +93,26 @@ export class AnalysisRepository {
     const files = snapshotListedFiles(listed);
     if (!files) return frozenArtifacts([]);
 
-    const candidates = files
-      .filter((path) =>
-        analysisArtifactPathItemId(path, this.analysisDirectory) === itemId)
-      .sort(compareText)
-      .slice(0, MAX_AI_ANALYSIS_HISTORY_FILES);
+    const canonicalPaths: Array<{
+      path: string;
+      createdAt: string;
+    }> = [];
+    for (const path of files) {
+      const metadata = parseAnalysisArtifactPath(path, this.analysisDirectory);
+      if (
+        metadata?.itemId !== itemId ||
+        (operation !== undefined && metadata.operation !== operation)
+      ) {
+        continue;
+      }
+      canonicalPaths.push({ path, createdAt: metadata.createdAt });
+    }
+    const candidates = canonicalPaths
+      .sort((left, right) =>
+        compareText(right.createdAt, left.createdAt) ||
+        compareText(left.path, right.path))
+      .slice(0, MAX_AI_ANALYSIS_HISTORY_FILES)
+      .map(({ path }) => path);
     const artifacts: AiAnalysisArtifact[] = [];
     let totalBytes = 0;
     for (const path of candidates) {

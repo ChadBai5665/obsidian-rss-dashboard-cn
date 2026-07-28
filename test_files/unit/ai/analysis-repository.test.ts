@@ -201,6 +201,11 @@ function analysis(
   };
 }
 
+function analysisPath(value: AiAnalysisResult, suffix = ""): string {
+  const timestamp = value.createdAt.replace(/[-:.Z]/gu, "");
+  return `${DATA_ROOT}/analysis/${value.itemId}/${timestamp}-${value.operation}${suffix}.md`;
+}
+
 function repository(
   adapter: InMemoryAdapter,
   vault = { adapter } as unknown as Vault,
@@ -337,6 +342,63 @@ describe("AnalysisRepository", () => {
     expect(adapter.operations.filter((entry) => entry.startsWith("read:")).length)
       .toBeLessThanOrEqual(256);
     expect(listed.every(({ record }) => record.text.startsWith("result-"))).toBe(true);
+  });
+
+  it("keeps the newest 256 canonical paths before bounded reads", async () => {
+    const adapter = new InMemoryAdapter();
+    const target = repository(adapter);
+    const start = Date.parse("2026-07-21T12:00:00.000Z");
+    let expectedLatestPath = "";
+    for (let index = 0; index < 300; index += 1) {
+      const value = analysis({
+        id: index % 2 === 0
+          ? RESULT_ID
+          : "69a10bdf-6d36-4388-bbe4-219da9c3ea46",
+        createdAt: new Date(start + index).toISOString(),
+        text: `result-${index}`,
+      });
+      const path = analysisPath(value);
+      adapter.files.set(path, renderAnalysisMarkdown(value));
+      if (index === 299) expectedLatestPath = path;
+    }
+
+    const listed = await target.list(ITEM_ID);
+    const latest = await target.latest(ITEM_ID, "summary");
+
+    expect(listed).toHaveLength(256);
+    expect(listed[0]?.path).toBe(expectedLatestPath);
+    expect(listed[0]?.record.text).toBe("result-299");
+    expect(latest?.path).toBe(expectedLatestPath);
+    expect(adapter.operations.filter((entry) => entry.startsWith("read:")).length)
+      .toBeLessThanOrEqual(512);
+  });
+
+  it("filters canonical paths by operation before the 256-read cap", async () => {
+    const adapter = new InMemoryAdapter();
+    const target = repository(adapter);
+    const start = Date.parse("2026-07-21T12:00:00.000Z");
+    for (let index = 0; index < 300; index += 1) {
+      const value = analysis({
+        createdAt: new Date(start + index).toISOString(),
+        text: `summary-${index}`,
+      });
+      adapter.files.set(analysisPath(value), renderAnalysisMarkdown(value));
+    }
+    const expected = analysis({
+      operation: "deep-analysis",
+      createdAt: new Date(start + 300).toISOString(),
+      text: "wanted-deep-analysis",
+    });
+    const expectedPath = analysisPath(expected);
+    adapter.files.set(expectedPath, renderAnalysisMarkdown(expected));
+
+    const listed = await target.list(ITEM_ID, "deep-analysis");
+    const latest = await target.latest(ITEM_ID, "deep-analysis");
+
+    expect(listed.map(({ path }) => path)).toEqual([expectedPath]);
+    expect(latest?.path).toBe(expectedPath);
+    expect(adapter.operations.filter((entry) => entry.startsWith("read:")).length)
+      .toBe(2);
   });
 
   it("binds read-only adapter methods before enumeration and does not require write capabilities", async () => {

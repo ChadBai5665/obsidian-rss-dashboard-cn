@@ -32,7 +32,7 @@ export function renderAnalysisMarkdown(value: unknown): string {
     "",
   ];
   const prefix = lines.join("\n");
-  return `${prefix}${result.text}${result.text.endsWith("\n") ? "" : "\n"}`;
+  return `${prefix}${result.text}\n`;
 }
 
 /** JSON string literals are a reversible subset of YAML double-quoted scalars. */

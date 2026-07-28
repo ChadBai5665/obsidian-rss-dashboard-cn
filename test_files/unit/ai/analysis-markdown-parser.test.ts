@@ -95,6 +95,24 @@ describe("parseAnalysisMarkdown", () => {
     expect(parse(renderAnalysisMarkdown(expected))?.record.text).toBe(expected.text);
   });
 
+  it.each([
+    "x",
+    "x\n",
+    "x\n\n",
+    "第一行 🌏\n第二行\n",
+  ])("round-trips the exact final text including trailing newlines", (text) => {
+    const expected = result({ text });
+
+    expect(parse(renderAnalysisMarkdown(expected))?.record.text).toBe(text);
+  });
+
+  it("renders distinct bytes for final text with and without a trailing newline", () => {
+    const withoutTrailingNewline = renderAnalysisMarkdown(result({ text: "x" }));
+    const withTrailingNewline = renderAnalysisMarkdown(result({ text: "x\n" }));
+
+    expect(withTrailingNewline).not.toBe(withoutTrailingNewline);
+  });
+
   it("reads old schema-v1 artifacts without connectionId and valid collision suffixes", () => {
     const expected = result();
     const legacy = renderAnalysisMarkdown(expected)

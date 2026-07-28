@@ -189,32 +189,46 @@
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
+    "path": "test_files/unit/ai/analysis-markdown-parser.test.ts",
+    "rule": "home-path",
+    "line": 180,
+    "fingerprint": "sha256:0ea7d511318eaa3db4c091e55bd4c4e21f955c93b54083ba1d909145fe36ef15",
+    "reason": "Security test fixture intentionally verifies rejection of a synthetic Windows drive path."
+  },
+  {
     "path": "test_files/unit/ai/analysis-markdown.test.ts",
     "rule": "credential-value",
-    "line": 111,
+    "line": 112,
     "fingerprint": "sha256:8c65c86ce11dbad12269ef1265dc56e2301dcd3922be5e19edcbee71a74e5bf9",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/analysis-markdown.test.ts",
     "rule": "credential-value",
-    "line": 113,
+    "line": 114,
     "fingerprint": "sha256:935d112de3eeadeb9a3ac446885d57290c26802d4fb53540f7e3cfee08182835",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/ai/analysis-markdown.test.ts",
     "rule": "home-path",
-    "line": 152,
+    "line": 153,
     "fingerprint": "sha256:5beadea37d0480582c19f89e0fbc974ecee182dddd13badb270a55b365047c14",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/ai/analysis-markdown.test.ts",
     "rule": "credential-url",
-    "line": 153,
+    "line": 154,
     "fingerprint": "sha256:b9bc2327c28d30850f536014cdab6d2e2869326ac003acd12c3df7c484e498a4",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
+  },
+  {
+    "path": "test_files/unit/ai/analysis-repository.test.ts",
+    "rule": "home-path",
+    "line": 300,
+    "fingerprint": "sha256:b5c459df9c348b634f283828479d875972374c2e76be5dda758d7729f42ca5db",
+    "reason": "Security test fixture intentionally verifies rejection of a synthetic Windows drive path."
   },
   {
     "path": "test_files/unit/ai/connection-validation.test.ts",

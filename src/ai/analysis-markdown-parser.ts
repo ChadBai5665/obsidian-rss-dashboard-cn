@@ -50,7 +50,7 @@ export interface AiAnalysisHistoryRecord {
   text: string;
 }
 
-interface ParsedArtifactPath {
+export interface AiAnalysisArtifactPath {
   itemId: string;
   operation: AiOperation;
   createdAt: string;
@@ -66,7 +66,7 @@ export function parseAnalysisMarkdown(
   analysisRootValue: unknown,
 ): AiAnalysisArtifact | null {
   if (typeof value !== "string") return null;
-  const parsedPath = parseArtifactPath(pathValue, analysisRootValue);
+  const parsedPath = parseAnalysisArtifactPath(pathValue, analysisRootValue);
   if (!parsedPath) return null;
   try {
     const separatorIndex = value.indexOf(BODY_SEPARATOR);
@@ -187,13 +187,13 @@ export function analysisArtifactPathItemId(
   pathValue: unknown,
   analysisRootValue: unknown,
 ): string | undefined {
-  return parseArtifactPath(pathValue, analysisRootValue)?.itemId;
+  return parseAnalysisArtifactPath(pathValue, analysisRootValue)?.itemId;
 }
 
-function parseArtifactPath(
+export function parseAnalysisArtifactPath(
   pathValue: unknown,
   analysisRootValue: unknown,
-): ParsedArtifactPath | undefined {
+): Readonly<AiAnalysisArtifactPath> | undefined {
   if (
     typeof pathValue !== "string" ||
     typeof analysisRootValue !== "string" ||
@@ -241,7 +241,7 @@ function parseArtifactPath(
   }
   const createdAt = timestampToCanonicalUtc(timestamp);
   if (!createdAt) return undefined;
-  return { itemId, operation, createdAt };
+  return Object.freeze({ itemId, operation, createdAt });
 }
 
 function timestampToCanonicalUtc(value: string): string | undefined {
