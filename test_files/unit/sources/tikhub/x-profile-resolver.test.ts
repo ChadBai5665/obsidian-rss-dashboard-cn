@@ -8,7 +8,11 @@ import {
 import type { TikHubResult } from "../../../../src/sources/tikhub/tikhub-types";
 import {
   XProfileResolver,
+  XProfileResolverError,
 } from "../../../../src/sources/tikhub/x-profile-resolver";
+import type {
+  XProfileShapeDiagnostic,
+} from "../../../../src/sources/tikhub/x-profile-shape-diagnostic";
 
 const API_KEY = "profile-resolver-secret";
 const CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
@@ -58,6 +62,56 @@ function harness(options: {
 }
 
 describe("XProfileResolver", () => {
+  it("does not let runtime callers attach diagnostic fields or invoke getters", () => {
+    let getterCalls = 0;
+    const supplied = {
+      issue: "unknown-shape",
+      visitedContainers: 1,
+      candidateCount: 1,
+      hasLegacyContainer: true,
+      hasCoreContainer: false,
+      providerSentinel: "SECRET_NAVAL_VALUE",
+      get dangerous() {
+        getterCalls += 1;
+        return "SECRET_NAVAL_VALUE";
+      },
+    } as XProfileShapeDiagnostic & Record<string, unknown>;
+    const RuntimeResolverError = XProfileResolverError as unknown as new (
+      ...args: unknown[]
+    ) => XProfileResolverError;
+
+    const error = new RuntimeResolverError(
+      "profile-shape-unsupported",
+      supplied,
+    );
+
+    expect(getterCalls).toBe(0);
+    expect(error).not.toHaveProperty("diagnostic");
+    expect(JSON.stringify(error)).not.toContain("SECRET_NAVAL_VALUE");
+    expect(Object.isExtensible(error)).toBe(false);
+  });
+
+  it.each([
+    "provider-failure",
+    "network-failure",
+    "missing-key",
+  ] as const)("never permits a diagnostic on resolver code %s", (code) => {
+    const RuntimeResolverError = XProfileResolverError as unknown as new (
+      ...args: unknown[]
+    ) => XProfileResolverError;
+    const error = new RuntimeResolverError(code, {
+      issue: "unknown-shape",
+      visitedContainers: 1,
+      candidateCount: 1,
+      hasLegacyContainer: true,
+      hasCoreContainer: false,
+      providerSentinel: "SECRET_NAVAL_VALUE",
+    });
+
+    expect(error).not.toHaveProperty("diagnostic");
+    expect(JSON.stringify(error)).not.toContain("SECRET_NAVAL_VALUE");
+  });
+
   it("returns a short-lived opaque verification with the safe profile projection", async () => {
     const test = harness();
 
@@ -161,6 +215,19 @@ describe("XProfileResolver", () => {
     expect(String(error)).not.toContain("unsafe");
   });
 
+  it("remaps and strips a client-thrown resolver error at the transport boundary", async () => {
+    const clientError = new XProfileResolverError("profile-shape-unsupported");
+    const test = harness({ fetch: async () => { throw clientError; } });
+
+    const error = await test.resolver.resolve("openai").catch((caught) => caught);
+
+    expect(error).not.toBe(clientError);
+    expect(error).toMatchObject({ code: "provider-failure" });
+    expect(error.message).toBe("provider-failure");
+    expect(error).not.toHaveProperty("diagnostic");
+    expect(test.fetchUserProfile).toHaveBeenCalledTimes(1);
+  });
+
   it("forwards AbortSignal to the client", async () => {
     const controller = new AbortController();
     const test = harness();
@@ -213,6 +280,11 @@ describe("XProfileResolver", () => {
       "hasLegacyContainer",
       "hasCoreContainer",
     ]);
+    expect(Object.getOwnPropertyDescriptor(error, "diagnostic")).toMatchObject({
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
     expect(JSON.stringify(error)).not.toContain(providerSentinel);
     expect(JSON.stringify(error.diagnostic)).not.toContain(providerUrl);
     expect(String(error)).not.toContain(providerSentinel);

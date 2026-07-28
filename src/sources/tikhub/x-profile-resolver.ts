@@ -29,16 +29,35 @@ export type XProfileResolverErrorCode =
   | "profile-shape-unsupported"
   | "provider-failure";
 
+const RESOLVER_ERROR_DIAGNOSTIC_AUTHORITY = Symbol(
+  "x-profile-resolver-diagnostic-authority",
+);
+
 export class XProfileResolverError extends Error {
   readonly diagnostic?: XProfileShapeDiagnostic;
 
   constructor(
     readonly code: XProfileResolverErrorCode,
+    authority?: typeof RESOLVER_ERROR_DIAGNOSTIC_AUTHORITY,
     diagnostic?: XProfileShapeDiagnostic,
   ) {
     super(code);
     this.name = "XProfileResolverError";
-    if (diagnostic) this.diagnostic = Object.freeze({ ...diagnostic });
+    if (
+      code === "profile-shape-unsupported" &&
+      authority === RESOLVER_ERROR_DIAGNOSTIC_AUTHORITY
+    ) {
+      const snapshot = snapshotShapeDiagnostic(diagnostic);
+      if (snapshot) {
+        Object.defineProperty(this, "diagnostic", {
+          value: snapshot,
+          enumerable: true,
+          configurable: false,
+          writable: false,
+        });
+      }
+    }
+    Object.preventExtensions(this);
   }
 }
 
@@ -207,7 +226,6 @@ export class XProfileResolver {
           signal,
         })).data;
       } catch (error) {
-        if (error instanceof XProfileResolverError) throw error;
         throw mapClientError(error);
       }
 
@@ -296,5 +314,69 @@ function resolverError(
   code: XProfileResolverErrorCode,
   diagnostic?: XProfileShapeDiagnostic,
 ): XProfileResolverError {
-  return new XProfileResolverError(code, diagnostic);
+  return code === "profile-shape-unsupported" && diagnostic
+    ? new XProfileResolverError(
+      code,
+      RESOLVER_ERROR_DIAGNOSTIC_AUTHORITY,
+      diagnostic,
+    )
+    : new XProfileResolverError(code);
+}
+
+function snapshotShapeDiagnostic(
+  diagnostic: unknown,
+): XProfileShapeDiagnostic | undefined {
+  if (!isObject(diagnostic)) return undefined;
+  try {
+    const issue = ownDataValue(diagnostic, "issue");
+    const visitedContainers = ownDataValue(diagnostic, "visitedContainers");
+    const candidateCount = ownDataValue(diagnostic, "candidateCount");
+    const hasLegacyContainer = ownDataValue(diagnostic, "hasLegacyContainer");
+    const hasCoreContainer = ownDataValue(diagnostic, "hasCoreContainer");
+    if (
+      !isShapeIssue(issue) ||
+      !isNonNegativeSafeInteger(visitedContainers) ||
+      !isNonNegativeSafeInteger(candidateCount) ||
+      typeof hasLegacyContainer !== "boolean" ||
+      typeof hasCoreContainer !== "boolean"
+    ) {
+      return undefined;
+    }
+    return Object.freeze({
+      issue,
+      visitedContainers,
+      candidateCount,
+      hasLegacyContainer,
+      hasCoreContainer,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function ownDataValue(value: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && "value" in descriptor
+    ? descriptor.value as unknown
+    : undefined;
+}
+
+function isShapeIssue(value: unknown): value is XProfileShapeDiagnostic["issue"] {
+  return value === "no-candidate" ||
+    value === "required-field-invalid" ||
+    value === "identity-conflict" ||
+    value === "optional-field-conflict" ||
+    value === "unsafe-structure" ||
+    value === "unknown-shape";
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0;
+}
+
+function isObject(value: unknown): value is object {
+  return (typeof value === "object" || typeof value === "function") &&
+    value !== null;
 }
