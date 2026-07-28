@@ -199,7 +199,7 @@ function nestedPropertyValue(
   if (container === undefined || container === null || container === "") {
     return undefined;
   }
-  if (!isObject(container)) throw malformedProfile();
+  if (!isObject(container) || Array.isArray(container)) throw malformedProfile();
   const nested = ownDataProperties(container);
   return optionalPropertyValue(nested, valueKey);
 }
@@ -218,7 +218,9 @@ function modernVerified(properties: readonly DataProperty[]): boolean {
   if (verification === undefined || verification === null || verification === "") {
     return false;
   }
-  if (!isObject(verification)) throw malformedProfile();
+  if (!isObject(verification) || Array.isArray(verification)) {
+    throw malformedProfile();
+  }
   return optionalBoolean(ownDataProperties(verification), "verified") ?? false;
 }
 

@@ -89,6 +89,19 @@ describe("parseXProfile", () => {
     });
   });
 
+  it.each(["avatar", "profile_bio", "verification"])(
+    "rejects an array %s container",
+    (containerKey) => {
+      expect(() => parseXProfile({
+        result: {
+          rest_id: "123",
+          core: { screen_name: "naval", name: "Naval" },
+          [containerKey]: [],
+        },
+      })).toThrow(expect.objectContaining({ code: "malformed-profile" }));
+    },
+  );
+
   it.each([
     ["legacy omitted", {
       rest_id: "123",
