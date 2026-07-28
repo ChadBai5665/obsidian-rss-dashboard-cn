@@ -14,8 +14,7 @@ vi.mock("../../../src/security/desktop-secret-store", () => ({
 }));
 
 import RssDashboardPlugin from "../../../main";
-import { AiOperationError, AiOperationService } from "../../../src/ai/ai-operation-service";
-import { AiContentSelector } from "../../../src/ai/content/ai-content-selector";
+import { AiOperationService } from "../../../src/ai/ai-operation-service";
 import { AnalysisRepository } from "../../../src/ai/analysis-repository";
 import { AnalysisNoteInserter } from "../../../src/ai/analysis-note-inserter";
 import { createAiConnection } from "../../../src/ai/provider-presets";
@@ -27,61 +26,9 @@ import {
   type RssDashboardSettings,
 } from "../../../src/types/types";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
+import type { AiAnalysisResult } from "../../../src/ai/analysis-result";
 
 const CONNECTION_ID = "9a76f539-c9ec-4c45-a8e5-156cc6740a8d";
-
-function button(container: HTMLElement, label: string): HTMLButtonElement {
-  const match = Array.from(container.querySelectorAll("button")).find(
-    (candidate) => candidate.textContent === label,
-  );
-  if (!(match instanceof HTMLButtonElement)) {
-    throw new Error(`Missing button: ${label}`);
-  }
-  return match;
-}
-
-function enableConnection(test: ReturnType<typeof harness>): void {
-  test.settings.ai.connections = [createAiConnection({
-    id: CONNECTION_ID,
-    name: "Kimi work",
-    providerKind: "kimi",
-    model: "account-model",
-  })];
-  test.settings.ai.defaultConnectionId = CONNECTION_ID;
-}
-
-function installAtomicAdapter(test: ReturnType<typeof harness>): void {
-  const adapter = test.app.vault.adapter;
-  adapter.copy = async (from: string, to: string) => {
-    if (await adapter.exists(to)) throw new Error(`Destination exists: ${to}`);
-    await adapter.write(to, await adapter.read(from));
-  };
-  adapter.process = async (
-    path: string,
-    update: (current: string) => string,
-  ) => {
-    const current = await adapter.read(path);
-    const next = update(current);
-    await adapter.write(path, next);
-    return next;
-  };
-}
-
-function mockPreparedSuccess(): ReturnType<typeof vi.spyOn> {
-  return vi.spyOn(AiOperationService.prototype, "runPrepared")
-    .mockImplementation(async (input) => ({
-      operation: input.operation,
-      itemId: input.itemId,
-      connectionId: CONNECTION_ID,
-      connectionName: "Kimi work",
-      providerKind: "kimi",
-      model: "account-model",
-      contentBasis: input.selectedContent.basis,
-      inputCharacterCount: input.selectedContent.content.length,
-      inputTruncated: input.selectedContent.truncated,
-      text: "Production wiring analysis",
-    }));
-}
 
 function feedItem(guid: string, title: string): FeedItem {
   return {
@@ -121,188 +68,195 @@ function harness() {
     lastUpdated: Date.now(),
   };
   settings.feeds = [feed];
+  settings.ai.connections = [createAiConnection({
+    id: CONNECTION_ID,
+    name: "Kimi work",
+    providerKind: "kimi",
+    model: "account-model",
+  })];
+  settings.ai.defaultConnectionId = CONNECTION_ID;
   plugin.settings = settings;
-  const openSettingsToTab = vi
-    .spyOn(plugin, "openSettingsToTab")
-    .mockResolvedValue(undefined);
-  return { app, plugin, settings, selected, unrelated, openSettingsToTab };
+  return { app, plugin, settings, selected, unrelated };
+}
+
+function installAtomicAdapter(app: App): void {
+  const adapter = app.vault.adapter;
+  adapter.copy = async (from: string, to: string) => {
+    if (await adapter.exists(to)) throw new Error(`Destination exists: ${to}`);
+    await adapter.write(to, await adapter.read(from));
+  };
+  adapter.process = async (
+    path: string,
+    update: (current: string) => string,
+  ) => {
+    const current = await adapter.read(path);
+    const next = update(current);
+    await adapter.write(path, next);
+    return next;
+  };
+}
+
+function mockGeneration(): ReturnType<typeof vi.spyOn> {
+  return vi.spyOn(AiOperationService.prototype, "run")
+    .mockImplementation(async (input) => ({
+      operation: input.operation,
+      itemId: input.item.id,
+      connectionId: CONNECTION_ID,
+      connectionName: "Kimi work",
+      providerKind: "kimi",
+      model: "account-model",
+      contentBasis: "feed",
+      inputCharacterCount: 32,
+      inputTruncated: false,
+      text: "Production inline analysis",
+    }));
+}
+
+function analysisResult(itemId: string, index: number): AiAnalysisResult {
+  return {
+    schemaVersion: 1,
+    id: `123e4567-e89b-42d3-a456-${index.toString(16).padStart(12, "0")}`,
+    itemId,
+    sourceUrl: "https://example.com/item",
+    operation: "summary",
+    createdAt: `2026-07-23T03:${String(index % 60).padStart(2, "0")}:00.000Z`,
+    connectionId: CONNECTION_ID,
+    connectionName: "Kimi work",
+    providerKind: "kimi",
+    model: "account-model",
+    contentBasis: "feed",
+    inputCharacterCount: 10,
+    inputTruncated: false,
+    text: `Generated result ${index}`,
+  };
 }
 
 beforeEach(() => {
   installObsidianDomPolyfills();
-  document.body.empty();
   secretState.constructed = 0;
   secretState.reads = 0;
   vi.restoreAllMocks();
 });
 
-describe("production AI operation wiring", () => {
-  it("disposes a transcript runtime on data-root swap and gives AI the same repository", () => {
+describe("production inline AI composition", () => {
+  it("reuses one runtime per data root and reads no secret before a provider run", () => {
     const test = harness();
-    enableConnection(test);
-    const privatePlugin = test.plugin as unknown as {
-      getYouTubeTranscriptRuntime(): {
-        dataRoot: string;
-        service: { dispose(): void };
-        contentRepository: unknown;
-      };
-    };
-    const first = privatePlugin.getYouTubeTranscriptRuntime();
-    const disposeFirst = vi.spyOn(first.service, "dispose");
-    let rootObservedDuringDispose: string | undefined;
-    disposeFirst.mockImplementation(() => {
-      rootObservedDuringDispose = (
-        test.plugin as unknown as {
-          youtubeTranscriptRuntime: { dataRoot: string } | null;
-        }
-      ).youtubeTranscriptRuntime?.dataRoot;
+
+    const first = test.plugin.createAiPanelOptionsForItem(test.selected);
+    const second = test.plugin.createAiPanelOptionsForItem(test.selected);
+
+    expect(first).not.toBeNull();
+    expect(second?.coordinator).toBe(first?.coordinator);
+    expect(first?.createStartInput("summary", CONNECTION_ID)).toMatchObject({
+      operation: "summary",
+      connectionId: CONNECTION_ID,
+      fetchFullText: false,
+      item: { id: expect.stringMatching(/^[a-f0-9]{64}$/u) },
     });
-    test.settings.collection.dataFolder = ".rss-dashboard-data-next";
-
-    const current = privatePlugin.getYouTubeTranscriptRuntime();
-    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
-    const modalOptions = (modal as unknown as {
-      options: {
-        contentSelector: { contentRepository: unknown };
-      };
-    }).options;
-
-    expect(current).not.toBe(first);
-    expect(current.dataRoot).toBe(".rss-dashboard-data-next");
-    expect(disposeFirst).toHaveBeenCalledTimes(1);
-    expect(rootObservedDuringDispose).toBe(".rss-dashboard-data-next");
-    expect(modalOptions.contentSelector.contentRepository).toBe(
-      current.contentRepository,
-    );
-    modal?.close();
-  });
-
-  it("keeps the old transcript runtime intact when a candidate data root is invalid", async () => {
-    const test = harness();
-    const privatePlugin = test.plugin as unknown as {
-      youtubeTranscriptRuntime: {
-        dataRoot: string;
-        service: {
-          dispose(): void;
-          get(request: {
-            itemId: string;
-            videoId: string;
-            refresh?: boolean;
-          }): Promise<unknown>;
-        };
-        contentRepository: unknown;
-      } | null;
-      getYouTubeTranscriptRuntime(): {
-        dataRoot: string;
-        service: {
-          dispose(): void;
-          get(request: {
-            itemId: string;
-            videoId: string;
-            refresh?: boolean;
-          }): Promise<unknown>;
-        };
-        contentRepository: unknown;
-      };
-    };
-    const original = privatePlugin.getYouTubeTranscriptRuntime();
-    const disposeOriginal = vi.spyOn(original.service, "dispose");
-    const originalField = privatePlugin.youtubeTranscriptRuntime;
-    test.settings.collection.dataFolder = "../invalid-root";
-
-    expect(() => privatePlugin.getYouTubeTranscriptRuntime()).toThrow(
-      "Invalid data root",
-    );
-
-    expect(disposeOriginal).not.toHaveBeenCalled();
-    expect(privatePlugin.youtubeTranscriptRuntime).toBe(originalField);
-    test.settings.collection.dataFolder = original.dataRoot;
-    const restored = privatePlugin.getYouTubeTranscriptRuntime();
-    expect(restored.service).toBe(original.service);
-    expect(restored.contentRepository).toBe(original.contentRepository);
-    await expect(
-      restored.service.get({
-        itemId: "invalid-item-id",
-        videoId: "dQw4w9WgXcQ",
-        refresh: true,
-      }),
-    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
-  });
-
-  it("opens AI settings before constructing secrets or touching vault content when no connection is enabled", () => {
-    const test = harness();
-    const exists = vi.spyOn(test.app.vault.adapter, "exists");
-    const read = vi.spyOn(test.app.vault.adapter, "read");
-
-    const modal = test.plugin.openAiOperationForItem(
-      test.selected,
-      "summary",
-    );
-
-    expect(modal).toBeNull();
-    expect(test.openSettingsToTab).toHaveBeenCalledWith("ai");
-    expect(secretState.constructed).toBe(0);
-    expect(secretState.reads).toBe(0);
-    expect(exists).not.toHaveBeenCalled();
-    expect(read).not.toHaveBeenCalled();
-  });
-
-  it("previews only the selected FeedItem and does not read a key or unrelated item before confirmation", async () => {
-    const test = harness();
-    enableConnection(test);
-    const exists = vi.spyOn(test.app.vault.adapter, "exists");
-    const read = vi.spyOn(test.app.vault.adapter, "read");
-    const selectedId = createCollectedItemId({
-      sourceId: "feed-id",
-      guid: test.selected.guid,
-      url: test.selected.link,
-      title: test.selected.title,
-      publishedAt: test.selected.pubDate,
-    });
-    const unrelatedId = createCollectedItemId({
-      sourceId: "feed-id",
-      guid: test.unrelated.guid,
-      url: test.unrelated.link,
-      title: test.unrelated.title,
-      publishedAt: test.unrelated.pubDate,
-    });
-
-    const modal = test.plugin.openAiOperationForItem(
-      test.selected,
-      "summary",
-    );
-    expect(modal).not.toBeNull();
-    await vi.waitFor(() => {
-      expect(modal?.contentEl.textContent).toContain("Selected item");
-    });
-
     expect(secretState.constructed).toBe(1);
     expect(secretState.reads).toBe(0);
-    expect(test.openSettingsToTab).not.toHaveBeenCalled();
-    expect(test.selected.rssDashboardId).toBeUndefined();
-    expect(exists.mock.calls.flat().join("\n")).toContain(selectedId);
-    expect(exists.mock.calls.flat().join("\n")).not.toContain(unrelatedId);
-    expect(read).not.toHaveBeenCalled();
-    modal?.close();
   });
 
-  it("submits the production preview snapshot without selecting a cache file that appears later", async () => {
+  it("replaces and shuts down the runtime only after a real data-root change", () => {
     const test = harness();
-    enableConnection(test);
-    const select = vi.spyOn(AiContentSelector.prototype, "select");
-    const legacyRun = vi.spyOn(AiOperationService.prototype, "run")
-      .mockRejectedValue(new Error("legacy selection path must not run"));
-    const runPrepared = vi.spyOn(AiOperationService.prototype, "runPrepared")
-      .mockImplementation(async (input) => await new Promise((_, reject) => {
-        input.signal?.addEventListener("abort", () => {
-          reject(new AiOperationError("aborted"));
-        }, { once: true });
-      }));
-    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
-    await vi.waitFor(() => expect(select).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(
-      button(modal!.contentEl, "确认发送").disabled,
-    ).toBe(false));
+    const first = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const shutdown = vi.spyOn(
+      first.coordinator as { shutdown(): Promise<void> },
+      "shutdown",
+    );
+
+    test.settings.ai.defaultConnectionId = CONNECTION_ID;
+    expect(test.plugin.createAiPanelOptionsForItem(test.selected)?.coordinator)
+      .toBe(first.coordinator);
+    test.settings.collection.dataFolder = ".rss-dashboard-data-next";
+    const next = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+
+    expect(next.coordinator).not.toBe(first.coordinator);
+    expect(shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the old runtime alive when the candidate data root is invalid", () => {
+    const test = harness();
+    const first = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const shutdown = vi.spyOn(
+      first.coordinator as { shutdown(): Promise<void> },
+      "shutdown",
+    );
+    test.settings.collection.dataFolder = "../invalid-root";
+
+    expect(test.plugin.createAiPanelOptionsForItem(test.selected)).toBeNull();
+    expect(shutdown).not.toHaveBeenCalled();
+    test.settings.collection.dataFolder = DEFAULT_SETTINGS.collection.dataFolder;
+    expect(test.plugin.createAiPanelOptionsForItem(test.selected)?.coordinator)
+      .toBe(first.coordinator);
+  });
+
+  it("rejects an untrusted detached item before constructing the runtime", () => {
+    const test = harness();
+    const detached = structuredClone(test.selected);
+    detached.feedUrl = "https://unowned.example/feed.xml";
+
+    expect(test.plugin.createAiPanelOptionsForItem(detached)).toBeNull();
+    expect(secretState.constructed).toBe(0);
+    expect(secretState.reads).toBe(0);
+  });
+
+  it("inserts only a newly generated exact result after source-save and repository verification", async () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    mockGeneration();
+    await test.app.vault.createFolder("Notes");
+    const note = await test.app.vault.create("Notes/source.md", "Source bytes");
+    const saveSource = vi.spyOn(
+      test.plugin as unknown as { saveArticleForAiInsertion(): Promise<string> },
+      "saveArticleForAiInsertion",
+    ).mockResolvedValue(note.path);
+    const verify = vi.spyOn(AnalysisRepository.prototype, "withVerifiedArtifact");
+    const insert = vi.spyOn(AnalysisNoteInserter.prototype, "insert");
+    const open = vi.spyOn(
+      test.plugin as unknown as { openAiVaultFile(): Promise<void> },
+      "openAiVaultFile",
+    ).mockResolvedValue(undefined);
+    const options = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+
+    const terminal = await options.coordinator.start(
+      options.createStartInput("summary", CONNECTION_ID),
+    );
+    expect(terminal.status).toBe("complete");
+    expect(options.canInsertArtifact(terminal.artifactPath!)).toBe(true);
+    const unrelatedOptions = test.plugin.createAiPanelOptionsForItem(
+      test.unrelated,
+    )!;
+    expect(unrelatedOptions.canInsertArtifact(terminal.artifactPath!)).toBe(false);
+    await expect(
+      unrelatedOptions.insertArtifact(terminal.artifactPath!),
+    ).rejects.toThrow();
+
+    await options.insertArtifact(terminal.artifactPath!);
+
+    expect(saveSource).toHaveBeenCalledTimes(1);
+    expect(verify).toHaveBeenCalledWith(
+      terminal.artifactPath,
+      expect.objectContaining({ itemId: terminal.itemId }),
+      expect.any(Function),
+    );
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({
+      notePath: note.path,
+      result: expect.objectContaining({ itemId: terminal.itemId }),
+    }));
+    expect(saveSource.mock.invocationCallOrder[0]).toBeLessThan(
+      insert.mock.invocationCallOrder[0],
+    );
+    expect(open).toHaveBeenLastCalledWith(
+      note.path,
+      expect.stringMatching(/^RSS-DASHBOARD-CN:AI:/u),
+    );
+  });
+
+  it("does not grant insertion authority to repository history", async () => {
+    const test = harness();
+    installAtomicAdapter(test.app);
+    const options = test.plugin.createAiPanelOptionsForItem(test.selected)!;
     const itemId = createCollectedItemId({
       sourceId: "feed-id",
       guid: test.selected.guid,
@@ -310,87 +264,87 @@ describe("production AI operation wiring", () => {
       title: test.selected.title,
       publishedAt: test.selected.pubDate,
     });
-    const cachePath = `${test.settings.collection.dataFolder}/content/${itemId}.md`;
-    await test.app.vault.adapter.write(cachePath, [
-      "---",
-      "schemaVersion: 1",
-      `itemId: ${JSON.stringify(itemId)}`,
-      `sourceUrl: ${JSON.stringify(test.selected.link)}`,
-      `fetchedAt: ${JSON.stringify("2026-07-23T02:00:00.000Z")}`,
-      `contentBasis: ${JSON.stringify("full-text")}`,
-      "---",
-      "",
-      "Later cached full text that was never previewed",
-    ].join("\n"));
-
-    button(modal!.contentEl, "确认发送").click();
-    await vi.waitFor(() => expect(runPrepared).toHaveBeenCalledTimes(1));
-
-    expect(legacyRun).not.toHaveBeenCalled();
-    expect(select).toHaveBeenCalledTimes(1);
-    expect(runPrepared).toHaveBeenCalledWith(expect.objectContaining({
+    const historyPath = await new AnalysisRepository(
+      test.app.vault,
+      test.settings.collection.dataFolder,
+      { randomSuffix: () => "historysuffix0001" },
+    ).save({
+      schemaVersion: 1,
+      id: "123e4567-e89b-42d3-a456-426614174000",
       itemId,
-      selectedContent: expect.objectContaining({
-        content: "Selected item feed excerpt",
-        basis: "feed",
-      }),
-    }));
-    modal?.close();
+      sourceUrl: test.selected.link,
+      operation: "summary",
+      createdAt: "2026-07-23T03:00:00.000Z",
+      connectionId: CONNECTION_ID,
+      connectionName: "Kimi work",
+      providerKind: "kimi",
+      model: "account-model",
+      contentBasis: "feed",
+      inputCharacterCount: 10,
+      inputTruncated: false,
+      text: "Historical result",
+    });
+
+    expect(options.canInsertArtifact(historyPath)).toBe(false);
+    await expect(options.insertArtifact(historyPath)).rejects.toThrow();
   });
 
-  it.each(["valid", "deleted", "replaced"] as const)(
-    "binds note insertion to the current saved artifact in production wiring: %s",
-    async (scenario) => {
-      const test = harness();
-      enableConnection(test);
-      installAtomicAdapter(test);
-      await test.app.vault.createFolder("Notes");
-      const sourceNote = await test.app.vault.create(
-        "Notes/source.md",
-        "User-authored source bytes",
-      );
-      test.selected.saved = true;
-      test.selected.savedFilePath = sourceNote.path;
-      mockPreparedSuccess();
-      const save = vi.spyOn(AnalysisRepository.prototype, "save");
-      const insert = vi.spyOn(AnalysisNoteInserter.prototype, "insert");
-      const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
-      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
-        "Selected item",
+  it("bounds current insertion authority to the newest 256 exact paths", async () => {
+    const test = harness();
+    const options = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const runtime = (test.plugin as unknown as {
+      aiRuntime: {
+        generatedResults: Map<string, Readonly<AiAnalysisResult>>;
+        coordinator: { saveAnalysis(result: AiAnalysisResult): Promise<string> };
+      };
+    }).aiRuntime;
+    vi.spyOn(AnalysisRepository.prototype, "save")
+      .mockImplementation(async (value) => {
+        const result = value as AiAnalysisResult;
+        return `.rss-dashboard-data/analysis/${result.itemId}/${result.id}.md`;
+      });
+
+    const paths: string[] = [];
+    for (let index = 0; index < 257; index += 1) {
+      paths.push(await runtime.coordinator.saveAnalysis(
+        analysisResult(options.itemId, index),
       ));
+    }
 
-      button(modal!.contentEl, "确认发送").click();
-      await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1));
-      const artifactPath = await save.mock.results[0].value;
-      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
-        artifactPath,
-      ));
-      if (scenario === "deleted") {
-        await test.app.vault.adapter.remove(artifactPath);
-      } else if (scenario === "replaced") {
-        await test.app.vault.adapter.write(
-          artifactPath,
-          "---\nresultId: \"forged\"\nsourceItemId: \"other\"\n---\n",
-        );
-      }
+    expect(runtime.generatedResults.size).toBe(256);
+    expect(options.canInsertArtifact(paths[0])).toBe(false);
+    expect(options.canInsertArtifact(paths[1])).toBe(true);
+    expect(options.canInsertArtifact(paths[256])).toBe(true);
+  });
 
-      button(modal!.contentEl, "插入已保存原文").click();
+  it("does not remember a result when the real repository save fails", async () => {
+    const test = harness();
+    const options = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const runtime = (test.plugin as unknown as {
+      aiRuntime: {
+        generatedResults: Map<string, Readonly<AiAnalysisResult>>;
+        coordinator: { saveAnalysis(result: AiAnalysisResult): Promise<string> };
+      };
+    }).aiRuntime;
+    vi.spyOn(AnalysisRepository.prototype, "save")
+      .mockRejectedValue(new Error("atomic save failed"));
 
-      if (scenario === "valid") {
-        await vi.waitFor(() => expect(insert).toHaveBeenCalledTimes(1));
-        expect(await test.app.vault.read(sourceNote)).toContain(
-          "RSS-DASHBOARD-CN:AI:",
-        );
-      } else {
-        await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
-          "分析文档已缺失或发生变化",
-        ));
-        expect(insert).not.toHaveBeenCalled();
-        expect(await test.app.vault.read(sourceNote)).toBe(
-          "User-authored source bytes",
-        );
-      }
-      modal?.close();
-    },
-  );
+    await expect(runtime.coordinator.saveAnalysis(
+      analysisResult(options.itemId, 1),
+    )).rejects.toThrow("atomic save failed");
+    expect(runtime.generatedResults.size).toBe(0);
+  });
+
+  it("shuts the active coordinator down on plugin unload", () => {
+    const test = harness();
+    const options = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const shutdown = vi.spyOn(
+      options.coordinator as { shutdown(): Promise<void> },
+      "shutdown",
+    ).mockResolvedValue(undefined);
+
+    test.plugin.onunload();
+
+    expect(shutdown).toHaveBeenCalledTimes(1);
+  });
 });

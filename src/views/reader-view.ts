@@ -69,6 +69,11 @@ import {
   type YouTubeTranscriptRuntimeOptions,
 } from "../components/youtube-transcript-panel";
 import { isValidYouTubeVideoId } from "../youtube-transcript/transcript-types";
+import {
+  createInlineAiPanel,
+  type InlineAiPanelController,
+  type InlineAiPanelDependencies,
+} from "../components/inline-ai-panel";
 
 export const RSS_READER_VIEW_TYPE = "rss-reader-view";
 
@@ -129,11 +134,12 @@ export class ReaderView extends ItemView {
   private readonly explicitContentCoordinator: ExplicitContentCoordinator;
   private disposed = false;
   private actualContentBasis: ContentBasis | null = null;
-  private onAiOperation?: (
-    item: FeedItem,
-    operation: AiOperation,
-  ) => { close(): void } | null | void;
-  private activeAiModal: { close(): void } | null = null;
+  private readonly createAiPanelOptions:
+    | ((item: FeedItem) => InlineAiPanelDependencies | null)
+    | undefined;
+  private aiPanel: InlineAiPanelController | null = null;
+  private aiPanelMount: HTMLElement | null = null;
+  private activeAiOperation: AiOperation | null = null;
   private transcriptPanel: YouTubeTranscriptPanelController | null = null;
   private readonly youtubeTranscript: ReaderYouTubeTranscriptOptions | undefined;
   private readonly localizedReadingBindings = new Map<
@@ -218,10 +224,9 @@ export class ReaderView extends ItemView {
         duration: number,
         flush?: boolean,
       ) => void;
-      onAiOperation?: (
+      createAiPanelOptions?: (
         item: FeedItem,
-        operation: AiOperation,
-      ) => { close(): void } | null | void;
+      ) => InlineAiPanelDependencies | null;
       youtubeTranscript?: ReaderYouTubeTranscriptOptions;
     },
   ) {
@@ -231,7 +236,7 @@ export class ReaderView extends ItemView {
     this.onArticleSave = onArticleSave;
     this.onArticleUpdate = onArticleUpdate;
     this.onPlaybackProgress = options?.onPlaybackProgress;
-    this.onAiOperation = options?.onAiOperation;
+    this.createAiPanelOptions = options?.createAiPanelOptions;
     this.youtubeTranscript = options?.youtubeTranscript;
     this.explicitContentCoordinator = new ExplicitContentCoordinator(
       this.app.vault,
@@ -1076,9 +1081,8 @@ export class ReaderView extends ItemView {
       event.stopPropagation();
       const menu = new Menu();
       addAiOperationMenuItems(menu, this.settings.locale, (operation) => {
-        if (!this.currentItem || !this.onAiOperation) return;
-        this.activeAiModal?.close();
-        this.activeAiModal = this.onAiOperation(this.currentItem, operation) ?? null;
+        if (!this.currentItem) return;
+        void this.showAiOperation(operation);
       });
       menu.showAtMouseEvent(event as MouseEvent);
     };
@@ -1139,7 +1143,69 @@ export class ReaderView extends ItemView {
       createTranslator(this.settings.locale ?? "zh-CN"),
       this.settings.locale ?? "zh-CN",
     );
+    const operation = this.activeAiOperation;
+    if (this.currentItem && this.aiPanelMount) {
+      this.destroyAiPanel(true);
+      this.mountAiPanel();
+      if (operation && this.aiPanel) {
+        void this.aiPanel.show(operation);
+      }
+    }
     this.updateToggleButtons();
+  }
+
+  /** Opens one explicitly requested operation in this reader's inline panel. */
+  public async showAiOperation(operation: AiOperation): Promise<void> {
+    if (!this.currentItem) return;
+    if (!this.aiPanel && !this.aiPanelMount) {
+      this.mountAiPanel();
+    }
+    if (!this.aiPanel) return;
+    this.activeAiOperation = operation;
+    await this.aiPanel.show(operation);
+  }
+
+  private mountAiPanel(): void {
+    if (!this.currentItem || !this.readingContainer || this.aiPanelMount) return;
+    const mount = this.readingContainer.ownerDocument.createElement("div");
+    mount.className = "rss-reader-ai-mount";
+    this.readingContainer.insertBefore(mount, this.readingContainer.firstChild);
+    this.aiPanelMount = mount;
+
+    let dependencies: InlineAiPanelDependencies | null = null;
+    try {
+      dependencies = this.createAiPanelOptions?.(this.currentItem) ?? null;
+    } catch {
+      dependencies = null;
+    }
+    if (!dependencies) {
+      mount.createDiv({
+        cls: "rss-reader-ai-unavailable",
+        text: this.t("ai.itemUnavailable"),
+      });
+      return;
+    }
+    try {
+      this.aiPanel = createInlineAiPanel({
+        ...dependencies,
+        container: mount,
+        locale: this.settings.locale ?? "zh-CN",
+      });
+    } catch {
+      mount.empty();
+      mount.createDiv({
+        cls: "rss-reader-ai-unavailable",
+        text: this.t("ai.itemUnavailable"),
+      });
+    }
+  }
+
+  private destroyAiPanel(preserveOperation = false): void {
+    this.aiPanel?.destroy();
+    this.aiPanel = null;
+    this.aiPanelMount?.remove();
+    this.aiPanelMount = null;
+    if (!preserveOperation) this.activeAiOperation = null;
   }
 
   private bindLocalizedReadingText(
@@ -1183,8 +1249,7 @@ export class ReaderView extends ItemView {
     this.disposed = true;
     this.displayRequestSequence += 1;
     this.closeTagsDropdown();
-    this.activeAiModal?.close();
-    this.activeAiModal = null;
+    this.destroyAiPanel();
     this.destroyTranscriptPanel();
 
     if (this.readerFormatPortal) {
@@ -1419,6 +1484,7 @@ export class ReaderView extends ItemView {
   ): Promise<void> {
     if (this.disposed) return;
     const displayRequest = ++this.displayRequestSequence;
+    this.destroyAiPanel();
     this.destroyTranscriptPanel();
     if (this.currentItem?.guid !== item.guid) {
       this.lastRestrictedNoticeGuid = null;

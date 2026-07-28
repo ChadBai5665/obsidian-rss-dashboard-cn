@@ -664,6 +664,7 @@ export const en = {
   "ai.panel.status.aborted": "Generation stopped",
   "ai.noEnabledConnection":
     "Enable an AI connection in Settings before using this action.",
+  "ai.itemUnavailable": "AI is unavailable for this item.",
   "ai.modal.title": "AI action: {operation}",
   "ai.preview.heading": "Review before sending",
   "ai.preview.sourceTitle": "Selected item",

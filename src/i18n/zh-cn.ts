@@ -655,6 +655,7 @@ export const zhCN = {
   "ai.panel.status.completeHistory": "历史结果",
   "ai.panel.status.aborted": "已停止生成",
   "ai.noEnabledConnection": "请先在设置中启用一个 AI 连接，再使用此操作。",
+  "ai.itemUnavailable": "当前信息无法安全识别，暂时不能使用 AI 操作。",
   "ai.modal.title": "AI 操作：{operation}",
   "ai.preview.heading": "发送前确认",
   "ai.preview.sourceTitle": "当前信息",

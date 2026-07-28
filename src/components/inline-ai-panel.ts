@@ -61,6 +61,12 @@ export interface InlineAiPanelOptions {
   ): Promise<void> | void;
 }
 
+/** Host-independent dependencies prepared by the plugin composition root. */
+export type InlineAiPanelDependencies = Omit<
+  InlineAiPanelOptions,
+  "container" | "locale"
+>;
+
 type Coordinator = InlineAiPanelOptions["coordinator"];
 type ResultOrigin = "current" | "history";
 

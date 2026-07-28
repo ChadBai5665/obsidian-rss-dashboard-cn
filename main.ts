@@ -134,6 +134,12 @@ import { AiContentSelector } from "./src/ai/content/ai-content-selector";
 import { AiOperationService } from "./src/ai/ai-operation-service";
 import { AnalysisRepository } from "./src/ai/analysis-repository";
 import { AnalysisNoteInserter } from "./src/ai/analysis-note-inserter";
+import { AiOperationTaskCoordinator } from "./src/ai/ai-operation-task-coordinator";
+import {
+  snapshotAiAnalysisResult,
+  type AiAnalysisResult,
+} from "./src/ai/analysis-result";
+import type { InlineAiPanelDependencies } from "./src/components/inline-ai-panel";
 import {
   cloneAiSourceItem,
   revalidateAiSourceForSave,
@@ -141,11 +147,6 @@ import {
   type AiSourceSnapshot,
 } from "./src/ai/ai-source-snapshot";
 import type { AiOperation } from "./src/ai/prompts/prompt-types";
-import {
-  AiOperationModal,
-  aiOperationLabel,
-  openAiOperationModal,
-} from "./src/modals/ai-operation-modal";
 import { fetchFullArticleContentWithOutcome } from "./src/utils/full-article-fetch";
 import { getContentBasisLabel } from "./src/collection/content-basis-display";
 import { SourceRegistry } from "./src/sources/source-registry";
@@ -205,6 +206,19 @@ interface AiArticleSaveSnapshot {
   addSavedTag: boolean;
   savedTag: Tag;
 }
+
+interface AiRuntime {
+  dataRoot: string;
+  contentRepository: ContentRepository;
+  contentSelector: AiContentSelector;
+  operationService: AiOperationService;
+  analysisRepository: AnalysisRepository;
+  noteInserter: AnalysisNoteInserter;
+  coordinator: AiOperationTaskCoordinator;
+  generatedResults: Map<string, Readonly<AiAnalysisResult>>;
+}
+
+const MAX_CURRENT_AI_INSERTION_RESULTS = 256;
 
 function canWriteOwnDataValues(target: object, keys: string[]): boolean {
   try {
@@ -828,6 +842,7 @@ export default class RssDashboardPlugin extends Plugin {
         contentRepository: ContentRepository;
       }
     | null = null;
+  private aiRuntime: AiRuntime | null = null;
   private sourceRegistry:
     | { signature: string; registry: SourceRegistry }
     | null = null;
@@ -1749,97 +1764,165 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  /** Opens one explicitly requested AI operation for one selected feed item. */
-  public openAiOperationForItem(
+  /**
+   * Prepares only trusted, non-secret dependencies for an inline AI panel.
+   * The caller owns UI and the coordinator owns task lifetime.
+   */
+  public createAiPanelOptionsForItem(
     item: FeedItem,
-    operation: AiOperation,
-  ): AiOperationModal | null {
+  ): InlineAiPanelDependencies | null {
     try {
-      return openAiOperationModal({
-        connections: this.settings.ai.connections,
-        locale: this.settings.locale,
-        openSettings: () => { void this.openSettingsToTab("ai"); },
-        showNotice: () => { this.notify("ai.noEnabledConnection"); },
-        createModal: (enabledConnections) => {
-          const source = resolveAndSnapshotAiSource(this.settings.feeds, item);
-          if (!source) throw new Error("Selected AI item has no trusted source");
-          const normalizationItem = cloneAiSourceItem(source.item);
-          const normalizationFeed: Feed = {
-            ...source.feed,
-            items: [normalizationItem],
-          };
-          const selectedItem = normalizeFeedItem(
-            normalizationFeed,
-            normalizationItem,
-            new Date(),
-          );
-          const saveSnapshot = this.createAiArticleSaveSnapshot(source);
-          let savedNotePath = this.resolveExistingSavedNotePath(source.item);
-          const transcriptRuntime = this.getYouTubeTranscriptRuntime();
-          const dataRoot = transcriptRuntime.dataRoot;
-          const contentSelector = new AiContentSelector({
-            contentRepository: transcriptRuntime.contentRepository,
-            fullTextFetcher: async ({ url, signal }) =>
-              await fetchFullArticleContentWithOutcome(
-                url,
-                this.settings.corsProxyEnabled && this.settings.corsProxyUrl
-                  ? this.settings.corsProxyUrl
-                  : undefined,
-                signal,
-              ),
-          });
-          const operationService = new AiOperationService({
-            getAiSettings: () => this.settings.ai,
-            secretStore: new DesktopSecretStore(),
-            contentSelector,
-          });
-          const analysisRepository = new AnalysisRepository(
-            this.app.vault,
-            dataRoot,
-          );
-          const noteInserter = new AnalysisNoteInserter(this.app.vault);
-          const t = createTranslator(this.settings.locale ?? "zh-CN");
+      const source = resolveAndSnapshotAiSource(this.settings.feeds, item);
+      if (!source) return null;
+      const normalizationItem = cloneAiSourceItem(source.item);
+      const normalizationFeed: Feed = {
+        ...source.feed,
+        items: [normalizationItem],
+      };
+      const selectedItem = normalizeFeedItem(
+        normalizationFeed,
+        normalizationItem,
+        new Date(),
+      );
+      if (selectedItem.id !== source.expectedStableId) return null;
 
-          return new AiOperationModal(this.app, {
-            locale: this.settings.locale,
-            operation,
-            item: selectedItem,
-            connections: enabledConnections,
-            defaultConnectionId: this.settings.ai.defaultConnectionId,
-            contentSelector,
-            operationService,
-            analysisRepository,
-            openAnalysis: async (path) => {
-              await this.openAiVaultFile(path);
-            },
-            getSavedNotePath: () => savedNotePath,
-            insertIntoSavedNote: async (result, artifactPath, notePath) =>
-              await analysisRepository.withVerifiedArtifact(
-                artifactPath,
-                result,
-                async (trustedResult) => await noteInserter.insert({
-                  notePath,
-                  result: trustedResult,
-                  operationLabel: aiOperationLabel(trustedResult.operation, t),
-                  contentBasisLabel: getContentBasisLabel(
-                    trustedResult.contentBasis,
-                    this.settings.locale ?? "zh-CN",
-                  ),
-                }),
-              ),
-            openSavedNote: async (notePath, marker) => {
-              await this.openAiVaultFile(notePath, marker);
-            },
-            saveArticleFirst: async () => {
-              savedNotePath = await this.saveArticleForAiInsertion(saveSnapshot);
-            },
-          });
+      const runtime = this.getAiRuntime();
+      const saveSnapshot = this.createAiArticleSaveSnapshot(source);
+      let savedNotePath = this.resolveExistingSavedNotePath(source.item);
+      const itemId = selectedItem.id;
+
+      return {
+        itemId,
+        connections: this.settings.ai.connections,
+        defaultConnectionId: this.settings.ai.defaultConnectionId,
+        coordinator: runtime.coordinator,
+        createStartInput: (operation, connectionId) => ({
+          operation,
+          item: selectedItem,
+          connectionId,
+          fetchFullText: false,
+        }),
+        listHistory: async (requestedItemId, operation) => {
+          if (requestedItemId !== itemId) return [];
+          return await runtime.analysisRepository.list(itemId, operation);
         },
-      });
+        openArtifact: async (path) => {
+          await this.openAiVaultFile(path);
+        },
+        openSettings: async () => {
+          await this.openSettingsToTab("ai");
+        },
+        canInsertArtifact: (path) =>
+          runtime.generatedResults.get(path)?.itemId === itemId,
+        insertArtifact: async (path) => {
+          const result = runtime.generatedResults.get(path);
+          if (!result || result.itemId !== itemId) {
+            throw new Error("The AI result is not insertable");
+          }
+          if (!savedNotePath) {
+            savedNotePath = await this.saveArticleForAiInsertion(saveSnapshot);
+          }
+          const currentResult = runtime.generatedResults.get(path);
+          if (currentResult !== result || currentResult.itemId !== itemId) {
+            throw new Error("The AI result is no longer current");
+          }
+          const notePath = savedNotePath;
+          const insertion = await runtime.analysisRepository.withVerifiedArtifact(
+            path,
+            currentResult,
+            async (trustedResult) => await runtime.noteInserter.insert({
+              notePath,
+              result: trustedResult,
+              operationLabel: this.aiOperationLabel(trustedResult.operation),
+              contentBasisLabel: getContentBasisLabel(
+                trustedResult.contentBasis,
+                this.settings.locale ?? "zh-CN",
+              ),
+            }),
+          );
+          await this.openAiVaultFile(notePath, insertion.marker);
+        },
+      };
     } catch {
-      this.notify("ai.error.failed");
       return null;
     }
+  }
+
+  private getAiRuntime(): AiRuntime {
+    const dataRoot = this.settings.collection.dataFolder.trim();
+    if (this.aiRuntime?.dataRoot === dataRoot) return this.aiRuntime;
+
+    const transcriptRuntime = this.getYouTubeTranscriptRuntime();
+    const contentRepository = transcriptRuntime.contentRepository;
+    const contentSelector = new AiContentSelector({
+      contentRepository,
+      fullTextFetcher: async ({ url, signal }) =>
+        await fetchFullArticleContentWithOutcome(
+          url,
+          this.settings.corsProxyEnabled && this.settings.corsProxyUrl
+            ? this.settings.corsProxyUrl
+            : undefined,
+          signal,
+        ),
+    });
+    const operationService = new AiOperationService({
+      getAiSettings: () => this.settings.ai,
+      secretStore: new DesktopSecretStore(),
+      contentSelector,
+    });
+    const analysisRepository = new AnalysisRepository(this.app.vault, dataRoot);
+    const noteInserter = new AnalysisNoteInserter(this.app.vault);
+    const generatedResults = new Map<string, Readonly<AiAnalysisResult>>();
+    const rememberGeneratedResult = (
+      path: string,
+      value: Readonly<AiAnalysisResult>,
+    ): void => {
+      generatedResults.delete(path);
+      generatedResults.set(path, value);
+      while (generatedResults.size > MAX_CURRENT_AI_INSERTION_RESULTS) {
+        const oldest = generatedResults.keys().next().value;
+        if (!oldest) break;
+        generatedResults.delete(oldest);
+      }
+    };
+    const coordinator = new AiOperationTaskCoordinator({
+      service: operationService,
+      repository: {
+        latest: async (itemId, operation) =>
+          await analysisRepository.latest(itemId, operation),
+        save: async (value) => {
+          const result = Object.freeze(snapshotAiAnalysisResult(value));
+          const path = await analysisRepository.save(result);
+          rememberGeneratedResult(path, result);
+          return path;
+        },
+      },
+    });
+    const candidate: AiRuntime = {
+      dataRoot,
+      contentRepository,
+      contentSelector,
+      operationService,
+      analysisRepository,
+      noteInserter,
+      coordinator,
+      generatedResults,
+    };
+    const previous = this.aiRuntime;
+    this.aiRuntime = candidate;
+    if (previous) void previous.coordinator.shutdown();
+    return candidate;
+  }
+
+  private aiOperationLabel(operation: AiOperation): string {
+    const t = createTranslator(this.settings.locale ?? "zh-CN");
+    const keys: Record<AiOperation, Parameters<typeof t>[0]> = {
+      summary: "ai.operation.summary",
+      "translate-zh-cn": "ai.operation.translateZhCn",
+      "core-points": "ai.operation.corePoints",
+      "deep-analysis": "ai.operation.deepAnalysis",
+    };
+    return t(keys[operation]);
   }
 
   private resolveExistingSavedNotePath(item: FeedItem): string | undefined {
@@ -2074,8 +2157,8 @@ export default class RssDashboardPlugin extends Plugin {
                   item,
                 );
               },
-              onAiOperation: (item, operation) =>
-                this.openAiOperationForItem(item, operation),
+              createAiPanelOptions: (item) =>
+                this.createAiPanelOptionsForItem(item),
               youtubeTranscript: {
                 resolveRuntime: () => this.getYouTubeTranscriptRuntime(),
               },
@@ -5554,6 +5637,11 @@ export default class RssDashboardPlugin extends Plugin {
 
   onunload() {
     this.isUnloading = true;
+    if (this.aiRuntime) {
+      void this.aiRuntime.coordinator.shutdown();
+      this.aiRuntime.generatedResults.clear();
+      this.aiRuntime = null;
+    }
     this.youtubeTranscriptRuntime?.service.dispose();
     this.youtubeTranscriptRuntime = null;
     this.importExportService?.revokeAllSafeDiagnosticsPreviews();

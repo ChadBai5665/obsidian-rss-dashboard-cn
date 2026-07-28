@@ -31,6 +31,12 @@ import {
   type YouTubeTranscriptRuntimeOptions,
 } from "./youtube-transcript-panel";
 import { isValidYouTubeVideoId } from "../youtube-transcript/transcript-types";
+import type { AiOperation } from "../ai/prompts/prompt-types";
+import {
+  createInlineAiPanel,
+  type InlineAiPanelController,
+  type InlineAiPanelDependencies,
+} from "./inline-ai-panel";
 
 const MAX_SESSION_CONTENT_ITEMS = 12;
 
@@ -52,6 +58,9 @@ export interface ArticleRendererOptions {
   ) => void;
   youtubeTranscript?: YouTubeTranscriptRuntimeOptions;
   onContentBasisChange?: (item: FeedItem, basis: ContentBasis) => void;
+  createAiPanelOptions?: (
+    item: FeedItem,
+  ) => InlineAiPanelDependencies | null;
 }
 
 export class ArticleRenderer {
@@ -74,6 +83,9 @@ export class ArticleRenderer {
   private readonly onContentBasisChange:
     | ((item: FeedItem, basis: ContentBasis) => void)
     | undefined;
+  private readonly createAiPanelOptions:
+    | ((item: FeedItem) => InlineAiPanelDependencies | null)
+    | undefined;
 
   private podcastPlayer: PodcastPlayer | null = null;
   private videoPlayer: VideoPlayer | null = null;
@@ -90,6 +102,9 @@ export class ArticleRenderer {
   private readonly explicitContentCoordinator: ExplicitContentCoordinator;
   private disposed = false;
   private currentVideoContentBasis: ContentBasis = "title-description";
+  private aiPanel: InlineAiPanelController | null = null;
+  private aiPanelMount: HTMLElement | null = null;
+  private activeAiOperation: AiOperation | null = null;
   private readonly sessionContent = new Map<
     string,
     { content: string; failureType: FullArticleFetchFailureType }
@@ -111,6 +126,7 @@ export class ArticleRenderer {
     this.onPlaybackProgress = options.onPlaybackProgress;
     this.youtubeTranscript = options.youtubeTranscript;
     this.onContentBasisChange = options.onContentBasisChange;
+    this.createAiPanelOptions = options.createAiPanelOptions;
     this.explicitContentCoordinator = new ExplicitContentCoordinator(
       this.app.vault,
     );
@@ -124,6 +140,9 @@ export class ArticleRenderer {
   ): Promise<ContentBasis | null> {
     if (this.disposed) return null;
     const renderRequest = ++this.renderRequestSequence;
+    const previousItemId = this.currentItem?.rssDashboardId;
+    const previousOperation = this.activeAiOperation;
+    this.destroyAiPanel(true);
     this.destroyTranscriptPanel();
     if (this.currentItem?.guid !== item.guid) {
       this.lastRestrictedNoticeGuid = null;
@@ -131,6 +150,19 @@ export class ArticleRenderer {
 
     container.empty();
     this.currentItem = item;
+    this.aiPanelMount = container.ownerDocument.createElement("div");
+    this.aiPanelMount.className = "rss-reader-ai-mount";
+    container.appendChild(this.aiPanelMount);
+    if (
+      previousOperation &&
+      previousItemId &&
+      previousItemId === item.rssDashboardId
+    ) {
+      this.activeAiOperation = previousOperation;
+      void this.showAiOperation(previousOperation);
+    } else {
+      this.activeAiOperation = null;
+    }
     this.relatedItems = relatedItems;
     this.currentDisplayTitle = undefined;
     this.currentReaderTitle = this.isTweetLikeItem(item)
@@ -810,12 +842,63 @@ export class ArticleRenderer {
     }
   }
 
+  /** Opens one explicitly requested operation in the Dashboard inline reader. */
+  public async showAiOperation(operation: AiOperation): Promise<void> {
+    if (!this.currentItem || !this.aiPanelMount) return;
+    if (!this.aiPanel) {
+      let dependencies: InlineAiPanelDependencies | null = null;
+      try {
+        dependencies = this.createAiPanelOptions?.(this.currentItem) ?? null;
+      } catch {
+        dependencies = null;
+      }
+      if (!dependencies) {
+        this.aiPanelMount.empty();
+        this.aiPanelMount.createDiv({
+          cls: "rss-reader-ai-unavailable",
+          text: this.t("ai.itemUnavailable"),
+        });
+        return;
+      }
+      try {
+        this.aiPanel = createInlineAiPanel({
+          ...dependencies,
+          container: this.aiPanelMount,
+          locale: this.settings.locale ?? "zh-CN",
+        });
+      } catch {
+        this.aiPanelMount.empty();
+        this.aiPanelMount.createDiv({
+          cls: "rss-reader-ai-unavailable",
+          text: this.t("ai.itemUnavailable"),
+        });
+        return;
+      }
+    }
+    this.activeAiOperation = operation;
+    await this.aiPanel.show(operation);
+  }
+
+  private destroyAiPanel(preserveOperation = false): void {
+    this.aiPanel?.destroy();
+    this.aiPanel = null;
+    this.aiPanelMount?.remove();
+    this.aiPanelMount = null;
+    if (!preserveOperation) this.activeAiOperation = null;
+  }
+
+  /** Detaches inline AI UI without affecting coordinator-owned work. */
+  public detachAiPanel(): void {
+    this.destroyAiPanel();
+  }
+
   public dispose(): void {
     this.disposed = true;
     this.renderRequestSequence += 1;
     this.currentItem = null;
     this.currentFullContent = undefined;
     this.sessionContent.clear();
+    this.destroyAiPanel();
     this.destroyTranscriptPanel();
     this.cleanupPlayers();
   }

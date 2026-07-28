@@ -21,6 +21,7 @@ type ReaderViewInternals = {
   currentItem: { guid: string } | null;
   podcastPlayer: { destroy: ReturnType<typeof vi.fn> } | null;
   videoPlayer: { destroy: ReturnType<typeof vi.fn> } | null;
+  aiPanel: { destroy: ReturnType<typeof vi.fn> } | null;
 };
 
 function getInternals(view: ReaderView): ReaderViewInternals {
@@ -80,13 +81,16 @@ describe("ReaderView onClose cleanup", () => {
 
     const podcastPlayer = { destroy: vi.fn() };
     const videoPlayer = { destroy: vi.fn() };
+    const aiPanel = { destroy: vi.fn() };
     getInternals(readerView).podcastPlayer = podcastPlayer;
     getInternals(readerView).videoPlayer = videoPlayer;
+    getInternals(readerView).aiPanel = aiPanel;
 
     await readerView.onClose();
 
     expect(podcastPlayer.destroy).toHaveBeenCalled();
     expect(videoPlayer.destroy).toHaveBeenCalled();
+    expect(aiPanel.destroy).toHaveBeenCalledTimes(1);
     expect(
       document.body.querySelector(".rss-reader-format-dropdown-portal"),
     ).toBeNull();

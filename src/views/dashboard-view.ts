@@ -7,6 +7,7 @@ import {
   Platform,
   setIcon,
   Scope,
+  Menu,
   type EventRef,
 } from "obsidian";
 import {
@@ -61,6 +62,8 @@ import { getContentBasisLabel } from "../collection/content-basis-display";
 import { toLocalCalendarDate } from "../refresh/local-calendar-day";
 import { createTranslator } from "../i18n";
 import { renderTopicDiscoverySection } from "./topic-discovery-section";
+import type { AiOperation } from "../ai/prompts/prompt-types";
+import { addAiOperationMenuItems } from "../components/article-list/utils/article-actions";
 
 export const RSS_DASHBOARD_VIEW_TYPE = "rss-dashboard-view";
 
@@ -147,7 +150,6 @@ export class RssDashboardView extends ItemView {
   private inlineArticleRenderGeneration = 0;
   private readonly inlineActionPendingKeys = new Set<string>();
   private articleRenderer: ArticleRenderer | null = null;
-  private activeAiModal: { close(): void } | null = null;
   private lastClickAnchorKey: string | null = null;
   private readonly collectionQueryService = new CollectionQueryService();
   private collectionSection: CollectionSection = "today";
@@ -684,6 +686,8 @@ export class RssDashboardView extends ItemView {
         resolveRuntime: () =>
           this.plugin.resolveYouTubeTranscriptRuntime(),
       },
+      createAiPanelOptions: (item) =>
+        this.plugin.createAiPanelOptionsForItem(item),
       onContentBasisChange: (item, contentBasis) => {
         if (this.inlineArticle !== item) return;
         this.inlineArticleContentContext = { contentBasis };
@@ -915,8 +919,6 @@ export class RssDashboardView extends ItemView {
       if (this.articleList) {
         this.articleList.destroy();
       }
-      this.activeAiModal?.close();
-      this.activeAiModal = null;
       this.clearCardLayoutRefreshTimeout();
 
       if (this.settings.sidebarCollapsed) {
@@ -976,6 +978,8 @@ export class RssDashboardView extends ItemView {
         this.renderInlineArticle(contentContainer);
         return;
       }
+
+      this.articleRenderer?.detachAiPanel();
 
       this.renderToolbar(contentContainer);
       this.renderCollectionSections(contentContainer);
@@ -1042,11 +1046,7 @@ export class RssDashboardView extends ItemView {
             void this.handleOpenInReaderView(article);
           },
           onAiOperation: (article, operation) => {
-            this.activeAiModal?.close();
-            this.activeAiModal = this.plugin.openAiOperationForItem(
-              article,
-              operation,
-            );
+            void this.openAiOperationInReader(article, operation);
           },
           onToggleSidebar: this.handleToggleSidebar.bind(this),
           onSortChange: this.handleSortChange.bind(this),
@@ -3339,7 +3339,7 @@ export class RssDashboardView extends ItemView {
     article: FeedItem,
     leaf: WorkspaceLeaf,
     contentContext?: ReaderContentContext,
-  ): Promise<void> {
+  ): Promise<ReaderView | null> {
     if (leaf) {
       await leaf.setViewState({
         type: RSS_READER_VIEW_TYPE,
@@ -3360,8 +3360,10 @@ export class RssDashboardView extends ItemView {
           await view.displayItem(article, relatedItems);
         }
         view.focusReaderView();
+        return view;
       }
     }
+    return null;
   }
 
   private openArticleInExternalBrowser(article: FeedItem): void {
@@ -4136,8 +4138,6 @@ export class RssDashboardView extends ItemView {
     this.inlineActionPendingKeys.clear();
     this.articleRenderer?.dispose();
     this.articleRenderer = null;
-    this.activeAiModal?.close();
-    this.activeAiModal = null;
     this.closeMobileSidebarModal();
     this.lastViewportMobileSidebarMode = null;
 
@@ -4791,6 +4791,46 @@ export class RssDashboardView extends ItemView {
     await this.openArticleInNewTab(article, contentContext);
   }
 
+  /** Routes an explicit AI action to an internal reader host only. */
+  public async openAiOperationInReader(
+    article: FeedItem,
+    operation: AiOperation,
+  ): Promise<void> {
+    const readerLocation = this.getReaderViewLocation();
+    const contentContext = await this.resolveReaderContentContext(article);
+    this.selectedArticle = article;
+
+    if (readerLocation === "inline") {
+      this.inlineArticle = article;
+      this.inlineArticleContentContext = contentContext;
+      this.render();
+      await this.articleRenderer?.showAiOperation(operation);
+      return;
+    }
+
+    const readerLeaves = this.app.workspace.getLeavesOfType(
+      RSS_READER_VIEW_TYPE,
+    );
+    const playingLeaves = await this.getPodcastPlayingReaderLeaves();
+    let targetLeaf = readerLocation === "external-browser"
+      ? (readerLeaves.find((leaf) => !playingLeaves.includes(leaf)) ?? null)
+      : this.getConfiguredReaderLeaf();
+    if (targetLeaf && playingLeaves.includes(targetLeaf)) targetLeaf = null;
+
+    let reader: ReaderView | null = null;
+    if (targetLeaf) {
+      reader = await this.openArticleInSpecificLeaf(
+        article,
+        targetLeaf,
+        contentContext,
+      );
+    } else {
+      const leaf = await this.openArticleInNewTab(article, contentContext);
+      reader = leaf.view instanceof ReaderView ? leaf.view : null;
+    }
+    await reader?.showAiOperation(operation);
+  }
+
   private getInlineActionKey(
     article: FeedItem,
     action: "save" | "read" | "starred",
@@ -4983,6 +5023,31 @@ export class RssDashboardView extends ItemView {
             activeWindow.open(url, "_blank");
           }
         }
+      });
+
+      const aiButton = actions.createDiv({
+        cls: "rss-reader-action-button rss-reader-ai-button",
+        attr: {
+          title: this.t("ai.actions"),
+          "aria-label": this.t("ai.actions"),
+          role: "button",
+          tabindex: "0",
+        },
+      });
+      setIcon(aiButton, "sparkles");
+      const openAiMenu = (event: MouseEvent | KeyboardEvent): void => {
+        event.stopPropagation();
+        const menu = new Menu();
+        addAiOperationMenuItems(menu, this.settings.locale, (operation) => {
+          void this.articleRenderer?.showAiOperation(operation);
+        });
+        menu.showAtMouseEvent(event as MouseEvent);
+      };
+      aiButton.addEventListener("click", openAiMenu);
+      aiButton.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        openAiMenu(event);
       });
     }
 
