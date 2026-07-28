@@ -73,8 +73,11 @@ function createPanel(options: {
   const revokeChoiceSet = vi.fn();
   const runtime = {
     identity: "test-root",
-    service: { get, revokeChoiceSet } satisfies YouTubeTranscriptPanelService,
-    loadCached,
+    service: {
+      get,
+      readCached: loadCached,
+      revokeChoiceSet,
+    } satisfies YouTubeTranscriptPanelService,
   };
   const panel = new YouTubeTranscriptPanel({
     container,
@@ -391,8 +394,11 @@ describe("YouTubeTranscriptPanel", () => {
     const rootBLoad = vi.fn(async () => null);
     let runtime = {
       identity: "root-a",
-      service: { get: rootAGet, revokeChoiceSet: vi.fn() },
-      loadCached: rootALoad,
+      service: {
+        get: rootAGet,
+        readCached: rootALoad,
+        revokeChoiceSet: vi.fn(),
+      },
     };
     const panel = new YouTubeTranscriptPanel({
       container,
@@ -406,8 +412,11 @@ describe("YouTubeTranscriptPanel", () => {
     expect(container.textContent).toContain("Old root cache.");
     runtime = {
       identity: "root-b",
-      service: { get: rootBGet, revokeChoiceSet: vi.fn() },
-      loadCached: rootBLoad,
+      service: {
+        get: rootBGet,
+        readCached: rootBLoad,
+        revokeChoiceSet: vi.fn(),
+      },
     };
     await panel.refresh();
 
@@ -435,8 +444,7 @@ describe("YouTubeTranscriptPanel", () => {
     const container = document.createElement("div");
     const runtime = {
       identity: "root-a",
-      service: { get, revokeChoiceSet },
-      loadCached: async () => null,
+      service: { get, readCached: async () => null, revokeChoiceSet },
     };
     const panel = new YouTubeTranscriptPanel({
       container,
@@ -471,8 +479,11 @@ describe("YouTubeTranscriptPanel", () => {
     const rootBGet = vi.fn(async () => await rootBResult.promise);
     let runtime = {
       identity: "root-a",
-      service: { get: rootAGet, revokeChoiceSet: rootARevoke },
-      loadCached: vi.fn(async () => null),
+      service: {
+        get: rootAGet,
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: rootARevoke,
+      },
     };
     const container = document.createElement("div");
     const panel = new YouTubeTranscriptPanel({
@@ -487,8 +498,11 @@ describe("YouTubeTranscriptPanel", () => {
 
     runtime = {
       identity: "root-a",
-      service: { get: rootBGet, revokeChoiceSet: vi.fn() },
-      loadCached: vi.fn(async () => null),
+      service: {
+        get: rootBGet,
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
     };
     const selecting = panel.selectTrack("opaque-track-a");
     const revokedBeforeReplacementSettled = rootARevoke.mock.calls.length === 1;
@@ -515,9 +529,9 @@ describe("YouTubeTranscriptPanel", () => {
           source: "fresh" as const,
           content: transcript({ text: "Old ready transcript." }),
         })),
+        readCached: vi.fn(async () => null),
         revokeChoiceSet: vi.fn(),
       },
-      loadCached: vi.fn(async () => null),
     };
     const container = document.createElement("div");
     const panel = new YouTubeTranscriptPanel({
@@ -572,8 +586,11 @@ describe("YouTubeTranscriptPanel", () => {
     }));
     let runtime = {
       identity: "root-a",
-      service: { get: rootAGet, revokeChoiceSet: vi.fn() },
-      loadCached: vi.fn(async () => null),
+      service: {
+        get: rootAGet,
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
     };
     const container = document.createElement("div");
     const onReady = vi.fn();
@@ -589,8 +606,11 @@ describe("YouTubeTranscriptPanel", () => {
     const fetching = panel.fetch();
     runtime = {
       identity: "root-b",
-      service: { get: rootBGet, revokeChoiceSet: vi.fn() },
-      loadCached: vi.fn(async () => null),
+      service: {
+        get: rootBGet,
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
     };
     pending.resolve({
       status: "ready",
@@ -611,9 +631,9 @@ describe("YouTubeTranscriptPanel", () => {
       identity: "root-a",
       service: {
         get: vi.fn(async () => await pending.promise),
+        readCached: vi.fn(async () => null),
         revokeChoiceSet: vi.fn(),
       },
-      loadCached: vi.fn(async () => null),
     };
     const container = document.createElement("div");
     const onReady = vi.fn();
@@ -629,8 +649,11 @@ describe("YouTubeTranscriptPanel", () => {
     const fetching = panel.fetch();
     runtime = {
       identity: "root-a",
-      service: { get: vi.fn(), revokeChoiceSet: vi.fn() },
-      loadCached: vi.fn(async () => null),
+      service: {
+        get: vi.fn(),
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
     };
     pending.resolve({
       status: "ready",
@@ -648,8 +671,11 @@ describe("YouTubeTranscriptPanel", () => {
     const cached = deferred<YouTubeTranscriptCachedItemContent | null>();
     let runtime = {
       identity: "root-a",
-      service: { get: vi.fn(), revokeChoiceSet: vi.fn() },
-      loadCached: vi.fn(async () => await cached.promise),
+      service: {
+        get: vi.fn(),
+        readCached: vi.fn(async () => await cached.promise),
+        revokeChoiceSet: vi.fn(),
+      },
     };
     const container = document.createElement("div");
     const onReady = vi.fn();
@@ -665,8 +691,11 @@ describe("YouTubeTranscriptPanel", () => {
     const restoring = panel.showCached();
     runtime = {
       identity: "root-b",
-      service: { get: vi.fn(), revokeChoiceSet: vi.fn() },
-      loadCached: vi.fn(async () => null),
+      service: {
+        get: vi.fn(),
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
     };
     cached.resolve(transcript({ text: "Stale cached transcript." }));
     await restoring;
@@ -682,9 +711,9 @@ describe("YouTubeTranscriptPanel", () => {
       identity: "root-a",
       service: {
         get: vi.fn(async () => await pending.promise),
+        readCached: vi.fn(async () => null),
         revokeChoiceSet: vi.fn(),
       },
-      loadCached: vi.fn(async () => null),
     };
     const container = document.createElement("div");
     const panel = new YouTubeTranscriptPanel({
@@ -698,8 +727,11 @@ describe("YouTubeTranscriptPanel", () => {
     const fetching = panel.fetch();
     runtime = {
       identity: "root-b",
-      service: { get: vi.fn(), revokeChoiceSet: vi.fn() },
-      loadCached: vi.fn(async () => null),
+      service: {
+        get: vi.fn(),
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
     };
     pending.reject(new YouTubeTranscriptServiceError("timeout"));
     await fetching;
@@ -715,9 +747,9 @@ describe("YouTubeTranscriptPanel", () => {
       identity: "root-a",
       service: {
         get: vi.fn(async () => await pending.promise),
+        readCached: vi.fn(async () => null),
         revokeChoiceSet: vi.fn(),
       },
-      loadCached: vi.fn(async () => null),
     };
     const container = document.createElement("div");
     const onReady = vi.fn();

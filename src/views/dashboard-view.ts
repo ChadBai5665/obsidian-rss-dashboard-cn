@@ -680,6 +680,18 @@ export class RssDashboardView extends ItemView {
           item,
         );
       },
+      youtubeTranscript: {
+        resolveRuntime: () =>
+          this.plugin.resolveYouTubeTranscriptRuntime(),
+      },
+      onContentBasisChange: (item, contentBasis) => {
+        if (this.inlineArticle !== item) return;
+        this.inlineArticleContentContext = { contentBasis };
+        const body = this.dashboardContainer?.querySelector<HTMLElement>(
+          ".rss-reader-content.inline-reader-content",
+        );
+        if (body) this.upsertInlineContentBasis(body, contentBasis);
+      },
     });
 
     this.registerEvent(

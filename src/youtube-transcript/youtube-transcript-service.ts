@@ -66,6 +66,12 @@ export interface YouTubeTranscriptRequest {
   signal?: AbortSignal;
 }
 
+export interface YouTubeTranscriptCacheRequest {
+  itemId: string;
+  videoId: string;
+  signal?: AbortSignal;
+}
+
 export interface YouTubeTranscriptTrackChoice {
   id: string;
   languageCode: string;
@@ -165,6 +171,7 @@ export class YouTubeTranscriptService {
     { key: string; generation: symbol }
   >();
   private readonly currentGenerations = new Map<string, symbol>();
+  private readonly cacheReadControllers = new Set<AbortController>();
   private readonly choiceTtlMs: number;
   private readonly maxPendingChoiceSets: number;
   private choiceSequence = 0;
@@ -240,6 +247,48 @@ export class YouTubeTranscriptService {
     );
   }
 
+  /**
+   * Reads only the durable transcript cache and repairs collection metadata.
+   * A cache miss is final: this path never probes InnerTube or yt-dlp.
+   */
+  async readCached(
+    request: YouTubeTranscriptCacheRequest,
+  ): Promise<YouTubeTranscriptCachedItemContent | null> {
+    this.assertActive();
+    assertRequest(request);
+    assertNotAborted(request.signal);
+    const controller = new AbortController();
+    const onCallerAbort = () => controller.abort();
+    request.signal?.addEventListener("abort", onCallerAbort, { once: true });
+    if (request.signal?.aborted) controller.abort();
+    this.cacheReadControllers.add(controller);
+    try {
+      const cached = await this.options.contentRepository.transaction(
+        request.itemId,
+        async (transaction) => {
+          assertNotAborted(controller.signal);
+          const content = await transaction.read();
+          assertNotAborted(controller.signal);
+          if (!isMatchingTranscriptCache(content, request)) return null;
+          await this.repairMetadata(request.itemId, transaction.pathFor());
+          assertNotAborted(controller.signal);
+          return content;
+        },
+      );
+      assertNotAborted(controller.signal);
+      return cached;
+    } catch (error) {
+      if (controller.signal.aborted || this.disposed) {
+        throw new YouTubeTranscriptServiceError("aborted");
+      }
+      if (error instanceof YouTubeTranscriptServiceError) throw error;
+      throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+    } finally {
+      request.signal?.removeEventListener("abort", onCallerAbort);
+      this.cacheReadControllers.delete(controller);
+    }
+  }
+
   /** Releases all runtime-owned resources and permanently rejects new work. */
   dispose(): void {
     if (this.disposed) return;
@@ -252,6 +301,10 @@ export class YouTubeTranscriptService {
     for (const [key] of this.pendingChoices) {
       this.deletePendingChoiceSet(key);
     }
+    for (const controller of this.cacheReadControllers) {
+      controller.abort();
+    }
+    this.cacheReadControllers.clear();
     this.choiceSetIndex.clear();
     this.currentGenerations.clear();
   }

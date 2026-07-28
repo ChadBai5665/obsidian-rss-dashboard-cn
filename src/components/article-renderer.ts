@@ -25,6 +25,12 @@ import { isYouTubeItem } from "../utils/youtube-detection";
 import { createTranslator } from "../i18n";
 import type { ContentBasis } from "../collection/collected-item";
 import { resolveItemExternalUrl } from "../utils/item-url-utils";
+import {
+  YouTubeTranscriptPanel,
+  type YouTubeTranscriptPanelController,
+  type YouTubeTranscriptRuntimeOptions,
+} from "./youtube-transcript-panel";
+import { isValidYouTubeVideoId } from "../youtube-transcript/transcript-types";
 
 const MAX_SESSION_CONTENT_ITEMS = 12;
 
@@ -44,6 +50,8 @@ export interface ArticleRendererOptions {
     duration: number,
     flush?: boolean,
   ) => void;
+  youtubeTranscript?: YouTubeTranscriptRuntimeOptions;
+  onContentBasisChange?: (item: FeedItem, basis: ContentBasis) => void;
 }
 
 export class ArticleRenderer {
@@ -62,9 +70,14 @@ export class ArticleRenderer {
     duration: number,
     flush?: boolean,
   ) => void;
+  private readonly youtubeTranscript: YouTubeTranscriptRuntimeOptions | undefined;
+  private readonly onContentBasisChange:
+    | ((item: FeedItem, basis: ContentBasis) => void)
+    | undefined;
 
   private podcastPlayer: PodcastPlayer | null = null;
   private videoPlayer: VideoPlayer | null = null;
+  private transcriptPanel: YouTubeTranscriptPanelController | null = null;
   private currentItem: FeedItem | null = null;
   private relatedItems: FeedItem[] = [];
   private currentFullContent?: string;
@@ -76,6 +89,7 @@ export class ArticleRenderer {
   private renderRequestSequence = 0;
   private readonly explicitContentCoordinator: ExplicitContentCoordinator;
   private disposed = false;
+  private currentVideoContentBasis: ContentBasis = "title-description";
   private readonly sessionContent = new Map<
     string,
     { content: string; failureType: FullArticleFetchFailureType }
@@ -95,6 +109,8 @@ export class ArticleRenderer {
     this.onArticleUpdate = options.onArticleUpdate;
     this.onOpenSavedArticle = options.onOpenSavedArticle;
     this.onPlaybackProgress = options.onPlaybackProgress;
+    this.youtubeTranscript = options.youtubeTranscript;
+    this.onContentBasisChange = options.onContentBasisChange;
     this.explicitContentCoordinator = new ExplicitContentCoordinator(
       this.app.vault,
     );
@@ -108,6 +124,7 @@ export class ArticleRenderer {
   ): Promise<ContentBasis | null> {
     if (this.disposed) return null;
     const renderRequest = ++this.renderRequestSequence;
+    this.destroyTranscriptPanel();
     if (this.currentItem?.guid !== item.guid) {
       this.lastRestrictedNoticeGuid = null;
     }
@@ -121,6 +138,7 @@ export class ArticleRenderer {
       : undefined;
     this.currentContentIsFullArticle = false;
     this.currentFullContentFailureType = "none";
+    this.currentVideoContentBasis = "title-description";
 
     if (item.mediaType === "video" && !item.videoId && item.link) {
       const vid = MediaService.extractYouTubeVideoId(item.link);
@@ -128,8 +146,15 @@ export class ArticleRenderer {
     }
 
     if (item.mediaType === "video" && item.videoId) {
-      await this.displayVideo(container, item);
-      return "title-description";
+      await this.displayVideo(container, item, renderRequest);
+      if (
+        this.disposed ||
+        renderRequest !== this.renderRequestSequence ||
+        this.currentItem !== item
+      ) {
+        return null;
+      }
+      return this.currentVideoContentBasis;
     } else if (this.isVideoPodcastItem(item)) {
       await this.displayVideoPodcast(container, item);
       return "title-description";
@@ -213,6 +238,7 @@ export class ArticleRenderer {
   private async displayVideo(
     container: HTMLElement,
     item: FeedItem,
+    renderRequest: number,
   ): Promise<void> {
     this.cleanupPlayers();
     const videoContainer = container.createDiv({
@@ -229,6 +255,18 @@ export class ArticleRenderer {
         this.settings.locale,
       );
       this.videoPlayer.loadVideo(item);
+      await this.mountTranscriptPanel(
+        item,
+        videoContainer,
+        renderRequest,
+      );
+      if (
+        this.disposed ||
+        renderRequest !== this.renderRequestSequence ||
+        this.currentItem !== item
+      ) {
+        return;
+      }
       if (this.relatedItems.length > 0) {
         this.videoPlayer.setRelatedVideos(this.relatedItems);
       }
@@ -248,6 +286,66 @@ export class ArticleRenderer {
       }
       await this.displayArticle(container, item);
     }
+  }
+
+  private async mountTranscriptPanel(
+    item: FeedItem,
+    videoContainer: HTMLElement,
+    renderRequest: number,
+  ): Promise<void> {
+    const runtimeOptions = this.youtubeTranscript;
+    const videoId = item.videoId;
+    if (!runtimeOptions || !videoId || !isValidYouTubeVideoId(videoId)) return;
+
+    const itemId = this.getCollectedItemId(item);
+    const mount = videoContainer.ownerDocument.createElement("div");
+    mount.className = "rss-youtube-transcript-mount";
+    const player = videoContainer.querySelector<HTMLElement>(
+      ".rss-video-player",
+    );
+    const insertionPoint = player?.querySelector<HTMLElement>(
+      ".rss-video-description, .rss-video-links",
+    );
+    if (insertionPoint?.parentElement) {
+      insertionPoint.parentElement.insertBefore(mount, insertionPoint);
+    } else if (player) {
+      player.appendChild(mount);
+    } else {
+      videoContainer.appendChild(mount);
+    }
+
+    const panel = new YouTubeTranscriptPanel({
+      container: mount,
+      locale: this.settings.locale ?? "zh-CN",
+      request: {
+        itemId,
+        videoId,
+        sourceUrl: item.link || undefined,
+      },
+      resolveRuntime: () => runtimeOptions.resolveRuntime(),
+      openExternal: runtimeOptions.openExternalUrl ?? ((url) => {
+        activeWindow.open(url, "_blank", "noopener,noreferrer");
+      }),
+      onReady: () => {
+        if (
+          this.transcriptPanel !== panel ||
+          this.disposed ||
+          renderRequest !== this.renderRequestSequence ||
+          this.currentItem !== item
+        ) {
+          return;
+        }
+        this.currentVideoContentBasis = "youtube-transcript";
+        this.onContentBasisChange?.(item, "youtube-transcript");
+      },
+    });
+    this.transcriptPanel = panel;
+    await panel.showCached();
+  }
+
+  private destroyTranscriptPanel(): void {
+    this.transcriptPanel?.destroy();
+    this.transcriptPanel = null;
   }
 
   private async displayVideoPodcast(
@@ -718,6 +816,7 @@ export class ArticleRenderer {
     this.currentItem = null;
     this.currentFullContent = undefined;
     this.sessionContent.clear();
+    this.destroyTranscriptPanel();
     this.cleanupPlayers();
   }
 

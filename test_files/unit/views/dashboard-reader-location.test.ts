@@ -78,6 +78,13 @@ type MockReaderView = {
 type TestDashboardView = {
   app: App;
   render: ReturnType<typeof vi.fn>;
+  onOpen(): Promise<void>;
+  onClose(): Promise<void>;
+  articleRenderer: {
+    youtubeTranscript?: {
+      resolveRuntime(): unknown;
+    };
+  } | null;
   inlineArticle: import("../../../src/types/types").FeedItem | null;
   handleArticleClick: (
     item: import("../../../src/types/types").FeedItem,
@@ -172,6 +179,16 @@ async function createDashboardView(
     settings,
     saveSettings: vi.fn(async () => {}),
     updateArticle: vi.fn(async () => {}),
+    updatePlaybackProgress: vi.fn(),
+    getCollectedItemsForDate: vi.fn(async () => []),
+    resolveYouTubeTranscriptRuntime: vi.fn(() => ({
+      identity: "dashboard-test-root",
+      service: {
+        get: vi.fn(),
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
+    })),
   };
   const dashboardLeaf = {
     app,
@@ -616,6 +633,22 @@ describe("Dashboard reader location", () => {
     // Check state and re-render was triggered
     expect(view.inlineArticle).toBe(feed.items[0]);
     expect(view.render).toHaveBeenCalled();
+  });
+
+  it("injects the plugin-owned transcript runtime into the inline ArticleRenderer", async () => {
+    const settings = cloneSettings();
+    settings.readerViewLocation = "inline";
+    const { view, plugin } = await createDashboardView(settings);
+
+    await view.onOpen();
+    const runtime = view.articleRenderer?.youtubeTranscript?.resolveRuntime();
+
+    expect(runtime).toMatchObject({ identity: "dashboard-test-root" });
+    expect(
+      (plugin as { resolveYouTubeTranscriptRuntime: ReturnType<typeof vi.fn> })
+        .resolveYouTubeTranscriptRuntime,
+    ).toHaveBeenCalledTimes(1);
+    await view.onClose();
   });
 
   it("uses inline mode for explicit open-in-reader actions too", async () => {

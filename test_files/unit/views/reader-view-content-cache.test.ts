@@ -334,11 +334,16 @@ describe("ReaderView explicit full-text content cache", () => {
 
   it("restores a YouTube transcript cache inline without provider or process work", async () => {
     const serviceGet = vi.fn();
-    const cacheRead = vi.fn(async (itemId: string) => transcript(itemId));
+    const cacheRead = vi.fn(async (request: { itemId: string }) =>
+      transcript(request.itemId),
+    );
     const runtime = {
       identity: "test-root",
-      service: { get: serviceGet, revokeChoiceSet: vi.fn() },
-      contentRepository: { read: cacheRead },
+      service: {
+        get: serviceGet,
+        readCached: cacheRead,
+        revokeChoiceSet: vi.fn(),
+      },
     };
     const reader = createReader({
       youtubeTranscript: {
@@ -412,8 +417,11 @@ describe("ReaderView explicit full-text content cache", () => {
     });
     const runtime = {
       identity: "test-root",
-      service: { get: serviceGet, revokeChoiceSet: vi.fn() },
-      contentRepository: { read: vi.fn(async () => null) },
+      service: {
+        get: serviceGet,
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
     };
     const reader = createReader({
       youtubeTranscript: {
@@ -463,9 +471,12 @@ describe("ReaderView explicit full-text content cache", () => {
     }));
     const runtime = {
       identity: "test-root",
-      service: { get: serviceGet, revokeChoiceSet: vi.fn() },
-      contentRepository: {
-        read: vi.fn(async (itemId: string) => transcript(itemId)),
+      service: {
+        get: serviceGet,
+        readCached: vi.fn(async (request: { itemId: string }) =>
+          transcript(request.itemId),
+        ),
+        revokeChoiceSet: vi.fn(),
       },
     };
     const reader = createReader({
@@ -503,8 +514,11 @@ describe("ReaderView explicit full-text content cache", () => {
     });
     const runtime = {
       identity: "test-root",
-      service: { get: serviceGet, revokeChoiceSet: vi.fn() },
-      contentRepository: { read: vi.fn(async () => null) },
+      service: {
+        get: serviceGet,
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
     };
     const reader = createReader({
       youtubeTranscript: {
@@ -558,8 +572,11 @@ describe("ReaderView explicit full-text content cache", () => {
     }));
     let runtime = {
       identity: "root-a",
-      service: { get: rootAGet, revokeChoiceSet: vi.fn() },
-      contentRepository: { read: vi.fn(async () => null) },
+      service: {
+        get: rootAGet,
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
     };
     const reader = createReader({
       youtubeTranscript: {
@@ -574,8 +591,11 @@ describe("ReaderView explicit full-text content cache", () => {
     }));
     runtime = {
       identity: "root-b",
-      service: { get: rootBGet, revokeChoiceSet: vi.fn() },
-      contentRepository: { read: vi.fn(async () => null) },
+      service: {
+        get: rootBGet,
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
     };
 
     const reading = (reader as unknown as { readingContainer: HTMLElement })

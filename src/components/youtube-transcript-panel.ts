@@ -2,19 +2,27 @@ import type { YouTubeTranscriptCachedItemContent } from "../collection/content-r
 import { createTranslator, type Locale, type Translator } from "../i18n";
 import {
   YouTubeTranscriptServiceError,
+  type YouTubeTranscriptCacheRequest,
   type YouTubeTranscriptRequest,
   type YouTubeTranscriptServiceResult,
 } from "../youtube-transcript/youtube-transcript-service";
 
 export interface YouTubeTranscriptPanelService {
   get(request: YouTubeTranscriptRequest): Promise<YouTubeTranscriptServiceResult>;
+  readCached(
+    request: YouTubeTranscriptCacheRequest,
+  ): Promise<YouTubeTranscriptCachedItemContent | null>;
   revokeChoiceSet(choiceSetId: string): void;
 }
 
 export interface YouTubeTranscriptPanelRuntime {
   identity: string;
   service: YouTubeTranscriptPanelService;
-  loadCached(): Promise<YouTubeTranscriptCachedItemContent | null>;
+}
+
+export interface YouTubeTranscriptRuntimeOptions {
+  resolveRuntime(): YouTubeTranscriptPanelRuntime;
+  openExternalUrl?: (url: string) => void;
 }
 
 export interface YouTubeTranscriptPanelController {
@@ -115,14 +123,22 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     const resolved = this.resolveRuntimeEntry();
     if (!resolved) return;
     const { runtime } = resolved;
+    this.activeController?.abort();
+    const controller = new AbortController();
+    this.activeController = controller;
     const operation = ++this.operationSequence;
     let content: YouTubeTranscriptCachedItemContent | null;
     try {
-      content = await runtime.loadCached();
+      content = await runtime.service.readCached({
+        itemId: this.options.request.itemId,
+        videoId: this.options.request.videoId,
+        signal: controller.signal,
+      });
     } catch {
       content = null;
     }
     if (!this.confirmRuntime(runtime, operation)) return;
+    this.activeController = null;
     if (!content || !this.matchesRequest(content)) {
       this.renderIdle();
       return;

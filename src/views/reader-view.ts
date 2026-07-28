@@ -66,9 +66,8 @@ import { addAiOperationMenuItems } from "../components/article-list/utils/articl
 import {
   YouTubeTranscriptPanel,
   type YouTubeTranscriptPanelController,
-  type YouTubeTranscriptPanelService,
+  type YouTubeTranscriptRuntimeOptions,
 } from "../components/youtube-transcript-panel";
-import type { CachedItemContent } from "../collection/content-repository";
 import { isValidYouTubeVideoId } from "../youtube-transcript/transcript-types";
 
 export const RSS_READER_VIEW_TYPE = "rss-reader-view";
@@ -78,16 +77,7 @@ export interface ReaderContentContext {
   contentBasis: ContentBasis;
 }
 
-export interface ReaderYouTubeTranscriptOptions {
-  resolveRuntime(): {
-    identity: string;
-    service: YouTubeTranscriptPanelService;
-    contentRepository: {
-      read(itemId: string): Promise<CachedItemContent | null>;
-    };
-  };
-  openExternalUrl?: (url: string) => void;
-}
+export type ReaderYouTubeTranscriptOptions = YouTubeTranscriptRuntimeOptions;
 
 interface LocalizedReadingBinding {
   key: TranslationKey;
@@ -1693,15 +1683,7 @@ export class ReaderView extends ItemView {
         sourceUrl: item.link || undefined,
       },
       resolveRuntime: () => {
-        const runtime = runtimeOptions.resolveRuntime();
-        return {
-          identity: runtime.identity,
-          service: runtime.service,
-          loadCached: async () => {
-            const cached = await runtime.contentRepository.read(itemId);
-            return cached?.contentBasis === "youtube-transcript" ? cached : null;
-          },
-        };
+        return runtimeOptions.resolveRuntime();
       },
       openExternal: runtimeOptions.openExternalUrl ?? ((url) => {
         activeWindow.open(url, "_blank", "noopener,noreferrer");

@@ -128,6 +128,7 @@ import { ContentRepository } from "./src/collection/content-repository";
 import { InnerTubeTranscriptProvider } from "./src/youtube-transcript/innertube-transcript-provider";
 import { YtDlpTranscriptProvider } from "./src/youtube-transcript/yt-dlp-transcript-provider";
 import { YouTubeTranscriptService } from "./src/youtube-transcript/youtube-transcript-service";
+import type { YouTubeTranscriptPanelRuntime } from "./src/components/youtube-transcript-panel";
 import { createRuntimeTranscriptHttpTransport } from "./src/youtube-transcript/runtime-transcript-transport";
 import { AiContentSelector } from "./src/ai/content/ai-content-selector";
 import { AiOperationService } from "./src/ai/ai-operation-service";
@@ -1334,6 +1335,15 @@ export default class RssDashboardPlugin extends Plugin {
     this.youtubeTranscriptRuntime = candidate;
     previous?.service.dispose();
     return { ...candidate, identity: dataRoot };
+  }
+
+  /** Shared, plugin-owned transcript runtime used by both reader layouts. */
+  public resolveYouTubeTranscriptRuntime(): YouTubeTranscriptPanelRuntime {
+    const runtime = this.getYouTubeTranscriptRuntime();
+    return {
+      identity: runtime.identity,
+      service: runtime.service,
+    };
   }
 
   private getSubscriptionService(): SubscriptionService {

@@ -282,6 +282,142 @@ describe("YouTubeTranscriptService", () => {
     expect(ytDlp.listCalls).toBe(0);
   });
 
+  it("reads a matching cache through the cache-only API and repairs metadata without providers", async () => {
+    const content = new FakeContentRepository(cached());
+    const metadata = new FakeMetadataRepository();
+    const innerTube = new FakeProvider();
+    const ytDlp = new FakeOptionalProvider(true);
+    const { service } = createService({ content, metadata, innerTube, ytDlp });
+
+    await expect(
+      service.readCached({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+    ).resolves.toEqual(cached());
+
+    expect(metadata.updates).toEqual([
+      { id: ITEM_ID, path: CONTENT_PATH, basis: "youtube-transcript" },
+    ]);
+    expect(content.writes).toEqual([]);
+    expect(innerTube.listCalls).toBe(0);
+    expect(innerTube.fetchCalls).toBe(0);
+    expect(ytDlp.availabilityChecks).toBe(0);
+    expect(ytDlp.listCalls).toBe(0);
+    expect(ytDlp.fetchCalls).toBe(0);
+  });
+
+  it("returns null from the cache-only API on a miss without probing either provider", async () => {
+    const innerTube = new FakeProvider();
+    const ytDlp = new FakeOptionalProvider(true);
+    const { service, metadata } = createService({ innerTube, ytDlp });
+
+    await expect(
+      service.readCached({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+    ).resolves.toBeNull();
+
+    expect(metadata.updates).toEqual([]);
+    expect(innerTube.listCalls).toBe(0);
+    expect(innerTube.fetchCalls).toBe(0);
+    expect(ytDlp.availabilityChecks).toBe(0);
+    expect(ytDlp.listCalls).toBe(0);
+    expect(ytDlp.fetchCalls).toBe(0);
+  });
+
+  it("returns cache when metadata repair fails and retries repair on the next cache-only read", async () => {
+    const content = new FakeContentRepository(cached());
+    const metadata = new FakeMetadataRepository();
+    metadata.failuresRemaining = 1;
+    const { service } = createService({ content, metadata });
+
+    await expect(
+      service.readCached({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+    ).resolves.toEqual(cached());
+    await expect(
+      service.readCached({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+    ).resolves.toEqual(cached());
+
+    expect(metadata.updates).toHaveLength(2);
+    expect(content.value).toEqual(cached());
+  });
+
+  it("aborts an in-progress cache-only read without starting provider work", async () => {
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    let continueRead!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      continueRead = resolve;
+    });
+    const content: TranscriptCacheRepository = {
+      transaction: async (_itemId, operation) => await operation({
+        read: async () => {
+          releaseRead();
+          await readGate;
+          return cached();
+        },
+        write: async () => CONTENT_PATH,
+        pathFor: () => CONTENT_PATH,
+      }),
+    };
+    const innerTube = new FakeProvider();
+    const ytDlp = new FakeOptionalProvider(true);
+    const { service, metadata } = createService({
+      content: content as FakeContentRepository,
+      innerTube,
+      ytDlp,
+    });
+    const controller = new AbortController();
+    const pending = service.readCached({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      signal: controller.signal,
+    });
+    await readStarted;
+
+    controller.abort();
+    continueRead();
+
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    expect(metadata.updates).toEqual([]);
+    expect(innerTube.listCalls).toBe(0);
+    expect(ytDlp.availabilityChecks).toBe(0);
+  });
+
+  it("dispose invalidates an in-progress cache-only read and rejects future cache reads", async () => {
+    let markReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
+    let continueRead!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      continueRead = resolve;
+    });
+    const content: TranscriptCacheRepository = {
+      transaction: async (_itemId, operation) => await operation({
+        read: async () => {
+          markReadStarted();
+          await readGate;
+          return cached();
+        },
+        write: async () => CONTENT_PATH,
+        pathFor: () => CONTENT_PATH,
+      }),
+    };
+    const { service, metadata } = createService({
+      content: content as FakeContentRepository,
+    });
+    const pending = service.readCached({ itemId: ITEM_ID, videoId: VIDEO_ID });
+    await readStarted;
+
+    service.dispose();
+    continueRead();
+
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    await expect(
+      service.readCached({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+    ).rejects.toMatchObject({ code: "aborted" });
+    expect(metadata.updates).toEqual([]);
+  });
+
   it("preserves a valid cache when metadata repair fails and retries on the next read", async () => {
     const content = new FakeContentRepository(cached());
     const metadata = new FakeMetadataRepository();
