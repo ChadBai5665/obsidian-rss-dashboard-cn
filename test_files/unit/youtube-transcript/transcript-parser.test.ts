@@ -69,6 +69,14 @@ describe("parseJson3Transcript", () => {
     expect(parseJson3Transcript(payload)).toBe("你好世界\n下一句");
   });
 
+  it("deduplicates an overlapping multi-line rolling-caption window", () => {
+    const payload = JSON.stringify({
+      events: [{ segs: [{ utf8: "A\nB" }] }, { segs: [{ utf8: "A\nB\nC" }] }],
+    });
+
+    expect(parseJson3Transcript(payload)).toBe("A\nB\nC");
+  });
+
   it.each([
     { events: [{ tStartMs: -1, segs: [{ utf8: "text" }] }] },
     { events: [{ tStartMs: "0", segs: [{ utf8: "text" }] }] },
@@ -90,6 +98,58 @@ describe("parseJson3Transcript", () => {
     });
 
     expectTranscriptFailure(() => parseJson3Transcript(payload));
+  });
+
+  it.each([
+    [
+      "JSON3 bidi override",
+      () =>
+        parseJson3Transcript(
+          JSON.stringify({
+            events: [{ segs: [{ utf8: "safe\u202Eunsafe" }] }],
+          }),
+        ),
+    ],
+    [
+      "JSON3 unpaired high surrogate",
+      () =>
+        parseJson3Transcript(
+          JSON.stringify({
+            events: [{ segs: [{ utf8: "safe\uD800unsafe" }] }],
+          }),
+        ),
+    ],
+    [
+      "WebVTT isolate control",
+      () =>
+        parseWebVttTranscript(
+          "WEBVTT\n\n00:00.000 --> 00:01.000\nsafe\u2066unsafe\n",
+        ),
+    ],
+    [
+      "SRV encoded isolate control",
+      () =>
+        parseSrvTranscript(
+          '<transcript><text start="0">safe&#x2069;unsafe</text></transcript>',
+        ),
+    ],
+    [
+      "SRV unpaired low surrogate",
+      () =>
+        parseSrvTranscript(
+          '<transcript><text start="0">safe\uDFFFunsafe</text></transcript>',
+        ),
+    ],
+  ])("rejects unsafe Unicode in %s", (_label, parse) => {
+    expectTranscriptFailure(parse);
+  });
+
+  it("preserves paired emoji surrogates and legal zero-width joiners", () => {
+    const payload = JSON.stringify({
+      events: [{ segs: [{ utf8: "Family 👨‍👩‍👧‍👦" }] }],
+    });
+
+    expect(parseJson3Transcript(payload)).toBe("Family 👨‍👩‍👧‍👦");
   });
 
   it("rejects malformed JSON and non-object event structures", () => {
@@ -151,6 +211,19 @@ describe("parseJson3Transcript", () => {
 });
 
 describe("parseWebVttTranscript", () => {
+  it("allows one byte-order mark only at the start of a WebVTT document", () => {
+    expect(
+      parseWebVttTranscript(
+        "\uFEFFWEBVTT\n\n00:00.000 --> 00:01.000\nVisible\n",
+      ),
+    ).toBe("Visible");
+    expectTranscriptFailure(() =>
+      parseWebVttTranscript(
+        "WEBVTT\n\n00:00.000 --> 00:01.000\nNot\uFEFFsafe\n",
+      ),
+    );
+  });
+
   it("removes cue identifiers, timestamps, settings, tags, entities, and duplicate rolling lines", () => {
     const payload = [
       "WEBVTT",
@@ -215,6 +288,12 @@ describe("parseWebVttTranscript", () => {
     );
   });
 
+  it("rejects a single WebVTT cue over sixteen thousand characters", () => {
+    const payload = `WEBVTT\n\n00:00.000 --> 00:01.000\n${"a".repeat(16_001)}\n`;
+
+    expectTranscriptFailure(() => parseWebVttTranscript(payload));
+  });
+
   it("rejects missing headers and empty cue sets", () => {
     expectTranscriptFailure(() =>
       parseWebVttTranscript("00:00.000 --> 00:01.000\nText\n"),
@@ -250,6 +329,35 @@ describe("parseSrvTranscript", () => {
   });
 
   it.each([
+    [
+      "SRV text node",
+      `<transcript><text start="0">${"a".repeat(16_001)}</text></transcript>`,
+    ],
+    [
+      "SRV3 paragraph",
+      `<timedtext><body><p t="0">${"a".repeat(16_001)}</p></body></timedtext>`,
+    ],
+    [
+      "SRV3 segment",
+      `<timedtext><body><p t="0"><s>${"a".repeat(16_001)}</s></p></body></timedtext>`,
+    ],
+  ])("rejects a single overlong %s", (_label, payload) => {
+    expectTranscriptFailure(() => parseSrvTranscript(payload));
+  });
+
+  it("rejects more than ten thousand SRV3 segment nodes", () => {
+    const oneHundredSegments = "<s>x</s>".repeat(100);
+    const paragraphs = Array.from(
+      { length: 101 },
+      (_, index) => `<p t="${index}">${oneHundredSegments}</p>`,
+    ).join("");
+
+    expectTranscriptFailure(() =>
+      parseSrvTranscript(`<timedtext><body>${paragraphs}</body></timedtext>`),
+    );
+  });
+
+  it.each([
     '<transcript><text start="-1" dur="1">Text</text></transcript>',
     '<transcript><text start="zero" dur="1">Text</text></transcript>',
     '<transcript><text start="0" dur="-1">Text</text></transcript>',
@@ -264,6 +372,39 @@ describe("parseSrvTranscript", () => {
     );
     expectTranscriptFailure(() => parseSrvTranscript("<transcript/>"));
     expectTranscriptFailure(() => parseSrvTranscript("not xml"));
+  });
+
+  it.each([
+    [
+      "two consecutive roots",
+      '<transcript><text start="0">One</text></transcript><transcript><text start="1">Two</text></transcript>',
+    ],
+    [
+      "an SRV3 paragraph under an SRV root",
+      '<transcript><p t="0">Text</p></transcript>',
+    ],
+    [
+      "an SRV3 paragraph outside its body",
+      '<timedtext><p t="0">Text</p></timedtext>',
+    ],
+    [
+      "an SRV text node under an SRV3 body",
+      '<timedtext><body><text start="0">Text</text></body></timedtext>',
+    ],
+    [
+      "two SRV3 bodies",
+      '<timedtext><body><p t="0">One</p></body><body><p t="1">Two</p></body></timedtext>',
+    ],
+    [
+      "two SRV3 heads",
+      '<timedtext><head></head><head></head><body><p t="0">Text</p></body></timedtext>',
+    ],
+    [
+      "a structural body nested inside SRV text",
+      '<transcript><text start="0"><body>Text</body></text></transcript>',
+    ],
+  ])("rejects malformed XML structure with %s", (_label, payload) => {
+    expectTranscriptFailure(() => parseSrvTranscript(payload));
   });
 
   it("rejects more than twenty thousand caption nodes", () => {

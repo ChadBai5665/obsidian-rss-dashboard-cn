@@ -19,6 +19,11 @@ interface Json3Event {
   segs?: unknown;
 }
 
+interface XmlFrame {
+  name: string;
+  contentStart: number;
+}
+
 export function parseTranscriptPayload(
   format: YouTubeCaptionFormat,
   payload: string,
@@ -64,7 +69,7 @@ export function parseJson3Transcript(payload: string): string {
         eventText += segment.utf8;
         if (eventText.length > MAX_TRANSCRIPT_CHARACTERS) throw unavailable();
       }
-      lines.push(...plainTextLines(eventText));
+      appendCaptionWindow(lines, plainTextLines(eventText));
     }
     return finalizeTranscript(lines);
   } catch (error) {
@@ -74,7 +79,7 @@ export function parseJson3Transcript(payload: string): string {
 
 export function parseWebVttTranscript(payload: string): string {
   try {
-    assertBoundedPayload(payload);
+    assertBoundedPayload(payload, true);
     const normalized = payload.replace(/^\uFEFF/u, "").replace(/\r\n?/gu, "\n");
     const firstBreak = normalized.indexOf("\n");
     const firstLine = (
@@ -112,7 +117,8 @@ export function parseWebVttTranscript(payload: string): string {
       if (cueCount > MAX_CAPTION_EVENTS) throw unavailable();
 
       const cueText = blockLines.slice(timingIndex + 1).join("\n");
-      lines.push(...plainTextLines(cueText));
+      assertBoundedSegment(cueText);
+      appendCaptionWindow(lines, plainTextLines(cueText));
     }
     return finalizeTranscript(lines);
   } catch (error) {
@@ -122,14 +128,9 @@ export function parseWebVttTranscript(payload: string): string {
 
 export function parseSrvTranscript(payload: string): string {
   try {
-    assertBoundedPayload(payload);
+    assertBoundedPayload(payload, true);
     const documentBody = payload.trim().replace(/^<\?xml\s[^?]*\?>\s*/iu, "");
-    validateMarkup(documentBody);
-    if (
-      !/^<(transcript|timedtext)\b[^>]*>[\s\S]*<\/\1>$/iu.test(documentBody)
-    ) {
-      throw unavailable();
-    }
+    validateXmlDocument(documentBody);
 
     const lines: string[] = [];
     let nodeCount = 0;
@@ -139,6 +140,7 @@ export function parseSrvTranscript(payload: string): string {
       const nodeName = match[1]?.toLowerCase();
       const attributes = match[2] ?? "";
       const content = match[3] ?? "";
+      assertBoundedSegment(content);
       if (nodeName === "text") {
         validateRequiredXmlTimestamp(attributes, "start");
         validateOptionalXmlTimestamp(attributes, "dur");
@@ -148,7 +150,7 @@ export function parseSrvTranscript(payload: string): string {
       } else {
         throw unavailable();
       }
-      lines.push(...plainTextLines(content));
+      appendCaptionWindow(lines, plainTextLines(content));
     }
     return finalizeTranscript(lines);
   } catch (error) {
@@ -156,22 +158,71 @@ export function parseSrvTranscript(payload: string): string {
   }
 }
 
-function assertBoundedPayload(payload: string): void {
+function assertBoundedPayload(
+  payload: string,
+  allowLeadingByteOrderMark = false,
+): void {
   if (!payload || payload.length > MAX_RAW_PAYLOAD_BYTES) throw unavailable();
   if (new TextEncoder().encode(payload).byteLength > MAX_RAW_PAYLOAD_BYTES) {
     throw unavailable();
   }
-  assertSafeText(payload);
+  assertSafeText(payload, allowLeadingByteOrderMark);
 }
 
-function assertSafeText(value: string): void {
+function assertSafeText(
+  value: string,
+  allowLeadingByteOrderMark = false,
+): void {
   for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
+    const first = value.charCodeAt(index);
+    let codePoint: number;
+    if (first >= 0xd800 && first <= 0xdbff) {
+      const second = value.charCodeAt(index + 1);
+      if (second < 0xdc00 || second > 0xdfff) throw unavailable();
+      codePoint = (first - 0xd800) * 0x400 + (second - 0xdc00) + 0x10000;
+      index += 1;
+    } else if (first >= 0xdc00 && first <= 0xdfff) {
+      throw unavailable();
+    } else {
+      codePoint = first;
+    }
+
+    if (allowLeadingByteOrderMark && index === 0 && codePoint === 0xfeff) {
+      continue;
+    }
+
     const unsafeC0 =
-      code <= 8 || code === 11 || code === 12 || (code >= 14 && code <= 31);
-    const unsafeDeleteOrC1 = code >= 127 && code <= 159;
-    if (unsafeC0 || unsafeDeleteOrC1) throw unavailable();
+      codePoint <= 8 ||
+      codePoint === 11 ||
+      codePoint === 12 ||
+      (codePoint >= 14 && codePoint <= 31);
+    const unsafeDeleteOrC1 = codePoint >= 127 && codePoint <= 159;
+    if (unsafeC0 || unsafeDeleteOrC1 || isDangerousFormatControl(codePoint)) {
+      throw unavailable();
+    }
   }
+}
+
+function isDangerousFormatControl(codePoint: number): boolean {
+  return (
+    codePoint === 0x00ad ||
+    codePoint === 0x061c ||
+    codePoint === 0x180e ||
+    codePoint === 0x200b ||
+    codePoint === 0x200e ||
+    codePoint === 0x200f ||
+    (codePoint >= 0x202a && codePoint <= 0x202e) ||
+    (codePoint >= 0x2060 && codePoint <= 0x206f) ||
+    codePoint === 0xfeff ||
+    (codePoint >= 0xfff9 && codePoint <= 0xfffb) ||
+    (codePoint >= 0x1d173 && codePoint <= 0x1d17a) ||
+    codePoint === 0xe0001 ||
+    (codePoint >= 0xe0020 && codePoint <= 0xe007f)
+  );
+}
+
+function assertBoundedSegment(value: string): void {
+  if (value.length > MAX_SEGMENT_CHARACTERS) throw unavailable();
 }
 
 function validateOptionalTimestamp(value: unknown): void {
@@ -276,6 +327,121 @@ function validateMarkup(value: string): void {
     throw unavailable();
 }
 
+function validateXmlDocument(value: string): void {
+  const stack: XmlFrame[] = [];
+  let cursor = 0;
+  let rootName: "transcript" | "timedtext" | undefined;
+  let rootCount = 0;
+  let headCount = 0;
+  let bodyCount = 0;
+  let segmentCount = 0;
+
+  for (const match of value.matchAll(MARKUP_TOKEN)) {
+    const index = match.index ?? 0;
+    const textBeforeTag = value.slice(cursor, index);
+    if (textBeforeTag.includes("<")) throw unavailable();
+    if (hasDisallowedXmlText(stack, textBeforeTag)) throw unavailable();
+    cursor = index + match[0].length;
+
+    const token = (match[1] ?? "").trim();
+    if (!token) throw unavailable();
+    if (/^(?:!|\?)/u.test(token)) continue;
+
+    const closing = token.startsWith("/");
+    const selfClosing = token.endsWith("/");
+    const name = token
+      .replace(/^\//u, "")
+      .match(/^([A-Za-z][A-Za-z0-9-]*)/u)?.[1]
+      ?.toLowerCase();
+    if (!name) throw unavailable();
+
+    if (closing) {
+      const frame = stack.pop();
+      if (!frame || frame.name !== name) throw unavailable();
+      if (name === "text" || name === "p" || name === "s") {
+        assertBoundedSegment(value.slice(frame.contentStart, index));
+      }
+      continue;
+    }
+
+    const parent = stack[stack.length - 1]?.name;
+    if (stack.length === 0) {
+      rootCount += 1;
+      if (
+        rootCount !== 1 ||
+        (name !== "transcript" && name !== "timedtext") ||
+        selfClosing
+      ) {
+        throw unavailable();
+      }
+      rootName = name;
+    } else if (!rootName || !isAllowedXmlChild(rootName, parent, name)) {
+      throw unavailable();
+    }
+
+    if (rootName === "timedtext" && parent === "timedtext") {
+      if (name === "head") {
+        headCount += 1;
+        if (headCount > 1) throw unavailable();
+      } else if (name === "body") {
+        bodyCount += 1;
+        if (bodyCount > 1) throw unavailable();
+      }
+    }
+    if (rootName === "timedtext" && name === "s") {
+      segmentCount += 1;
+      if (segmentCount > MAX_CAPTION_SEGMENTS) throw unavailable();
+    }
+
+    if (!selfClosing && name !== "br") {
+      stack.push({ name, contentStart: cursor });
+    }
+  }
+
+  const trailingText = value.slice(cursor);
+  if (
+    trailingText.includes("<") ||
+    trailingText.trim() ||
+    stack.length > 0 ||
+    rootCount !== 1 ||
+    !rootName ||
+    (rootName === "timedtext" && bodyCount !== 1)
+  ) {
+    throw unavailable();
+  }
+}
+
+function hasDisallowedXmlText(
+  stack: readonly XmlFrame[],
+  value: string,
+): boolean {
+  if (!value.trim()) return false;
+  const parent = stack[stack.length - 1]?.name;
+  return (
+    parent === undefined ||
+    parent === "transcript" ||
+    parent === "timedtext" ||
+    parent === "body"
+  );
+}
+
+function isAllowedXmlChild(
+  rootName: "transcript" | "timedtext",
+  parent: string | undefined,
+  name: string,
+): boolean {
+  if (rootName === "transcript") {
+    if (parent === "transcript") return name === "text";
+    return name !== "text" && name !== "p" && name !== "s";
+  }
+
+  if (parent === "timedtext") return name === "head" || name === "body";
+  if (parent === "body") return name === "p";
+  if (parent === "p") return name === "s" || name === "br" || name === "font";
+  if (parent === "s") return name === "br" || name === "font";
+  return name !== "body" && name !== "p" && name !== "s" && name !== "text";
+}
+
 function decodeHtmlEntities(value: string): string {
   return value.replace(HTML_ENTITY, (entity, body: string) => {
     const lowered = body.toLowerCase();
@@ -301,22 +467,48 @@ function decodeHtmlEntities(value: string): string {
 }
 
 function finalizeTranscript(sourceLines: readonly string[]): string {
-  const lines: string[] = [];
-  for (const line of sourceLines) {
-    if (!line) continue;
-    const previous = lines[lines.length - 1];
-    if (previous === line || previous?.startsWith(line)) continue;
-    if (previous && line.startsWith(previous)) {
-      lines[lines.length - 1] = line;
-    } else {
-      lines.push(line);
-    }
-  }
-  const transcript = lines.join("\n").trim();
+  const transcript = sourceLines.join("\n").trim();
   if (!transcript || transcript.length > MAX_TRANSCRIPT_CHARACTERS) {
     throw unavailable();
   }
   return transcript;
+}
+
+function appendCaptionWindow(
+  output: string[],
+  sourceWindow: readonly string[],
+): void {
+  const window: string[] = [];
+  for (const line of sourceWindow) appendProgressiveLine(window, line);
+  if (window.length === 0) return;
+
+  let overlap = Math.min(output.length, window.length);
+  while (overlap > 0) {
+    let matches = true;
+    for (let index = 0; index < overlap; index += 1) {
+      if (output[output.length - overlap + index] !== window[index]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) break;
+    overlap -= 1;
+  }
+
+  for (let index = overlap; index < window.length; index += 1) {
+    const line = window[index];
+    if (line) appendProgressiveLine(output, line);
+  }
+}
+
+function appendProgressiveLine(lines: string[], line: string): void {
+  const previous = lines[lines.length - 1];
+  if (previous === line || previous?.startsWith(line)) return;
+  if (previous && line.startsWith(previous)) {
+    lines[lines.length - 1] = line;
+  } else {
+    lines.push(line);
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
