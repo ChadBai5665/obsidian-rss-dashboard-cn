@@ -74,6 +74,17 @@ describe("renderAnalysisMarkdown", () => {
     },
   );
 
+  it("accepts the strict YouTube transcript basis without allowing unknown bases", () => {
+    const markdown = renderAnalysisMarkdown(result({
+      contentBasis: "youtube-transcript",
+    }));
+
+    expect(frontmatter(markdown).contentBasis).toBe("youtube-transcript");
+    expect(() => renderAnalysisMarkdown(result({
+      contentBasis: "unknown-basis" as AiAnalysisResult["contentBasis"],
+    }))).toThrow("Invalid AI analysis result");
+  });
+
   it("round-trips YAML-sensitive Unicode metadata without frontmatter injection", () => {
     const connectionName = "---\n名称: \"研究\" # 标签 !<tag:yaml.org,2002:js/function> 🌏\u2028行分隔";
     const model = "模型:\t'alpha'\n---\n!!python/object\u2029段分隔";

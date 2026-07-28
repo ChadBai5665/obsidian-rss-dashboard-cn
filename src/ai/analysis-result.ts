@@ -26,6 +26,7 @@ const PROVIDER_KINDS = new Set<AiProviderKind>([
 const CONTENT_BASES = new Set<ContentBasis>([
   "feed",
   "full-text",
+  "youtube-transcript",
   "title-description",
   "x-post",
   "linked-page",

@@ -1,6 +1,7 @@
 import type { CollectedItem, ContentBasis, SourceType } from "../../collection/collected-item";
 import type { CachedItemContent } from "../../collection/content-repository";
 import type { FullArticleFetchResult } from "../../utils/fetch-helpers";
+import { isValidYouTubeVideoId } from "../../youtube-transcript/transcript-types";
 import {
   MAX_AI_SELECTED_CONTENT_CHARACTERS,
   MIN_AI_INPUT_CHARACTERS,
@@ -20,6 +21,20 @@ const BASIC_HTML_ENTITY_TOKEN = /^(?:#x[0-9a-f]{1,6}|#[0-9]{1,7}|amp|lt|gt|quot|
 const MAX_TITLE_CHARACTERS = 20_000;
 const MAX_SOURCE_NAME_CHARACTERS = 20_000;
 const MAX_SOURCE_URL_CHARACTERS = 8_192;
+const TRANSCRIPT_LANGUAGE_CODE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u;
+const TRANSCRIPT_FIELDS = new Set([
+  "schemaVersion",
+  "itemId",
+  "sourceUrl",
+  "fetchedAt",
+  "contentBasis",
+  "videoId",
+  "languageCode",
+  "languageName",
+  "isGenerated",
+  "provider",
+  "text",
+]);
 const FETCHABLE_SOURCE_TYPES = new Set<SourceType>([
   "rss",
   "atom",
@@ -139,6 +154,23 @@ export class AiContentSelector {
     const selectedItem = snapshotItem(request.item);
 
     if (selectedItem.sourceType === "youtube") {
+      const cached = await this.readCurrentItemContent(
+        selectedItem.id,
+        request.signal,
+      );
+      const cachedTranscript = snapshotCachedYouTubeTranscript(
+        cached,
+        selectedItem.id,
+      );
+      if (cachedTranscript) {
+        const transcriptSelection = createSelection(
+          selectedItem,
+          cachedTranscript,
+          "youtube-transcript",
+          request.maxInputCharacters,
+        );
+        if (transcriptSelection) return transcriptSelection;
+      }
       return createRequiredSelection(
         selectedItem,
         joinTitleAndDescription(selectedItem.title, selectedItem.excerpt),
@@ -788,6 +820,63 @@ function snapshotCachedFullText(
   return cachedItemId === itemId && contentBasis === "full-text" && typeof text === "string" && text.trim()
     ? text
     : undefined;
+}
+
+function snapshotCachedYouTubeTranscript(
+  value: CachedItemContent | null,
+  itemId: string,
+): string | undefined {
+  const record = plainRecord(value);
+  if (!record || !hasOnlyTranscriptFields(record)) return undefined;
+
+  const schemaVersion = ownData(record, "schemaVersion");
+  const cachedItemId = ownData(record, "itemId");
+  const sourceUrl = ownOptionalData(record, "sourceUrl");
+  const fetchedAt = ownData(record, "fetchedAt");
+  const contentBasis = ownData(record, "contentBasis");
+  const videoId = ownData(record, "videoId");
+  const languageCode = ownData(record, "languageCode");
+  const languageName = ownData(record, "languageName");
+  const isGenerated = ownData(record, "isGenerated");
+  const provider = ownData(record, "provider");
+  const text = ownData(record, "text");
+
+  return schemaVersion === 2 &&
+    cachedItemId === itemId &&
+    (sourceUrl === undefined || typeof sourceUrl === "string") &&
+    typeof fetchedAt === "string" &&
+    !Number.isNaN(Date.parse(fetchedAt)) &&
+    contentBasis === "youtube-transcript" &&
+    typeof videoId === "string" &&
+    isValidYouTubeVideoId(videoId) &&
+    typeof languageCode === "string" &&
+    TRANSCRIPT_LANGUAGE_CODE.test(languageCode) &&
+    typeof languageName === "string" &&
+    Boolean(languageName.trim()) &&
+    languageName.length <= 200 &&
+    !hasUnsafeTranscriptControl(languageName) &&
+    typeof isGenerated === "boolean" &&
+    (provider === "innertube" || provider === "yt-dlp") &&
+    typeof text === "string" &&
+    Boolean(text.trim())
+    ? text
+    : undefined;
+}
+
+function hasOnlyTranscriptFields(record: Record<string, unknown>): boolean {
+  try {
+    return Object.keys(record).every((field) => TRANSCRIPT_FIELDS.has(field));
+  } catch {
+    return false;
+  }
+}
+
+function hasUnsafeTranscriptControl(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 32 || code === 127) return true;
+  }
+  return false;
 }
 
 function snapshotFetchedFullText(

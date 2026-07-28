@@ -20,6 +20,7 @@ const OPERATIONS = new Set<AiOperation>([
 const CONTENT_BASES = new Set<ContentBasis>([
   "feed",
   "full-text",
+  "youtube-transcript",
   "title-description",
   "x-post",
   "linked-page",

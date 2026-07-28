@@ -89,6 +89,39 @@ function responseWithText(text: string, status = 200): RequestUrlResponse {
   };
 }
 
+function transcriptCacheMarkdown(itemId: string): string {
+  return [
+    "---",
+    "schemaVersion: 2",
+    `itemId: ${JSON.stringify(itemId)}`,
+    `sourceUrl: ${JSON.stringify("https://www.youtube.com/watch?v=dQw4w9WgXcQ")}`,
+    `fetchedAt: ${JSON.stringify("2026-07-23T00:00:00.000Z")}`,
+    `contentBasis: ${JSON.stringify("youtube-transcript")}`,
+    `videoId: ${JSON.stringify("dQw4w9WgXcQ")}`,
+    `languageCode: ${JSON.stringify("en")}`,
+    `languageName: ${JSON.stringify("English")}`,
+    "isGenerated: false",
+    `provider: ${JSON.stringify("innertube")}`,
+    "---",
+    "",
+    "YOUTUBE_TRANSCRIPT_CANARY",
+  ].join("\n");
+}
+
+function fullTextCacheMarkdown(itemId: string): string {
+  return [
+    "---",
+    "schemaVersion: 1",
+    `itemId: ${JSON.stringify(itemId)}`,
+    `sourceUrl: ${JSON.stringify("https://www.youtube.com/watch?v=dQw4w9WgXcQ")}`,
+    `fetchedAt: ${JSON.stringify("2026-07-23T00:00:00.000Z")}`,
+    `contentBasis: ${JSON.stringify("full-text")}`,
+    "---",
+    "",
+    "YOUTUBE_TRANSCRIPT_CANARY",
+  ].join("\n");
+}
+
 function button(container: HTMLElement, label: string): HTMLButtonElement {
   const match = Array.from(container.querySelectorAll("button")).find(
     (candidate) => candidate.textContent === label,
@@ -1568,44 +1601,91 @@ describe("AI privacy boundary", () => {
     modal?.close();
   });
 
-  it("uses only a YouTube title and description without reading cached transcript-like data", async () => {
-    const test = harness();
-    installAtomicAdapter(test.app);
-    test.selectedFeed.mediaType = "video";
-    test.selected.mediaType = "video";
-    test.selected.videoId = "video-canary";
-    test.selected.description = "YOUTUBE_DESCRIPTION_CANARY";
-    const cachePath =
-      `${test.settings.collection.dataFolder}/content/${test.selected.rssDashboardId}.md`;
-    await test.app.vault.createFolder(".rss-dashboard-data/content");
-    await test.app.vault.adapter.write(cachePath, "YOUTUBE_TRANSCRIPT_CANARY");
-    const read = vi.spyOn(test.app.vault.adapter, "read");
-    const requestUrl = vi.spyOn(obsidian, "requestUrl")
-      .mockResolvedValue(responseWithText("safe YouTube analysis"));
-
-    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
-    await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
-      "标题和摘要",
-    ));
-
-    expect(modal?.contentEl.querySelector(
-      ".rss-dashboard-ai-full-text-toggle",
-    )).toBeNull();
-    expect(read).not.toHaveBeenCalledWith(cachePath);
-    expect(requestUrl).not.toHaveBeenCalled();
-    button(modal!.contentEl, "确认发送").click();
-    await vi.waitFor(() => expect(requestUrl).toHaveBeenCalledTimes(1));
-
-    expect(outboundUserPayload(requestUrl)).toMatchObject({
-      contentBasis: "title-description",
-      content: "SELECTED_ITEM_TITLE_CANARY YOUTUBE_DESCRIPTION_CANARY",
-    });
-    expect(requestUrl.mock.calls[0]?.[0].body).not.toContain(
+  it.each([
+    [
+      "a matching schemaVersion 2 transcript cache",
+      (itemId: string) => transcriptCacheMarkdown(itemId),
+      "youtube-transcript",
       "YOUTUBE_TRANSCRIPT_CANARY",
-    );
-    expect(read).not.toHaveBeenCalledWith(cachePath);
-    modal?.close();
-  });
+      true,
+    ],
+    [
+      "raw transcript-like data",
+      () => "YOUTUBE_TRANSCRIPT_CANARY",
+      "title-description",
+      "SELECTED_ITEM_TITLE_CANARY YOUTUBE_DESCRIPTION_CANARY",
+      false,
+    ],
+    [
+      "a schemaVersion 1 full-text cache",
+      (itemId: string) => fullTextCacheMarkdown(itemId),
+      "title-description",
+      "SELECTED_ITEM_TITLE_CANARY YOUTUBE_DESCRIPTION_CANARY",
+      false,
+    ],
+    [
+      "a transcript cache for another item",
+      () => transcriptCacheMarkdown("b".repeat(64)),
+      "title-description",
+      "SELECTED_ITEM_TITLE_CANARY YOUTUBE_DESCRIPTION_CANARY",
+      false,
+    ],
+  ] as const)(
+    "trusts only %s and performs no transcript network fetch",
+    async (_scenario, cacheFile, expectedBasis, expectedContent, trustsCache) => {
+      const test = harness();
+      installAtomicAdapter(test.app);
+      test.selectedFeed.mediaType = "video";
+      test.selected.mediaType = "video";
+      test.selected.videoId = "dQw4w9WgXcQ";
+      test.selected.description = "YOUTUBE_DESCRIPTION_CANARY";
+      const cachePath =
+        `${test.settings.collection.dataFolder}/content/${test.selected.rssDashboardId}.md`;
+      await test.app.vault.createFolder(".rss-dashboard-data/content");
+      await test.app.vault.adapter.write(
+        cachePath,
+        cacheFile(test.selected.rssDashboardId!),
+      );
+      if (trustsCache) {
+        await expect(new ContentRepository(
+          test.app.vault,
+          test.settings.collection.dataFolder,
+          () => new Date("2026-07-23T00:00:00.000Z"),
+        ).read(test.selected.rssDashboardId!)).resolves.toMatchObject({
+          schemaVersion: 2,
+          itemId: test.selected.rssDashboardId,
+          contentBasis: "youtube-transcript",
+          text: "YOUTUBE_TRANSCRIPT_CANARY",
+        });
+      }
+      const read = vi.spyOn(test.app.vault.adapter, "read");
+      const requestUrl = vi.spyOn(obsidian, "requestUrl")
+        .mockResolvedValue(responseWithText("safe YouTube analysis"));
+
+      const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+      await vi.waitFor(() => expect(modal?.contentEl.textContent).toContain(
+        trustsCache ? "YouTube 字幕" : "标题和摘要",
+      ));
+
+      expect(modal?.contentEl.querySelector(
+        ".rss-dashboard-ai-full-text-toggle",
+      )).toBeNull();
+      expect(read).toHaveBeenCalledWith(cachePath);
+      expect(requestUrl).not.toHaveBeenCalled();
+      button(modal!.contentEl, "确认发送").click();
+      await vi.waitFor(() => expect(requestUrl).toHaveBeenCalledTimes(1));
+
+      expect(outboundUserPayload(requestUrl)).toMatchObject({
+        contentBasis: expectedBasis,
+        content: expectedContent,
+      });
+      const outboundBodyText = requestUrl.mock.calls[0]?.[0].body ?? "";
+      expect(outboundBodyText.includes("YOUTUBE_TRANSCRIPT_CANARY")).toBe(
+        trustsCache,
+      );
+      modal?.close();
+    },
+  );
 
   it.each([
     ["missing credential", undefined, undefined, "当前连接尚未配置 API 密钥。", 0],
