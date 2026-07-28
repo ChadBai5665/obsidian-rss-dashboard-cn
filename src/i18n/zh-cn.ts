@@ -1471,8 +1471,10 @@ export const zhCN = {
     "内置字幕获取暂不可用，且本机未安装可选的 yt-dlp 后备工具。",
   "transcript.error.temporary": "公开字幕暂时不可用，请稍后重试。",
   "transcript.error.timeout": "获取字幕超时，请重试。",
+  "transcript.error.loginRequired":
+    "YouTube 要求登录后才能访问这个视频的公开字幕。插件不会读取 Cookie；请在系统默认浏览器中确认视频是否可访问。",
   "transcript.error.unavailable":
-    "这个视频的公开字幕当前不可用；Obsidian 不会读取浏览器登录状态。",
+    "这个视频或它的公开字幕当前不可用。",
   "settings.display.newest": "最新优先",
   "settings.display.oldest": "最早优先",
   "settings.display.none": "不分组",

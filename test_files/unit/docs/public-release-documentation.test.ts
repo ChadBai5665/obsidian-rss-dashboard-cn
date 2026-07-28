@@ -5,6 +5,20 @@ function read(relativePath: string): string {
   return readFileSync(relativePath, "utf8");
 }
 
+function section(document: string, heading: string): string {
+  const marker = `${heading}\n`;
+  const start = document.indexOf(marker);
+  if (start < 0) throw new Error(`Missing documentation section: ${heading}`);
+  const contentStart = start + marker.length;
+  const level = heading.match(/^#+/u)?.[0].length ?? 1;
+  const nextHeading = document
+    .slice(contentStart)
+    .search(new RegExp(`\\n#{1,${level}} `, "u"));
+  return nextHeading < 0
+    ? document.slice(contentStart)
+    : document.slice(contentStart, contentStart + nextHeading);
+}
+
 describe("public release documentation", () => {
   it("discloses the default proxy mode, complete target URL exposure, and disable tradeoff", () => {
     const readme = read("README.md");
@@ -70,9 +84,18 @@ describe("public release documentation", () => {
   });
 
   it("documents the public-caption boundary without substituting metadata or speech recognition", () => {
-    const readme = read("README.md");
-    const privacy = read("docs/PRIVACY.zh-CN.md");
-    const troubleshooting = read("docs/TROUBLESHOOTING.zh-CN.md");
+    const readme = section(
+      read("README.md"),
+      "## YouTube 字幕与播放边界",
+    );
+    const privacy = section(
+      read("docs/PRIVACY.zh-CN.md"),
+      "### 采集请求",
+    );
+    const troubleshooting = section(
+      read("docs/TROUBLESHOOTING.zh-CN.md"),
+      "## YouTube 字幕或播放不可用",
+    );
 
     for (const document of [readme, privacy, troubleshooting]) {
       expect(document).toContain("公开人工字幕");
@@ -88,13 +111,32 @@ describe("public release documentation", () => {
     expect(readme).toContain("Python");
     expect(readme).toContain("Bun");
     expect(readme).toContain("字幕 SaaS");
+    expect(readme).toMatch(/明确.*没有.*公开字幕.*回退.*无字幕/su);
+    expect(troubleshooting).toMatch(
+      /明确.*没有.*公开字幕.*回退.*失败.*无字幕/su,
+    );
+    expect(troubleshooting).toMatch(
+      /显示“需要登录”.*不会读取.*Cookie.*系统默认浏览器/su,
+    );
   });
 
   it("documents the optional yt-dlp process boundary and never presents it as required", () => {
-    const install = read("docs/INSTALL.zh-CN.md");
-    const privacy = read("docs/PRIVACY.zh-CN.md");
-    const security = read("docs/SECURITY.md");
-    const troubleshooting = read("docs/TROUBLESHOOTING.zh-CN.md");
+    const install = section(
+      read("docs/INSTALL.zh-CN.md"),
+      "### 可选的 YouTube 字幕回退",
+    );
+    const privacy = section(
+      read("docs/PRIVACY.zh-CN.md"),
+      "### 采集请求",
+    );
+    const security = section(
+      read("docs/SECURITY.md"),
+      "### YouTube 字幕进程边界",
+    );
+    const troubleshooting = section(
+      read("docs/TROUBLESHOOTING.zh-CN.md"),
+      "## YouTube 字幕或播放不可用",
+    );
 
     for (const document of [install, privacy, security]) {
       expect(document).toContain("可选本地回退");
@@ -114,12 +156,28 @@ describe("public release documentation", () => {
   });
 
   it("documents browser-login separation and transcript cache lifecycle", () => {
-    const readme = read("README.md");
-    const install = read("docs/INSTALL.zh-CN.md");
-    const privacy = read("docs/PRIVACY.zh-CN.md");
-    const troubleshooting = read("docs/TROUBLESHOOTING.zh-CN.md");
+    const readme = section(
+      read("README.md"),
+      "## YouTube 字幕与播放边界",
+    );
+    const install = section(read("docs/INSTALL.zh-CN.md"), "## 更新");
+    const privacyDocument = read("docs/PRIVACY.zh-CN.md");
+    const privacy = section(privacyDocument, "## 知识库内的数据");
+    const privacyRemote = section(
+      privacyDocument,
+      "### 界面渲染的远程资源",
+    );
+    const troubleshootingDocument = read("docs/TROUBLESHOOTING.zh-CN.md");
+    const troubleshooting = section(
+      troubleshootingDocument,
+      "## YouTube 字幕或播放不可用",
+    );
+    const remoteTroubleshooting = section(
+      troubleshootingDocument,
+      "## 只浏览页面却出现了网络请求",
+    );
 
-    for (const document of [readme, privacy, troubleshooting]) {
+    for (const document of [readme, privacyRemote, troubleshooting]) {
       expect(document).toContain("系统默认浏览器");
       expect(document).toMatch(/内嵌预览.*登录状态.*不相通/su);
     }
@@ -131,5 +189,10 @@ describe("public release documentation", () => {
     expect(privacy).toMatch(/schemaVersion 1.*继续读取.*不重写/su);
     expect(install).toMatch(/字幕缓存.*原地保留/su);
     expect(readme).toMatch(/重新获取字幕.*替换.*缓存/su);
+    expect(remoteTroubleshooting).toContain("只有点击“内嵌预览”");
+    expect(remoteTroubleshooting).toContain("youtube-nocookie.com");
+    expect(remoteTroubleshooting).not.toContain(
+      "打开 YouTube 播放器会请求",
+    );
   });
 });

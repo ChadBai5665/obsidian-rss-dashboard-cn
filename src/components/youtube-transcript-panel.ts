@@ -47,6 +47,7 @@ type PanelState =
   | "no-captions"
   | "fallback-unavailable"
   | "temporarily-unavailable"
+  | "login-required"
   | "unavailable"
   | "timeout"
   | "aborted"
@@ -58,6 +59,7 @@ type StatusTranslationKey =
   | "transcript.status.aborted"
   | "transcript.error.noCaptions"
   | "transcript.error.fallbackUnavailable"
+  | "transcript.error.loginRequired"
   | "transcript.error.timeout"
   | "transcript.error.unavailable"
   | "transcript.error.temporary";
@@ -356,8 +358,14 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
       case "aborted":
         this.renderStatus("aborted", "transcript.status.aborted", true);
         return;
-      case "video-unavailable":
       case "login-required":
+        this.renderStatus(
+          "login-required",
+          "transcript.error.loginRequired",
+          true,
+        );
+        return;
+      case "video-unavailable":
       case "invalid-video-id":
         this.renderStatus("unavailable", "transcript.error.unavailable", true);
         return;

@@ -104,6 +104,7 @@ export class YouTubeTranscriptServiceError extends Error {
 interface RegisteredChoice {
   provider: TranscriptProvider;
   track: YouTubeCaptionTrack;
+  fallbackPrimaryCode?: YouTubeTranscriptErrorCode;
 }
 
 interface PendingChoiceSet {
@@ -311,6 +312,11 @@ export class YouTubeTranscriptService {
             throw new YouTubeTranscriptServiceError("temporarily-unavailable");
           }
           if (
+            selectionAtStart.registered.fallbackPrimaryCode === "no-captions"
+          ) {
+            throw new YouTubeTranscriptServiceError("no-captions");
+          }
+          if (
             selectionAtStart.registered.track.source !== "innertube" ||
             !isFallbackEligible(primary.code)
           ) {
@@ -381,6 +387,7 @@ export class YouTubeTranscriptService {
     operationGeneration: symbol,
     provider: TranscriptProvider,
     expectedSource: "innertube" | "yt-dlp",
+    fallbackPrimaryCode?: YouTubeTranscriptErrorCode,
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
@@ -396,7 +403,13 @@ export class YouTubeTranscriptService {
 
     const selected = selectTracks(eligible, request.preferredLanguage);
     if (selected.length > 1) {
-      return this.registerChoices(key, operationGeneration, provider, selected);
+      return this.registerChoices(
+        key,
+        operationGeneration,
+        provider,
+        selected,
+        fallbackPrimaryCode,
+      );
     }
     return await this.fetchAndPersist(
       request,
@@ -443,10 +456,20 @@ export class YouTubeTranscriptService {
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
+    const preserveNoCaptions = primaryCode === "no-captions";
     let available: boolean;
     try {
       available = await this.options.ytDlp.isAvailable();
     } catch {
+      if (request.signal?.aborted || this.disposed) {
+        throw new YouTubeTranscriptServiceError("aborted");
+      }
+      if (this.currentGenerations.get(key) !== operationGeneration) {
+        throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+      }
+      if (preserveNoCaptions) {
+        throw new YouTubeTranscriptServiceError("no-captions");
+      }
       throw new YouTubeTranscriptServiceError(
         "temporarily-unavailable",
         primaryCode,
@@ -455,6 +478,9 @@ export class YouTubeTranscriptService {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
     if (!available) {
+      if (preserveNoCaptions) {
+        throw new YouTubeTranscriptServiceError("no-captions");
+      }
       throw new YouTubeTranscriptServiceError(
         "fallback-unavailable",
         primaryCode,
@@ -468,8 +494,18 @@ export class YouTubeTranscriptService {
         operationGeneration,
         this.options.ytDlp,
         "yt-dlp",
+        primaryCode,
       );
     } catch (error) {
+      if (request.signal?.aborted || this.disposed) {
+        throw new YouTubeTranscriptServiceError("aborted");
+      }
+      if (this.currentGenerations.get(key) !== operationGeneration) {
+        throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+      }
+      if (preserveNoCaptions) {
+        throw new YouTubeTranscriptServiceError("no-captions");
+      }
       throw normalizeProviderError(error);
     }
   }
@@ -479,12 +515,17 @@ export class YouTubeTranscriptService {
     operationGeneration: symbol,
     provider: TranscriptProvider,
     tracks: readonly YouTubeCaptionTrack[],
+    fallbackPrimaryCode?: YouTubeTranscriptErrorCode,
   ): YouTubeTranscriptServiceResult {
     this.assertCurrentGeneration(key, operationGeneration);
     const registered = new Map<string, RegisteredChoice>();
     const choices = tracks.map((candidate) => {
       const id = `track-${++this.choiceSequence}`;
-      registered.set(id, { provider, track: candidate });
+      registered.set(id, {
+        provider,
+        track: candidate,
+        ...(fallbackPrimaryCode === undefined ? {} : { fallbackPrimaryCode }),
+      });
       return Object.freeze({
         id,
         languageCode: candidate.languageCode,

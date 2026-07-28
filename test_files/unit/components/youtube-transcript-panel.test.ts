@@ -53,6 +53,7 @@ function deferred<T>(): {
 function createPanel(options: {
   cached?: YouTubeTranscriptCachedItemContent | null;
   get?: (request: YouTubeTranscriptRequest) => Promise<YouTubeTranscriptServiceResult>;
+  locale?: "zh-CN" | "en";
 } = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -77,7 +78,7 @@ function createPanel(options: {
   };
   const panel = new YouTubeTranscriptPanel({
     container,
-    locale: "en",
+    locale: options.locale ?? "en",
     request: {
       itemId: ITEM_ID,
       videoId: VIDEO_ID,
@@ -279,7 +280,8 @@ describe("YouTubeTranscriptPanel", () => {
     ["fallback-unavailable", "fallback-unavailable"],
     ["temporarily-unavailable", "temporarily-unavailable"],
     ["video-unavailable", "unavailable"],
-    ["login-required", "unavailable"],
+    ["invalid-video-id", "unavailable"],
+    ["login-required", "login-required"],
     ["timeout", "timeout"],
   ] as const)("keeps %s failures inline", async (code, expectedState) => {
     const { panel, container } = createPanel({
@@ -294,6 +296,38 @@ describe("YouTubeTranscriptPanel", () => {
     expect(container.querySelector(".rss-youtube-transcript-error")).not.toBeNull();
     expect(document.body.querySelector(".modal")).toBeNull();
   });
+
+  it.each([
+    {
+      locale: "zh-CN" as const,
+      cookieText: "不会读取 Cookie",
+      browserText: "系统默认浏览器",
+    },
+    {
+      locale: "en" as const,
+      cookieText: "does not read cookies",
+      browserText: "system browser",
+    },
+  ])(
+    "renders login-required as a dedicated $locale state with safe guidance",
+    async ({ locale, cookieText, browserText }) => {
+      const { panel, container } = createPanel({
+        locale,
+        get: async () => {
+          throw new YouTubeTranscriptServiceError("login-required");
+        },
+      });
+
+      await panel.fetch();
+
+      expect(state(container)).toBe("login-required");
+      expect(container.textContent).toContain(cookieText);
+      expect(container.textContent).toContain(browserText);
+      expect(
+        container.querySelector(".rss-youtube-transcript-fetch"),
+      ).not.toBeNull();
+    },
+  );
 
   it("aborts active work without allowing a late completion to change the UI", async () => {
     const pending = deferred<YouTubeTranscriptServiceResult>();

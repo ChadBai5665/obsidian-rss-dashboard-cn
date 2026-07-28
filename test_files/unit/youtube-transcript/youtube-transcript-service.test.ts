@@ -106,7 +106,7 @@ class FakeOptionalProvider extends FakeProvider {
   availabilityChecks = 0;
 
   constructor(
-    private readonly available: boolean,
+    private readonly availability: boolean | Error,
     tracks?: YouTubeCaptionTrack[] | YouTubeTranscriptError,
     fetchResult?: YouTubeTranscript | YouTubeTranscriptError,
   ) {
@@ -115,7 +115,8 @@ class FakeOptionalProvider extends FakeProvider {
 
   async isAvailable(): Promise<boolean> {
     this.availabilityChecks += 1;
-    return this.available;
+    if (this.availability instanceof Error) throw this.availability;
+    return this.availability;
   }
 }
 
@@ -439,45 +440,132 @@ describe("YouTubeTranscriptService", () => {
     },
   );
 
-  it("distinguishes a missing optional fallback from provider no-caption and temporary failures", async () => {
+  it("preserves authoritative no-captions when the optional fallback is absent", async () => {
+    const ytDlp = new FakeOptionalProvider(false);
     const missing = createService({
       innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
-      ytDlp: new FakeOptionalProvider(false),
+      ytDlp,
     });
     await expect(
       missing.service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
-    ).rejects.toMatchObject({
-      code: "fallback-unavailable",
-      primaryCode: "no-captions",
-    });
+    ).rejects.toMatchObject({ code: "no-captions" });
+    expect(ytDlp.availabilityChecks).toBe(1);
+    expect(ytDlp.listCalls).toBe(0);
+    expect(ytDlp.fetchCalls).toBe(0);
+  });
 
-    const none = createService({
+  it("preserves authoritative no-captions when fallback discovery fails", async () => {
+    const ytDlp = new FakeOptionalProvider(new Error("ENOENT"));
+    const { service } = createService({
       innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
-      ytDlp: new FakeOptionalProvider(
-        true,
-        new YouTubeTranscriptError("no-captions"),
-      ),
+      ytDlp,
     });
     await expect(
-      none.service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
     ).rejects.toMatchObject({ code: "no-captions" });
+    expect(ytDlp.availabilityChecks).toBe(1);
+    expect(ytDlp.listCalls).toBe(0);
+  });
 
-    const temporary = createService({
+  it.each([
+    {
+      name: "no supported tracks",
+      tracks: [] as YouTubeCaptionTrack[],
+      fetchResult: undefined,
+      expectedFetchCalls: 0,
+    },
+    {
+      name: "temporary track-list failure",
+      tracks: new YouTubeTranscriptError("temporarily-unavailable"),
+      fetchResult: undefined,
+      expectedFetchCalls: 0,
+    },
+    {
+      name: "temporary selected-track failure",
+      tracks: [track({ source: "yt-dlp" })],
+      fetchResult: new YouTubeTranscriptError("temporarily-unavailable"),
+      expectedFetchCalls: 1,
+    },
+  ])(
+    "preserves authoritative no-captions after fallback $name",
+    async ({ tracks, fetchResult, expectedFetchCalls }) => {
+      const ytDlp = new FakeOptionalProvider(true, tracks, fetchResult);
+      const { service } = createService({
+        innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+        ytDlp,
+      });
+
+      await expect(
+        service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+      ).rejects.toMatchObject({ code: "no-captions" });
+      expect(ytDlp.availabilityChecks).toBe(1);
+      expect(ytDlp.listCalls).toBe(1);
+      expect(ytDlp.fetchCalls).toBe(expectedFetchCalls);
+    },
+  );
+
+  it("preserves authoritative no-captions when a selected fallback track later fails", async () => {
+    const first = track({
+      source: "yt-dlp",
+      languageName: "English",
+      url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en&track=1",
+    });
+    const second = track({
+      source: "yt-dlp",
+      languageName: "English (United States)",
+      url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-US&track=2",
+    });
+    const ytDlp = new FakeOptionalProvider(
+      true,
+      [first, second],
+      new YouTubeTranscriptError("temporarily-unavailable"),
+    );
+    const { service } = createService({
+      innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+      ytDlp,
+    });
+
+    const choice = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    expect(choice.status).toBe("selection-required");
+    if (choice.status !== "selection-required") throw new Error("expected choices");
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        trackId: choice.tracks[0].id,
+      }),
+    ).rejects.toMatchObject({ code: "no-captions" });
+    expect(ytDlp.availabilityChecks).toBe(1);
+    expect(ytDlp.listCalls).toBe(1);
+    expect(ytDlp.fetchCalls).toBe(1);
+  });
+
+  it("reserves fallback-unavailable for a temporary primary failure with no local tool", async () => {
+    const ytDlp = new FakeOptionalProvider(false);
+    const { service } = createService({
       innerTube: new FakeProvider(
         new YouTubeTranscriptError("temporarily-unavailable"),
       ),
-      ytDlp: new FakeOptionalProvider(
-        true,
-        new YouTubeTranscriptError("temporarily-unavailable"),
-      ),
+      ytDlp,
     });
     await expect(
-      temporary.service.get({
+      service.get({
         itemId: ITEM_ID,
         videoId: VIDEO_ID,
         refresh: true,
       }),
-    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    ).rejects.toMatchObject({
+      code: "fallback-unavailable",
+      primaryCode: "temporarily-unavailable",
+    });
+    expect(ytDlp.availabilityChecks).toBe(1);
+    expect(ytDlp.listCalls).toBe(0);
   });
 
   it("does not write an invalid or empty provider transcript", async () => {
@@ -1470,91 +1558,98 @@ describe("YouTubeTranscriptService", () => {
     ).resolves.toMatchObject({ status: "ready" });
   });
 
-  it("prevents an older delayed fallback from replacing newer InnerTube choices", async () => {
-    let innerCalls = 0;
-    const newerTracks = [
-      track({ languageCode: "zh-CN", languageName: "新中文 A" }),
-      track({
-        languageCode: "zh-TW",
-        languageName: "新中文 B",
-        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=zh-TW",
-      }),
-    ];
-    const innerTube: TranscriptProvider = {
-      async listTracks() {
-        innerCalls += 1;
-        if (innerCalls === 1) {
-          throw new YouTubeTranscriptError("temporarily-unavailable");
+  it.each(["temporarily-unavailable", "no-captions"] as const)(
+    "prevents an older delayed fallback after %s from replacing newer InnerTube choices",
+    async (primaryCode) => {
+      let innerCalls = 0;
+      const newerTracks = [
+        track({ languageCode: "zh-CN", languageName: "新中文 A" }),
+        track({
+          languageCode: "zh-TW",
+          languageName: "新中文 B",
+          url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=zh-TW",
+        }),
+      ];
+      const innerTube: TranscriptProvider = {
+        async listTracks() {
+          innerCalls += 1;
+          if (innerCalls === 1) {
+            throw new YouTubeTranscriptError(primaryCode);
+          }
+          return newerTracks;
+        },
+        async fetchTrack(selectedTrack) {
+          return transcript(selectedTrack);
+        },
+      };
+      let releaseFallback!: (tracks: YouTubeCaptionTrack[]) => void;
+      let markFallbackStarted!: () => void;
+      const fallbackStarted = new Promise<void>((resolve) => {
+        markFallbackStarted = resolve;
+      });
+      class DelayedFallbackProvider extends FakeOptionalProvider {
+        override async listTracks(): Promise<YouTubeCaptionTrack[]> {
+          this.listCalls += 1;
+          markFallbackStarted();
+          return await new Promise<YouTubeCaptionTrack[]>((resolve) => {
+            releaseFallback = resolve;
+          });
         }
-        return newerTracks;
-      },
-      async fetchTrack(selectedTrack) {
-        return transcript(selectedTrack);
-      },
-    };
-    let releaseFallback!: (tracks: YouTubeCaptionTrack[]) => void;
-    let markFallbackStarted!: () => void;
-    const fallbackStarted = new Promise<void>((resolve) => {
-      markFallbackStarted = resolve;
-    });
-    class DelayedFallbackProvider extends FakeOptionalProvider {
-      override async listTracks(): Promise<YouTubeCaptionTrack[]> {
-        this.listCalls += 1;
-        markFallbackStarted();
-        return await new Promise<YouTubeCaptionTrack[]>((resolve) => {
-          releaseFallback = resolve;
-        });
-      }
 
-      override async fetchTrack(selectedTrack: YouTubeCaptionTrack) {
-        this.fetchCalls += 1;
-        return transcript(selectedTrack);
+        override async fetchTrack(selectedTrack: YouTubeCaptionTrack) {
+          this.fetchCalls += 1;
+          return transcript(selectedTrack);
+        }
       }
-    }
-    const ytDlp = new DelayedFallbackProvider(true);
-    const { service } = createService({ innerTube, ytDlp });
-    const older = service.get({
-      itemId: ITEM_ID,
-      videoId: VIDEO_ID,
-      refresh: true,
-      preferredLanguage: "en",
-    });
-    await fallbackStarted;
-    const newer = await service.get({
-      itemId: ITEM_ID,
-      videoId: VIDEO_ID,
-      refresh: true,
-      preferredLanguage: "zh",
-    });
-    if (newer.status !== "selection-required") throw new Error("expected choices");
-    releaseFallback([
-      track({
-        source: "yt-dlp",
-        languageCode: "en-US",
-        languageName: "Older fallback US",
-      }),
-      track({
-        source: "yt-dlp",
-        languageCode: "en-GB",
-        languageName: "Older fallback UK",
-        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-GB",
-      }),
-    ]);
-
-    await expect(older).rejects.toMatchObject({ code: "temporarily-unavailable" });
-    await expect(
-      service.get({
+      const ytDlp = new DelayedFallbackProvider(true);
+      const { service } = createService({ innerTube, ytDlp });
+      const older = service.get({
         itemId: ITEM_ID,
         videoId: VIDEO_ID,
-        trackId: newer.tracks[0].id,
-      }),
-    ).resolves.toMatchObject({
-      status: "ready",
-      content: { languageName: "新中文 A" },
-    });
-    expect(ytDlp.listCalls).toBe(1);
-    expect(ytDlp.fetchCalls).toBe(0);
-  });
+        refresh: true,
+        preferredLanguage: "en",
+      });
+      await fallbackStarted;
+      const newer = await service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        preferredLanguage: "zh",
+      });
+      if (newer.status !== "selection-required") {
+        throw new Error("expected choices");
+      }
+      releaseFallback([
+        track({
+          source: "yt-dlp",
+          languageCode: "en-US",
+          languageName: "Older fallback US",
+        }),
+        track({
+          source: "yt-dlp",
+          languageCode: "en-GB",
+          languageName: "Older fallback UK",
+          url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-GB",
+        }),
+      ]);
+
+      await expect(older).rejects.toMatchObject({
+        code: "temporarily-unavailable",
+      });
+      await expect(
+        service.get({
+          itemId: ITEM_ID,
+          videoId: VIDEO_ID,
+          trackId: newer.tracks[0].id,
+        }),
+      ).resolves.toMatchObject({
+        status: "ready",
+        content: { languageName: "新中文 A" },
+      });
+      expect(ytDlp.listCalls).toBe(1);
+      expect(ytDlp.fetchCalls).toBe(0);
+    },
+  );
 
   it("dispose aborts and releases every in-flight request and rejects future work", async () => {
     let activeSignal: AbortSignal | undefined;

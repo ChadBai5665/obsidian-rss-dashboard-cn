@@ -1531,8 +1531,10 @@ export const en = {
   "transcript.error.temporary":
     "The public transcript is temporarily unavailable. Try again later.",
   "transcript.error.timeout": "Transcript retrieval timed out. Try again.",
+  "transcript.error.loginRequired":
+    "YouTube requires a login to access this video's public captions. The plugin does not read cookies; confirm the video in your system browser.",
   "transcript.error.unavailable":
-    "This video's public captions are unavailable without a separate YouTube login.",
+    "This video or its public captions are unavailable.",
   "settings.display.newest": "Newest",
   "settings.display.oldest": "Oldest",
   "settings.display.none": "None",
