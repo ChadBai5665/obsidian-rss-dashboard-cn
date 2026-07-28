@@ -196,7 +196,9 @@ function nestedPropertyValue(
   valueKey: string,
 ): unknown {
   const container = propertyValue(properties, containerKey);
-  if (container === undefined || container === null) return undefined;
+  if (container === undefined || container === null || container === "") {
+    return undefined;
+  }
   if (!isObject(container)) throw malformedProfile();
   const nested = ownDataProperties(container);
   return optionalPropertyValue(nested, valueKey);
@@ -213,7 +215,9 @@ function legacyVerified(
 
 function modernVerified(properties: readonly DataProperty[]): boolean {
   const verification = propertyValue(properties, "verification");
-  if (verification === undefined) return false;
+  if (verification === undefined || verification === null || verification === "") {
+    return false;
+  }
   if (!isObject(verification)) throw malformedProfile();
   return optionalBoolean(ownDataProperties(verification), "verified") ?? false;
 }
@@ -224,6 +228,7 @@ function optionalBoolean(
 ): boolean | undefined {
   if (!hasProperty(properties, key)) return undefined;
   const value = propertyValue(properties, key);
+  if (value === null || value === "") return undefined;
   if (typeof value !== "boolean") throw malformedProfile();
   return value;
 }
@@ -244,14 +249,14 @@ function optionalText(
   maxLength: number,
   allowLineBreaks = false,
 ): string | undefined {
-  if (value === undefined || value === "") return undefined;
+  if (value === undefined || value === null || value === "") return undefined;
   const text = safeText(value, maxLength, allowLineBreaks);
   if (!text) throw malformedProfile();
   return text;
 }
 
 function optionalHttpsUrl(value: unknown): string | undefined {
-  if (value === undefined || value === "") return undefined;
+  if (value === undefined || value === null || value === "") return undefined;
   const text = safeText(value, MAX_AVATAR_URL_LENGTH);
   if (!text || text !== value) throw malformedProfile();
   try {

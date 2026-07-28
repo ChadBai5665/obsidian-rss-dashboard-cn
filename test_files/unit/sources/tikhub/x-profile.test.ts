@@ -89,6 +89,74 @@ describe("parseXProfile", () => {
     });
   });
 
+  it.each([
+    ["legacy omitted", {
+      rest_id: "123",
+      legacy: { screen_name: "naval", name: "Naval" },
+    }],
+    ["legacy nullable fields", {
+      rest_id: "123",
+      is_blue_verified: null,
+      legacy: {
+        screen_name: "naval",
+        name: "Naval",
+        profile_image_url_https: null,
+        description: null,
+        verified: null,
+      },
+    }],
+    ["legacy empty fields", {
+      rest_id: "123",
+      is_blue_verified: "",
+      legacy: {
+        screen_name: "naval",
+        name: "Naval",
+        profile_image_url_https: "",
+        description: "",
+        verified: "",
+      },
+    }],
+    ["core omitted", {
+      rest_id: "123",
+      core: { screen_name: "naval", name: "Naval" },
+    }],
+    ["core nullable containers and fields", {
+      rest_id: "123",
+      core: { screen_name: "naval", name: "Naval" },
+      avatar: null,
+      profile_bio: null,
+      verification: null,
+    }],
+    ["core empty containers", {
+      rest_id: "123",
+      core: { screen_name: "naval", name: "Naval" },
+      avatar: "",
+      profile_bio: "",
+      verification: "",
+    }],
+    ["core nullable optional fields", {
+      rest_id: "123",
+      core: { screen_name: "naval", name: "Naval" },
+      avatar: { image_url: null },
+      profile_bio: { description: null },
+      verification: { verified: null },
+    }],
+    ["core empty optional fields", {
+      rest_id: "123",
+      core: { screen_name: "naval", name: "Naval" },
+      avatar: { image_url: "" },
+      profile_bio: { description: "" },
+      verification: { verified: "" },
+    }],
+  ])("normalizes %s optional profile fields to absent", (_name, result) => {
+    expect(parseXProfile({ result })).toEqual({
+      restId: "123",
+      handle: "naval",
+      displayName: "Naval",
+      verified: false,
+    });
+  });
+
   it("rejects zero or multiple viable profile candidates", () => {
     expect(() => parseXProfile({ data: null })).toThrow(
       expect.objectContaining({ code: "malformed-profile" }),
