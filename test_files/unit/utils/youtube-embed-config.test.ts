@@ -3,6 +3,20 @@ import { MediaService } from "../../../src/services/media-service";
 import { Feed } from "../../../src/types/types";
 
 describe("youtube embed config", () => {
+  it("builds the canonical system-browser URL from a trimmed strict video id", () => {
+    expect(MediaService.buildYouTubeWatchUrl("  dQw4w9WgXcQ  ")).toBe(
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    );
+  });
+
+  it.each(["", "short", "dQw4w9WgXc!", "dQw4w9WgXcQextra"])(
+    "rejects a noncanonical video id before building playback URLs: %s",
+    (videoId) => {
+      expect(() => MediaService.buildYouTubeWatchUrl(videoId)).toThrow();
+      expect(() => MediaService.buildYouTubeEmbed(videoId)).toThrow();
+    },
+  );
+
   it("builds privacy-enhanced embed config with strict referrer policy", () => {
     const embed = MediaService.buildYouTubeEmbed("dQw4w9WgXcQ");
 

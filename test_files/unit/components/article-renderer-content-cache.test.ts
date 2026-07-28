@@ -17,6 +17,19 @@ vi.mock("../../../src/collection/content-repository", () => ({
     read = readMock;
     write = writeMock;
     pathFor = (id: string) => `.rss-dashboard-data/content/${id}.md`;
+    transaction = async (
+      id: string,
+      operation: (transaction: {
+        read: typeof readMock;
+        write: typeof writeMock;
+        pathFor: () => string;
+      }) => Promise<unknown>,
+    ) =>
+      await operation({
+        read: readMock,
+        write: writeMock,
+        pathFor: () => `.rss-dashboard-data/content/${id}.md`,
+      });
   },
 }));
 vi.mock("../../../src/collection/collection-repository", () => ({
@@ -100,6 +113,37 @@ describe("ArticleRenderer explicit content cache", () => {
     await renderer().render(document.createElement("div"), item({ feedUrl: "https://www.youtube.com/feeds/videos.xml?channel_id=secret", mediaType: "article" }));
     expect(fetchMock).not.toHaveBeenCalled();
     expect(readMock).not.toHaveBeenCalled();
+  });
+
+  it("uses the same external-first and lazy-preview controls for an inline YouTube item", async () => {
+    const container = document.createElement("div");
+
+    await renderer("zh-CN").render(
+      container,
+      item({
+        guid: "inline-youtube",
+        mediaType: "video",
+        videoId: "dQw4w9WgXcQ",
+        link: "https://youtu.be/dQw4w9WgXcQ",
+      }),
+    );
+
+    const external = container.querySelector<HTMLAnchorElement>(
+      ".rss-video-youtube-button",
+    );
+    expect(external?.getAttribute("href")).toBe(
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    );
+    expect(external?.textContent).toContain("在浏览器中播放");
+    expect(container.querySelector("iframe")).toBeNull();
+
+    container
+      .querySelector<HTMLButtonElement>(".rss-video-inline-toggle")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(container.querySelector<HTMLIFrameElement>("iframe")?.src).toContain(
+      "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+    );
   });
 
   it.each([

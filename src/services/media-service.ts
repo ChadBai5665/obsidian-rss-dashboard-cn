@@ -12,6 +12,7 @@ import { resolveArticleTags } from "../utils/tag-utils";
 import { resolveTagObjects } from "../utils/tag-resolver";
 import { createTranslator, type Locale } from "../i18n";
 import { resolveYouTubeChannel } from "./source-verification/youtube-channel-resolver";
+import { isValidYouTubeVideoId } from "../youtube-transcript/transcript-types";
 
 export interface YouTubeEmbedConfig {
   videoId: string;
@@ -552,7 +553,7 @@ export class MediaService {
   }
 
   static buildYouTubeEmbed(videoId: string): YouTubeEmbedConfig {
-    const normalizedVideoId = videoId.trim();
+    const normalizedVideoId = this.normalizeYouTubeVideoId(videoId);
     const embedParams = new URLSearchParams({
       rel: "0",
       enablejsapi: "1",
@@ -569,10 +570,23 @@ export class MediaService {
     return {
       videoId: normalizedVideoId,
       embedUrl: `https://www.youtube-nocookie.com/embed/${normalizedVideoId}?${embedParams.toString()}`,
-      watchUrl: `https://www.youtube.com/watch?v=${normalizedVideoId}`,
+      watchUrl: this.buildYouTubeWatchUrl(normalizedVideoId),
       referrerPolicy: this.YOUTUBE_EMBED_REFERRER_POLICY,
       allow: this.YOUTUBE_EMBED_ALLOW,
     };
+  }
+
+  static buildYouTubeWatchUrl(videoId: string): string {
+    const normalizedVideoId = this.normalizeYouTubeVideoId(videoId);
+    return `https://www.youtube.com/watch?v=${normalizedVideoId}`;
+  }
+
+  private static normalizeYouTubeVideoId(videoId: string): string {
+    const normalizedVideoId = videoId.trim();
+    if (!isValidYouTubeVideoId(normalizedVideoId)) {
+      throw new Error("Invalid YouTube video ID");
+    }
+    return normalizedVideoId;
   }
 
   static getYouTubePlayerHtml(

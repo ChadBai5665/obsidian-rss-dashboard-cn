@@ -16,6 +16,9 @@
 	overflow: hidden;
 	background-color: #000
   }
+  .rss-video-container.is-collapsed {
+	display: none
+  }
   .rss-video-container iframe {
 	width: 100%;
 	height: 100%;
@@ -70,6 +73,24 @@
   }
   .rss-video-youtube-button:hover {
 	background-color: #c00
+  }
+  .rss-video-inline-toggle {
+	display: inline-flex;
+	align-items: center;
+	padding: 8px 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background: var(--interactive-normal);
+	color: var(--text-normal);
+	cursor: pointer;
+	font-weight: 500
+  }
+  .rss-video-inline-toggle:hover {
+	background: var(--interactive-hover)
+  }
+  .rss-video-inline-toggle:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 2px
   }
   .rss-video-related {
 	padding: 15px;

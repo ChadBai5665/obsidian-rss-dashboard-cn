@@ -41,19 +41,28 @@ describe("VideoPlayer", () => {
       feedUrl: "https://example.com/feed.xml",
       coverImage: "",
       mediaType: "video" as const,
-      videoId: "abc123",
+      videoId: "dQw4w9WgXcQ",
       ...overrides,
     };
   }
 
   function fixedEmbed(): YouTubeEmbedConfig {
     return {
-      videoId: "abc123",
-      embedUrl: "https://example.com/embed/abc123",
-      watchUrl: "https://example.com/watch?v=abc123",
+      videoId: "dQw4w9WgXcQ",
+      embedUrl:
+        "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?rel=0&enablejsapi=1",
+      watchUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
       referrerPolicy: "strict-origin-when-cross-origin",
       allow: "accelerometer; encrypted-media",
     };
+  }
+
+  function clickInlineToggle(container: HTMLElement): void {
+    const toggle = container.querySelector<HTMLButtonElement>(
+      ".rss-video-inline-toggle",
+    );
+    expect(toggle).not.toBeNull();
+    toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   }
 
   it("emits a Notice and does not render when videoId is missing", () => {
@@ -72,18 +81,39 @@ describe("VideoPlayer", () => {
     expect(container.textContent).toContain("keep");
   });
 
-  it("renders iframe attributes using MediaService.buildYouTubeEmbed", () => {
+  it("renders metadata and external controls without creating inline player resources", () => {
     const container = createContainer();
+    const addListener = vi.spyOn(window, "addEventListener");
+    const setIntervalSpy = vi.spyOn(window, "setInterval");
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+
     const player = new VideoPlayer(container);
 
+    player.loadVideo(baseItem());
+
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(
+      addListener.mock.calls.filter(([type]) => type === "message"),
+    ).toHaveLength(0);
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    expect(container.querySelector(".rss-video-youtube-button")).not.toBeNull();
+    expect(container.querySelector(".rss-video-inline-toggle")).not.toBeNull();
+  });
+
+  it("creates the privacy-enhanced iframe only after the secondary preview action", () => {
+    const container = createContainer();
+    const player = new VideoPlayer(container);
     const embed = fixedEmbed();
     vi.spyOn(MediaService, "buildYouTubeEmbed").mockReturnValue(embed);
 
     player.loadVideo(baseItem());
+    expect(container.querySelector("iframe")).toBeNull();
+
+    clickInlineToggle(container);
 
     const iframe = container.querySelector<HTMLIFrameElement>("iframe");
     expect(iframe).not.toBeNull();
-    // src has &id=<iframeId> appended for postMessage routing, so check prefix
     expect(iframe?.getAttribute("src")).toContain(embed.embedUrl);
     expect(iframe?.getAttribute("allow")).toBe(embed.allow);
     expect(iframe?.getAttribute("referrerpolicy")).toBe(embed.referrerPolicy);
@@ -130,12 +160,9 @@ describe("VideoPlayer", () => {
     expect(description?.innerHTML).toContain('rel="noopener noreferrer"');
   });
 
-  it("renders the YouTube watch button using embed.watchUrl and sets icon dataset", () => {
+  it("renders the primary system-browser action with a strict canonical watch URL", () => {
     const container = createContainer();
     const player = new VideoPlayer(container);
-
-    const embed = fixedEmbed();
-    vi.spyOn(MediaService, "buildYouTubeEmbed").mockReturnValue(embed);
 
     player.loadVideo(baseItem());
 
@@ -143,9 +170,12 @@ describe("VideoPlayer", () => {
       ".rss-video-youtube-button",
     );
     expect(button).not.toBeNull();
-    expect(button?.getAttribute("href")).toBe(embed.watchUrl);
+    expect(button?.getAttribute("href")).toBe(
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    );
     expect(button?.target).toBe("_blank");
     expect(button?.rel).toBe("noopener noreferrer");
+    expect(button?.textContent).toContain("在浏览器中播放");
 
     const icon = container.querySelector<HTMLElement>(
       ".rss-video-youtube-button-icon",
@@ -164,13 +194,72 @@ describe("VideoPlayer", () => {
     ).toContain("No related videos found");
   });
 
-  it("defaults to Chinese chrome and keeps source-authored video metadata", () => {
+  it("defaults to Chinese controls without naming a particular browser", () => {
     const container = createContainer();
     const player = new VideoPlayer(container);
     player.loadVideo(baseItem({ title: "External video title" }));
 
-    expect(container.textContent).toContain("在 YouTube 中观看");
+    expect(container.textContent).toContain("在浏览器中播放");
+    expect(container.textContent).toContain("内嵌预览");
+    expect(container.textContent).not.toContain("Chrome");
     expect(container.textContent).toContain("External video title");
+  });
+
+  it("fully tears down each inline preview before another one is opened", () => {
+    vi.useFakeTimers();
+    const container = createContainer();
+    const addListener = vi.spyOn(window, "addEventListener");
+    const removeListener = vi.spyOn(window, "removeEventListener");
+    const player = new VideoPlayer(container, undefined, vi.fn());
+
+    player.loadVideo(baseItem());
+    clickInlineToggle(container);
+    const firstIframe = container.querySelector<HTMLIFrameElement>("iframe");
+    const firstId = firstIframe?.id;
+    expect(firstIframe).not.toBeNull();
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "https://www.youtube-nocookie.com",
+        data: JSON.stringify({
+          event: "infoDelivery",
+          info: { duration: 120 },
+          id: firstId,
+        }),
+      }),
+    );
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "https://www.youtube-nocookie.com",
+        data: JSON.stringify({
+          event: "onStateChange",
+          info: 1,
+          id: firstId,
+        }),
+      }),
+    );
+    expect(vi.getTimerCount()).toBe(1);
+
+    clickInlineToggle(container);
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(firstIframe?.isConnected).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+
+    clickInlineToggle(container);
+    const secondIframe = container.querySelector<HTMLIFrameElement>("iframe");
+    expect(secondIframe).not.toBeNull();
+    expect(secondIframe).not.toBe(firstIframe);
+    expect(container.querySelectorAll("iframe")).toHaveLength(1);
+    clickInlineToggle(container);
+
+    expect(
+      addListener.mock.calls.filter(([type]) => type === "message"),
+    ).toHaveLength(2);
+    expect(
+      removeListener.mock.calls.filter(([type]) => type === "message"),
+    ).toHaveLength(2);
+    expect(container.querySelector("iframe")).toBeNull();
+    vi.useRealTimers();
   });
 
   it("setRelatedVideos filters, excludes current, and caps at 5", () => {
@@ -272,6 +361,7 @@ describe("VideoPlayer", () => {
     vi.spyOn(MediaService, "buildYouTubeEmbed").mockReturnValue(fixedEmbed());
 
     player.loadVideo(item);
+    clickInlineToggle(container);
 
     const iframe = container.querySelector<HTMLIFrameElement>("iframe");
     const iframeId = iframe?.id;
@@ -345,6 +435,7 @@ describe("VideoPlayer", () => {
     vi.spyOn(MediaService, "buildYouTubeEmbed").mockReturnValue(fixedEmbed());
 
     player.loadVideo(item);
+    clickInlineToggle(container);
 
     const iframe = container.querySelector<HTMLIFrameElement>("iframe");
     const iframeId = iframe?.id;
@@ -400,6 +491,7 @@ describe("VideoPlayer", () => {
     vi.spyOn(MediaService, "buildYouTubeEmbed").mockReturnValue(embed);
 
     player.loadVideo(baseItem());
+    clickInlineToggle(container);
 
     const iframe = container.querySelector<HTMLIFrameElement>("iframe");
     expect(iframe).not.toBeNull();
@@ -418,6 +510,7 @@ describe("VideoPlayer", () => {
     vi.spyOn(MediaService, "buildYouTubeEmbed").mockReturnValue(fixedEmbed());
 
     player.loadVideo(item);
+    clickInlineToggle(container);
 
     const iframe = container.querySelector<HTMLIFrameElement>("iframe");
     const iframeId = iframe?.id;
@@ -442,7 +535,7 @@ describe("VideoPlayer", () => {
     const container = createContainer();
     const player = new VideoPlayer(container);
 
-    vi.spyOn(MediaService, "buildYouTubeEmbed").mockImplementation(() => {
+    vi.spyOn(MediaService, "buildYouTubeWatchUrl").mockImplementation(() => {
       throw new Error("boom");
     });
 
