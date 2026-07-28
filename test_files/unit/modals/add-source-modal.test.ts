@@ -695,4 +695,44 @@ describe("AddSourceModal", () => {
     expect(modal.contentEl.textContent).toContain(expected);
     expect(modal.contentEl.textContent).not.toContain("private provider response");
   });
+
+  it.each([
+    ["no-candidate", "请确认账号主页仍可公开访问后重试。"],
+    ["required-field-invalid", "请稍后重试，或更新插件后重新识别。"],
+    ["identity-conflict", "请确认账号地址无误后重新识别。"],
+    ["optional-field-conflict", "请稍后重试，或更新插件后重新识别。"],
+    ["unsafe-structure", "请稍后重试；如果持续出现，请更新插件。"],
+    ["unknown-shape", "请稍后重试，或更新插件后重新识别。"],
+  ] as const)("explains unsupported X profile shape %s without exposing provider data", async (issue, detail) => {
+    const providerValue = "provider-secret-value";
+    const verifyX = vi.fn(async () => {
+      throw Object.assign(new Error(providerValue), {
+        code: "profile-shape-unsupported",
+        diagnostic: Object.freeze({ issue, providerValue }),
+      });
+    });
+    const modal = new AddSourceModal(obsidian.App.createMock(), options({
+      initialKind: "x-account",
+      verifyX,
+    }));
+    modal.open();
+    const input = modal.contentEl.querySelector(".rss-source-identity-input") as HTMLInputElement;
+    input.value = "openai";
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(".rss-source-detect-button") as HTMLButtonElement).click();
+    await flush();
+
+    expect(modal.contentEl.textContent).toContain("账号资料格式暂不支持");
+    expect(modal.contentEl.textContent).toContain(detail);
+    expect(modal.contentEl.textContent).not.toContain(providerValue);
+    expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).toBeNull();
+
+    const failedInput = modal.contentEl.querySelector(".rss-source-identity-input") as HTMLInputElement;
+    failedInput.value = "anthropic";
+    failedInput.dispatchEvent(new Event("input"));
+    expect(modal.contentEl.textContent).not.toContain("账号资料格式暂不支持");
+    expect(modal.contentEl.textContent).not.toContain(detail);
+    expect(verifyX).toHaveBeenCalledTimes(1);
+    expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).toBeNull();
+  });
 });

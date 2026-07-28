@@ -99,6 +99,43 @@ describe("source verification state", () => {
     expect(state.snapshot()).toEqual({ status: "failure", code });
   });
 
+  it("retains only valid X profile shape issues in a frozen current failure", () => {
+    const state = new VerificationController<VerifiedSource>();
+    const first = state.begin("openai");
+
+    expect(state.fail(first, "profile-shape-unsupported", "identity-conflict")).toBe(true);
+    expect(state.snapshot()).toEqual({
+      status: "failure",
+      code: "profile-shape-unsupported",
+      detail: "identity-conflict",
+    });
+    expect(Object.isFrozen(state.snapshot())).toBe(true);
+    expect(state.canSubscribe()).toBe(false);
+
+    const second = state.begin("openai");
+    expect(state.fail(first, "profile-shape-unsupported", "no-candidate")).toBe(false);
+    expect(state.snapshot()).toEqual({ status: "checking" });
+
+    expect(state.fail(second, "profile-shape-unsupported", "provider-value" as never)).toBe(true);
+    expect(state.snapshot()).toEqual({
+      status: "failure",
+      code: "profile-shape-unsupported",
+    });
+    expect(state.canSubscribe()).toBe(false);
+  });
+
+  it("discards X profile details for every other failure code", () => {
+    const state = new VerificationController<VerifiedSource>();
+    const token = state.begin("openai");
+
+    expect(state.fail(token, "network-failure", "identity-conflict" as never)).toBe(true);
+    expect(state.snapshot()).toEqual({
+      status: "failure",
+      code: "network-failure",
+    });
+    expect(state.canSubscribe()).toBe(false);
+  });
+
   it.each(["cancel", "close"])("invalidates an in-flight completion on %s", () => {
     const state = new VerificationController<VerifiedSource>();
     const token = state.begin("https://a.example/feed");

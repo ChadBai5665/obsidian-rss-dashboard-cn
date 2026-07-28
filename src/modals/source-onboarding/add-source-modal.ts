@@ -6,10 +6,14 @@ import type {
 import type { RssWebsiteVerification } from "../../services/source-verification/rss-website-discovery";
 import { normalizeXAccountInput } from "../../services/source-verification/source-identifier";
 import type { VerificationFailureCode } from "../../services/source-verification/verification-state";
-import { VerificationController } from "../../services/source-verification/verification-state";
+import {
+  isXProfileShapeIssue,
+  VerificationController,
+} from "../../services/source-verification/verification-state";
 import type { YouTubeChannelVerification } from "../../services/source-verification/youtube-channel-resolver";
 import type { InitialImportPolicy } from "../../sources/initial-import-policy";
 import type { VerifiedXProfile } from "../../sources/tikhub/x-profile-resolver";
+import type { XProfileShapeIssue } from "../../sources/tikhub/x-profile-shape-diagnostic";
 import {
   renderInitialImportControl,
   type InitialImportControl,
@@ -77,6 +81,24 @@ const FAILURE_KEYS: Readonly<Partial<Record<VerificationFailureCode, Translation
   "youtube-feed-invalid": "sourceOnboarding.failure.feedInvalid",
   "feed-not-found": "sourceOnboarding.failure.feedNotFound",
 };
+
+const X_PROFILE_SHAPE_DETAIL_KEYS: Readonly<Record<XProfileShapeIssue, TranslationKey>> = {
+  "no-candidate": "sourceOnboarding.failure.tikhubProfileShapeNoCandidate",
+  "required-field-invalid": "sourceOnboarding.failure.tikhubProfileShapeRequiredField",
+  "identity-conflict": "sourceOnboarding.failure.tikhubProfileShapeIdentityConflict",
+  "optional-field-conflict": "sourceOnboarding.failure.tikhubProfileShapeOptionalField",
+  "unsafe-structure": "sourceOnboarding.failure.tikhubProfileShapeUnsafeStructure",
+  "unknown-shape": "sourceOnboarding.failure.tikhubProfileShapeUnknown",
+};
+
+type VerificationFailure =
+  | Readonly<{
+      code: "profile-shape-unsupported";
+      detail?: XProfileShapeIssue;
+    }>
+  | Readonly<{
+      code: Exclude<VerificationFailureCode, "profile-shape-unsupported">;
+    }>;
 
 export class AddSourceModal extends Modal {
   private readonly locale: Locale;
@@ -266,6 +288,12 @@ export class AddSourceModal extends Modal {
     if (state.status === "failure") {
       feedback.addClass("is-error");
       feedback.setText(this.t(FAILURE_KEYS[state.code] ?? "sourceOnboarding.failure.unknown"));
+      if (state.code === "profile-shape-unsupported" && state.detail) {
+        feedback.createDiv({
+          cls: "rss-source-profile-shape-detail",
+          text: this.t(X_PROFILE_SHAPE_DETAIL_KEYS[state.detail]),
+        });
+      }
       if (["missing-key", "invalid-key", "tikhub-disabled"].includes(state.code)) {
         const settings = feedback.createEl("button", {
           cls: "rss-source-open-settings-button",
@@ -466,7 +494,7 @@ export class AddSourceModal extends Modal {
       }
     } catch (error) {
       if (!this.isCurrent(epoch, token)) return;
-      this.verification.fail(token, failureCode(error, kind));
+      this.failVerification(token, error, kind);
     }
     if (!this.isCurrent(epoch, token)) return;
     this.stage = this.verification.snapshot().status === "failure"
@@ -511,7 +539,7 @@ export class AddSourceModal extends Modal {
       }
     } catch (error) {
       if (!this.isCurrent(epoch, token)) return;
-      this.verification.fail(token, failureCode(error, "rss-website"));
+      this.failVerification(token, error, "rss-website");
     }
     if (!this.isCurrent(epoch, token)) return;
     this.stage = this.verification.snapshot().status === "failure"
@@ -522,6 +550,19 @@ export class AddSourceModal extends Modal {
 
   private isCurrent(epoch: number, token: number): boolean {
     return epoch === this.lifecycleEpoch && token === this.verificationToken && !this.lifecycle.signal.aborted;
+  }
+
+  private failVerification(
+    token: number,
+    error: unknown,
+    kind: SourceOnboardingKind,
+  ): void {
+    const failure = verificationFailure(error, kind);
+    if (failure.code === "profile-shape-unsupported") {
+      this.verification.fail(token, failure.code, failure.detail);
+    } else {
+      this.verification.fail(token, failure.code);
+    }
   }
 
   private invalidateVisibleVerification(): void {
@@ -742,13 +783,26 @@ function inputPlaceholderKey(kind: SourceOnboardingKind): TranslationKey {
       : "sourceOnboarding.placeholder.x";
 }
 
+function verificationFailure(error: unknown, kind: SourceOnboardingKind): VerificationFailure {
+  const code = failureCode(error, kind);
+  if (code !== "profile-shape-unsupported") return { code };
+  return {
+    code,
+    detail: profileShapeIssue(error),
+  };
+}
+
 function failureCode(error: unknown, kind: SourceOnboardingKind): VerificationFailureCode {
   if (typeof error === "object" && error !== null) {
-    const descriptor = Object.getOwnPropertyDescriptor(error, "code");
-    if (descriptor && "value" in descriptor &&
-      typeof descriptor.value === "string" &&
-      Object.prototype.hasOwnProperty.call(FAILURE_KEYS, descriptor.value)) {
-      return descriptor.value as VerificationFailureCode;
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+      if (descriptor && "value" in descriptor &&
+        typeof descriptor.value === "string" &&
+        Object.prototype.hasOwnProperty.call(FAILURE_KEYS, descriptor.value)) {
+        return descriptor.value as VerificationFailureCode;
+      }
+    } catch {
+      // Treat uninspectable provider errors as an opaque provider failure.
     }
   }
   return kind === "youtube"
@@ -756,4 +810,21 @@ function failureCode(error: unknown, kind: SourceOnboardingKind): VerificationFa
     : kind === "x-account"
       ? "provider-failure"
       : "network-request-failed";
+}
+
+function profileShapeIssue(error: unknown): XProfileShapeIssue | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  try {
+    const diagnostic = Object.getOwnPropertyDescriptor(error, "diagnostic");
+    if (!diagnostic || !("value" in diagnostic) ||
+      typeof diagnostic.value !== "object" || diagnostic.value === null) {
+      return undefined;
+    }
+    const issue = Object.getOwnPropertyDescriptor(diagnostic.value, "issue");
+    return issue && "value" in issue && isXProfileShapeIssue(issue.value)
+      ? issue.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }

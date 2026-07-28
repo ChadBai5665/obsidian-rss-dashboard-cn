@@ -1,4 +1,5 @@
 import type { XProfileResolverErrorCode } from "../../sources/tikhub/x-profile-resolver.js";
+import type { XProfileShapeIssue } from "../../sources/tikhub/x-profile-shape-diagnostic.js";
 import type { SourceIdentifierErrorCode } from "./source-identifier.js";
 
 export type VerificationWarningCode =
@@ -24,7 +25,11 @@ export type VerificationState<T> =
       code: VerificationWarningCode;
       accepted: boolean;
     }>
-  | Readonly<{ status: "failure"; code: VerificationFailureCode }>;
+  | Readonly<{
+      status: "failure";
+      code: VerificationFailureCode;
+      detail?: XProfileShapeIssue;
+    }>;
 
 const WARNING_CODES = new Set<VerificationWarningCode>([
   "empty-feed",
@@ -62,6 +67,15 @@ const FAILURE_CODES = new Set<VerificationFailureCode>([
   "feed-not-found",
 ]);
 
+const X_PROFILE_SHAPE_ISSUES = new Set<XProfileShapeIssue>([
+  "no-candidate",
+  "required-field-invalid",
+  "identity-conflict",
+  "optional-field-conflict",
+  "unsafe-structure",
+  "unknown-shape",
+]);
+
 /**
  * Keeps async verification completions tied to the input that started them.
  * Call invalidate when a modal is cancelled or closed.
@@ -88,9 +102,22 @@ export class VerificationController<T> {
     );
   }
 
-  fail(token: number, code: VerificationFailureCode): boolean {
+  fail(
+    token: number,
+    code: "profile-shape-unsupported",
+    detail?: XProfileShapeIssue,
+  ): boolean;
+  fail(token: number, code: Exclude<VerificationFailureCode, "profile-shape-unsupported">): boolean;
+  fail(
+    token: number,
+    code: VerificationFailureCode,
+    detail?: XProfileShapeIssue,
+  ): boolean {
     if (!isFailureCode(code)) return false;
-    return this.complete(token, freezeState({ status: "failure", code }));
+    const failure = code === "profile-shape-unsupported" && isXProfileShapeIssue(detail)
+      ? { status: "failure" as const, code, detail }
+      : { status: "failure" as const, code };
+    return this.complete(token, freezeState(failure));
   }
 
   invalidate(): void {
@@ -145,4 +172,8 @@ function isWarningCode(value: unknown): value is VerificationWarningCode {
 
 function isFailureCode(value: unknown): value is VerificationFailureCode {
   return typeof value === "string" && FAILURE_CODES.has(value as VerificationFailureCode);
+}
+
+export function isXProfileShapeIssue(value: unknown): value is XProfileShapeIssue {
+  return typeof value === "string" && X_PROFILE_SHAPE_ISSUES.has(value as XProfileShapeIssue);
 }
