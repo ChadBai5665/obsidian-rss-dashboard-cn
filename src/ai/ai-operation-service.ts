@@ -19,9 +19,11 @@ import {
   type ProviderErrorCode,
 } from "./providers/provider-error";
 import type {
+  TextDeltaHandler,
   TextGenerationProvider,
   TextGenerationResult,
 } from "./providers/text-generation-provider";
+import { outputCharacterLimit } from "./providers/text-generation-provider";
 import { buildAiPrompt } from "./prompts/prompt-builder";
 import type { AiOperation } from "./prompts/prompt-types";
 import {
@@ -95,6 +97,7 @@ export interface AiOperationRunInput {
   connectionId: string;
   fetchFullText: boolean;
   signal?: AbortSignal;
+  onTextDelta?: TextDeltaHandler;
 }
 
 export interface AiPreparedOperationRunInput {
@@ -104,6 +107,7 @@ export interface AiPreparedOperationRunInput {
   connection: AiConnection;
   selectedContent: SelectedAiContent;
   signal?: AbortSignal;
+  onTextDelta?: TextDeltaHandler;
 }
 
 export type AiOperationProviderFactory = (
@@ -158,17 +162,12 @@ export class AiOperationService {
       selectedContent,
       effectiveConnection.maxInputCharacters,
     );
-    const generated = await this.runStage<TextGenerationResult>(
-      () => provider.generate({
-        system: prompt.system,
-        user: prompt.user,
-        maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
-        ...(request.signal ? { signal: request.signal } : {}),
-      }),
+    const text = await this.generateText(
+      provider,
+      prompt,
       request.signal,
-      "provider",
+      request.onTextDelta,
     );
-    const text = safeOutputText(generated);
 
     return {
       operation: request.operation,
@@ -205,17 +204,12 @@ export class AiOperationService {
       request.signal,
       "provider",
     );
-    const generated = await this.runStage<TextGenerationResult>(
-      () => provider.generate({
-        system: prompt.system,
-        user: prompt.user,
-        maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
-        ...(request.signal ? { signal: request.signal } : {}),
-      }),
+    const text = await this.generateText(
+      provider,
+      prompt,
       request.signal,
-      "provider",
+      request.onTextDelta,
     );
-    const text = safeOutputText(generated);
 
     return {
       operation: request.operation,
@@ -243,6 +237,35 @@ export class AiOperationService {
     return connection;
   }
 
+  private async generateText(
+    provider: TextGenerationProvider,
+    prompt: ReturnType<typeof buildPromptSafely>,
+    signal: AbortSignal | undefined,
+    onTextDelta: TextDeltaHandler | undefined,
+  ): Promise<string> {
+    const forwarder = new SafeTextDeltaForwarder(
+      outputCharacterLimit(DEFAULT_MAX_OUTPUT_TOKENS),
+      signal,
+      onTextDelta,
+    );
+    let generated: TextGenerationResult;
+    try {
+      generated = await this.runStage<TextGenerationResult>(
+        () => provider.generate({
+          system: prompt.system,
+          user: prompt.user,
+          maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+          ...(signal ? { signal } : {}),
+        }, forwarder.handler),
+        signal,
+        "provider",
+      );
+    } finally {
+      forwarder.stop();
+    }
+    return safeOutputTextWithDeltaInvariant(generated, forwarder);
+  }
+
   private async runStage<T>(
     start: () => unknown,
     signal: AbortSignal | undefined,
@@ -266,6 +289,7 @@ interface RunInputSnapshot {
   connectionId: string;
   fetchFullText: boolean;
   signal?: AbortSignal;
+  onTextDelta?: TextDeltaHandler;
 }
 
 interface PreparedRunInputSnapshot {
@@ -275,6 +299,7 @@ interface PreparedRunInputSnapshot {
   connection: AiConnection;
   selectedContent: SelectedAiContent;
   signal?: AbortSignal;
+  onTextDelta?: TextDeltaHandler;
 }
 
 function snapshotRunInput(input: AiOperationRunInput): RunInputSnapshot {
@@ -296,12 +321,14 @@ function snapshotRunInput(input: AiOperationRunInput): RunInputSnapshot {
     typeof fetchFullText !== "boolean" ||
     (signal !== undefined && readTrustedAbortState(signal) === undefined)
   ) throw new AiOperationError("invalid-request");
+  const onTextDelta = snapshotOptionalTextDelta(record);
   return {
     operation: operation as AiOperation,
     item: item as CollectedItem,
     connectionId,
     fetchFullText,
     ...(signal === undefined ? {} : { signal: signal as AbortSignal }),
+    ...(onTextDelta ? { onTextDelta } : {}),
   };
 }
 
@@ -331,6 +358,7 @@ function snapshotPreparedRunInput(
   if (!connectionId || connection.id !== connectionId) {
     throw new AiOperationError("connection-not-found");
   }
+  const onTextDelta = snapshotOptionalTextDelta(record);
   return {
     operation: operation as AiOperation,
     itemId,
@@ -338,6 +366,7 @@ function snapshotPreparedRunInput(
     connection,
     selectedContent: selectedContent as SelectedAiContent,
     ...(signal === undefined ? {} : { signal: signal as AbortSignal }),
+    ...(onTextDelta ? { onTextDelta } : {}),
   };
 }
 
@@ -374,6 +403,91 @@ function safeOutputText(result: TextGenerationResult): string {
     throw new AiOperationError("empty-output");
   }
   return text;
+}
+
+function safeOutputTextWithDeltaInvariant(
+  result: TextGenerationResult,
+  forwarder: SafeTextDeltaForwarder,
+): string {
+  forwarder.assertValid();
+  let text: string;
+  try {
+    text = safeOutputText(result);
+  } catch (error) {
+    if (forwarder.hasDeltas()) {
+      throw new AiOperationError("malformed-response");
+    }
+    throw error;
+  }
+  forwarder.assertMatches(text);
+  return text;
+}
+
+class SafeTextDeltaForwarder {
+  private readonly chunks: string[] = [];
+  private characters = 0;
+  private failure: "malformed-response" | "response-too-large" | undefined;
+  private terminal = false;
+
+  readonly handler: TextDeltaHandler = (value) => {
+    if (this.terminal) return;
+    const aborted = this.signal
+      ? readTrustedAbortState(this.signal)
+      : false;
+    if (aborted !== false) {
+      this.terminal = true;
+      return;
+    }
+    if (typeof value !== "string" || value.length === 0) {
+      this.fail("malformed-response");
+      return;
+    }
+    const nextCharacters = this.characters + value.length;
+    if (
+      !Number.isSafeInteger(nextCharacters) ||
+      nextCharacters > this.maximumCharacters
+    ) {
+      this.fail("response-too-large");
+      return;
+    }
+    this.characters = nextCharacters;
+    this.chunks.push(value);
+    if (!this.callback) return;
+    try {
+      this.callback(value);
+    } catch {
+      // Caller/UI callback failures cannot change provider completion.
+    }
+  };
+
+  constructor(
+    private readonly maximumCharacters: number,
+    private readonly signal: AbortSignal | undefined,
+    private readonly callback: TextDeltaHandler | undefined,
+  ) {}
+
+  stop(): void {
+    this.terminal = true;
+  }
+
+  hasDeltas(): boolean {
+    return this.chunks.length > 0;
+  }
+
+  assertValid(): void {
+    if (this.failure) throw new AiOperationError(this.failure);
+  }
+
+  assertMatches(text: string): void {
+    if (this.chunks.length > 0 && this.chunks.join("") !== text) {
+      throw new AiOperationError("malformed-response");
+    }
+  }
+
+  private fail(code: "malformed-response" | "response-too-large"): void {
+    this.failure = code;
+    this.terminal = true;
+  }
 }
 
 function publicOperationError(
@@ -429,5 +543,27 @@ function ownOptionalData(
     return !descriptor || !("value" in descriptor) ? undefined : descriptor.value;
   } catch {
     return undefined;
+  }
+}
+
+function snapshotOptionalTextDelta(
+  record: Record<string, unknown> | undefined,
+): TextDeltaHandler | undefined {
+  if (!record) throw new AiOperationError("invalid-request");
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, "onTextDelta");
+    if (!descriptor) {
+      if (Reflect.has(record, "onTextDelta")) {
+        throw new AiOperationError("invalid-request");
+      }
+      return undefined;
+    }
+    if (!("value" in descriptor) || typeof descriptor.value !== "function") {
+      throw new AiOperationError("invalid-request");
+    }
+    return descriptor.value as TextDeltaHandler;
+  } catch (error) {
+    if (error instanceof AiOperationError) throw error;
+    throw new AiOperationError("invalid-request");
   }
 }
