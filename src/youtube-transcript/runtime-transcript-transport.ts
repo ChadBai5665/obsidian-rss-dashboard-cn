@@ -13,11 +13,16 @@ export interface RuntimeTranscriptResponse {
   on(event: "data", listener: (chunk: unknown) => void): this;
   on(event: "end", listener: () => void): this;
   on(event: "error", listener: (error: Error) => void): this;
+  off(event: "data", listener: (chunk: unknown) => void): this;
+  off(event: "end", listener: () => void): this;
+  off(event: "error", listener: (error: Error) => void): this;
 }
 
 export interface RuntimeTranscriptRequest {
   on(event: "error", listener: (error: Error) => void): this;
+  off(event: "error", listener: (error: Error) => void): this;
   armTimeout(timeoutMs: number, listener: () => void): this;
+  disarmTimeout(): void;
   end(body?: string): void;
   destroy(error?: Error): void;
 }
@@ -70,10 +75,15 @@ const defaultRequest: RuntimeTranscriptRequestFactory = (
       client.on(event, listener);
       return wrapper;
     },
+    off: (event, listener) => {
+      client.off(event, listener);
+      return wrapper;
+    },
     armTimeout: (timeoutMs, listener) => {
       client.setTimeout(timeoutMs, listener);
       return wrapper;
     },
+    disarmTimeout: () => client.setTimeout(0),
     end: (body) => client.end(body),
     destroy: (error) => client.destroy(error),
   };
@@ -118,87 +128,131 @@ export function createRuntimeTranscriptHttpTransport(
     return await new Promise<TranscriptHttpResponse>((resolve, reject) => {
       let settled = false;
       let request: RuntimeTranscriptRequest | undefined;
+      let response: RuntimeTranscriptResponse | undefined;
+      let onResponseData: ((chunk: unknown) => void) | undefined;
+      let onResponseEnd: (() => void) | undefined;
+      let onResponseError: ((error: Error) => void) | undefined;
+      const onRequestError = (error: Error): void => {
+        finish(stableError(error, "Transcript request failed"));
+      };
+      const cleanup = (): void => {
+        input.signal?.removeEventListener("abort", onAbort);
+        try {
+          request?.disarmTimeout();
+        } catch {
+          // Cleanup remains best effort after the promise is already settled.
+        }
+        try {
+          request?.off("error", onRequestError);
+        } catch {
+          // Cleanup remains best effort after the promise is already settled.
+        }
+        try {
+          if (response && onResponseData) response.off("data", onResponseData);
+          if (response && onResponseEnd) response.off("end", onResponseEnd);
+          if (response && onResponseError) response.off("error", onResponseError);
+        } catch {
+          // Cleanup remains best effort after the promise is already settled.
+        }
+      };
       const finish = (
         error: Error | undefined,
         value?: TranscriptHttpResponse,
       ): void => {
         if (settled) return;
         settled = true;
-        input.signal?.removeEventListener("abort", onAbort);
+        cleanup();
         if (error) reject(error);
         else if (value) resolve(value);
         else reject(new Error("Transcript request failed"));
       };
       const onAbort = (): void => {
+        if (settled) return;
         const error = new Error("Transcript request aborted");
         finish(error);
-        request?.destroy(error);
+        safelyDestroy(request);
       };
 
       try {
         request = requestFactory(
           url,
           { method: input.method, headers },
-          (response) => {
-            const status = response.statusCode;
-            if (!Number.isInteger(status) || status === undefined || status < 100 || status > 599) {
-              const error = new Error("Invalid transcript response status");
-              finish(error);
-              request?.destroy(error);
-              return;
-            }
-            let responseHeaders: Record<string, string>;
+          (nextResponse) => {
+            if (settled) return;
+            response = nextResponse;
             try {
-              responseHeaders = projectResponseHeaders(response.headers);
-            } catch (error) {
-              const failure = stableError(error, "Invalid transcript response headers");
-              finish(failure);
-              request?.destroy(failure);
-              return;
-            }
-            const declaredLength = response.headers["content-length"];
-            if (
-              typeof declaredLength === "string" &&
-              Number.parseInt(declaredLength, 10) > maxResponseBytes
-            ) {
-              const error = new Error("Transcript response is too large");
-              finish(error);
-              request?.destroy(error);
-              return;
-            }
-            const chunks: Buffer[] = [];
-            let bytes = 0;
-            response.on("data", (chunk) => {
-              if (settled) return;
-              const buffer = toBuffer(chunk);
-              bytes += buffer.byteLength;
-              if (bytes > maxResponseBytes) {
-                const error = new Error("Transcript response is too large");
-                finish(error);
-                request?.destroy(error);
+              const status = nextResponse.statusCode;
+              if (!Number.isInteger(status) || status === undefined || status < 100 || status > 599) {
+                finish(new Error("Invalid transcript response status"));
+                safelyDestroy(request);
                 return;
               }
-              chunks.push(buffer);
-            });
-            response.on("end", () => {
-              finish(undefined, {
-                status,
-                headers: responseHeaders,
-                text: Buffer.concat(chunks, bytes).toString("utf8"),
-              });
-            });
-            response.on("error", (error) => {
-              finish(stableError(error, "Transcript response failed"));
-            });
+              const rawHeaders = nextResponse.headers;
+              const responseHeaders = projectResponseHeaders(rawHeaders);
+              const declaredLength = rawHeaders["content-length"];
+              if (
+                typeof declaredLength === "string" &&
+                Number.parseInt(declaredLength, 10) > maxResponseBytes
+              ) {
+                finish(new Error("Transcript response is too large"));
+                safelyDestroy(request);
+                return;
+              }
+              const chunks: Buffer[] = [];
+              let bytes = 0;
+              onResponseData = (chunk) => {
+                if (settled) return;
+                try {
+                  const buffer = toBuffer(chunk);
+                  bytes += buffer.byteLength;
+                  if (bytes > maxResponseBytes) {
+                    finish(new Error("Transcript response is too large"));
+                    safelyDestroy(request);
+                    return;
+                  }
+                  chunks.push(buffer);
+                } catch (error) {
+                  finish(stableError(error, "Invalid transcript response body"));
+                  safelyDestroy(request);
+                }
+              };
+              onResponseEnd = () => {
+                if (settled) return;
+                try {
+                  finish(undefined, {
+                    status,
+                    headers: responseHeaders,
+                    text: Buffer.concat(chunks, bytes).toString("utf8"),
+                  });
+                } catch (error) {
+                  finish(stableError(error, "Invalid transcript response body"));
+                  safelyDestroy(request);
+                }
+              };
+              onResponseError = (error) => {
+                if (settled) return;
+                finish(stableError(error, "Transcript response failed"));
+                safelyDestroy(request);
+              };
+              nextResponse.on("data", onResponseData);
+              nextResponse.on("end", onResponseEnd);
+              nextResponse.on("error", onResponseError);
+            } catch (error) {
+              finish(stableError(error, "Invalid transcript response headers"));
+              safelyDestroy(request);
+            }
           },
         );
-        request.on("error", (error) => {
-          finish(stableError(error, "Transcript request failed"));
-        });
+        if (settled) {
+          cleanup();
+          return;
+        }
+        request.on("error", onRequestError);
         request.armTimeout(timeoutMs, () => {
+          if (settled) return;
           const error = new Error("Transcript request timed out");
           finish(error);
-          request?.destroy(error);
+          safelyDestroy(request);
         });
         input.signal?.addEventListener("abort", onAbort, { once: true });
         if (input.signal?.aborted) {
@@ -211,6 +265,14 @@ export function createRuntimeTranscriptHttpTransport(
       }
     });
   };
+}
+
+function safelyDestroy(request: RuntimeTranscriptRequest | undefined): void {
+  try {
+    request?.destroy();
+  } catch {
+    // The transport promise has already been settled with a stable error.
+  }
 }
 
 function validateUrl(raw: string): URL {

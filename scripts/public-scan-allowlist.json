@@ -1771,6 +1771,20 @@
     "reason": "Negative security test supplies an intentionally credential-bearing URL that must be rejected."
   },
   {
+    "path": "test_files/unit/youtube-transcript/runtime-transcript-transport.test.ts",
+    "rule": "credential-url",
+    "line": 58,
+    "fingerprint": "sha256:282b1319e7929c820e168403dbfe23d6fc0acc55932ab5b20c264469c7dcafd3",
+    "reason": "Negative URL validation test uses synthetic userinfo and asserts rejection before any socket opens."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/runtime-transcript-transport.test.ts",
+    "rule": "credential-url",
+    "line": 130,
+    "fingerprint": "sha256:d7d55456019170be8144e31f18636674edad191371488117708609bfafbb753b",
+    "reason": "Protocol transport test uses the literal non-secret value fixed as a fake public YouTube API key."
+  },
+  {
     "path": "test_files/unit/youtube-transcript/yt-dlp-transcript-provider.test.ts",
     "rule": "home-path",
     "line": 120,

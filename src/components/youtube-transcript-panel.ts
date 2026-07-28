@@ -8,6 +8,13 @@ import {
 
 export interface YouTubeTranscriptPanelService {
   get(request: YouTubeTranscriptRequest): Promise<YouTubeTranscriptServiceResult>;
+  revokeChoiceSet(choiceSetId: string): void;
+}
+
+export interface YouTubeTranscriptPanelRuntime {
+  identity: string;
+  service: YouTubeTranscriptPanelService;
+  loadCached(): Promise<YouTubeTranscriptCachedItemContent | null>;
 }
 
 export interface YouTubeTranscriptPanelController {
@@ -15,6 +22,7 @@ export interface YouTubeTranscriptPanelController {
   fetch(): Promise<void>;
   refresh(): Promise<void>;
   selectTrack(trackId: string): Promise<void>;
+  refreshLocalization(translator: Translator): void;
   abort(): void;
   destroy(): void;
 }
@@ -23,8 +31,7 @@ export interface YouTubeTranscriptPanelOptions {
   container: HTMLElement;
   locale: Locale;
   request: Omit<YouTubeTranscriptRequest, "refresh" | "trackId" | "signal">;
-  service: YouTubeTranscriptPanelService;
-  loadCached: () => Promise<YouTubeTranscriptCachedItemContent | null>;
+  resolveRuntime: () => YouTubeTranscriptPanelRuntime;
   openExternal: (url: string) => void;
   onReady?: (content: YouTubeTranscriptCachedItemContent) => void;
 }
@@ -45,12 +52,46 @@ type PanelState =
   | "aborted"
   | "destroyed";
 
+type StatusTranslationKey =
+  | "transcript.status.checking"
+  | "transcript.status.fetching"
+  | "transcript.status.aborted"
+  | "transcript.error.noCaptions"
+  | "transcript.error.fallbackUnavailable"
+  | "transcript.error.timeout"
+  | "transcript.error.unavailable"
+  | "transcript.error.temporary";
+
+type PanelSnapshot =
+  | { kind: "idle" }
+  | {
+      kind: "status";
+      state: PanelState;
+      key: StatusTranslationKey;
+      isError: boolean;
+    }
+  | {
+      kind: "choice";
+      tracks: YouTubeTranscriptServiceResult & { status: "selection-required" };
+    }
+  | {
+      kind: "ready";
+      content: YouTubeTranscriptCachedItemContent;
+      state: "cached" | undefined;
+    };
+
 /** Compact, non-modal UI for one explicit YouTube transcript action. */
 export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController {
   private readonly root: HTMLElement;
   private readonly dom: Document;
-  private readonly t: Translator;
+  private t: Translator;
   private activeController: AbortController | null = null;
+  private runtimeIdentity: string | null = null;
+  private choiceLease: {
+    service: YouTubeTranscriptPanelService;
+    choiceSetId: string;
+  } | null = null;
+  private snapshot: PanelSnapshot = { kind: "idle" };
   private operationSequence = 0;
   private destroyed = false;
 
@@ -66,10 +107,11 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
 
   async showCached(): Promise<void> {
     if (this.destroyed) return;
+    const { runtime } = this.resolveRuntime();
     const operation = ++this.operationSequence;
     let content: YouTubeTranscriptCachedItemContent | null;
     try {
-      content = await this.options.loadCached();
+      content = await runtime.loadCached();
     } catch {
       content = null;
     }
@@ -91,7 +133,18 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
 
   async selectTrack(trackId: string): Promise<void> {
     if (!trackId) return;
-    await this.runRequest({ trackId }, "fetching");
+    const resolved = this.resolveRuntime();
+    await this.runRequest(
+      resolved.changed ? {} : { trackId },
+      resolved.changed ? "checking" : "fetching",
+      resolved.runtime,
+    );
+  }
+
+  refreshLocalization(translator: Translator): void {
+    if (this.destroyed) return;
+    this.t = translator;
+    this.renderSnapshot();
   }
 
   abort(): void {
@@ -99,6 +152,7 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     this.operationSequence += 1;
     this.activeController?.abort();
     this.activeController = null;
+    this.revokeChoiceLease();
     this.renderStatus("aborted", "transcript.status.aborted", true);
   }
 
@@ -108,6 +162,7 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     this.operationSequence += 1;
     this.activeController?.abort();
     this.activeController = null;
+    this.revokeChoiceLease();
     this.root.replaceChildren();
     this.root.setAttribute("data-state", "destroyed");
     this.root.removeAttribute("aria-live");
@@ -116,9 +171,12 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
   private async runRequest(
     request: Pick<YouTubeTranscriptRequest, "refresh" | "trackId">,
     pendingState: "checking" | "fetching",
+    fixedRuntime?: YouTubeTranscriptPanelRuntime,
   ): Promise<void> {
     if (this.destroyed) return;
+    const runtime = fixedRuntime ?? this.resolveRuntime().runtime;
     this.activeController?.abort();
+    if (request.trackId === undefined) this.revokeChoiceLease();
     const controller = new AbortController();
     this.activeController = controller;
     const operation = ++this.operationSequence;
@@ -129,7 +187,7 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
         : "transcript.status.fetching",
     );
     try {
-      const result = await this.options.service.get({
+      const result = await runtime.service.get({
         ...this.options.request,
         ...(request.refresh === undefined ? {} : { refresh: request.refresh }),
         ...(request.trackId === undefined ? {} : { trackId: request.trackId }),
@@ -137,7 +195,7 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
       });
       if (!this.isCurrent(operation)) return;
       this.activeController = null;
-      this.renderResult(result);
+      this.renderResult(result, runtime.service);
     } catch (error) {
       if (!this.isCurrent(operation)) return;
       this.activeController = null;
@@ -145,11 +203,25 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     }
   }
 
-  private renderResult(result: YouTubeTranscriptServiceResult): void {
+  private renderResult(
+    result: YouTubeTranscriptServiceResult,
+    service: YouTubeTranscriptPanelService,
+  ): void {
     if (result.status === "ready") {
+      this.choiceLease = null;
       this.renderReady(result.content, result.source === "cache" ? "cached" : undefined);
       return;
     }
+    this.revokeChoiceLease();
+    this.choiceLease = { service, choiceSetId: result.choiceSetId };
+    this.renderChoice(result);
+  }
+
+  private renderChoice(
+    result: YouTubeTranscriptServiceResult & { status: "selection-required" },
+    remember = true,
+  ): void {
+    if (remember) this.snapshot = { kind: "choice", tracks: result };
     this.prepare("language-choice");
     this.root.appendChild(this.heading());
     const prompt = this.dom.createElement("p");
@@ -174,11 +246,14 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
   private renderReady(
     content: YouTubeTranscriptCachedItemContent,
     state: "cached" | undefined,
+    notify = true,
+    remember = true,
   ): void {
     if (!this.matchesRequest(content)) {
       this.renderError(new YouTubeTranscriptServiceError("temporarily-unavailable"));
       return;
     }
+    if (remember) this.snapshot = { kind: "ready", content, state };
     this.prepare(state ?? (content.isGenerated ? "complete-auto" : "complete-manual"));
     const header = this.dom.createElement("div");
     header.className = "rss-youtube-transcript-header";
@@ -234,10 +309,11 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     });
     actions.appendChild(external);
     this.root.appendChild(actions);
-    this.options.onReady?.(content);
+    if (notify) this.options.onReady?.(content);
   }
 
-  private renderIdle(): void {
+  private renderIdle(remember = true): void {
+    if (remember) this.snapshot = { kind: "idle" };
     this.prepare("idle");
     this.root.appendChild(this.heading());
     const button = this.actionButton(
@@ -285,17 +361,11 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
 
   private renderStatus(
     state: PanelState,
-    key:
-      | "transcript.status.checking"
-      | "transcript.status.fetching"
-      | "transcript.status.aborted"
-      | "transcript.error.noCaptions"
-      | "transcript.error.fallbackUnavailable"
-      | "transcript.error.timeout"
-      | "transcript.error.unavailable"
-      | "transcript.error.temporary",
+    key: StatusTranslationKey,
     isError = false,
+    remember = true,
   ): void {
+    if (remember) this.snapshot = { kind: "status", state, key, isError };
     this.prepare(state);
     this.root.appendChild(this.heading());
     const status = this.dom.createElement("p");
@@ -346,5 +416,55 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
 
   private isCurrent(operation: number): boolean {
     return !this.destroyed && operation === this.operationSequence;
+  }
+
+  private resolveRuntime(): {
+    runtime: YouTubeTranscriptPanelRuntime;
+    changed: boolean;
+  } {
+    const runtime = this.options.resolveRuntime();
+    const changed =
+      this.runtimeIdentity !== null && this.runtimeIdentity !== runtime.identity;
+    if (changed) {
+      this.operationSequence += 1;
+      this.activeController?.abort();
+      this.activeController = null;
+      this.revokeChoiceLease();
+    }
+    this.runtimeIdentity = runtime.identity;
+    return { runtime, changed };
+  }
+
+  private revokeChoiceLease(): void {
+    const lease = this.choiceLease;
+    this.choiceLease = null;
+    if (!lease) return;
+    lease.service.revokeChoiceSet(lease.choiceSetId);
+  }
+
+  private renderSnapshot(): void {
+    switch (this.snapshot.kind) {
+      case "idle":
+        this.renderIdle(false);
+        return;
+      case "status":
+        this.renderStatus(
+          this.snapshot.state,
+          this.snapshot.key,
+          this.snapshot.isError,
+          false,
+        );
+        return;
+      case "choice":
+        this.renderChoice(this.snapshot.tracks, false);
+        return;
+      case "ready":
+        this.renderReady(
+          this.snapshot.content,
+          this.snapshot.state,
+          false,
+          false,
+        );
+    }
   }
 }

@@ -18,10 +18,17 @@ class FakeResponse extends EventEmitter implements RuntimeTranscriptResponse {
 }
 
 class FakeRequest extends EventEmitter implements RuntimeTranscriptRequest {
+  timeoutHandler: (() => void) | null = null;
   readonly destroy = vi.fn((error?: Error) => {
     if (error) this.emit("error", error);
   });
-  readonly armTimeout = vi.fn((_timeout: number, _handler: () => void) => this);
+  readonly armTimeout = vi.fn((_timeout: number, handler: () => void) => {
+    this.timeoutHandler = handler;
+    return this;
+  });
+  readonly disarmTimeout = vi.fn(() => {
+    this.timeoutHandler = null;
+  });
   readonly end = vi.fn((_body?: string) => undefined);
 }
 
@@ -163,5 +170,143 @@ describe("runtime transcript HTTPS transport", () => {
     controller.abort();
     await expect(pending).rejects.toThrow("Transcript request aborted");
     expect(request.destroy).toHaveBeenCalled();
+    expect(request.disarmTimeout).toHaveBeenCalledTimes(1);
+    expect(request.listenerCount("error")).toBe(0);
+  });
+
+  it("disarms timeout and detaches request/response listeners after success", async () => {
+    const request = new FakeRequest();
+    let response!: FakeResponse;
+    const factory = vi.fn<RuntimeTranscriptRequestFactory>(
+      (_url, _options, onResponse) => {
+        response = new FakeResponse(200, {});
+        queueMicrotask(() => {
+          onResponse(response);
+          response.emit("data", Buffer.from("ok"));
+          response.emit("end");
+        });
+        return request;
+      },
+    );
+    const transport = createRuntimeTranscriptHttpTransport({ request: factory });
+
+    await expect(transport({
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      method: "GET",
+      headers: {},
+    })).resolves.toMatchObject({ text: "ok" });
+
+    const timeoutAfterSuccess = request.armTimeout.mock.calls[0]?.[1];
+    timeoutAfterSuccess?.();
+    expect(request.destroy).not.toHaveBeenCalled();
+    expect(request.disarmTimeout).toHaveBeenCalledTimes(1);
+    expect(request.listenerCount("error")).toBe(0);
+    expect(response.listenerCount("data")).toBe(0);
+    expect(response.listenerCount("end")).toBe(0);
+    expect(response.listenerCount("error")).toBe(0);
+  });
+
+  it("terminates safely and cleans listeners when response data is invalid", async () => {
+    const request = new FakeRequest();
+    let response!: FakeResponse;
+    const factory = vi.fn<RuntimeTranscriptRequestFactory>(
+      (_url, _options, onResponse) => {
+        response = new FakeResponse(200, {});
+        queueMicrotask(() => {
+          onResponse(response);
+          response.emit("data", { unsafe: true });
+        });
+        return request;
+      },
+    );
+    const transport = createRuntimeTranscriptHttpTransport({ request: factory });
+
+    await expect(transport({
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      method: "GET",
+      headers: {},
+    })).rejects.toThrow("Invalid transcript response body");
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    expect(request.disarmTimeout).toHaveBeenCalledTimes(1);
+    expect(response.listenerCount("data")).toBe(0);
+    expect(response.listenerCount("end")).toBe(0);
+    expect(response.listenerCount("error")).toBe(0);
+  });
+
+  it("cleans every listener when the response stream fails", async () => {
+    const request = new FakeRequest();
+    let response!: FakeResponse;
+    const factory = vi.fn<RuntimeTranscriptRequestFactory>(
+      (_url, _options, onResponse) => {
+        response = new FakeResponse(200, {});
+        queueMicrotask(() => {
+          onResponse(response);
+          response.emit("error", new Error("stream failed"));
+        });
+        return request;
+      },
+    );
+    const transport = createRuntimeTranscriptHttpTransport({ request: factory });
+
+    await expect(transport({
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      method: "GET",
+      headers: {},
+    })).rejects.toThrow("Transcript response failed");
+    expect(request.disarmTimeout).toHaveBeenCalledTimes(1);
+    expect(request.listenerCount("error")).toBe(0);
+    expect(response.listenerCount("data")).toBe(0);
+    expect(response.listenerCount("end")).toBe(0);
+    expect(response.listenerCount("error")).toBe(0);
+  });
+
+  it("settles timeout once, destroys the request, and detaches listeners", async () => {
+    const request = new FakeRequest();
+    const factory = vi.fn<RuntimeTranscriptRequestFactory>(() => request);
+    const transport = createRuntimeTranscriptHttpTransport({ request: factory });
+    const pending = transport({
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      method: "GET",
+      headers: {},
+    });
+
+    request.armTimeout.mock.calls[0]?.[1]();
+
+    await expect(pending).rejects.toThrow("Transcript request timed out");
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    expect(request.disarmTimeout).toHaveBeenCalledTimes(1);
+    expect(request.listenerCount("error")).toBe(0);
+  });
+
+  it("catches response-end assembly exceptions and performs full cleanup", async () => {
+    const request = new FakeRequest();
+    let response!: FakeResponse;
+    const concat = vi.spyOn(Buffer, "concat").mockImplementationOnce(() => {
+      throw new Error("assembly failed");
+    });
+    const factory = vi.fn<RuntimeTranscriptRequestFactory>(
+      (_url, _options, onResponse) => {
+        response = new FakeResponse(200, {});
+        queueMicrotask(() => {
+          onResponse(response);
+          response.emit("data", Buffer.from("ok"));
+          response.emit("end");
+        });
+        return request;
+      },
+    );
+    const transport = createRuntimeTranscriptHttpTransport({ request: factory });
+
+    await expect(transport({
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      method: "GET",
+      headers: {},
+    })).rejects.toThrow("Invalid transcript response body");
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    expect(request.disarmTimeout).toHaveBeenCalledTimes(1);
+    expect(response.listenerCount("data")).toBe(0);
+    expect(response.listenerCount("end")).toBe(0);
+    expect(response.listenerCount("error")).toBe(0);
+    concat.mockRestore();
   });
 });

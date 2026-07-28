@@ -137,6 +137,37 @@ beforeEach(() => {
 });
 
 describe("production AI operation wiring", () => {
+  it("disposes a transcript runtime on data-root swap and gives AI the same repository", () => {
+    const test = harness();
+    enableConnection(test);
+    const privatePlugin = test.plugin as unknown as {
+      getYouTubeTranscriptRuntime(): {
+        dataRoot: string;
+        service: { dispose(): void };
+        contentRepository: unknown;
+      };
+    };
+    const first = privatePlugin.getYouTubeTranscriptRuntime();
+    const disposeFirst = vi.spyOn(first.service, "dispose");
+    test.settings.collection.dataFolder = ".rss-dashboard-data-next";
+
+    const current = privatePlugin.getYouTubeTranscriptRuntime();
+    const modal = test.plugin.openAiOperationForItem(test.selected, "summary");
+    const modalOptions = (modal as unknown as {
+      options: {
+        contentSelector: { contentRepository: unknown };
+      };
+    }).options;
+
+    expect(current).not.toBe(first);
+    expect(current.dataRoot).toBe(".rss-dashboard-data-next");
+    expect(disposeFirst).toHaveBeenCalledTimes(1);
+    expect(modalOptions.contentSelector.contentRepository).toBe(
+      current.contentRepository,
+    );
+    modal?.close();
+  });
+
   it("opens AI settings before constructing secrets or touching vault content when no connection is enabled", () => {
     const test = harness();
     const exists = vi.spyOn(test.app.vault.adapter, "exists");

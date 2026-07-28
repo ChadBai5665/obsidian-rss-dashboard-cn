@@ -2832,6 +2832,25 @@ describe("onunload()", () => {
     // When: onunload is called
     expect(() => plugin.onunload()).not.toThrow();
   });
+
+  it("disposes the active YouTube transcript runtime on unload", () => {
+    const dispose = vi.fn();
+    (plugin as unknown as {
+      youtubeTranscriptRuntime: {
+        dataRoot: string;
+        service: { dispose(): void };
+        contentRepository: object;
+      };
+    }).youtubeTranscriptRuntime = {
+      dataRoot: ".rss-dashboard-data",
+      service: { dispose },
+      contentRepository: {},
+    };
+
+    plugin.onunload();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
 });
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

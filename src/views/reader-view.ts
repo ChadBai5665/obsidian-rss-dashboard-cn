@@ -79,9 +79,12 @@ export interface ReaderContentContext {
 }
 
 export interface ReaderYouTubeTranscriptOptions {
-  service: YouTubeTranscriptPanelService;
-  contentRepository: {
-    read(itemId: string): Promise<CachedItemContent | null>;
+  resolveRuntime(): {
+    identity: string;
+    service: YouTubeTranscriptPanelService;
+    contentRepository: {
+      read(itemId: string): Promise<CachedItemContent | null>;
+    };
   };
   openExternalUrl?: (url: string) => void;
 }
@@ -1142,6 +1145,9 @@ export class ReaderView extends ItemView {
     this.refreshLocalizedReadingDom();
     this.podcastPlayer?.refreshLocalization(this.settings.locale ?? "zh-CN");
     this.videoPlayer?.refreshLocalization(this.settings.locale ?? "zh-CN");
+    this.transcriptPanel?.refreshLocalization(
+      createTranslator(this.settings.locale ?? "zh-CN"),
+    );
     this.updateToggleButtons();
   }
 
@@ -1656,9 +1662,9 @@ export class ReaderView extends ItemView {
     videoContainer: HTMLElement,
     displayRequest: number,
   ): Promise<void> {
-    const runtime = this.youtubeTranscript;
+    const runtimeOptions = this.youtubeTranscript;
     const videoId = item.videoId;
-    if (!runtime || !videoId || !isValidYouTubeVideoId(videoId)) return;
+    if (!runtimeOptions || !videoId || !isValidYouTubeVideoId(videoId)) return;
 
     const itemId = this.getCollectedItemId(item);
     const mount = activeDocument.createElement("div");
@@ -1685,12 +1691,18 @@ export class ReaderView extends ItemView {
         videoId,
         sourceUrl: item.link || undefined,
       },
-      service: runtime.service,
-      loadCached: async () => {
-        const cached = await runtime.contentRepository.read(itemId);
-        return cached?.contentBasis === "youtube-transcript" ? cached : null;
+      resolveRuntime: () => {
+        const runtime = runtimeOptions.resolveRuntime();
+        return {
+          identity: runtime.identity,
+          service: runtime.service,
+          loadCached: async () => {
+            const cached = await runtime.contentRepository.read(itemId);
+            return cached?.contentBasis === "youtube-transcript" ? cached : null;
+          },
+        };
       },
-      openExternal: runtime.openExternalUrl ?? ((url) => {
+      openExternal: runtimeOptions.openExternalUrl ?? ((url) => {
         activeWindow.open(url, "_blank", "noopener,noreferrer");
       }),
       onReady: () => {

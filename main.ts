@@ -1288,13 +1288,20 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private getYouTubeTranscriptRuntime(): {
+    dataRoot: string;
+    identity: string;
     service: YouTubeTranscriptService;
     contentRepository: ContentRepository;
   } {
     const dataRoot = this.settings.collection.dataFolder.trim();
     if (this.youtubeTranscriptRuntime?.dataRoot === dataRoot) {
-      return this.youtubeTranscriptRuntime;
+      return {
+        ...this.youtubeTranscriptRuntime,
+        identity: this.youtubeTranscriptRuntime.dataRoot,
+      };
     }
+
+    this.youtubeTranscriptRuntime?.service.dispose();
 
     const contentRepository = new ContentRepository(
       this.app.vault,
@@ -1325,7 +1332,7 @@ export default class RssDashboardPlugin extends Plugin {
       clock: () => new Date(),
     });
     this.youtubeTranscriptRuntime = { dataRoot, service, contentRepository };
-    return this.youtubeTranscriptRuntime;
+    return { ...this.youtubeTranscriptRuntime, identity: dataRoot };
   }
 
   private getSubscriptionService(): SubscriptionService {
@@ -1757,13 +1764,10 @@ export default class RssDashboardPlugin extends Plugin {
           );
           const saveSnapshot = this.createAiArticleSaveSnapshot(source);
           let savedNotePath = this.resolveExistingSavedNotePath(source.item);
-          const dataRoot = this.settings.collection.dataFolder.trim();
+          const transcriptRuntime = this.getYouTubeTranscriptRuntime();
+          const dataRoot = transcriptRuntime.dataRoot;
           const contentSelector = new AiContentSelector({
-            contentRepository: new ContentRepository(
-              this.app.vault,
-              dataRoot,
-              () => new Date(),
-            ),
+            contentRepository: transcriptRuntime.contentRepository,
             fullTextFetcher: async ({ url, signal }) =>
               await fetchFullArticleContentWithOutcome(
                 url,
@@ -2034,7 +2038,6 @@ export default class RssDashboardPlugin extends Plugin {
       this.registerView(
         RSS_READER_VIEW_TYPE,
         (leaf) => {
-          const youtubeTranscript = this.getYouTubeTranscriptRuntime();
           return new ReaderView(
             leaf,
             this.settings,
@@ -2062,7 +2065,9 @@ export default class RssDashboardPlugin extends Plugin {
               },
               onAiOperation: (item, operation) =>
                 this.openAiOperationForItem(item, operation),
-              youtubeTranscript,
+              youtubeTranscript: {
+                resolveRuntime: () => this.getYouTubeTranscriptRuntime(),
+              },
             },
           );
         },
@@ -5538,6 +5543,8 @@ export default class RssDashboardPlugin extends Plugin {
 
   onunload() {
     this.isUnloading = true;
+    this.youtubeTranscriptRuntime?.service.dispose();
+    this.youtubeTranscriptRuntime = null;
     this.importExportService?.revokeAllSafeDiagnosticsPreviews();
     if (this.progressSaveDebounce !== null) {
       window.clearTimeout(this.progressSaveDebounce);

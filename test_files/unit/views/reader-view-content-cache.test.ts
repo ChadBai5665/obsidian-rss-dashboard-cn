@@ -337,8 +337,11 @@ describe("ReaderView explicit full-text content cache", () => {
     const cacheRead = vi.fn(async (itemId: string) => transcript(itemId));
     const reader = createReader({
       youtubeTranscript: {
-        service: { get: serviceGet },
-        contentRepository: { read: cacheRead },
+        resolveRuntime: () => ({
+          identity: "test-root",
+          service: { get: serviceGet, revokeChoiceSet: vi.fn() },
+          contentRepository: { read: cacheRead },
+        }),
       },
     });
     const item = makeItem({
@@ -380,8 +383,11 @@ describe("ReaderView explicit full-text content cache", () => {
     });
     const reader = createReader({
       youtubeTranscript: {
-        service: { get: serviceGet },
-        contentRepository: { read: vi.fn(async () => null) },
+        resolveRuntime: () => ({
+          identity: "test-root",
+          service: { get: serviceGet, revokeChoiceSet: vi.fn() },
+          contentRepository: { read: vi.fn(async () => null) },
+        }),
       },
     });
     const item = makeItem({
@@ -427,10 +433,13 @@ describe("ReaderView explicit full-text content cache", () => {
     }));
     const reader = createReader({
       youtubeTranscript: {
-        service: { get: serviceGet },
-        contentRepository: {
-          read: vi.fn(async (itemId: string) => transcript(itemId)),
-        },
+        resolveRuntime: () => ({
+          identity: "test-root",
+          service: { get: serviceGet, revokeChoiceSet: vi.fn() },
+          contentRepository: {
+            read: vi.fn(async (itemId: string) => transcript(itemId)),
+          },
+        }),
       },
     });
     await reader.onOpen();
@@ -463,8 +472,11 @@ describe("ReaderView explicit full-text content cache", () => {
     });
     const reader = createReader({
       youtubeTranscript: {
-        service: { get: serviceGet },
-        contentRepository: { read: vi.fn(async () => null) },
+        resolveRuntime: () => ({
+          identity: "test-root",
+          service: { get: serviceGet, revokeChoiceSet: vi.fn() },
+          contentRepository: { read: vi.fn(async () => null) },
+        }),
       },
     });
     await reader.onOpen();
@@ -499,6 +511,69 @@ describe("ReaderView explicit full-text content cache", () => {
     await Promise.resolve();
     expect(reading.textContent).toContain("New video");
     expect(reading.textContent).not.toContain("Stale transcript.");
+  });
+
+  it("keeps an already-open reader on the latest data-root runtime", async () => {
+    const rootAGet = vi.fn(async (request: YouTubeTranscriptRequest) => ({
+      status: "ready" as const,
+      source: "fresh" as const,
+      content: transcript(request.itemId, { text: "Old root result." }),
+    }));
+    const rootBGet = vi.fn(async (request: YouTubeTranscriptRequest) => ({
+      status: "ready" as const,
+      source: "fresh" as const,
+      content: transcript(request.itemId, { text: "New root result." }),
+    }));
+    let runtime = {
+      identity: "root-a",
+      service: { get: rootAGet, revokeChoiceSet: vi.fn() },
+      contentRepository: { read: vi.fn(async () => null) },
+    };
+    const reader = createReader({
+      youtubeTranscript: {
+        resolveRuntime: () => runtime,
+      },
+    } as never);
+    await reader.onOpen();
+    await reader.displayItem(makeItem({
+      link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      mediaType: "video",
+      videoId: "dQw4w9WgXcQ",
+    }));
+    runtime = {
+      identity: "root-b",
+      service: { get: rootBGet, revokeChoiceSet: vi.fn() },
+      contentRepository: { read: vi.fn(async () => null) },
+    };
+
+    const reading = (reader as unknown as { readingContainer: HTMLElement })
+      .readingContainer;
+    reading
+      .querySelector<HTMLButtonElement>(".rss-youtube-transcript-fetch")
+      ?.click();
+    await vi.waitFor(() => expect(rootBGet).toHaveBeenCalledTimes(1));
+
+    expect(rootAGet).not.toHaveBeenCalled();
+    expect(reading.textContent).toContain("New root result.");
+  });
+
+  it("refreshes the active transcript panel translator in place", async () => {
+    const reader = createReader();
+    await reader.onOpen();
+    const refreshLocalization = vi.fn();
+    (reader as unknown as {
+      transcriptPanel: { refreshLocalization: typeof refreshLocalization };
+    }).transcriptPanel = { refreshLocalization };
+    (reader as unknown as { settings: RssDashboardSettings }).settings.locale =
+      "zh-CN";
+
+    reader.refreshLocalization();
+
+    expect(refreshLocalization).toHaveBeenCalledTimes(1);
+    const translator = refreshLocalization.mock.calls[0]?.[0] as
+      | ((key: "transcript.title") => string)
+      | undefined;
+    expect(translator?.("transcript.title")).toBe("YouTube 字幕");
   });
 
   it("retains a durable cache when collection metadata repair fails", async () => {

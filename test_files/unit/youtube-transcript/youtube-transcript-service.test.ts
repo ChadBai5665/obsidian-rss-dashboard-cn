@@ -1555,4 +1555,114 @@ describe("YouTubeTranscriptService", () => {
     expect(ytDlp.listCalls).toBe(1);
     expect(ytDlp.fetchCalls).toBe(0);
   });
+
+  it("dispose aborts and releases every in-flight request and rejects future work", async () => {
+    let activeSignal: AbortSignal | undefined;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const innerTube: TranscriptProvider = {
+      async listTracks(_videoId, signal) {
+        activeSignal = signal;
+        markStarted();
+        return await new Promise<YouTubeCaptionTrack[]>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(new YouTubeTranscriptError("aborted")),
+            { once: true },
+          );
+        });
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+    };
+    const { service } = createService({ innerTube });
+    const pending = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    await started;
+
+    service.dispose();
+
+    expect(activeSignal?.aborted).toBe(true);
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    expect((service as unknown as { inFlight: Map<string, unknown> }).inFlight.size).toBe(0);
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({ code: "aborted" });
+  });
+
+  it("dispose clears choice timers, opaque track references, and generation maps", async () => {
+    vi.useFakeTimers();
+    const innerTube = new FakeProvider([
+      track({ languageName: "English A" }),
+      track({
+        languageName: "English B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+      }),
+    ]);
+    const { service } = createService({ innerTube });
+    try {
+      const result = await service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+      });
+      if (result.status !== "selection-required") throw new Error("expected choices");
+      const internals = service as unknown as {
+        pendingChoices: Map<string, { choices: Map<string, unknown> }>;
+        currentGenerations: Map<string, symbol>;
+      };
+      const retainedChoiceSet = [...internals.pendingChoices.values()][0];
+      expect(retainedChoiceSet?.choices.size).toBe(2);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      service.dispose();
+
+      expect(internals.pendingChoices.size).toBe(0);
+      expect(internals.currentGenerations.size).toBe(0);
+      expect(retainedChoiceSet?.choices.size).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("revokes only the exact opaque choice set and cannot invalidate a newer set", async () => {
+    const innerTube = new FakeProvider([
+      track({ languageName: "English A" }),
+      track({
+        languageName: "English B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+      }),
+    ]);
+    const { service } = createService({ innerTube });
+    const older = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (older.status !== "selection-required") throw new Error("expected choices");
+    const newer = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (newer.status !== "selection-required") throw new Error("expected choices");
+
+    expect(older.choiceSetId).not.toBe(newer.choiceSetId);
+    service.revokeChoiceSet(older.choiceSetId);
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: newer.tracks[0].id,
+      }),
+    ).resolves.toMatchObject({ status: "ready" });
+  });
 });

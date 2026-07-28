@@ -141,13 +141,17 @@ describe("ReaderView onClose cleanup", () => {
       vi.fn(),
       {
         youtubeTranscript: {
-          service: {
-            get: vi.fn(async (nextRequest: YouTubeTranscriptRequest) => {
-              request = nextRequest;
-              return await never;
-            }),
-          },
-          contentRepository: { read: vi.fn(async () => null) },
+          resolveRuntime: () => ({
+            identity: "test-root",
+            service: {
+              get: vi.fn(async (nextRequest: YouTubeTranscriptRequest) => {
+                request = nextRequest;
+                return await never;
+              }),
+              revokeChoiceSet: vi.fn(),
+            },
+            contentRepository: { read: vi.fn(async () => null) },
+          }),
         },
       },
     );

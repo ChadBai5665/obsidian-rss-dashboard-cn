@@ -82,6 +82,7 @@ export type YouTubeTranscriptServiceResult =
     }
   | {
       status: "selection-required";
+      choiceSetId: string;
       tracks: readonly YouTubeTranscriptTrackChoice[];
     };
 
@@ -107,6 +108,7 @@ interface RegisteredChoice {
 
 interface PendingChoiceSet {
   generation: symbol;
+  choiceSetId: string;
   expiresAt: number;
   expirationTimer: number;
   choices: Map<string, RegisteredChoice>;
@@ -146,10 +148,16 @@ const MAX_PENDING_CHOICE_SETS = 100;
 export class YouTubeTranscriptService {
   private readonly inFlight = new Map<string, SharedWork>();
   private readonly pendingChoices = new Map<string, PendingChoiceSet>();
+  private readonly choiceSetIndex = new Map<
+    string,
+    { key: string; generation: symbol }
+  >();
   private readonly currentGenerations = new Map<string, symbol>();
   private readonly choiceTtlMs: number;
   private readonly maxPendingChoiceSets: number;
   private choiceSequence = 0;
+  private choiceSetSequence = 0;
+  private disposed = false;
 
   constructor(private readonly options: YouTubeTranscriptServiceOptions) {
     this.choiceTtlMs = positiveInteger(
@@ -169,6 +177,7 @@ export class YouTubeTranscriptService {
   async get(
     request: YouTubeTranscriptRequest,
   ): Promise<YouTubeTranscriptServiceResult> {
+    this.assertActive();
     assertRequest(request);
     this.cleanupExpiredChoices();
     const resourceKey = requestKey(request.itemId, request.videoId);
@@ -219,6 +228,37 @@ export class YouTubeTranscriptService {
     );
   }
 
+  /** Releases all runtime-owned resources and permanently rejects new work. */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const [key, work] of this.inFlight) {
+      this.inFlight.delete(key);
+      work.onAllCancelled();
+      work.controller.abort();
+    }
+    for (const [key] of this.pendingChoices) {
+      this.deletePendingChoiceSet(key);
+    }
+    this.choiceSetIndex.clear();
+    this.currentGenerations.clear();
+  }
+
+  /** Revokes only the opaque choice generation issued to one panel. */
+  revokeChoiceSet(choiceSetId: string): void {
+    const indexed = this.choiceSetIndex.get(choiceSetId);
+    if (!indexed) return;
+    const pending = this.pendingChoices.get(indexed.key);
+    if (
+      pending?.generation !== indexed.generation ||
+      pending.choiceSetId !== choiceSetId
+    ) {
+      this.choiceSetIndex.delete(choiceSetId);
+      return;
+    }
+    this.clearGeneration(indexed.key, indexed.generation);
+  }
+
   private async getInternal(
     request: YouTubeTranscriptRequest,
     key: string,
@@ -264,6 +304,9 @@ export class YouTubeTranscriptService {
           return result;
         } catch (error) {
           const primary = normalizeProviderError(error);
+          if (request.signal?.aborted || this.disposed) {
+            throw new YouTubeTranscriptServiceError("aborted");
+          }
           if (this.currentGenerations.get(key) !== operationGeneration) {
             throw new YouTubeTranscriptServiceError("temporarily-unavailable");
           }
@@ -305,6 +348,9 @@ export class YouTubeTranscriptService {
         return result;
       } catch (error) {
         const primary = normalizeProviderError(error);
+        if (request.signal?.aborted || this.disposed) {
+          throw new YouTubeTranscriptServiceError("aborted");
+        }
         if (this.currentGenerations.get(key) !== operationGeneration) {
           throw new YouTubeTranscriptServiceError("temporarily-unavailable");
         }
@@ -448,18 +494,25 @@ export class YouTubeTranscriptService {
       });
     });
     this.deletePendingChoiceSet(key);
+    const choiceSetId = `choice-set-${++this.choiceSetSequence}`;
     const expirationTimer = window.setTimeout(() => {
       this.clearGeneration(key, operationGeneration);
     }, this.choiceTtlMs);
     this.pendingChoices.set(key, {
       generation: operationGeneration,
+      choiceSetId,
       expiresAt: this.options.clock().getTime() + this.choiceTtlMs,
       expirationTimer,
       choices: registered,
     });
+    this.choiceSetIndex.set(choiceSetId, {
+      key,
+      generation: operationGeneration,
+    });
     this.enforceChoiceCapacity();
     return {
       status: "selection-required",
+      choiceSetId,
       tracks: Object.freeze(choices),
     };
   }
@@ -621,7 +674,15 @@ export class YouTubeTranscriptService {
       return;
     }
     window.clearTimeout(pending.expirationTimer);
+    pending.choices.clear();
+    this.choiceSetIndex.delete(pending.choiceSetId);
     this.pendingChoices.delete(key);
+  }
+
+  private assertActive(): void {
+    if (this.disposed) {
+      throw new YouTubeTranscriptServiceError("aborted");
+    }
   }
 }
 

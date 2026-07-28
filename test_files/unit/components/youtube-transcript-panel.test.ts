@@ -9,6 +9,7 @@ import {
   type YouTubeTranscriptRequest,
   type YouTubeTranscriptServiceResult,
 } from "../../../src/youtube-transcript/youtube-transcript-service";
+import { createTranslator } from "../../../src/i18n";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 
 installObsidianDomPolyfills();
@@ -68,6 +69,7 @@ function createPanel(options: {
   );
   const openExternal = vi.fn();
   const onReady = vi.fn();
+  const revokeChoiceSet = vi.fn();
   const panel = new YouTubeTranscriptPanel({
     container,
     locale: "en",
@@ -76,12 +78,23 @@ function createPanel(options: {
       videoId: VIDEO_ID,
       sourceUrl: `https://www.youtube.com/watch?v=${VIDEO_ID}`,
     },
-    service: { get } satisfies YouTubeTranscriptPanelService,
-    loadCached,
+    resolveRuntime: () => ({
+      identity: "test-root",
+      service: { get, revokeChoiceSet } satisfies YouTubeTranscriptPanelService,
+      loadCached,
+    }),
     openExternal,
     onReady,
   });
-  return { panel, container, get, loadCached, openExternal, onReady };
+  return {
+    panel,
+    container,
+    get,
+    loadCached,
+    openExternal,
+    onReady,
+    revokeChoiceSet,
+  };
 }
 
 function state(container: HTMLElement): string | null {
@@ -149,6 +162,7 @@ describe("YouTubeTranscriptPanel", () => {
       .fn<YouTubeTranscriptPanelService["get"]>()
       .mockResolvedValueOnce({
         status: "selection-required",
+        choiceSetId: "choice-set-test",
         tracks: [
           {
             id: "track-opaque-one",
@@ -276,5 +290,100 @@ describe("YouTubeTranscriptPanel", () => {
     pending.resolve({ status: "ready", source: "fresh", content: transcript() });
     await fetching;
     expect(state(container)).toBe("destroyed");
+  });
+
+  it("resolves the current data-root runtime for every action in an already-open panel", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const rootAGet = vi.fn(async () => ({
+      status: "ready",
+      source: "fresh",
+      content: transcript({ text: "Wrong old root." }),
+    } as const));
+    const rootBGet = vi.fn(async () => ({
+      status: "ready",
+      source: "fresh",
+      content: transcript({ text: "Current root transcript." }),
+    } as const));
+    const rootALoad = vi.fn(async () => transcript({ text: "Old root cache." }));
+    const rootBLoad = vi.fn(async () => null);
+    let runtime = {
+      identity: "root-a",
+      service: { get: rootAGet, revokeChoiceSet: vi.fn() },
+      loadCached: rootALoad,
+    };
+    const panel = new YouTubeTranscriptPanel({
+      container,
+      locale: "en",
+      request: { itemId: ITEM_ID, videoId: VIDEO_ID },
+      resolveRuntime: () => runtime,
+      openExternal: vi.fn(),
+    } as never);
+
+    await panel.showCached();
+    expect(container.textContent).toContain("Old root cache.");
+    runtime = {
+      identity: "root-b",
+      service: { get: rootBGet, revokeChoiceSet: vi.fn() },
+      loadCached: rootBLoad,
+    };
+    await panel.refresh();
+
+    expect(rootAGet).not.toHaveBeenCalled();
+    expect(rootBGet).toHaveBeenCalledTimes(1);
+    expect(rootBLoad).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Current root transcript.");
+  });
+
+  it("releases its exact pending language choice when destroyed", async () => {
+    const revokeChoiceSet = vi.fn();
+    const get = vi.fn(async () => ({
+      status: "selection-required",
+      choiceSetId: "opaque-choice-set-a",
+      tracks: [
+        {
+          id: "opaque-track-a",
+          languageCode: "en",
+          languageName: "English",
+          isGenerated: false,
+          provider: "innertube",
+        },
+      ],
+    } as const));
+    const container = document.createElement("div");
+    const panel = new YouTubeTranscriptPanel({
+      container,
+      locale: "en",
+      request: { itemId: ITEM_ID, videoId: VIDEO_ID },
+      resolveRuntime: () => ({
+        identity: "root-a",
+        service: { get, revokeChoiceSet },
+        loadCached: async () => null,
+      }),
+      openExternal: vi.fn(),
+    } as never);
+
+    await panel.fetch();
+    panel.destroy();
+
+    expect(revokeChoiceSet).toHaveBeenCalledWith("opaque-choice-set-a");
+  });
+
+  it("re-renders cached transcript localization without cache, service, or onReady side effects", async () => {
+    const { panel, container, get, loadCached, onReady } = createPanel({
+      cached: transcript(),
+    });
+    await panel.showCached();
+    expect(container.textContent).toContain("YouTube transcript");
+    expect(onReady).toHaveBeenCalledTimes(1);
+
+    panel.refreshLocalization(createTranslator("zh-CN"));
+
+    expect(container.textContent).toContain("YouTube 字幕");
+    expect(container.textContent).toContain("A durable public transcript.");
+    expect(container.textContent).toContain("重新获取字幕");
+    expect(loadCached).toHaveBeenCalledTimes(1);
+    expect(get).not.toHaveBeenCalled();
+    expect(onReady).toHaveBeenCalledTimes(1);
   });
 });
