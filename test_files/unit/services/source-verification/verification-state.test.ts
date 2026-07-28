@@ -87,6 +87,18 @@ describe("source verification state", () => {
     expect(state.snapshot()).toEqual({ status: "checking" });
   });
 
+  it.each([
+    "network-failure",
+    "malformed-response",
+    "profile-shape-unsupported",
+  ] as const)("retains the safe TikHub diagnostic code %s", (code) => {
+    const state = new VerificationController<VerifiedSource>();
+    const token = state.begin("openai");
+
+    expect(state.fail(token, code)).toBe(true);
+    expect(state.snapshot()).toEqual({ status: "failure", code });
+  });
+
   it.each(["cancel", "close"])("invalidates an in-flight completion on %s", () => {
     const state = new VerificationController<VerifiedSource>();
     const token = state.begin("https://a.example/feed");

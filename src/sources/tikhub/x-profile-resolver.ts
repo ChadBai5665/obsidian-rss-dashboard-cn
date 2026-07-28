@@ -20,6 +20,9 @@ export type XProfileResolverErrorCode =
   | "rate-limited"
   | "not-found"
   | "network-timeout"
+  | "network-failure"
+  | "malformed-response"
+  | "profile-shape-unsupported"
   | "provider-failure";
 
 export class XProfileResolverError extends Error {
@@ -204,7 +207,7 @@ export class XProfileResolver {
         if (error instanceof XProfileParseError && error.code === "not-found") {
           throw resolverError("not-found");
         }
-        throw resolverError("provider-failure");
+        throw resolverError("profile-shape-unsupported");
       }
       if (profile.handle !== normalizedHandle) throw resolverError("not-found");
       const verifiedAt = this.now().getTime();
@@ -254,6 +257,10 @@ function mapClientError(error: unknown): XProfileResolverError {
       return resolverError("rate-limited");
     case "timeout":
       return resolverError("network-timeout");
+    case "network-failure":
+      return resolverError("network-failure");
+    case "malformed-response":
+      return resolverError("malformed-response");
     case "provider-rejected":
       return error.status === 404
         ? resolverError("not-found")

@@ -1640,7 +1640,7 @@
   {
     "path": "src/sources/tikhub/x-profile-resolver.ts",
     "rule": "credential-value",
-    "line": 187,
+    "line": 190,
     "fingerprint": "sha256:d52fb1704166125beb6dc71d88d2a3c8bb69c814bfe1f4ef7427a93d144715d5",
     "reason": "The resolver assigns a runtime secret-store value; no credential value is present in source."
   },

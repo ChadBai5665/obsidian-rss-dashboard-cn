@@ -148,7 +148,9 @@ describe("XProfileResolver", () => {
     [new TikHubClientError("rate-limited", "unsafe"), "rate-limited"],
     [new TikHubClientError("timeout", "unsafe"), "network-timeout"],
     [new TikHubClientError("provider-rejected", "unsafe", 404), "not-found"],
-    [new TikHubClientError("network-failure", "unsafe"), "provider-failure"],
+    [new TikHubClientError("network-failure", "unsafe"), "network-failure"],
+    [new TikHubClientError("malformed-response", "unsafe"), "malformed-response"],
+    [new TikHubClientError("provider-failure", "unsafe"), "provider-failure"],
     [new TikHubClientError("aborted", "unsafe"), "provider-failure"],
   ])("maps client failure to stable resolver code %s", async (failure, code) => {
     const test = harness({ fetch: async () => { throw failure; } });
@@ -169,11 +171,11 @@ describe("XProfileResolver", () => {
     );
   });
 
-  it("maps malformed provider shape to provider-failure", async () => {
+  it("maps an unsupported profile payload to a safe profile-shape diagnostic", async () => {
     const test = harness({ fetch: async () => ({ data: { unknown: true } }) });
 
     await expect(test.resolver.resolve("openai")).rejects.toMatchObject({
-      code: "provider-failure",
+      code: "profile-shape-unsupported",
     });
   });
 
