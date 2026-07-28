@@ -1640,7 +1640,7 @@
   {
     "path": "src/sources/tikhub/x-profile-resolver.ts",
     "rule": "credential-value",
-    "line": 190,
+    "line": 219,
     "fingerprint": "sha256:d52fb1704166125beb6dc71d88d2a3c8bb69c814bfe1f4ef7427a93d144715d5",
     "reason": "The resolver assigns a runtime secret-store value; no credential value is present in source."
   },
@@ -1710,21 +1710,21 @@
   {
     "path": "test_files/unit/sources/tikhub/x-profile-resolver.test.ts",
     "rule": "credential-value",
-    "line": 13,
+    "line": 17,
     "fingerprint": "sha256:ed9eb1ba272afc6f255b946f5caca924ebd60496a6a8b690ec565ea48e1ec44b",
     "reason": "Security test fixture defines a synthetic resolver credential value."
   },
   {
     "path": "test_files/unit/sources/tikhub/x-profile-resolver.test.ts",
     "rule": "credential-value",
-    "line": 79,
+    "line": 133,
     "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
     "reason": "Security test fixture verifies the synthetic key reaches the expected provider boundary."
   },
   {
     "path": "test_files/unit/sources/tikhub/x-profile-resolver.test.ts",
     "rule": "credential-value",
-    "line": 111,
+    "line": 165,
     "fingerprint": "sha256:e8413218ec7421666e984a3ab9318a60e1e7e2eb15186d7f307a0e97e911423a",
     "reason": "Security test fixture supplies an intentionally invalid synthetic key."
   }
