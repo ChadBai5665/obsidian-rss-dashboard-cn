@@ -1722,13 +1722,6 @@
     "reason": "Type-only InnerTube session identifier; no credential value is present in source."
   },
   {
-    "path": "src/youtube-transcript/innertube-transcript-provider.ts",
-    "rule": "credential-url",
-    "line": 307,
-    "fingerprint": "sha256:78fd711afd8be01c936b53ac689e631b1e89b48edb9fd8e9f9eabc7c611e1b63",
-    "reason": "Fixed public YouTube player endpoint built with the API key discovered from the current public watch page."
-  },
-  {
     "path": "test_files/unit/youtube-transcript/innertube-transcript-provider.test.ts",
     "rule": "credential-url",
     "line": 14,

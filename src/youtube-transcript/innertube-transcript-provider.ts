@@ -302,9 +302,12 @@ export class InnerTubeTranscriptProvider {
       },
       videoId,
     });
+    const playerUrl = new URL(PLAYER_URL_PREFIX);
+    playerUrl.searchParams.set("key", session.apiKey);
+    playerUrl.searchParams.set("prettyPrint", "false");
     const response = await this.requestWithRedirects(
       {
-        url: `${PLAYER_URL_PREFIX}?key=${session.apiKey}&prettyPrint=false`,
+        url: playerUrl.toString(),
         method: "POST",
         headers,
         body,
