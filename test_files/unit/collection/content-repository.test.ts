@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   ContentRepository,
   type CachedItemContent,
+  type FullTextCachedItemContent,
+  type YouTubeTranscriptCachedItemContent,
 } from "../../../src/collection/content-repository";
 
 const DATA_ROOT = ".rss-dashboard-data";
@@ -92,8 +94,8 @@ function createRepository(adapter: InMemoryAdapter, vault?: Vault): ContentRepos
 }
 
 function createContent(
-  overrides: Partial<CachedItemContent> = {},
-): CachedItemContent {
+  overrides: Partial<FullTextCachedItemContent> = {},
+): FullTextCachedItemContent {
   return {
     schemaVersion: 1,
     itemId: ITEM_ID,
@@ -101,6 +103,25 @@ function createContent(
     fetchedAt: "2026-07-21T12:00:00.000Z",
     contentBasis: "full-text",
     text: "<p>Durable extracted article text.</p>",
+    ...overrides,
+  };
+}
+
+function createTranscriptContent(
+  overrides: Partial<YouTubeTranscriptCachedItemContent> = {},
+): YouTubeTranscriptCachedItemContent {
+  return {
+    schemaVersion: 2,
+    itemId: ITEM_ID,
+    sourceUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    fetchedAt: "2026-07-21T12:00:00.000Z",
+    contentBasis: "youtube-transcript",
+    videoId: "dQw4w9WgXcQ",
+    languageCode: "en",
+    languageName: "English",
+    isGenerated: false,
+    provider: "innertube",
+    text: "A durable public subtitle transcript.",
     ...overrides,
   };
 }
@@ -204,5 +225,107 @@ describe("ContentRepository", () => {
     ]);
 
     expect((await reader.read(ITEM_ID))?.text).toBe("<p>Replacement durable text</p>");
+  });
+
+  it("reads an existing schemaVersion 1 file without rewriting a byte", async () => {
+    const adapter = new InMemoryAdapter();
+    await adapter.mkdir(DATA_ROOT);
+    await adapter.mkdir(`${DATA_ROOT}/content`);
+    const path = `${DATA_ROOT}/content/${ITEM_ID}.md`;
+    const original = [
+      "---",
+      "schemaVersion: 1",
+      `itemId: "${ITEM_ID}"`,
+      'sourceUrl: "https://example.com/legacy"',
+      'fetchedAt: "2026-07-20T08:00:00.000Z"',
+      'contentBasis: "full-text"',
+      "---",
+      "",
+      "<p>Legacy bytes stay exactly as stored.</p>",
+    ].join("\r\n");
+    await adapter.write(path, original);
+
+    const result = await createRepository(adapter).read(ITEM_ID);
+
+    expect(result).toEqual({
+      schemaVersion: 1,
+      itemId: ITEM_ID,
+      sourceUrl: "https://example.com/legacy",
+      fetchedAt: "2026-07-20T08:00:00.000Z",
+      contentBasis: "full-text",
+      text: "<p>Legacy bytes stay exactly as stored.</p>",
+    });
+    expect(await adapter.read(path)).toBe(original);
+  });
+
+  it("round-trips strict schemaVersion 2 transcript metadata on the stable item path", async () => {
+    const adapter = new InMemoryAdapter();
+    const repository = createRepository(adapter);
+    const transcript = createTranscriptContent();
+
+    const path = await repository.write(transcript);
+
+    expect(path).toBe(`${DATA_ROOT}/content/${ITEM_ID}.md`);
+    expect(await repository.read(ITEM_ID)).toEqual(transcript);
+    expect(adapter.files.get(path)).toContain('provider: "innertube"');
+    expect(adapter.files.get(path)).toContain('languageCode: "en"');
+  });
+
+  it("rejects invalid or undocumented schemaVersion 2 metadata", async () => {
+    const repository = createRepository(new InMemoryAdapter());
+    const invalid = [
+      createTranscriptContent({ videoId: "too-short" }),
+      createTranscriptContent({ languageCode: "" }),
+      createTranscriptContent({ languageName: "" }),
+      createTranscriptContent({ provider: "other" as "innertube" }),
+      createTranscriptContent({ isGenerated: "yes" as unknown as boolean }),
+      {
+        ...createTranscriptContent(),
+        undocumented: "must not be serialized",
+      } as CachedItemContent,
+    ];
+
+    for (const candidate of invalid) {
+      await expect(repository.write(candidate)).rejects.toThrow();
+    }
+
+    const adapter = new InMemoryAdapter();
+    await adapter.mkdir(DATA_ROOT);
+    await adapter.mkdir(`${DATA_ROOT}/content`);
+    await adapter.write(
+      `${DATA_ROOT}/content/${ITEM_ID}.md`,
+      [
+        "---",
+        "schemaVersion: 2",
+        `itemId: "${ITEM_ID}"`,
+        'fetchedAt: "2026-07-21T12:00:00.000Z"',
+        'contentBasis: "youtube-transcript"',
+        'videoId: "dQw4w9WgXcQ"',
+        'languageCode: "en"',
+        'languageName: "English"',
+        "isGenerated: false",
+        'provider: "innertube"',
+        'unknownField: "rejected"',
+        "---",
+        "",
+        "Transcript text.",
+      ].join("\n"),
+    );
+    await expect(createRepository(adapter).read(ITEM_ID)).resolves.toBeNull();
+  });
+
+  it("atomically refreshes a transcript without losing the prior valid cache", async () => {
+    const adapter = new InMemoryAdapter();
+    const repository = createRepository(adapter);
+    await repository.write(createTranscriptContent({ text: "Old transcript." }));
+    adapter.failNextRenameWhere(
+      (from, to) => from.includes(".tmp-") && to.endsWith(`${ITEM_ID}.md`),
+    );
+
+    await expect(
+      repository.write(createTranscriptContent({ text: "New transcript." })),
+    ).rejects.toThrow("Injected rename failure");
+
+    expect((await repository.read(ITEM_ID))?.text).toBe("Old transcript.");
   });
 });

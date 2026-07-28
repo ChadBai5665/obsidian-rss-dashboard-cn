@@ -1,6 +1,7 @@
 import { normalizePath, type DataAdapter, type Vault } from "obsidian";
+import { isValidYouTubeVideoId } from "../youtube-transcript/transcript-types";
 
-export interface CachedItemContent {
+export interface FullTextCachedItemContent {
   schemaVersion: 1;
   itemId: string;
   sourceUrl?: string;
@@ -9,7 +10,39 @@ export interface CachedItemContent {
   text: string;
 }
 
+export interface YouTubeTranscriptCachedItemContent {
+  schemaVersion: 2;
+  contentBasis: "youtube-transcript";
+  itemId: string;
+  sourceUrl?: string;
+  fetchedAt: string;
+  videoId: string;
+  languageCode: string;
+  languageName: string;
+  isGenerated: boolean;
+  provider: "innertube" | "yt-dlp";
+  text: string;
+}
+
+export type CachedItemContent =
+  | FullTextCachedItemContent
+  | YouTubeTranscriptCachedItemContent;
+
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/;
+const LANGUAGE_CODE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u;
+const TRANSCRIPT_FIELDS = new Set([
+  "schemaVersion",
+  "itemId",
+  "sourceUrl",
+  "fetchedAt",
+  "contentBasis",
+  "videoId",
+  "languageCode",
+  "languageName",
+  "isGenerated",
+  "provider",
+  "text",
+]);
 const vaultItemQueues = new WeakMap<object, Map<string, Promise<void>>>();
 let transactionSequence = 0;
 
@@ -219,6 +252,21 @@ function serializeCachedItemContent(content: CachedItemContent): string {
       : `sourceUrl: ${JSON.stringify(content.sourceUrl)}`,
     `fetchedAt: ${JSON.stringify(content.fetchedAt)}`,
     `contentBasis: ${JSON.stringify(content.contentBasis)}`,
+    content.schemaVersion === 2
+      ? `videoId: ${JSON.stringify(content.videoId)}`
+      : undefined,
+    content.schemaVersion === 2
+      ? `languageCode: ${JSON.stringify(content.languageCode)}`
+      : undefined,
+    content.schemaVersion === 2
+      ? `languageName: ${JSON.stringify(content.languageName)}`
+      : undefined,
+    content.schemaVersion === 2
+      ? `isGenerated: ${JSON.stringify(content.isGenerated)}`
+      : undefined,
+    content.schemaVersion === 2
+      ? `provider: ${JSON.stringify(content.provider)}`
+      : undefined,
     "---",
     "",
   ].filter((line): line is string => line !== undefined);
@@ -233,25 +281,48 @@ function parseCachedItemContent(raw: string): CachedItemContent | null {
   for (const line of frontmatter[1].split(/\r?\n/)) {
     const match = line.match(/^([A-Za-z][A-Za-z0-9]*):\s(.+)$/);
     if (!match) return null;
+    if (fields.has(match[1])) return null;
     try {
       fields.set(match[1], JSON.parse(match[2]));
     } catch {
-      if (match[1] === "schemaVersion" && match[2] === "1") {
-        fields.set(match[1], 1);
-      } else {
-        return null;
-      }
+      return null;
     }
   }
 
-  const candidate: CachedItemContent = {
-    schemaVersion: fields.get("schemaVersion") as 1,
-    itemId: fields.get("itemId") as string,
-    sourceUrl: fields.get("sourceUrl") as string | undefined,
-    fetchedAt: fields.get("fetchedAt") as string,
-    contentBasis: fields.get("contentBasis") as "full-text",
-    text: frontmatter[2],
-  };
+  const schemaVersion = fields.get("schemaVersion");
+  let candidate: CachedItemContent;
+  if (schemaVersion === 1) {
+    candidate = {
+      schemaVersion: 1,
+      itemId: fields.get("itemId") as string,
+      sourceUrl: fields.get("sourceUrl") as string | undefined,
+      fetchedAt: fields.get("fetchedAt") as string,
+      contentBasis: fields.get("contentBasis") as "full-text",
+      text: frontmatter[2],
+    };
+  } else if (schemaVersion === 2) {
+    const allowedFrontmatter = new Set(
+      [...TRANSCRIPT_FIELDS].filter((field) => field !== "text"),
+    );
+    if ([...fields.keys()].some((field) => !allowedFrontmatter.has(field))) {
+      return null;
+    }
+    candidate = {
+      schemaVersion: 2,
+      itemId: fields.get("itemId") as string,
+      sourceUrl: fields.get("sourceUrl") as string | undefined,
+      fetchedAt: fields.get("fetchedAt") as string,
+      contentBasis: fields.get("contentBasis") as "youtube-transcript",
+      videoId: fields.get("videoId") as string,
+      languageCode: fields.get("languageCode") as string,
+      languageName: fields.get("languageName") as string,
+      isGenerated: fields.get("isGenerated") as boolean,
+      provider: fields.get("provider") as "innertube" | "yt-dlp",
+      text: frontmatter[2],
+    };
+  } else {
+    return null;
+  }
   try {
     assertCachedItemContent(candidate);
     return candidate;
@@ -261,9 +332,7 @@ function parseCachedItemContent(raw: string): CachedItemContent | null {
 }
 
 function assertCachedItemContent(content: CachedItemContent): void {
-  if (content.schemaVersion !== 1 || content.contentBasis !== "full-text") {
-    throw new Error("Invalid cached content schema");
-  }
+  if (!isRecord(content)) throw new Error("Invalid cached content schema");
   assertStableItemId(content.itemId);
   if (typeof content.fetchedAt !== "string" || Number.isNaN(Date.parse(content.fetchedAt))) {
     throw new Error("Invalid cached content timestamp");
@@ -274,6 +343,58 @@ function assertCachedItemContent(content: CachedItemContent): void {
   if (typeof content.text !== "string" || !content.text.trim()) {
     throw new Error("Cached content must not be empty");
   }
+  if (content.schemaVersion === 1) {
+    if (content.contentBasis !== "full-text") {
+      throw new Error("Invalid cached content schema");
+    }
+    return;
+  }
+  if (
+    content.schemaVersion !== 2 ||
+    content.contentBasis !== "youtube-transcript"
+  ) {
+    throw new Error("Invalid cached content schema");
+  }
+  if (
+    Object.keys(content).some((field) => !TRANSCRIPT_FIELDS.has(field))
+  ) {
+    throw new Error("Invalid cached transcript fields");
+  }
+  if (!isValidYouTubeVideoId(content.videoId)) {
+    throw new Error("Invalid cached transcript video id");
+  }
+  if (
+    typeof content.languageCode !== "string" ||
+    !LANGUAGE_CODE.test(content.languageCode)
+  ) {
+    throw new Error("Invalid cached transcript language code");
+  }
+  if (
+    typeof content.languageName !== "string" ||
+    !content.languageName.trim() ||
+    content.languageName.length > 200 ||
+    hasUnsafeControl(content.languageName)
+  ) {
+    throw new Error("Invalid cached transcript language name");
+  }
+  if (typeof content.isGenerated !== "boolean") {
+    throw new Error("Invalid cached transcript generation flag");
+  }
+  if (content.provider !== "innertube" && content.provider !== "yt-dlp") {
+    throw new Error("Invalid cached transcript provider");
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasUnsafeControl(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 32 || code === 127) return true;
+  }
+  return false;
 }
 
 function assertStableItemId(value: string): void {

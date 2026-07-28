@@ -47,7 +47,7 @@ export class ExplicitContentCoordinator {
       // ContentRepository already validates that a cached artifact is non-empty
       // and belongs to this stable ID. Once durable, it is the cache truth even
       // when the publisher article itself is intentionally short.
-      if (cached) {
+      if (cached?.contentBasis === "full-text") {
         await this.syncMetadata(input, contentRepository.pathFor(input.itemId));
         return { content: cached.text, failureType: "none" };
       }

@@ -65,6 +65,7 @@ const SOURCE_TYPES = new Set([
 const CONTENT_BASES = new Set([
   "feed",
   "full-text",
+  "youtube-transcript",
   "title-description",
   "x-post",
   "linked-page",
@@ -425,15 +426,20 @@ export class CollectionRepository {
    * Callers must write the content file first: metadata never claims a cache
    * that has not reached storage.
    */
-  async updateContentMetadata(id: string, contentPath: string): Promise<void> {
+  async updateContentMetadata(
+    id: string,
+    contentPath: string,
+    contentBasis: "full-text" | "youtube-transcript" = "full-text",
+  ): Promise<void> {
     await this.withRootAccessLock(async () =>
-      await this.updateContentMetadataUnlocked(id, contentPath),
+      await this.updateContentMetadataUnlocked(id, contentPath, contentBasis),
     );
   }
 
   private async updateContentMetadataUnlocked(
     id: string,
     contentPath: string,
+    contentBasis: "full-text" | "youtube-transcript",
   ): Promise<void> {
     assertStableContentReference(id, contentPath, this.dataRoot);
     await this.loadIndex();
@@ -447,13 +453,13 @@ export class CollectionRepository {
       const updated = parsed.items.map((item) => {
         if (item.id !== id) return item;
         if (
-          item.contentBasis === "full-text" &&
+          item.contentBasis === contentBasis &&
           item.contentPath === contentPath
         ) {
           return item;
         }
         changed = true;
-        return { ...item, contentBasis: "full-text" as const, contentPath };
+        return { ...item, contentBasis, contentPath };
       });
       if (changed) {
         rewrites.push({

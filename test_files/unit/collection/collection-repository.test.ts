@@ -355,6 +355,28 @@ describe("CollectionRepository", () => {
     ]);
   });
 
+  it("links a durable transcript with an explicit transcript content basis", async () => {
+    const { repository } = createHarness();
+    const id = "e".repeat(64);
+    const contentPath = `${DATA_ROOT}/content/${id}.md`;
+    await repository.upsertDaily(
+      [createItem({ id, sourceType: "youtube", contentBasis: "title-description" })],
+      "2026-07-21",
+    );
+
+    await repository.updateContentMetadata(
+      id,
+      contentPath,
+      "youtube-transcript",
+    );
+
+    expect(await repository.findById(id)).toMatchObject({
+      id,
+      contentBasis: "youtube-transcript",
+      contentPath,
+    });
+  });
+
   it("does no constructor I/O and creates only collection persistence directories", async () => {
     const { adapter, repository } = createHarness();
 
