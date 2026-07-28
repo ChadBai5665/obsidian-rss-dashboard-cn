@@ -1727,5 +1727,47 @@
     "line": 165,
     "fingerprint": "sha256:e8413218ec7421666e984a3ab9318a60e1e7e2eb15186d7f307a0e97e911423a",
     "reason": "Security test fixture supplies an intentionally invalid synthetic key."
+  },
+  {
+    "path": "src/youtube-transcript/innertube-transcript-provider.ts",
+    "rule": "credential-value",
+    "line": 271,
+    "fingerprint": "sha256:296876ebdd6065cedab18a190c2b1eccab7532d0f280cd14985e47d03db96a2b",
+    "reason": "Type-only InnerTube session identifier; no credential value is present in source."
+  },
+  {
+    "path": "src/youtube-transcript/innertube-transcript-provider.ts",
+    "rule": "credential-url",
+    "line": 307,
+    "fingerprint": "sha256:78fd711afd8be01c936b53ac689e631b1e89b48edb9fd8e9f9eabc7c611e1b63",
+    "reason": "Fixed public YouTube player endpoint built with the API key discovered from the current public watch page."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/innertube-transcript-provider.test.ts",
+    "rule": "credential-url",
+    "line": 14,
+    "fingerprint": "sha256:acf45ff0e9467dc2eaaa38b53dede9adfcee5e7868d5ec1f14e1bdc860fbd871",
+    "reason": "Protocol test asserts a fixed public YouTube endpoint containing a synthetic fake key."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/innertube-transcript-provider.test.ts",
+    "rule": "credential-value",
+    "line": 34,
+    "fingerprint": "sha256:d1a64ab7278aaee6e510e59d8de2adb27f92a4077e651e6651f118afe2f38f22",
+    "reason": "Synthetic watch-page fixture contains an intentionally fake public session key."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/innertube-transcript-provider.test.ts",
+    "rule": "credential-value",
+    "line": 576,
+    "fingerprint": "sha256:275c1e7a78ff41537cbbcbff6573ca63cf330da9b61bebdd31e994c1046d682c",
+    "reason": "Negative validation test supplies the intentionally invalid synthetic value bad/key."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/innertube-transcript-provider.test.ts",
+    "rule": "credential-url",
+    "line": 608,
+    "fingerprint": "sha256:3ad61a61421243ac98acdd08e6c1e806ad0470b48aaee46eedfd6974250f25b2",
+    "reason": "Negative security test supplies an intentionally credential-bearing URL that must be rejected."
   }
 ]
