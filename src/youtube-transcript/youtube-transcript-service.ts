@@ -135,6 +135,8 @@ const FALLBACK_ELIGIBLE = new Set<YouTubeTranscriptErrorCode>([
 ]);
 const DEFAULT_CHOICE_TTL_MS = 2 * 60 * 1_000;
 const DEFAULT_MAX_PENDING_CHOICE_SETS = 20;
+const MAX_CHOICE_TTL_MS = 10 * 60 * 1_000;
+const MAX_PENDING_CHOICE_SETS = 100;
 
 export class YouTubeTranscriptService {
   private readonly inFlight = new Map<string, SharedWork>();
@@ -147,11 +149,13 @@ export class YouTubeTranscriptService {
     this.choiceTtlMs = positiveInteger(
       options.choiceTtlMs,
       DEFAULT_CHOICE_TTL_MS,
+      MAX_CHOICE_TTL_MS,
       "choice TTL",
     );
     this.maxPendingChoiceSets = positiveInteger(
       options.maxPendingChoiceSets,
       DEFAULT_MAX_PENDING_CHOICE_SETS,
+      MAX_PENDING_CHOICE_SETS,
       "pending choice capacity",
     );
   }
@@ -671,10 +675,15 @@ function requestWorkKey(
 function positiveInteger(
   value: number | undefined,
   fallback: number,
+  maximum: number,
   label: string,
 ): number {
   const resolved = value ?? fallback;
-  if (!Number.isSafeInteger(resolved) || resolved <= 0) {
+  if (
+    !Number.isSafeInteger(resolved) ||
+    resolved <= 0 ||
+    resolved > maximum
+  ) {
     throw new Error(`Invalid ${label}`);
   }
   return resolved;

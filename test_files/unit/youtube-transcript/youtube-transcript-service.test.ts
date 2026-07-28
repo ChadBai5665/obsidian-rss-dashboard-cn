@@ -231,6 +231,15 @@ function createService(options: {
 }
 
 describe("YouTubeTranscriptService", () => {
+  it("rejects unbounded pending-choice retention settings", () => {
+    expect(() => createService({ choiceTtlMs: 60 * 60 * 1_000 })).toThrow(
+      "Invalid choice TTL",
+    );
+    expect(() => createService({ maxPendingChoiceSets: 1_000 })).toThrow(
+      "Invalid pending choice capacity",
+    );
+  });
+
   it("returns a matching cache and repairs metadata without provider calls", async () => {
     const content = new FakeContentRepository(cached());
     const metadata = new FakeMetadataRepository();
