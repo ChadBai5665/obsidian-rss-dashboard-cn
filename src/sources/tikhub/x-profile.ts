@@ -38,14 +38,19 @@ interface WalkEntry {
   depth: number;
 }
 
-type CandidateResult =
-  | { kind: "none" }
-  | { kind: "profile"; profile: XProfile };
+interface NormalizedProfileCandidate {
+  restId: string;
+  handle: string;
+  displayName: string;
+  avatarUrl?: string;
+  description?: string;
+  verified?: boolean;
+}
 
 /** Projects one untrusted TikHub profile payload into a provider-neutral record. */
 export function parseXProfile(payload: unknown): XProfile {
   try {
-    const candidates: XProfile[] = [];
+    const candidates: NormalizedProfileCandidate[] = [];
     let notFound = false;
     const seen = new WeakSet<object>();
     const stack: WalkEntry[] = [{ value: payload, depth: 0 }];
@@ -64,8 +69,7 @@ export function parseXProfile(payload: unknown): XProfile {
 
       const properties = ownDataProperties(value);
       if (isNotFoundRecord(properties)) notFound = true;
-      const candidate = profileCandidate(properties);
-      if (candidate.kind === "profile") candidates.push(candidate.profile);
+      candidates.push(...profileCandidate(properties));
 
       for (let index = properties.length - 1; index >= 0; index -= 1) {
         const child = properties[index]?.value;
@@ -75,18 +79,20 @@ export function parseXProfile(payload: unknown): XProfile {
       }
     }
 
-    if (candidates.length === 1 && !notFound) return candidates[0];
-    if (candidates.length === 0 && notFound) {
+    if (notFound && candidates.length === 0) {
       throw new XProfileParseError("not-found");
     }
-    throw malformedProfile();
+    if (notFound || candidates.length === 0) throw malformedProfile();
+    return reconcileCandidates(candidates);
   } catch (error) {
     if (error instanceof XProfileParseError) throw error;
     throw malformedProfile();
   }
 }
 
-function profileCandidate(properties: readonly DataProperty[]): CandidateResult {
+function profileCandidate(
+  properties: readonly DataProperty[],
+): NormalizedProfileCandidate[] {
   const restIdValue = propertyValue(properties, "rest_id");
   const legacyValue = propertyValue(properties, "legacy");
   const coreValue = propertyValue(properties, "core");
@@ -100,42 +106,113 @@ function profileCandidate(properties: readonly DataProperty[]): CandidateResult 
   const hasLegacyPair = legacyHandle !== undefined && legacyName !== undefined;
   const hasCurrentPair = currentHandle !== undefined && currentName !== undefined;
   if (restIdValue === undefined || (!hasLegacyPair && !hasCurrentPair)) {
-    return { kind: "none" };
+    return [];
   }
-  if (hasLegacyPair && hasCurrentPair) throw malformedProfile();
 
   const restId = safeText(restIdValue, MAX_REST_ID_LENGTH);
-  const handle = normalizeXHandle(hasLegacyPair ? legacyHandle : currentHandle);
-  const displayName = safeText(
-    hasLegacyPair ? legacyName : currentName,
-    MAX_DISPLAY_NAME_LENGTH,
-  );
-  if (!restId || !handle || !displayName) throw malformedProfile();
+  if (!restId) throw malformedProfile();
 
   const legacyProperties = legacy ?? [];
-  const avatarValue = hasLegacyPair
-    ? optionalPropertyValue(legacyProperties, "profile_image_url_https")
-    : nestedPropertyValue(properties, "avatar", "image_url");
-  const descriptionValue = hasLegacyPair
-    ? optionalPropertyValue(legacyProperties, "description")
-    : nestedPropertyValue(properties, "profile_bio", "description");
-  const avatarUrl = optionalHttpsUrl(avatarValue);
-  const description = optionalText(descriptionValue, MAX_DESCRIPTION_LENGTH, true);
-  const verified = hasLegacyPair
-    ? legacyVerified(properties, legacyProperties)
-    : modernVerified(properties);
-
-  return {
-    kind: "profile",
-    profile: withoutUndefined({
+  const candidates: NormalizedProfileCandidate[] = [];
+  if (hasLegacyPair) {
+    candidates.push(normalizedCandidate({
       restId,
-      handle,
-      displayName,
-      avatarUrl,
-      description,
-      verified,
-    }),
-  };
+      handleValue: legacyHandle,
+      displayNameValue: legacyName,
+      avatarValue: optionalPropertyValue(legacyProperties, "profile_image_url_https"),
+      descriptionValue: optionalPropertyValue(legacyProperties, "description"),
+      verified: legacyVerified(properties, legacyProperties),
+    }));
+  }
+  if (hasCurrentPair) {
+    candidates.push(normalizedCandidate({
+      restId,
+      handleValue: currentHandle,
+      displayNameValue: currentName,
+      avatarValue: nestedPropertyValue(properties, "avatar", "image_url"),
+      descriptionValue: nestedPropertyValue(properties, "profile_bio", "description"),
+      verified: modernVerified(properties),
+    }));
+  }
+  return candidates;
+}
+
+function normalizedCandidate(input: {
+  restId: string;
+  handleValue: unknown;
+  displayNameValue: unknown;
+  avatarValue: unknown;
+  descriptionValue: unknown;
+  verified: boolean | undefined;
+}): NormalizedProfileCandidate {
+  const handle = normalizeXHandle(input.handleValue);
+  const displayName = safeText(input.displayNameValue, MAX_DISPLAY_NAME_LENGTH);
+  if (!handle || !displayName) throw malformedProfile();
+  return withoutUndefined({
+    restId: input.restId,
+    handle,
+    displayName,
+    avatarUrl: optionalHttpsUrl(input.avatarValue),
+    description: optionalText(input.descriptionValue, MAX_DESCRIPTION_LENGTH, true),
+    verified: input.verified,
+  });
+}
+
+function profileIdentity(candidate: NormalizedProfileCandidate): string {
+  return `${candidate.restId}\0${normalizeXHandle(candidate.handle)}`;
+}
+
+function reconcileCandidates(
+  candidates: readonly NormalizedProfileCandidate[],
+): XProfile {
+  const reconciled = new Map<string, NormalizedProfileCandidate>();
+  for (const candidate of candidates) {
+    const identity = profileIdentity(candidate);
+    const existing = reconciled.get(identity);
+    reconciled.set(
+      identity,
+      existing ? mergeCandidates(existing, candidate) : candidate,
+    );
+  }
+  if (reconciled.size !== 1) throw malformedProfile();
+  const profile = reconciled.values().next().value;
+  if (!profile) throw malformedProfile();
+  return withoutUndefined({
+    restId: profile.restId,
+    handle: profile.handle,
+    displayName: profile.displayName,
+    avatarUrl: profile.avatarUrl,
+    description: profile.description,
+    verified: profile.verified ?? false,
+  });
+}
+
+function mergeCandidates(
+  first: NormalizedProfileCandidate,
+  second: NormalizedProfileCandidate,
+): NormalizedProfileCandidate {
+  if (
+    first.restId !== second.restId ||
+    first.handle !== second.handle ||
+    first.displayName !== second.displayName
+  ) {
+    throw malformedProfile();
+  }
+  return withoutUndefined({
+    restId: first.restId,
+    handle: first.handle,
+    displayName: first.displayName,
+    avatarUrl: mergeOptional(first.avatarUrl, second.avatarUrl),
+    description: mergeOptional(first.description, second.description),
+    verified: mergeOptional(first.verified, second.verified),
+  });
+}
+
+function mergeOptional<T>(first: T | undefined, second: T | undefined): T | undefined {
+  if (first !== undefined && second !== undefined && first !== second) {
+    throw malformedProfile();
+  }
+  return first ?? second;
 }
 
 interface DataProperty {
@@ -207,21 +284,23 @@ function nestedPropertyValue(
 function legacyVerified(
   properties: readonly DataProperty[],
   legacy: readonly DataProperty[],
-): boolean {
+): boolean | undefined {
   const blue = optionalBoolean(properties, "is_blue_verified");
   const legacyVerifiedValue = optionalBoolean(legacy, "verified");
-  return blue === true || legacyVerifiedValue === true;
+  if (blue === true || legacyVerifiedValue === true) return true;
+  if (blue === false || legacyVerifiedValue === false) return false;
+  return undefined;
 }
 
-function modernVerified(properties: readonly DataProperty[]): boolean {
+function modernVerified(properties: readonly DataProperty[]): boolean | undefined {
   const verification = propertyValue(properties, "verification");
   if (verification === undefined || verification === null || verification === "") {
-    return false;
+    return undefined;
   }
   if (!isObject(verification) || Array.isArray(verification)) {
     throw malformedProfile();
   }
-  return optionalBoolean(ownDataProperties(verification), "verified") ?? false;
+  return optionalBoolean(ownDataProperties(verification), "verified");
 }
 
 function optionalBoolean(

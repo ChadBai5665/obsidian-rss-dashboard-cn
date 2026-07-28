@@ -26,6 +26,158 @@ const LEGACY_FIXTURE = {
 };
 
 describe("parseXProfile", () => {
+  it("reconciles matching legacy and core candidates from one response object", () => {
+    expect(parseXProfile({
+      result: {
+        rest_id: "123",
+        legacy: {
+          screen_name: "OpenAI",
+          name: "OpenAI",
+          profile_image_url_https:
+            "https://pbs.twimg.com/profile_images/example.jpg",
+          description: "Research and deployment company",
+          verified: true,
+        },
+        core: { screen_name: "openai", name: "OpenAI" },
+        avatar: {
+          image_url: "https://pbs.twimg.com/profile_images/example.jpg",
+        },
+        profile_bio: { description: "Research and deployment company" },
+        verification: { verified: true },
+      },
+    })).toEqual({
+      restId: "123",
+      handle: "openai",
+      displayName: "OpenAI",
+      avatarUrl: "https://pbs.twimg.com/profile_images/example.jpg",
+      description: "Research and deployment company",
+      verified: true,
+    });
+  });
+
+  it("reconciles distinct duplicate candidates across harmless wrappers", () => {
+    const first = {
+      rest_id: "123",
+      legacy: { screen_name: "openai", name: "OpenAI" },
+    };
+    const second = {
+      rest_id: "123",
+      legacy: { screen_name: "OPENAI", name: "OpenAI" },
+    };
+    const third = {
+      rest_id: "123",
+      legacy: { screen_name: "OpenAI", name: "OpenAI" },
+    };
+
+    expect(parseXProfile({
+      data: first,
+      result: second,
+      nested: { wrapper: { result: third } },
+    })).toEqual({
+      restId: "123",
+      handle: "openai",
+      displayName: "OpenAI",
+      verified: false,
+    });
+  });
+
+  it("merges an absent optional avatar with an equivalent candidate that provides it", () => {
+    expect(parseXProfile({
+      data: {
+        rest_id: "123",
+        legacy: { screen_name: "openai", name: "OpenAI" },
+      },
+      result: {
+        rest_id: "123",
+        core: { screen_name: "OPENAI", name: "OpenAI" },
+        avatar: {
+          image_url: "https://pbs.twimg.com/profile_images/example.jpg",
+        },
+      },
+    })).toEqual({
+      restId: "123",
+      handle: "openai",
+      displayName: "OpenAI",
+      avatarUrl: "https://pbs.twimg.com/profile_images/example.jpg",
+      verified: false,
+    });
+  });
+
+  it("merges an absent verified status with an explicit verified status", () => {
+    expect(parseXProfile({
+      data: {
+        rest_id: "123",
+        legacy: { screen_name: "openai", name: "OpenAI" },
+      },
+      result: {
+        rest_id: "123",
+        core: { screen_name: "OPENAI", name: "OpenAI" },
+        verification: { verified: true },
+      },
+    })).toEqual({
+      restId: "123",
+      handle: "openai",
+      displayName: "OpenAI",
+      verified: true,
+    });
+  });
+
+  it.each([
+    ["rest IDs", {
+      data: { rest_id: "123", legacy: { screen_name: "openai", name: "OpenAI" } },
+      result: { rest_id: "456", core: { screen_name: "openai", name: "OpenAI" } },
+    }],
+    ["handles", {
+      data: { rest_id: "123", legacy: { screen_name: "openai", name: "OpenAI" } },
+      result: { rest_id: "123", core: { screen_name: "different", name: "OpenAI" } },
+    }],
+    ["display names", {
+      data: { rest_id: "123", legacy: { screen_name: "openai", name: "OpenAI" } },
+      result: { rest_id: "123", core: { screen_name: "OPENAI", name: "Different" } },
+    }],
+    ["avatars", {
+      data: {
+        rest_id: "123",
+        legacy: {
+          screen_name: "openai",
+          name: "OpenAI",
+          profile_image_url_https: "https://pbs.twimg.com/profile_images/one.jpg",
+        },
+      },
+      result: {
+        rest_id: "123",
+        core: { screen_name: "OPENAI", name: "OpenAI" },
+        avatar: { image_url: "https://pbs.twimg.com/profile_images/two.jpg" },
+      },
+    }],
+    ["descriptions", {
+      data: {
+        rest_id: "123",
+        legacy: { screen_name: "openai", name: "OpenAI", description: "First" },
+      },
+      result: {
+        rest_id: "123",
+        core: { screen_name: "OPENAI", name: "OpenAI" },
+        profile_bio: { description: "Second" },
+      },
+    }],
+    ["verified states", {
+      data: {
+        rest_id: "123",
+        legacy: { screen_name: "openai", name: "OpenAI", verified: false },
+      },
+      result: {
+        rest_id: "123",
+        core: { screen_name: "OPENAI", name: "OpenAI" },
+        verification: { verified: true },
+      },
+    }],
+  ])("rejects conflicting equivalent candidates with different %s", (_name, payload) => {
+    expect(() => parseXProfile(payload)).toThrow(
+      expect.objectContaining({ code: "malformed-profile" }),
+    );
+  });
+
   it("projects the allowlisted legacy profile fields without retaining provider data", () => {
     const result = parseXProfile(LEGACY_FIXTURE);
 
@@ -189,6 +341,13 @@ describe("parseXProfile", () => {
     expect(() => parseXProfile(payload)).toThrow(
       expect.objectContaining({ code: "not-found" }),
     );
+  });
+
+  it("rejects a usable candidate that accompanies an authoritative not-found marker", () => {
+    expect(() => parseXProfile({
+      data: LEGACY_FIXTURE.data.user.result,
+      errors: [{ code: "user-not-found" }],
+    })).toThrow(expect.objectContaining({ code: "malformed-profile" }));
   });
 
   it("rejects accessors without invoking them", () => {
