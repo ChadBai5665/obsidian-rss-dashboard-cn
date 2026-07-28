@@ -382,8 +382,8 @@ export class YouTubeTranscriptService {
         assertNotAborted(request.signal);
         this.assertCurrentGeneration(key, operationGeneration);
         const path = await transaction.write(content);
-        this.assertCurrentGeneration(key, operationGeneration);
         await this.repairMetadata(request.itemId, path);
+        this.assertCurrentGeneration(key, operationGeneration);
       },
     );
     return { status: "ready", source: "fresh", content };

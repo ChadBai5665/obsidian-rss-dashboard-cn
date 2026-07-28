@@ -16,6 +16,13 @@ const ITEM_ID = "f".repeat(64);
 class InMemoryAdapter {
   readonly files = new Map<string, string>();
   private readonly directories = new Set<string>();
+  private renameBarrier:
+    | {
+        predicate: (from: string, to: string) => boolean;
+        reached: () => void;
+        wait: Promise<void>;
+      }
+    | null = null;
 
   async exists(path: string): Promise<boolean> {
     return this.files.has(path) || this.directories.has(path);
@@ -44,6 +51,12 @@ class InMemoryAdapter {
   }
 
   async rename(from: string, to: string): Promise<void> {
+    const barrier = this.renameBarrier;
+    if (barrier?.predicate(from, to)) {
+      this.renameBarrier = null;
+      barrier.reached();
+      await barrier.wait;
+    }
     const value = this.files.get(from);
     if (value === undefined) throw new Error(`Missing rename source: ${from}`);
     if (this.files.has(to)) throw new Error(`Destination exists: ${to}`);
@@ -69,6 +82,21 @@ class InMemoryAdapter {
           !candidate.slice(prefix.length).includes("/"),
       ),
     };
+  }
+
+  pauseNextRenameWhere(
+    predicate: (from: string, to: string) => boolean,
+  ): { reached: Promise<void>; release: () => void } {
+    let markReached!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      markReached = resolve;
+    });
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.renameBarrier = { predicate, reached: markReached, wait };
+    return { reached, release };
   }
 }
 
@@ -338,5 +366,137 @@ describe("ExplicitContentCoordinator", () => {
     } finally {
       updateSpy.mockRestore();
     }
+  });
+
+  it("syncs transcript metadata after an atomic write commits despite a newer intent", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+    const contentRepository = new ContentRepository(
+      vault,
+      DATA_ROOT,
+      () => new Date("2026-07-28T06:00:00.000Z"),
+    );
+    const collectionRepository = new CollectionRepository(
+      vault,
+      DATA_ROOT,
+      () => new Date("2026-07-28T06:00:00.000Z"),
+    );
+    await collectionRepository.upsertDaily(
+      [
+        {
+          schemaVersion: 1,
+          id: ITEM_ID,
+          sourceType: "youtube",
+          sourceId: "youtube-source",
+          sourceName: "YouTube source",
+          sourceBucket: "Videos",
+          title: "Transcript race",
+          fetchedAt: "2026-07-28T06:00:00.000Z",
+          firstSeenAt: "2026-07-28T06:00:00.000Z",
+          lastSeenAt: "2026-07-28T06:00:00.000Z",
+          observationType: "new",
+          topics: [],
+          contentBasis: "feed",
+          read: false,
+          starred: false,
+          saved: false,
+          collectionStatus: "collected",
+        },
+      ],
+      "2026-07-28",
+    );
+    const chineseTracks: YouTubeCaptionTrack[] = [
+      {
+        ...CAPTION_TRACK,
+        languageCode: "zh-CN",
+        languageName: "中文 A",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=zh-CN",
+      },
+      {
+        ...CAPTION_TRACK,
+        languageCode: "zh-TW",
+        languageName: "中文 B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=zh-TW",
+      },
+    ];
+    let listCalls = 0;
+    const innerTube: TranscriptProvider = {
+      async listTracks() {
+        listCalls += 1;
+        return listCalls === 1 ? [CAPTION_TRACK] : chineseTracks;
+      },
+      async fetchTrack(selectedTrack) {
+        return {
+          videoId: "dQw4w9WgXcQ",
+          languageCode: selectedTrack.languageCode,
+          languageName: selectedTrack.languageName,
+          isGenerated: selectedTrack.isGenerated,
+          provider: selectedTrack.source,
+          text: `Durable ${selectedTrack.languageName} transcript.`,
+        };
+      },
+    };
+    const service = new YouTubeTranscriptService({
+      innerTube,
+      ytDlp: {
+        ...innerTube,
+        async isAvailable() {
+          return false;
+        },
+      },
+      contentRepository,
+      metadataRepository: collectionRepository,
+      clock: () => new Date("2026-07-28T06:00:00.000Z"),
+    });
+    const contentPath = `${DATA_ROOT}/content/${ITEM_ID}.md`;
+    const barrier = adapter.pauseNextRenameWhere(
+      (from, to) => from.includes(".tmp-") && to === contentPath,
+    );
+    const older = service.get({
+      itemId: ITEM_ID,
+      videoId: "dQw4w9WgXcQ",
+      refresh: true,
+      preferredLanguage: "en",
+    });
+    await barrier.reached;
+    const newer = await service.get({
+      itemId: ITEM_ID,
+      videoId: "dQw4w9WgXcQ",
+      refresh: true,
+      preferredLanguage: "zh",
+    });
+    if (newer.status !== "selection-required") throw new Error("expected choices");
+    barrier.release();
+
+    await expect(older).rejects.toMatchObject({
+      code: "temporarily-unavailable",
+    });
+    await expect(contentRepository.read(ITEM_ID)).resolves.toMatchObject({
+      contentBasis: "youtube-transcript",
+      languageName: "English",
+    });
+    await expect(collectionRepository.findById(ITEM_ID)).resolves.toMatchObject({
+      contentBasis: "youtube-transcript",
+      contentPath,
+    });
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: "dQw4w9WgXcQ",
+        trackId: newer.tracks[0].id,
+      }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { languageName: "中文 A" },
+    });
+    await expect(contentRepository.read(ITEM_ID)).resolves.toMatchObject({
+      contentBasis: "youtube-transcript",
+      languageName: "中文 A",
+    });
+    await expect(collectionRepository.findById(ITEM_ID)).resolves.toMatchObject({
+      contentBasis: "youtube-transcript",
+      contentPath,
+    });
   });
 });
