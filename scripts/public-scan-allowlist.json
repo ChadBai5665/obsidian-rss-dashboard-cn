@@ -1769,5 +1769,19 @@
     "line": 608,
     "fingerprint": "sha256:3ad61a61421243ac98acdd08e6c1e806ad0470b48aaee46eedfd6974250f25b2",
     "reason": "Negative security test supplies an intentionally credential-bearing URL that must be rejected."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/yt-dlp-transcript-provider.test.ts",
+    "rule": "home-path",
+    "line": 120,
+    "fingerprint": "sha256:6ea0573378c99047996fc724c02c8b20bfc0ddde8f3f301e1fa7d5bf7c1f36f6",
+    "reason": "Executable-discovery test uses a synthetic user-local yt-dlp path; it is not a real user path."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/yt-dlp-transcript-provider.test.ts",
+    "rule": "credential-url",
+    "line": 325,
+    "fingerprint": "sha256:340a421166ea2894a0338beea6bdbe4b9670137bc86851cd09b889f25600f9a1",
+    "reason": "Negative security test uses a synthetic credential-bearing caption URL that must be rejected."
   }
 ]

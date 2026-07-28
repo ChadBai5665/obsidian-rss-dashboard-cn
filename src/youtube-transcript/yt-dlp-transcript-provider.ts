@@ -60,6 +60,7 @@ const EXECUTION_TIMEOUT_MS = 20_000;
 const MAX_PROCESS_BUFFER_BYTES = 2_000_000;
 const MAX_METADATA_BYTES = 2_000_000;
 const MAX_CAPTION_RESPONSE_BYTES = 2_000_000;
+const CAPTION_ACTION_DEADLINE_MS = 20_000;
 const MAX_REDIRECTS = 3;
 const MAX_URL_CHARACTERS = 8_192;
 const MAX_LANGUAGES_PER_KIND = 100;
@@ -102,6 +103,78 @@ const defaultRunner: ExecutableRunner = Object.freeze({
     });
   },
 });
+
+class CaptionActionDeadline {
+  readonly signal: AbortSignal;
+
+  private readonly controller = new AbortController();
+  private readonly callerSignal: AbortSignal | undefined;
+  private readonly onCallerAbort: () => void;
+  private timeoutId: number | undefined;
+  private cause: "caller" | "timeout" | undefined;
+  private disposed = false;
+
+  constructor(callerSignal: AbortSignal | undefined) {
+    this.signal = this.controller.signal;
+    this.callerSignal = callerSignal;
+    this.onCallerAbort = () => this.abort("caller");
+
+    if (callerSignal?.aborted) {
+      this.abort("caller");
+      return;
+    }
+    callerSignal?.addEventListener("abort", this.onCallerAbort, {
+      once: true,
+    });
+    this.timeoutId = window.setTimeout(() => {
+      this.timeoutId = undefined;
+      this.abort("timeout");
+    }, CAPTION_ACTION_DEADLINE_MS);
+  }
+
+  assertActive(): void {
+    if (this.signal.aborted) throw stableError(this.failureCode());
+  }
+
+  async run<T>(operation: () => Promise<T>): Promise<T> {
+    this.assertActive();
+    const pendingOperation = Promise.resolve().then(operation);
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(stableError(this.failureCode()));
+      this.signal.addEventListener("abort", onAbort, { once: true });
+      if (this.signal.aborted) onAbort();
+    });
+    try {
+      return await Promise.race([pendingOperation, aborted]);
+    } finally {
+      if (onAbort) this.signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  failureCode(): "aborted" | "timeout" {
+    if (this.callerSignal?.aborted || this.cause === "caller") {
+      return "aborted";
+    }
+    return "timeout";
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    if (this.timeoutId !== undefined) {
+      window.clearTimeout(this.timeoutId);
+      this.timeoutId = undefined;
+    }
+    this.callerSignal?.removeEventListener("abort", this.onCallerAbort);
+  }
+
+  private abort(cause: "caller" | "timeout"): void {
+    if (this.cause !== undefined) return;
+    this.cause = cause;
+    this.controller.abort();
+  }
+}
 
 export class YtDlpTranscriptProvider {
   private readonly runner: ExecutableRunner;
@@ -171,8 +244,9 @@ export class YtDlpTranscriptProvider {
     track: YouTubeCaptionTrack,
     signal?: AbortSignal,
   ): Promise<YouTubeTranscript> {
+    const deadline = new CaptionActionDeadline(signal);
     try {
-      assertNotAborted(signal);
+      deadline.assertActive();
       const registered = this.registeredTracks.get(track);
       if (!registered || track !== registered.snapshot) {
         throw stableError("temporarily-unavailable");
@@ -182,9 +256,9 @@ export class YtDlpTranscriptProvider {
         this.transport,
         registered.snapshot.url,
         registered.videoId,
-        signal,
+        deadline,
       );
-      assertNotAborted(signal);
+      deadline.assertActive();
       const text = parseTranscriptPayload(
         registered.snapshot.format,
         response.text,
@@ -198,7 +272,9 @@ export class YtDlpTranscriptProvider {
         text,
       };
     } catch (error) {
-      throw normalizeFailure(error, signal);
+      throw normalizeCaptionFailure(error, deadline);
+    } finally {
+      deadline.dispose();
     }
   }
 
@@ -356,9 +432,9 @@ async function requestCaptionWithRedirects(
   transport: TranscriptHttpTransport,
   initialUrl: string,
   videoId: string,
-  signal: AbortSignal | undefined,
+  deadline: CaptionActionDeadline,
 ): Promise<TranscriptHttpResponse> {
-  let request = captionRequest(initialUrl, videoId, signal);
+  let request = captionRequest(initialUrl, videoId, deadline.signal);
   validateCaptionUrl(request.url);
 
   for (
@@ -366,9 +442,11 @@ async function requestCaptionWithRedirects(
     redirectCount <= MAX_REDIRECTS;
     redirectCount += 1
   ) {
-    assertNotAborted(signal);
-    const response = validateResponse(await transport(request));
-    assertNotAborted(signal);
+    deadline.assertActive();
+    const response = validateResponse(
+      await deadline.run(() => transport(request)),
+    );
+    deadline.assertActive();
     if (isRedirect(response.status)) {
       if (redirectCount === MAX_REDIRECTS || response.status === 303) {
         throw stableError("temporarily-unavailable");
@@ -388,7 +466,7 @@ async function requestCaptionWithRedirects(
       request = captionRequest(
         redirected.href,
         videoId,
-        signal,
+        deadline.signal,
         redirected.origin === priorOrigin
           ? request.headers
           : crossOriginCaptionHeaders(request.headers),
@@ -623,4 +701,14 @@ function normalizeFailure(
     }
   }
   return stableError("temporarily-unavailable");
+}
+
+function normalizeCaptionFailure(
+  error: unknown,
+  deadline: CaptionActionDeadline,
+): YouTubeTranscriptError {
+  if (deadline.signal.aborted) {
+    return stableError(deadline.failureCode());
+  }
+  return normalizeFailure(error, undefined);
 }

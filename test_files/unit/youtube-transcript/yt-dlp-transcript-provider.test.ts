@@ -1,6 +1,9 @@
 import { constants } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import type { TranscriptHttpTransport } from "../../../src/youtube-transcript/innertube-transcript-provider";
+import type {
+  TranscriptHttpResponse,
+  TranscriptHttpTransport,
+} from "../../../src/youtube-transcript/innertube-transcript-provider";
 import {
   YtDlpTranscriptProvider,
   type ExecutableRunner,
@@ -470,5 +473,157 @@ describe("YtDlpTranscriptProvider", () => {
     });
     expect(transport.mock.calls[1]?.[0].headers).not.toHaveProperty("Origin");
     expect(transport.mock.calls[1]?.[0].headers).not.toHaveProperty("Referer");
+  });
+
+  it("times out the whole caption action when transport ignores its signal", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = vi.fn(
+        () => new Promise<TranscriptHttpResponse>(() => undefined),
+      );
+      const provider = providerWith(
+        runnerReturning(metadata()),
+        accessOnly("/safe/bin/yt-dlp"),
+        transport,
+      );
+      const [track] = await provider.listTracks(VIDEO_ID);
+      const pending = provider.fetchTrack(track);
+      const rejection = expect(pending).rejects.toMatchObject({
+        code: "timeout",
+        message: "timeout",
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      await rejection;
+      expect(transport).toHaveBeenCalledOnce();
+      expect(transport.mock.calls[0]?.[0].signal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns caller abort immediately and cleans the deadline resources", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const addSpy = vi.spyOn(controller.signal, "addEventListener");
+      const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+      const transport = vi.fn(
+        () => new Promise<TranscriptHttpResponse>(() => undefined),
+      );
+      const provider = providerWith(
+        runnerReturning(metadata()),
+        accessOnly("/safe/bin/yt-dlp"),
+        transport,
+      );
+      const [track] = await provider.listTracks(VIDEO_ID);
+      const pending = provider.fetchTrack(track, controller.signal);
+      const rejection = expect(pending).rejects.toMatchObject({
+        code: "aborted",
+        message: "aborted",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(transport).toHaveBeenCalledOnce();
+
+      controller.abort();
+
+      await rejection;
+      expect(transport.mock.calls[0]?.[0].signal?.aborted).toBe(true);
+      expect(removeSpy).toHaveBeenCalledTimes(addSpy.mock.calls.length);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not follow a caption redirect after caller abort", async () => {
+    const controller = new AbortController();
+    const transport = vi.fn<TranscriptHttpTransport>(async () => {
+      controller.abort();
+      return {
+        status: 302,
+        headers: {
+          location: `https://rr1---sn-safe.googlevideo.com/api/timedtext?v=${VIDEO_ID}&lang=en`,
+        },
+        text: "",
+      };
+    });
+    const provider = providerWith(
+      runnerReturning(metadata()),
+      accessOnly("/safe/bin/yt-dlp"),
+      transport,
+    );
+    const [track] = await provider.listTracks(VIDEO_ID);
+
+    await expect(
+      provider.fetchTrack(track, controller.signal),
+    ).rejects.toMatchObject({ code: "aborted", message: "aborted" });
+    expect(transport).toHaveBeenCalledOnce();
+  });
+
+  it("cleans the deadline timer and caller listener after caption success", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const addSpy = vi.spyOn(controller.signal, "addEventListener");
+      const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+      const transport = transportReturning(
+        JSON.stringify({
+          events: [{ tStartMs: 0, segs: [{ utf8: "Complete" }] }],
+        }),
+      );
+      const provider = providerWith(
+        runnerReturning(metadata()),
+        accessOnly("/safe/bin/yt-dlp"),
+        transport,
+      );
+      const [track] = await provider.listTracks(VIDEO_ID);
+
+      await expect(
+        provider.fetchTrack(track, controller.signal),
+      ).resolves.toMatchObject({ text: "Complete" });
+
+      expect(removeSpy).toHaveBeenCalledTimes(addSpy.mock.calls.length);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("handles a late transport rejection after the caption deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = vi.fn(
+        () =>
+          new Promise<TranscriptHttpResponse>((_resolve, reject) => {
+            window.setTimeout(
+              () => reject(new Error("late private transport failure")),
+              30_000,
+            );
+          }),
+      );
+      const provider = providerWith(
+        runnerReturning(metadata()),
+        accessOnly("/safe/bin/yt-dlp"),
+        transport,
+      );
+      const [track] = await provider.listTracks(VIDEO_ID);
+      const pending = provider.fetchTrack(track);
+      const rejection = expect(pending).rejects.toMatchObject({
+        code: "timeout",
+        message: "timeout",
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      await rejection;
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(transport).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
