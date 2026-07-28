@@ -106,7 +106,7 @@ interface RegisteredChoice {
 }
 
 interface PendingChoiceSet {
-  token: symbol;
+  generation: symbol;
   expiresAt: number;
   expirationTimer: number;
   choices: Map<string, RegisteredChoice>;
@@ -167,8 +167,9 @@ export class YouTubeTranscriptService {
     this.cleanupExpiredChoices();
     const resourceKey = requestKey(request.itemId, request.videoId);
     const workKey = requestWorkKey(resourceKey, request);
-    const operationToken = Symbol(workKey);
-    const pendingTokenAtStart = this.pendingChoices.get(resourceKey)?.token;
+    const operationGeneration = Symbol(workKey);
+    const pendingGenerationAtStart =
+      this.pendingChoices.get(resourceKey)?.generation;
     return await this.subscribeToWork(
       workKey,
       request.signal,
@@ -176,15 +177,15 @@ export class YouTubeTranscriptService {
         await this.getInternal(
           { ...request, signal: sharedSignal },
           resourceKey,
-          operationToken,
+          operationGeneration,
         ),
       () => {
         const pending = this.pendingChoices.get(resourceKey);
         if (
           request.trackId !== undefined
             ? pending?.choices.has(request.trackId)
-            : pendingTokenAtStart !== undefined &&
-              pending?.token === pendingTokenAtStart
+            : pendingGenerationAtStart !== undefined &&
+              pending?.generation === pendingGenerationAtStart
         ) {
           this.deletePendingChoiceSet(resourceKey);
         }
@@ -195,9 +196,9 @@ export class YouTubeTranscriptService {
   private async getInternal(
     request: YouTubeTranscriptRequest,
     key: string,
-    operationToken: symbol,
+    operationGeneration: symbol,
   ): Promise<YouTubeTranscriptServiceResult> {
-    let ownedChoiceToken = operationToken;
+    let ownedChoiceGeneration = operationGeneration;
     try {
       assertNotAborted(request.signal);
 
@@ -230,12 +231,12 @@ export class YouTubeTranscriptService {
       }
 
       if (registered && pendingSet) {
-        ownedChoiceToken = pendingSet.token;
+        ownedChoiceGeneration = pendingSet.generation;
         try {
           return await this.fetchAndPersist(
             request,
             key,
-            pendingSet.token,
+            pendingSet.generation,
             registered.provider,
             registered.track,
           );
@@ -250,7 +251,7 @@ export class YouTubeTranscriptService {
           return await this.runFallback(
             request,
             key,
-            pendingSet.token,
+            pendingSet.generation,
             primary.code,
           );
         }
@@ -261,7 +262,7 @@ export class YouTubeTranscriptService {
         return await this.runProvider(
           request,
           key,
-          operationToken,
+          operationGeneration,
           this.options.innerTube,
           "innertube",
         );
@@ -271,12 +272,12 @@ export class YouTubeTranscriptService {
         return await this.runFallback(
           request,
           key,
-          operationToken,
+          operationGeneration,
           primary.code,
         );
       }
     } catch (error) {
-      this.clearPendingChoices(key, ownedChoiceToken);
+      this.clearPendingChoices(key, ownedChoiceGeneration);
       throw error;
     }
   }
@@ -284,7 +285,7 @@ export class YouTubeTranscriptService {
   private async runProvider(
     request: YouTubeTranscriptRequest,
     key: string,
-    operationToken: symbol,
+    operationGeneration: symbol,
     provider: TranscriptProvider,
     expectedSource: "innertube" | "yt-dlp",
   ): Promise<YouTubeTranscriptServiceResult> {
@@ -300,12 +301,12 @@ export class YouTubeTranscriptService {
 
     const selected = selectTracks(eligible, request.preferredLanguage);
     if (selected.length > 1) {
-      return this.registerChoices(key, operationToken, provider, selected);
+      return this.registerChoices(key, operationGeneration, provider, selected);
     }
     return await this.fetchAndPersist(
       request,
       key,
-      operationToken,
+      operationGeneration,
       provider,
       selected[0],
     );
@@ -314,7 +315,7 @@ export class YouTubeTranscriptService {
   private async fetchAndPersist(
     request: YouTubeTranscriptRequest,
     key: string,
-    operationToken: symbol,
+    operationGeneration: symbol,
     provider: TranscriptProvider,
     selectedTrack: YouTubeCaptionTrack,
   ): Promise<YouTubeTranscriptServiceResult> {
@@ -332,14 +333,14 @@ export class YouTubeTranscriptService {
         await this.repairMetadata(request.itemId, path);
       },
     );
-    this.clearPendingChoices(key, operationToken);
+    this.clearPendingChoices(key, operationGeneration);
     return { status: "ready", source: "fresh", content };
   }
 
   private async runFallback(
     request: YouTubeTranscriptRequest,
     key: string,
-    operationToken: symbol,
+    operationGeneration: symbol,
     primaryCode: YouTubeTranscriptErrorCode,
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(request.signal);
@@ -364,7 +365,7 @@ export class YouTubeTranscriptService {
       return await this.runProvider(
         request,
         key,
-        operationToken,
+        operationGeneration,
         this.options.ytDlp,
         "yt-dlp",
       );
@@ -375,7 +376,7 @@ export class YouTubeTranscriptService {
 
   private registerChoices(
     key: string,
-    operationToken: symbol,
+    operationGeneration: symbol,
     provider: TranscriptProvider,
     tracks: readonly YouTubeCaptionTrack[],
   ): YouTubeTranscriptServiceResult {
@@ -393,10 +394,10 @@ export class YouTubeTranscriptService {
     });
     this.deletePendingChoiceSet(key);
     const expirationTimer = window.setTimeout(() => {
-      this.clearPendingChoices(key, operationToken);
+      this.clearPendingChoices(key, operationGeneration);
     }, this.choiceTtlMs);
     this.pendingChoices.set(key, {
-      token: operationToken,
+      generation: operationGeneration,
       expiresAt: this.options.clock().getTime() + this.choiceTtlMs,
       expirationTimer,
       choices: registered,
@@ -517,13 +518,18 @@ export class YouTubeTranscriptService {
     }
   }
 
-  private clearPendingChoices(key: string, token: symbol): void {
-    this.deletePendingChoiceSet(key, token);
+  private clearPendingChoices(key: string, generation: symbol): void {
+    this.deletePendingChoiceSet(key, generation);
   }
 
-  private deletePendingChoiceSet(key: string, token?: symbol): void {
+  private deletePendingChoiceSet(key: string, generation?: symbol): void {
     const pending = this.pendingChoices.get(key);
-    if (!pending || (token !== undefined && pending.token !== token)) return;
+    if (
+      !pending ||
+      (generation !== undefined && pending.generation !== generation)
+    ) {
+      return;
+    }
     window.clearTimeout(pending.expirationTimer);
     this.pendingChoices.delete(key);
   }
