@@ -3,7 +3,7 @@ import {
   type AiAnalysisResult,
 } from "./analysis-result";
 
-const PROVENANCE_NOTE =
+export const ANALYSIS_MARKDOWN_PROVENANCE_NOTE =
   "> [!info] AI 生成内容：来源项目、模型和内容依据记录在上方属性中，请结合原始来源核验。";
 
 /** Render a safe, deterministic YAML frontmatter projection plus unmodified model text. */
@@ -19,6 +19,7 @@ export function renderAnalysisMarkdown(value: unknown): string {
       : `sourceUrl: ${yamlString(result.sourceUrl)}`,
     `operation: ${yamlString(result.operation)}`,
     `createdAt: ${yamlString(result.createdAt)}`,
+    `connectionId: ${yamlString(result.connectionId)}`,
     `connectionName: ${yamlString(result.connectionName)}`,
     `providerKind: ${yamlString(result.providerKind)}`,
     `model: ${yamlString(result.model)}`,
@@ -27,7 +28,7 @@ export function renderAnalysisMarkdown(value: unknown): string {
     `inputTruncated: ${String(result.inputTruncated)}`,
     "---",
     "",
-    PROVENANCE_NOTE,
+    ANALYSIS_MARKDOWN_PROVENANCE_NOTE,
     "",
   ];
   const prefix = lines.join("\n");

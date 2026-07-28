@@ -46,6 +46,7 @@ describe("renderAnalysisMarkdown", () => {
       sourceUrl: "https://example.com/research?id=42",
       operation: "deep-analysis",
       createdAt: "2026-07-21T12:34:56.789Z",
+      connectionId: CONNECTION_ID,
       connectionName: "Kimi research",
       providerKind: "kimi",
       model: "moonshot-v1-128k",

@@ -28,6 +28,8 @@ class InMemoryAdapter {
   injectForeignBeforeContentClaim = false;
   injectForeignBeforeClaimSourceProcess = false;
   replaceWriteOnFirstExists = false;
+  replaceReadOnList = false;
+  readonly unreadable = new Set<string>();
   injectedForeignPath?: string;
   private copyBarrier?: () => Promise<void>;
 
@@ -76,6 +78,7 @@ class InMemoryAdapter {
 
   async read(path: string): Promise<string> {
     this.operations.push(`read:${path}`);
+    if (this.unreadable.has(path)) throw new Error(`Unreadable file: ${path}`);
     const content = this.files.get(path);
     if (content === undefined) throw new Error(`Missing file: ${path}`);
     return content;
@@ -146,6 +149,13 @@ class InMemoryAdapter {
   }
 
   async list(path: string): Promise<{ files: string[]; folders: string[] }> {
+    this.operations.push(`list:${path}`);
+    if (this.replaceReadOnList) {
+      this.replaceReadOnList = false;
+      this.read = async () => {
+        throw new Error("Late replacement must not be called");
+      };
+    }
     const prefix = `${path}/`;
     return {
       files: [...this.files.keys()].filter(
@@ -210,6 +220,191 @@ function temporaryFiles(adapter: InMemoryAdapter): string[] {
 }
 
 describe("AnalysisRepository", () => {
+  it("lists only valid immutable artifacts in the exact item directory and filters by operation", async () => {
+    const adapter = new InMemoryAdapter();
+    const target = repository(adapter);
+    const directory = `${DATA_ROOT}/analysis/${ITEM_ID}`;
+    const older = analysis({
+      createdAt: "2026-07-21T12:34:55.789Z",
+      text: "older",
+    });
+    const newerSummary = analysis({
+      id: "69a10bdf-6d36-4388-bbe4-219da9c3ea46",
+      createdAt: "2026-07-21T12:34:57.789Z",
+      text: "newer-summary",
+    });
+    const newerAnalysis = analysis({
+      id: "c56a4180-65aa-42ec-a945-5fd21dec0538",
+      operation: "deep-analysis",
+      createdAt: "2026-07-21T12:34:57.789Z",
+      text: "newer-analysis",
+    });
+    const olderPath = `${directory}/20260721T123455789-summary.md`;
+    const summaryPath = `${directory}/20260721T123457789-summary.md`;
+    const analysisPath = `${directory}/20260721T123457789-deep-analysis.md`;
+    adapter.files.set(olderPath, renderAnalysisMarkdown(older));
+    adapter.files.set(summaryPath, renderAnalysisMarkdown(newerSummary));
+    adapter.files.set(analysisPath, renderAnalysisMarkdown(newerAnalysis));
+    adapter.files.set(`${directory}/invalid.md`, "not an artifact");
+    adapter.files.set(`${directory}/ignored.md.tmp-claim`, "temporary");
+    adapter.files.set(`${directory}/ignored.md.backup`, "backup");
+    adapter.files.set(`${directory}/ignored.txt`, "other");
+    adapter.files.set(
+      `${DATA_ROOT}/analysis/${"c".repeat(64)}/20260721T123459789-summary.md`,
+      renderAnalysisMarkdown(analysis({
+        itemId: "c".repeat(64),
+        createdAt: "2026-07-21T12:34:59.789Z",
+      })),
+    );
+    adapter.unreadable.add(olderPath);
+
+    const listed = await target.list(ITEM_ID);
+    const summaries = await target.list(ITEM_ID, "summary");
+    const latest = await target.latest(ITEM_ID, "deep-analysis");
+
+    expect(listed.map(({ path }) => path)).toEqual([analysisPath, summaryPath]);
+    expect(summaries.map(({ path }) => path)).toEqual([summaryPath]);
+    expect(latest?.path).toBe(analysisPath);
+    expect(Object.isFrozen(listed)).toBe(true);
+    expect(Object.isFrozen(listed[0])).toBe(true);
+    expect(Object.isFrozen(listed[0]?.record)).toBe(true);
+    expect(adapter.operations.filter((entry) => entry.startsWith("list:")))
+      .toEqual([
+        `list:${directory}`,
+        `list:${directory}`,
+        `list:${directory}`,
+      ]);
+    expect(adapter.operations.some((entry) => entry.includes(`${"c".repeat(64)}/`)))
+      .toBe(false);
+    expect(adapter.operations.some((entry) =>
+      /write:|remove:|rename:|copy:|process:|mkdir:/u.test(entry))).toBe(false);
+  });
+
+  it("reads only exact repository artifact paths and returns null for invalid, unreadable, or mismatched files", async () => {
+    const adapter = new InMemoryAdapter();
+    const target = repository(adapter);
+    adapter.files.set(BASE_PATH, renderAnalysisMarkdown(analysis()));
+
+    await expect(target.read(BASE_PATH)).resolves.toEqual({
+      path: BASE_PATH,
+      record: analysis(),
+    });
+    const readsAfterValid = adapter.operations.length;
+    for (const path of [
+      `/${BASE_PATH}`,
+      `C:/${BASE_PATH}`,
+      BASE_PATH.replace("/", "\\"),
+      `${BASE_PATH}\0`,
+      `${DATA_ROOT}/analysis/${ITEM_ID}/../${BASE_PATH.split("/").pop()}`,
+      `Notes/${BASE_PATH.split("/").pop()}`,
+    ]) {
+      await expect(target.read(path)).resolves.toBeNull();
+    }
+    expect(adapter.operations).toHaveLength(readsAfterValid);
+
+    adapter.files.set(BASE_PATH, renderAnalysisMarkdown(analysis({
+      itemId: "c".repeat(64),
+    })));
+    await expect(target.read(BASE_PATH)).resolves.toBeNull();
+    adapter.unreadable.add(BASE_PATH);
+    await expect(target.read(BASE_PATH)).resolves.toBeNull();
+  });
+
+  it("bounds enumeration and reads while skipping oversized artifacts independently", async () => {
+    const adapter = new InMemoryAdapter();
+    const target = repository(adapter);
+    const directory = `${DATA_ROOT}/analysis/${ITEM_ID}`;
+    for (let index = 0; index < 300; index += 1) {
+      const collision = index === 0 ? "" : `-${index + 1}`;
+      adapter.files.set(
+        `${directory}/20260721T123456789-summary${collision}.md`,
+        renderAnalysisMarkdown(analysis({
+          id: index % 2 === 0
+            ? RESULT_ID
+            : "69a10bdf-6d36-4388-bbe4-219da9c3ea46",
+          text: `result-${index}`,
+        })),
+      );
+    }
+    adapter.files.set(
+      `${directory}/20260721T123457789-summary.md`,
+      "x".repeat(1_100_001),
+    );
+
+    const listed = await target.list(ITEM_ID);
+
+    expect(listed.length).toBeLessThanOrEqual(256);
+    expect(adapter.operations.filter((entry) => entry.startsWith("read:")).length)
+      .toBeLessThanOrEqual(256);
+    expect(listed.every(({ record }) => record.text.startsWith("result-"))).toBe(true);
+  });
+
+  it("binds read-only adapter methods before enumeration and does not require write capabilities", async () => {
+    const adapter = new InMemoryAdapter();
+    adapter.files.set(BASE_PATH, renderAnalysisMarkdown(analysis()));
+    const readOnly: {
+      read(path: string): Promise<string>;
+      list(path: string): Promise<{ files: string[]; folders: string[] }>;
+    } = {
+      read: adapter.read.bind(adapter),
+      list: async (path) => {
+        const listing = await adapter.list(path);
+        readOnly.read = async () => {
+          throw new Error("Late replacement must not be called");
+        };
+        return listing;
+      },
+    };
+    const target = repository(adapter, { adapter: readOnly } as unknown as Vault);
+
+    await expect(target.list(ITEM_ID)).resolves.toHaveLength(1);
+    await expect(target.read(BASE_PATH)).resolves.toBeNull();
+  });
+
+  it("fails closed on hostile list results without invoking accessors", async () => {
+    const adapter = new InMemoryAdapter();
+    let getterCalled = false;
+    const hostile = {
+      read: adapter.read.bind(adapter),
+      list: async () => {
+        const result = {};
+        Object.defineProperty(result, "files", {
+          get() {
+            getterCalled = true;
+            return [BASE_PATH];
+          },
+        });
+        return result;
+      },
+    };
+    const target = repository(adapter, { adapter: hostile } as unknown as Vault);
+
+    await expect(target.list(ITEM_ID)).resolves.toEqual([]);
+    expect(getterCalled).toBe(false);
+    expect(adapter.operations).toEqual([]);
+  });
+
+  it("rejects hostile query inputs before adapter access", async () => {
+    const adapter = new InMemoryAdapter();
+    let coercionCalled = false;
+    const hostile = {};
+    Object.defineProperty(hostile, "toString", {
+      get() {
+        coercionCalled = true;
+        return () => ITEM_ID;
+      },
+    });
+    const target = repository(adapter);
+
+    await expect(target.list(hostile as unknown as string)).resolves.toEqual([]);
+    await expect(target.latest(
+      hostile as unknown as string,
+      "summary",
+    )).resolves.toBeNull();
+    expect(coercionCalled).toBe(false);
+    expect(adapter.operations).toEqual([]);
+  });
+
   it("binds a valid saved artifact to the expected result before running a consumer", async () => {
     const adapter = new InMemoryAdapter();
     const target = repository(adapter);
