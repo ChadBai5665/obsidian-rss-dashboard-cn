@@ -125,6 +125,10 @@ import {
 } from "./src/security/stable-own-data-json";
 import { normalizeFeedItem } from "./src/collection/feed-normalizer";
 import { ContentRepository } from "./src/collection/content-repository";
+import { InnerTubeTranscriptProvider } from "./src/youtube-transcript/innertube-transcript-provider";
+import { YtDlpTranscriptProvider } from "./src/youtube-transcript/yt-dlp-transcript-provider";
+import { YouTubeTranscriptService } from "./src/youtube-transcript/youtube-transcript-service";
+import { createRuntimeTranscriptHttpTransport } from "./src/youtube-transcript/runtime-transcript-transport";
 import { AiContentSelector } from "./src/ai/content/ai-content-selector";
 import { AiOperationService } from "./src/ai/ai-operation-service";
 import { AnalysisRepository } from "./src/ai/analysis-repository";
@@ -816,6 +820,13 @@ export default class RssDashboardPlugin extends Plugin {
   private collectionService:
     | { dataRoot: string; dailyIndexFolder: string; service: CollectionService }
     | null = null;
+  private youtubeTranscriptRuntime:
+    | {
+        dataRoot: string;
+        service: YouTubeTranscriptService;
+        contentRepository: ContentRepository;
+      }
+    | null = null;
   private sourceRegistry:
     | { signature: string; registry: SourceRegistry }
     | null = null;
@@ -1274,6 +1285,47 @@ export default class RssDashboardPlugin extends Plugin {
     });
     this.collectionService = { dataRoot, dailyIndexFolder, service };
     return service;
+  }
+
+  private getYouTubeTranscriptRuntime(): {
+    service: YouTubeTranscriptService;
+    contentRepository: ContentRepository;
+  } {
+    const dataRoot = this.settings.collection.dataFolder.trim();
+    if (this.youtubeTranscriptRuntime?.dataRoot === dataRoot) {
+      return this.youtubeTranscriptRuntime;
+    }
+
+    const contentRepository = new ContentRepository(
+      this.app.vault,
+      dataRoot,
+      () => new Date(),
+    );
+    const metadataRepository = new CollectionRepository(
+      this.app.vault,
+      dataRoot,
+      () => new Date(),
+    );
+    const transport = createRuntimeTranscriptHttpTransport();
+    const innerTube = new InnerTubeTranscriptProvider(transport);
+    const ytDlp = Platform.isDesktopApp
+      ? new YtDlpTranscriptProvider(transport)
+      : {
+          isAvailable: async () => false,
+          listTracks: async () => [],
+          fetchTrack: async () => {
+            throw new Error("Desktop transcript fallback unavailable");
+          },
+        };
+    const service = new YouTubeTranscriptService({
+      innerTube,
+      ytDlp,
+      contentRepository,
+      metadataRepository,
+      clock: () => new Date(),
+    });
+    this.youtubeTranscriptRuntime = { dataRoot, service, contentRepository };
+    return this.youtubeTranscriptRuntime;
   }
 
   private getSubscriptionService(): SubscriptionService {
@@ -1981,8 +2033,9 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.registerView(
         RSS_READER_VIEW_TYPE,
-        (leaf) =>
-          new ReaderView(
+        (leaf) => {
+          const youtubeTranscript = this.getYouTubeTranscriptRuntime();
+          return new ReaderView(
             leaf,
             this.settings,
             this.articleSaver,
@@ -2009,8 +2062,10 @@ export default class RssDashboardPlugin extends Plugin {
               },
               onAiOperation: (item, operation) =>
                 this.openAiOperationForItem(item, operation),
+              youtubeTranscript,
             },
-          ),
+          );
+        },
       );
 
       this.registerView(

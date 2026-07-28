@@ -6,6 +6,11 @@ import {
   type RssDashboardSettings,
 } from "../../../src/types/types";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
+import type { YouTubeTranscriptCachedItemContent } from "../../../src/collection/content-repository";
+import type {
+  YouTubeTranscriptRequest,
+  YouTubeTranscriptServiceResult,
+} from "../../../src/youtube-transcript/youtube-transcript-service";
 
 const fetchFullArticleContentWithOutcomeMock = vi.hoisted(() => vi.fn());
 const contentReadMock = vi.hoisted(() => vi.fn());
@@ -29,6 +34,18 @@ vi.mock("../../../src/collection/content-repository", () => ({
     write = contentWriteMock;
     remove = contentRemoveMock;
     pathFor = (itemId: string) => `.rss-dashboard-data/content/${itemId}.md`;
+    transaction = async (
+      itemId: string,
+      operation: (transaction: {
+        read(): Promise<unknown>;
+        write(content: unknown): Promise<string>;
+        pathFor(): string;
+      }) => Promise<unknown>,
+    ) => await operation({
+      read: async () => await contentReadMock(itemId),
+      write: async (content) => await contentWriteMock(content),
+      pathFor: () => `.rss-dashboard-data/content/${itemId}.md`,
+    });
   },
 }));
 
@@ -68,7 +85,9 @@ function makeItem(overrides: Partial<FeedItem> = {}): FeedItem {
   };
 }
 
-function createReader(): ReaderView {
+function createReader(
+  options?: ConstructorParameters<typeof ReaderView>[5],
+): ReaderView {
   const app = {
     workspace: {
       getLeavesOfType: vi.fn().mockReturnValue([]),
@@ -92,10 +111,42 @@ function createReader(): ReaderView {
     { saveArticle: vi.fn(), checkSavedFileExists: vi.fn(() => true) } as never,
     vi.fn(),
     vi.fn(),
+    options,
   );
   (reader as unknown as { contentEl: HTMLElement }).contentEl =
     document.createElement("div");
   return reader;
+}
+
+function transcript(
+  itemId: string,
+  overrides: Partial<YouTubeTranscriptCachedItemContent> = {},
+): YouTubeTranscriptCachedItemContent {
+  return {
+    schemaVersion: 2,
+    contentBasis: "youtube-transcript",
+    itemId,
+    sourceUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    fetchedAt: "2026-07-28T06:00:00.000Z",
+    videoId: "dQw4w9WgXcQ",
+    languageCode: "en",
+    languageName: "English",
+    isGenerated: false,
+    provider: "innertube",
+    text: "A cached transcript restored locally.",
+    ...overrides,
+  };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
 }
 
 describe("ReaderView explicit full-text content cache", () => {
@@ -279,6 +330,175 @@ describe("ReaderView explicit full-text content cache", () => {
     expect(fetchFullArticleContentWithOutcomeMock).not.toHaveBeenCalled();
     expect(contentReadMock).not.toHaveBeenCalled();
     expect(contentWriteMock).not.toHaveBeenCalled();
+  });
+
+  it("restores a YouTube transcript cache inline without provider or process work", async () => {
+    const serviceGet = vi.fn();
+    const cacheRead = vi.fn(async (itemId: string) => transcript(itemId));
+    const reader = createReader({
+      youtubeTranscript: {
+        service: { get: serviceGet },
+        contentRepository: { read: cacheRead },
+      },
+    });
+    const item = makeItem({
+      title: "Transcript video",
+      link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      mediaType: "video",
+      videoId: "dQw4w9WgXcQ",
+    });
+    await reader.onOpen();
+
+    await reader.displayItem(item);
+
+    const reading = (reader as unknown as { readingContainer: HTMLElement })
+      .readingContainer;
+    const panel = reading.querySelector<HTMLElement>(
+      ".rss-youtube-transcript-panel",
+    );
+    const description = reading.querySelector<HTMLElement>(
+      ".rss-video-description",
+    );
+    expect(cacheRead).toHaveBeenCalledTimes(1);
+    expect(serviceGet).not.toHaveBeenCalled();
+    expect(panel?.getAttribute("data-state")).toBe("cached");
+    expect(panel?.textContent).toContain("A cached transcript restored locally.");
+    expect(
+      panel && description
+        ? panel.compareDocumentPosition(description) & Node.DOCUMENT_POSITION_FOLLOWING
+        : 0,
+    ).not.toBe(0);
+    expect(document.body.querySelector(".modal")).toBeNull();
+  });
+
+  it("fetches only after the inline action and updates the visible content basis", async () => {
+    const pending = deferred<YouTubeTranscriptServiceResult>();
+    const requests: YouTubeTranscriptRequest[] = [];
+    const serviceGet = vi.fn(async (request: YouTubeTranscriptRequest) => {
+      requests.push(request);
+      return await pending.promise;
+    });
+    const reader = createReader({
+      youtubeTranscript: {
+        service: { get: serviceGet },
+        contentRepository: { read: vi.fn(async () => null) },
+      },
+    });
+    const item = makeItem({
+      title: "Transcript video",
+      link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      mediaType: "video",
+      videoId: "dQw4w9WgXcQ",
+    });
+    await reader.onOpen();
+    await reader.displayItem(item);
+
+    const reading = (reader as unknown as { readingContainer: HTMLElement })
+      .readingContainer;
+    expect(serviceGet).not.toHaveBeenCalled();
+    reading
+      .querySelector<HTMLButtonElement>(".rss-youtube-transcript-fetch")
+      ?.click();
+    expect(
+      reading
+        .querySelector<HTMLElement>(".rss-youtube-transcript-panel")
+        ?.getAttribute("data-state"),
+    ).toBe("checking");
+
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    pending.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript(requests[0].itemId, { text: "Fresh transcript." }),
+    });
+    await vi.waitFor(() =>
+      expect(reading.textContent).toContain("Fresh transcript."),
+    );
+
+    expect(requests[0]?.refresh).toBe(false);
+    expect(reading.textContent).toContain("YouTube transcript");
+  });
+
+  it("uses refresh only for the explicit re-fetch action", async () => {
+    const serviceGet = vi.fn(async (request: YouTubeTranscriptRequest) => ({
+      status: "ready" as const,
+      source: "fresh" as const,
+      content: transcript(request.itemId, { text: "Refreshed transcript." }),
+    }));
+    const reader = createReader({
+      youtubeTranscript: {
+        service: { get: serviceGet },
+        contentRepository: {
+          read: vi.fn(async (itemId: string) => transcript(itemId)),
+        },
+      },
+    });
+    await reader.onOpen();
+    await reader.displayItem(makeItem({
+      link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      mediaType: "video",
+      videoId: "dQw4w9WgXcQ",
+    }));
+
+    const reading = (reader as unknown as { readingContainer: HTMLElement })
+      .readingContainer;
+    reading
+      .querySelector<HTMLButtonElement>(".rss-youtube-transcript-refresh")
+      ?.click();
+    await vi.waitFor(() => expect(serviceGet).toHaveBeenCalledTimes(1));
+
+    expect(serviceGet).toHaveBeenCalledWith(
+      expect.objectContaining({ refresh: true, signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("aborts an active transcript action when switching items and ignores its late result", async () => {
+    const pending = deferred<YouTubeTranscriptServiceResult>();
+    let firstRequest:
+      | { itemId: string; signal?: AbortSignal }
+      | undefined;
+    const serviceGet = vi.fn(async (request: YouTubeTranscriptRequest) => {
+      firstRequest = request;
+      return await pending.promise;
+    });
+    const reader = createReader({
+      youtubeTranscript: {
+        service: { get: serviceGet },
+        contentRepository: { read: vi.fn(async () => null) },
+      },
+    });
+    await reader.onOpen();
+    await reader.displayItem(makeItem({
+      guid: "first-video",
+      link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      mediaType: "video",
+      videoId: "dQw4w9WgXcQ",
+    }));
+    const reading = (reader as unknown as { readingContainer: HTMLElement })
+      .readingContainer;
+    reading
+      .querySelector<HTMLButtonElement>(".rss-youtube-transcript-fetch")
+      ?.click();
+    await vi.waitFor(() => expect(firstRequest).toBeDefined());
+
+    await reader.displayItem(makeItem({
+      title: "New video",
+      guid: "second-video",
+      link: "https://www.youtube.com/watch?v=M7lc1UVf-VE",
+      mediaType: "video",
+      videoId: "M7lc1UVf-VE",
+    }));
+    expect(firstRequest?.signal?.aborted).toBe(true);
+
+    pending.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript(firstRequest!.itemId, { text: "Stale transcript." }),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(reading.textContent).toContain("New video");
+    expect(reading.textContent).not.toContain("Stale transcript.");
   });
 
   it("retains a durable cache when collection metadata repair fails", async () => {
