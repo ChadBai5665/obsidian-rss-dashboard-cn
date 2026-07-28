@@ -101,6 +101,14 @@ export class YouTubeTranscriptServiceError extends Error {
   }
 }
 
+/** Internal marker that distinguishes provider/tool failures from local state. */
+class TranscriptProviderStageError extends Error {
+  constructor(readonly failure: YouTubeTranscriptServiceError) {
+    super(failure.message);
+    this.name = "TranscriptProviderStageError";
+  }
+}
+
 interface RegisteredChoice {
   provider: TranscriptProvider;
   track: YouTubeCaptionTrack;
@@ -141,6 +149,9 @@ const FALLBACK_ELIGIBLE = new Set<YouTubeTranscriptErrorCode>([
   "temporarily-unavailable",
   "timeout",
 ]);
+const NO_CAPTIONS_PRESERVABLE_FALLBACK_FAILURES = new Set<
+  YouTubeTranscriptServiceErrorCode
+>(["no-captions", "temporarily-unavailable", "timeout"]);
 const DEFAULT_CHOICE_TTL_MS = 2 * 60 * 1_000;
 const DEFAULT_MAX_PENDING_CHOICE_SETS = 20;
 const MAX_CHOICE_TTL_MS = 10 * 60 * 1_000;
@@ -312,7 +323,8 @@ export class YouTubeTranscriptService {
             throw new YouTubeTranscriptServiceError("temporarily-unavailable");
           }
           if (
-            selectionAtStart.registered.fallbackPrimaryCode === "no-captions"
+            selectionAtStart.registered.fallbackPrimaryCode === "no-captions" &&
+            preservesNoCaptions(error)
           ) {
             throw new YouTubeTranscriptServiceError("no-captions");
           }
@@ -391,14 +403,21 @@ export class YouTubeTranscriptService {
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
-    const tracks = await provider.listTracks(request.videoId, request.signal);
+    let tracks: YouTubeCaptionTrack[];
+    try {
+      tracks = await provider.listTracks(request.videoId, request.signal);
+    } catch (error) {
+      throw providerStageError(error);
+    }
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
     const eligible = tracks.filter(
       (candidate) => candidate.source === expectedSource,
     );
     if (eligible.length === 0) {
-      throw new YouTubeTranscriptServiceError("no-captions");
+      throw providerStageError(
+        new YouTubeTranscriptServiceError("no-captions"),
+      );
     }
 
     const selected = selectTracks(eligible, request.preferredLanguage);
@@ -428,13 +447,24 @@ export class YouTubeTranscriptService {
     selectedTrack: YouTubeCaptionTrack,
   ): Promise<YouTubeTranscriptServiceResult> {
     this.assertCurrentGeneration(key, operationGeneration);
-    const transcript = await provider.fetchTrack(
-      selectedTrack,
-      request.signal,
-    );
+    let transcript: YouTubeTranscript;
+    try {
+      transcript = await provider.fetchTrack(selectedTrack, request.signal);
+    } catch (error) {
+      throw providerStageError(error);
+    }
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
-    const content = createCachedTranscript(request, transcript, this.options.clock);
+    try {
+      assertProviderTranscript(request, transcript);
+    } catch (error) {
+      throw providerStageError(error);
+    }
+    const content = createCachedTranscript(
+      request,
+      transcript,
+      this.options.clock,
+    );
     await this.options.contentRepository.transaction(
       request.itemId,
       async (transaction) => {
@@ -497,16 +527,17 @@ export class YouTubeTranscriptService {
         primaryCode,
       );
     } catch (error) {
+      const failure = normalizeProviderError(error);
       if (request.signal?.aborted || this.disposed) {
         throw new YouTubeTranscriptServiceError("aborted");
       }
       if (this.currentGenerations.get(key) !== operationGeneration) {
         throw new YouTubeTranscriptServiceError("temporarily-unavailable");
       }
-      if (preserveNoCaptions) {
+      if (preserveNoCaptions && preservesNoCaptions(error)) {
         throw new YouTubeTranscriptServiceError("no-captions");
       }
-      throw normalizeProviderError(error);
+      throw failure;
     }
   }
 
@@ -765,22 +796,12 @@ function createCachedTranscript(
   transcript: YouTubeTranscript,
   clock: () => Date,
 ): YouTubeTranscriptCachedItemContent {
-  if (
-    transcript.videoId !== request.videoId ||
-    !LANGUAGE_CODE.test(transcript.languageCode) ||
-    typeof transcript.languageName !== "string" ||
-    !transcript.languageName.trim() ||
-    transcript.languageName.length > 200 ||
-    hasUnsafeControl(transcript.languageName) ||
-    typeof transcript.isGenerated !== "boolean" ||
-    (transcript.provider !== "innertube" &&
-      transcript.provider !== "yt-dlp") ||
-    typeof transcript.text !== "string" ||
-    !transcript.text.trim()
-  ) {
+  let fetchedAt: string;
+  try {
+    fetchedAt = clock().toISOString();
+  } catch {
     throw new YouTubeTranscriptServiceError("temporarily-unavailable");
   }
-  const fetchedAt = clock().toISOString();
   if (Number.isNaN(Date.parse(fetchedAt))) {
     throw new YouTubeTranscriptServiceError("temporarily-unavailable");
   }
@@ -797,6 +818,27 @@ function createCachedTranscript(
     provider: transcript.provider,
     text: transcript.text,
   };
+}
+
+function assertProviderTranscript(
+  request: YouTubeTranscriptRequest,
+  transcript: YouTubeTranscript,
+): void {
+  if (
+    transcript.videoId !== request.videoId ||
+    !LANGUAGE_CODE.test(transcript.languageCode) ||
+    typeof transcript.languageName !== "string" ||
+    !transcript.languageName.trim() ||
+    transcript.languageName.length > 200 ||
+    hasUnsafeControl(transcript.languageName) ||
+    typeof transcript.isGenerated !== "boolean" ||
+    (transcript.provider !== "innertube" &&
+      transcript.provider !== "yt-dlp") ||
+    typeof transcript.text !== "string" ||
+    !transcript.text.trim()
+  ) {
+    throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+  }
 }
 
 function isMatchingTranscriptCache(
@@ -818,11 +860,24 @@ function isMatchingTranscriptCache(
 }
 
 function normalizeProviderError(error: unknown): YouTubeTranscriptServiceError {
+  if (error instanceof TranscriptProviderStageError) return error.failure;
   if (error instanceof YouTubeTranscriptServiceError) return error;
   if (error instanceof YouTubeTranscriptError) {
     return new YouTubeTranscriptServiceError(error.code);
   }
   return new YouTubeTranscriptServiceError("temporarily-unavailable");
+}
+
+function providerStageError(error: unknown): TranscriptProviderStageError {
+  if (error instanceof TranscriptProviderStageError) return error;
+  return new TranscriptProviderStageError(normalizeProviderError(error));
+}
+
+function preservesNoCaptions(error: unknown): boolean {
+  return (
+    error instanceof TranscriptProviderStageError &&
+    NO_CAPTIONS_PRESERVABLE_FALLBACK_FAILURES.has(error.failure.code)
+  );
 }
 
 function isFallbackEligible(

@@ -111,10 +111,14 @@ describe("public release documentation", () => {
     expect(readme).toContain("Python");
     expect(readme).toContain("Bun");
     expect(readme).toContain("字幕 SaaS");
-    expect(readme).toMatch(/明确.*没有.*公开字幕.*回退.*无字幕/su);
-    expect(troubleshooting).toMatch(
-      /明确.*没有.*公开字幕.*回退.*失败.*无字幕/su,
+    expect(readme).toMatch(
+      /明确.*没有.*公开字幕.*可选工具或字幕提供方.*失败.*无字幕/su,
     );
+    expect(readme).toMatch(/本地保存失败.*不会.*无字幕/su);
+    expect(troubleshooting).toMatch(
+      /明确.*没有.*公开字幕.*可选工具或字幕提供方.*失败.*无字幕/su,
+    );
+    expect(troubleshooting).toMatch(/本地保存失败.*不会.*无字幕/su);
     expect(troubleshooting).toMatch(
       /显示“需要登录”.*不会读取.*Cookie.*系统默认浏览器/su,
     );

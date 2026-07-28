@@ -174,6 +174,12 @@ class FakeContentRepository implements TranscriptCacheRepository {
   }
 }
 
+class FailingWriteContentRepository extends FakeContentRepository {
+  override async write(_value: CachedItemContent): Promise<string> {
+    throw new Error("local content write failed");
+  }
+}
+
 class FakeMetadataRepository implements TranscriptMetadataRepository {
   readonly updates: Array<{
     id: string;
@@ -504,6 +510,50 @@ describe("YouTubeTranscriptService", () => {
     },
   );
 
+  it("does not report no-captions after a valid fallback transcript fails local persistence", async () => {
+    const fallbackTrack = track({ source: "yt-dlp" });
+    const ytDlp = new FakeOptionalProvider(true, [fallbackTrack]);
+    const content = new FailingWriteContentRepository();
+    const { service } = createService({
+      innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+      ytDlp,
+      content,
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(ytDlp.availabilityChecks).toBe(1);
+    expect(ytDlp.listCalls).toBe(1);
+    expect(ytDlp.fetchCalls).toBe(1);
+  });
+
+  it.each([
+    "login-required",
+    "video-unavailable",
+    "invalid-video-id",
+    "aborted",
+  ] as const)(
+    "propagates explicit fallback %s after primary no-captions",
+    async (code) => {
+      const ytDlp = new FakeOptionalProvider(
+        true,
+        new YouTubeTranscriptError(code),
+      );
+      const { service } = createService({
+        innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+        ytDlp,
+      });
+
+      await expect(
+        service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+      ).rejects.toMatchObject({ code });
+      expect(ytDlp.availabilityChecks).toBe(1);
+      expect(ytDlp.listCalls).toBe(1);
+      expect(ytDlp.fetchCalls).toBe(0);
+    },
+  );
+
   it("preserves authoritative no-captions when a selected fallback track later fails", async () => {
     const first = track({
       source: "yt-dlp",
@@ -545,6 +595,94 @@ describe("YouTubeTranscriptService", () => {
     expect(ytDlp.listCalls).toBe(1);
     expect(ytDlp.fetchCalls).toBe(1);
   });
+
+  it("does not report no-captions when a selected fallback transcript fails local persistence", async () => {
+    const first = track({
+      source: "yt-dlp",
+      languageName: "English",
+      url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en&track=1",
+    });
+    const second = track({
+      source: "yt-dlp",
+      languageName: "English (United States)",
+      url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-US&track=2",
+    });
+    const ytDlp = new FakeOptionalProvider(true, [first, second]);
+    const content = new FailingWriteContentRepository();
+    const { service } = createService({
+      innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+      ytDlp,
+      content,
+    });
+
+    const choice = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choice.status !== "selection-required") throw new Error("expected choices");
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        trackId: choice.tracks[0].id,
+      }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(ytDlp.availabilityChecks).toBe(1);
+    expect(ytDlp.listCalls).toBe(1);
+    expect(ytDlp.fetchCalls).toBe(1);
+  });
+
+  it.each([
+    "login-required",
+    "video-unavailable",
+    "invalid-video-id",
+    "aborted",
+  ] as const)(
+    "propagates an explicit selected fallback %s state",
+    async (code) => {
+      const first = track({
+        source: "yt-dlp",
+        languageName: "English",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en&track=1",
+      });
+      const second = track({
+        source: "yt-dlp",
+        languageName: "English (United States)",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-US&track=2",
+      });
+      const ytDlp = new FakeOptionalProvider(
+        true,
+        [first, second],
+        new YouTubeTranscriptError(code),
+      );
+      const { service } = createService({
+        innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+        ytDlp,
+      });
+
+      const choice = await service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+      });
+      if (choice.status !== "selection-required") {
+        throw new Error("expected choices");
+      }
+
+      await expect(
+        service.get({
+          itemId: ITEM_ID,
+          videoId: VIDEO_ID,
+          refresh: true,
+          trackId: choice.tracks[0].id,
+        }),
+      ).rejects.toMatchObject({ code });
+      expect(ytDlp.fetchCalls).toBe(1);
+    },
+  );
 
   it("reserves fallback-unavailable for a temporary primary failure with no local tool", async () => {
     const ytDlp = new FakeOptionalProvider(false);
