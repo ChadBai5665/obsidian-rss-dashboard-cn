@@ -180,6 +180,19 @@ class FailingWriteContentRepository extends FakeContentRepository {
   }
 }
 
+class FailingTransactionContentRepository extends FakeContentRepository {
+  override async transaction<T>(
+    _itemId: string,
+    _operation: (transaction: {
+      read(): Promise<CachedItemContent | null>;
+      write(value: CachedItemContent): Promise<string>;
+      pathFor(): string;
+    }) => Promise<T>,
+  ): Promise<T> {
+    throw new Error("local content transaction failed");
+  }
+}
+
 class FakeMetadataRepository implements TranscriptMetadataRepository {
   readonly updates: Array<{
     id: string;
@@ -426,6 +439,154 @@ describe("YouTubeTranscriptService", () => {
       expect(ytDlp.availabilityChecks).toBe(1);
       expect(ytDlp.listCalls).toBe(1);
       expect(ytDlp.fetchCalls).toBe(1);
+    },
+  );
+
+  it.each([
+    {
+      name: "unknown list failure",
+      createProvider: (): TranscriptProvider => ({
+        async listTracks() {
+          throw new Error("unknown provider failure");
+        },
+        async fetchTrack(selectedTrack) {
+          return transcript(selectedTrack);
+        },
+      }),
+    },
+    {
+      name: "structurally invalid list response",
+      createProvider: (): TranscriptProvider => ({
+        async listTracks() {
+          return null as unknown as YouTubeCaptionTrack[];
+        },
+        async fetchTrack(selectedTrack) {
+          return transcript(selectedTrack);
+        },
+      }),
+    },
+    {
+      name: "temporary fetch failure",
+      createProvider: (): TranscriptProvider =>
+        new FakeProvider(
+          [track()],
+          new YouTubeTranscriptError("temporarily-unavailable"),
+        ),
+    },
+  ])(
+    "keeps provider-stage fallback for $name",
+    async ({ createProvider }) => {
+      const fallbackTrack = track({ source: "yt-dlp" });
+      const ytDlp = new FakeOptionalProvider(true, [fallbackTrack]);
+      const { service } = createService({
+        innerTube: createProvider(),
+        ytDlp,
+      });
+
+      await expect(
+        service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+      ).resolves.toMatchObject({
+        status: "ready",
+        content: { provider: "yt-dlp" },
+      });
+      expect(ytDlp.availabilityChecks).toBe(1);
+      expect(ytDlp.listCalls).toBe(1);
+      expect(ytDlp.fetchCalls).toBe(1);
+    },
+  );
+
+  it("does not fall back when the local clock fails after a valid InnerTube transcript", async () => {
+    let clockCalls = 0;
+    const clock = () => {
+      clockCalls += 1;
+      if (clockCalls === 2) throw new Error("local clock failed");
+      return new Date("2026-07-28T06:00:00.000Z");
+    };
+    const ytDlp = new FakeOptionalProvider(false);
+    const { service } = createService({ ytDlp, clock });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(ytDlp.availabilityChecks).toBe(0);
+    expect(ytDlp.listCalls).toBe(0);
+    expect(ytDlp.fetchCalls).toBe(0);
+  });
+
+  it("does not fall back when a valid InnerTube transcript cannot start its local transaction", async () => {
+    const ytDlp = new FakeOptionalProvider(false);
+    const content = new FailingTransactionContentRepository();
+    const { service } = createService({ ytDlp, content });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(ytDlp.availabilityChecks).toBe(0);
+    expect(ytDlp.listCalls).toBe(0);
+    expect(ytDlp.fetchCalls).toBe(0);
+  });
+
+  it("does not fall back when a valid InnerTube transcript fails its local write", async () => {
+    const ytDlp = new FakeOptionalProvider(false);
+    const content = new FailingWriteContentRepository();
+    const { service } = createService({ ytDlp, content });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(ytDlp.availabilityChecks).toBe(0);
+    expect(ytDlp.listCalls).toBe(0);
+    expect(ytDlp.fetchCalls).toBe(0);
+  });
+
+  it.each(["clock", "write"] as const)(
+    "does not fall back when a selected InnerTube transcript fails local %s work",
+    async (failure) => {
+      const first = track({ languageName: "English" });
+      const second = track({
+        languageName: "English (United States)",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-US",
+      });
+      let clockCalls = 0;
+      const clock = () => {
+        clockCalls += 1;
+        if (failure === "clock" && clockCalls === 4) {
+          throw new Error("local clock failed");
+        }
+        return new Date("2026-07-28T06:00:00.000Z");
+      };
+      const ytDlp = new FakeOptionalProvider(false);
+      const content =
+        failure === "write"
+          ? new FailingWriteContentRepository()
+          : new FakeContentRepository();
+      const { service } = createService({
+        innerTube: new FakeProvider([first, second]),
+        ytDlp,
+        content,
+        clock,
+      });
+
+      const choice = await service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+      });
+      if (choice.status !== "selection-required") {
+        throw new Error("expected choices");
+      }
+
+      await expect(
+        service.get({
+          itemId: ITEM_ID,
+          videoId: VIDEO_ID,
+          refresh: true,
+          trackId: choice.tracks[0].id,
+        }),
+      ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+      expect(ytDlp.availabilityChecks).toBe(0);
+      expect(ytDlp.listCalls).toBe(0);
+      expect(ytDlp.fetchCalls).toBe(0);
     },
   );
 

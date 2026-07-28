@@ -328,17 +328,16 @@ export class YouTubeTranscriptService {
           ) {
             throw new YouTubeTranscriptServiceError("no-captions");
           }
-          if (
-            selectionAtStart.registered.track.source !== "innertube" ||
-            !isFallbackEligible(primary.code)
-          ) {
+          if (selectionAtStart.registered.track.source !== "innertube") {
             throw primary;
           }
+          const fallbackCode = providerStageFallbackCode(error);
+          if (fallbackCode === undefined) throw primary;
           const result = await this.runFallback(
             request,
             key,
             operationGeneration,
-            primary.code,
+            fallbackCode,
           );
           if (result.status === "ready") {
             this.deletePendingChoiceSet(
@@ -372,12 +371,13 @@ export class YouTubeTranscriptService {
         if (this.currentGenerations.get(key) !== operationGeneration) {
           throw new YouTubeTranscriptServiceError("temporarily-unavailable");
         }
-        if (!isFallbackEligible(primary.code)) throw primary;
+        const fallbackCode = providerStageFallbackCode(error);
+        if (fallbackCode === undefined) throw primary;
         const result = await this.runFallback(
           request,
           key,
           operationGeneration,
-          primary.code,
+          fallbackCode,
         );
         if (result.status === "ready") {
           this.clearGeneration(key, operationGeneration);
@@ -411,16 +411,20 @@ export class YouTubeTranscriptService {
     }
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
-    const eligible = tracks.filter(
-      (candidate) => candidate.source === expectedSource,
-    );
-    if (eligible.length === 0) {
-      throw providerStageError(
-        new YouTubeTranscriptServiceError("no-captions"),
+    let selected: YouTubeCaptionTrack[];
+    try {
+      assertProviderTracks(tracks);
+      const eligible = tracks.filter(
+        (candidate) => candidate.source === expectedSource,
       );
+      if (eligible.length === 0) {
+        throw new YouTubeTranscriptServiceError("no-captions");
+      }
+      selected = selectTracks(eligible, request.preferredLanguage);
+    } catch (error) {
+      throw providerStageError(error);
     }
 
-    const selected = selectTracks(eligible, request.preferredLanguage);
     if (selected.length > 1) {
       return this.registerChoices(
         key,
@@ -880,12 +884,50 @@ function preservesNoCaptions(error: unknown): boolean {
   );
 }
 
+function providerStageFallbackCode(
+  error: unknown,
+): YouTubeTranscriptErrorCode | undefined {
+  if (!(error instanceof TranscriptProviderStageError)) return undefined;
+  return isFallbackEligible(error.failure.code)
+    ? error.failure.code
+    : undefined;
+}
+
 function isFallbackEligible(
   code: YouTubeTranscriptServiceErrorCode,
 ): code is YouTubeTranscriptErrorCode {
   return (
     code !== "fallback-unavailable" &&
     FALLBACK_ELIGIBLE.has(code)
+  );
+}
+
+function assertProviderTracks(
+  value: unknown,
+): asserts value is YouTubeCaptionTrack[] {
+  if (!Array.isArray(value) || !value.every(isValidProviderTrack)) {
+    throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+  }
+}
+
+function isValidProviderTrack(value: unknown): value is YouTubeCaptionTrack {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.languageCode === "string" &&
+    LANGUAGE_CODE.test(candidate.languageCode) &&
+    typeof candidate.languageName === "string" &&
+    Boolean(candidate.languageName.trim()) &&
+    candidate.languageName.length <= 200 &&
+    !hasUnsafeControl(candidate.languageName) &&
+    typeof candidate.isGenerated === "boolean" &&
+    (candidate.source === "innertube" || candidate.source === "yt-dlp") &&
+    typeof candidate.url === "string" &&
+    Boolean(candidate.url.trim()) &&
+    !hasUnsafeControl(candidate.url) &&
+    (candidate.format === "json3" ||
+      candidate.format === "srv3" ||
+      candidate.format === "vtt")
   );
 }
 
