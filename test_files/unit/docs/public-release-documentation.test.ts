@@ -200,7 +200,7 @@ describe("public release documentation", () => {
     );
   });
 
-  it("documents direct manual AI authorization, connection choice, and cached-content boundaries", () => {
+  it("documents direct manual AI authorization and separate selector/reader request boundaries", () => {
     const readmeDocument = read("README.md");
     const privacyDocument = read("docs/PRIVACY.zh-CN.md");
     const troubleshootingDocument = read("docs/TROUBLESHOOTING.zh-CN.md");
@@ -221,10 +221,35 @@ describe("public release documentation", () => {
       expect(document).toMatch(/重新生成.*当前.*连接/su);
       expect(document).toMatch(/流式.*最终答案/su);
       expect(document).toMatch(/不.*隐藏推理.*深度思考/su);
+    }
+
+    for (const document of [readme, privacy, troubleshooting]) {
       expect(document).toContain("fetchFullText=false");
-      expect(document).toMatch(/缓存.*全文.*YouTube 字幕/su);
-      expect(document).toMatch(/不会.*点击 AI.*抓取全文/su);
-      expect(document).toMatch(/先.*获取全文.*获取字幕.*再.*AI/su);
+      expect(document).toMatch(
+        /AI 内容选择器.*不会.*发起.*全文.*字幕.*获取/su,
+      );
+      expect(document).toMatch(
+        /选择器运行时.*已有.*缓存.*否则.*Feed.*标题.*简介/su,
+      );
+      expect(document).toMatch(/列表.*AI.*先.*内部阅读区/su);
+      expect(document).toMatch(
+        /普通网页文章.*内部阅读区.*独立.*读取缓存.*请求发布者页面/su,
+      );
+      expect(document).toMatch(
+        /列表.*AI.*间接.*阅读器.*网络请求/su,
+      );
+      expect(document).toMatch(
+        /先.*打开并阅读.*等待.*全文.*缓存.*再.*AI/su,
+      );
+      expect(document).toMatch(/YouTube.*先.*获取字幕.*再.*AI/su);
+      expect(document).toMatch(
+        /阅读器抓取.*仍在进行.*模型.*内容.*路径.*时机.*不同/su,
+      );
+      expect(document).toMatch(
+        /不能保证.*同一次 AI 请求.*缓存.*选择器运行前/su,
+      );
+      expect(document).not.toContain("“获取全文”");
+      expect(document).not.toContain("不会因为点击 AI 操作而抓取全文");
     }
 
     expect(troubleshooting).toMatch(
