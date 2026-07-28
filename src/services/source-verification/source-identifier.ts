@@ -63,6 +63,9 @@ export function normalizeXAccountInput(input: string): string {
     if (!X_HOSTS.has(url.hostname)) {
       throw sourceError("x-unsupported-host");
     }
+    if (url.search || url.hash) {
+      throw sourceError("x-not-profile");
+    }
 
     const path = pathSegments(url);
     if (path.length !== 1 || X_RESERVED_PATHS.has(path[0].toLowerCase())) {

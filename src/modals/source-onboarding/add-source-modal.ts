@@ -4,6 +4,7 @@ import type {
   VerifiedSubscriptionRequest,
 } from "../../services/subscription-service";
 import type { RssWebsiteVerification } from "../../services/source-verification/rss-website-discovery";
+import { normalizeXAccountInput } from "../../services/source-verification/source-identifier";
 import type { VerificationFailureCode } from "../../services/source-verification/verification-state";
 import { VerificationController } from "../../services/source-verification/verification-state";
 import type { YouTubeChannelVerification } from "../../services/source-verification/youtube-channel-resolver";
@@ -453,8 +454,9 @@ export class AddSourceModal extends Modal {
         if (value.hasEntries) this.verification.succeed(token, snapshot);
         else this.verification.warn(token, snapshot, "empty-feed");
       } else {
+        const normalizedInput = normalizeXAccountInput(input);
         const value = projectVerifiedXProfile(
-          await this.options.verifyX(input, this.lifecycle.signal),
+          await this.options.verifyX(normalizedInput, this.lifecycle.signal),
         );
         if (!this.isCurrent(epoch, token)) return;
         this.verification.succeed(token, Object.freeze({ kind, verification: value }));

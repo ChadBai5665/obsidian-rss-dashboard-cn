@@ -132,6 +132,69 @@ describe("AddSourceModal", () => {
     expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).not.toBeNull();
   });
 
+  it.each([
+    "OpenAI",
+    "@OpenAI",
+    "https://x.com/OpenAI",
+    "https://twitter.com/OpenAI",
+  ])("normalizes public X input before provider verification: %s", async (value) => {
+    const verified = {
+      profile: {
+        restId: "123",
+        handle: "openai",
+        displayName: "OpenAI",
+        verified: true,
+      },
+      proof: Object.freeze({}),
+    } as unknown as VerifiedXProfile;
+    const verifyX = vi.fn(async () => verified);
+    const modal = new AddSourceModal(obsidian.App.createMock(), options({
+      initialKind: "x-account",
+      verifyX,
+    }));
+    modal.open();
+
+    const input = modal.contentEl.querySelector(
+      ".rss-source-identity-input",
+    ) as HTMLInputElement;
+    input.value = value;
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(
+      ".rss-source-detect-button",
+    ) as HTMLButtonElement).click();
+    await flush();
+
+    expect(verifyX).toHaveBeenCalledWith("openai", expect.any(AbortSignal));
+    expect(modal.contentEl.dataset.stage).toBe("confirmed");
+  });
+
+  it.each([
+    "https://x.com/OpenAI/status/1",
+    "https://x.com/OpenAI?screen_name=Other",
+    "https://twitter.com/OpenAI#Other",
+  ])("rejects an X route or query that is not an unambiguous profile: %s", async (value) => {
+    const verifyX = vi.fn();
+    const modal = new AddSourceModal(obsidian.App.createMock(), options({
+      initialKind: "x-account",
+      verifyX,
+    }));
+    modal.open();
+
+    const input = modal.contentEl.querySelector(
+      ".rss-source-identity-input",
+    ) as HTMLInputElement;
+    input.value = value;
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(
+      ".rss-source-detect-button",
+    ) as HTMLButtonElement).click();
+    await flush();
+
+    expect(verifyX).not.toHaveBeenCalled();
+    expect(modal.contentEl.textContent).toContain("X 的账号");
+    expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).toBeNull();
+  });
+
   it("requires an explicit warning acceptance for an empty RSS feed", async () => {
     const verification: RssWebsiteVerification = Object.freeze({
       inputUrl: "https://example.com",

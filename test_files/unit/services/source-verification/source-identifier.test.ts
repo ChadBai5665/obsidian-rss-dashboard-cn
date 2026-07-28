@@ -26,11 +26,14 @@ describe("source identifier normalization", () => {
     expect(normalizeXAccountInput("OpenAI")).toBe("openai");
     expect(normalizeXAccountInput("@OpenAI")).toBe("openai");
     expect(normalizeXAccountInput("https://x.com/OpenAI")).toBe("openai");
+    expect(normalizeXAccountInput("https://twitter.com/OpenAI")).toBe("openai");
   });
 
   it.each([
     "https://x.com/OpenAI/status/1",
     "https://x.com/search?q=OpenAI",
+    "https://x.com/OpenAI?screen_name=Other",
+    "https://twitter.com/OpenAI#Other",
     "https://x.com/home",
     "@open-ai",
     "open ai",
