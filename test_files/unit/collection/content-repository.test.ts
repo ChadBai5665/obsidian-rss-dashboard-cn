@@ -328,4 +328,66 @@ describe("ContentRepository", () => {
 
     expect((await repository.read(ITEM_ID))?.text).toBe("Old transcript.");
   });
+
+  it.each([
+    ["transcript-first", "full-text"],
+    ["full-text-first", "youtube-transcript"],
+  ] as const)(
+    "serializes complete content-and-metadata transactions in %s order",
+    async (order, expectedBasis) => {
+      const adapter = new InMemoryAdapter();
+      const vault = { adapter } as unknown as Vault;
+      const transcriptRepository = createRepository(adapter, vault);
+      const fullTextRepository = createRepository(adapter, vault);
+      let metadataBasis: "full-text" | "youtube-transcript" | undefined;
+      let releaseFirst!: () => void;
+      let firstWrote!: () => void;
+      const firstWritten = new Promise<void>((resolve) => {
+        firstWrote = resolve;
+      });
+      const holdFirst = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+
+      const transcriptTransaction = () =>
+        transcriptRepository.transaction(ITEM_ID, async (transaction) => {
+          await transaction.write(
+            createTranscriptContent({ text: "Transaction transcript." }),
+          );
+          firstWrote();
+          if (order === "transcript-first") await holdFirst;
+          metadataBasis = "youtube-transcript";
+        });
+      const fullTextTransaction = () =>
+        fullTextRepository.transaction(ITEM_ID, async (transaction) => {
+          await transaction.write(
+            createContent({ text: "<p>Transaction full text.</p>" }),
+          );
+          firstWrote();
+          if (order === "full-text-first") await holdFirst;
+          metadataBasis = "full-text";
+        });
+
+      const first = order === "transcript-first"
+        ? transcriptTransaction()
+        : fullTextTransaction();
+      await firstWritten;
+      let secondFinished = false;
+      const second = (
+        order === "transcript-first"
+          ? fullTextTransaction()
+          : transcriptTransaction()
+      ).then(() => {
+        secondFinished = true;
+      });
+      await Promise.resolve();
+      expect(secondFinished).toBe(false);
+      releaseFirst();
+      await Promise.all([first, second]);
+
+      const stored = await transcriptRepository.read(ITEM_ID);
+      expect(stored?.contentBasis).toBe(expectedBasis);
+      expect(metadataBasis).toBe(expectedBasis);
+    },
+  );
 });

@@ -26,9 +26,16 @@ export interface OptionalTranscriptProvider extends TranscriptProvider {
 }
 
 export interface TranscriptCacheRepository {
-  read(itemId: string): Promise<CachedItemContent | null>;
+  transaction<T>(
+    itemId: string,
+    operation: (transaction: TranscriptCacheTransaction) => Promise<T>,
+  ): Promise<T>;
+}
+
+export interface TranscriptCacheTransaction {
+  read(): Promise<CachedItemContent | null>;
   write(content: CachedItemContent): Promise<string>;
-  pathFor(itemId: string): string;
+  pathFor(): string;
 }
 
 export interface TranscriptMetadataRepository {
@@ -45,6 +52,8 @@ export interface YouTubeTranscriptServiceOptions {
   contentRepository: TranscriptCacheRepository;
   metadataRepository: TranscriptMetadataRepository;
   clock: () => Date;
+  choiceTtlMs?: number;
+  maxPendingChoiceSets?: number;
 }
 
 export interface YouTubeTranscriptRequest {
@@ -96,6 +105,21 @@ interface RegisteredChoice {
   track: YouTubeCaptionTrack;
 }
 
+interface PendingChoiceSet {
+  token: symbol;
+  expiresAt: number;
+  expirationTimer: number;
+  choices: Map<string, RegisteredChoice>;
+}
+
+interface SharedWork {
+  controller: AbortController;
+  promise: Promise<YouTubeTranscriptServiceResult>;
+  subscribers: number;
+  settled: boolean;
+  onAllCancelled: () => void;
+}
+
 interface RankedTrack {
   track: YouTubeCaptionTrack;
   languageRank: number;
@@ -109,96 +133,154 @@ const FALLBACK_ELIGIBLE = new Set<YouTubeTranscriptErrorCode>([
   "temporarily-unavailable",
   "timeout",
 ]);
+const DEFAULT_CHOICE_TTL_MS = 2 * 60 * 1_000;
+const DEFAULT_MAX_PENDING_CHOICE_SETS = 20;
 
 export class YouTubeTranscriptService {
-  private readonly inFlight = new Map<
-    string,
-    Promise<YouTubeTranscriptServiceResult>
-  >();
-  private readonly pendingChoices = new Map<string, Map<string, RegisteredChoice>>();
+  private readonly inFlight = new Map<string, SharedWork>();
+  private readonly pendingChoices = new Map<string, PendingChoiceSet>();
+  private readonly choiceTtlMs: number;
+  private readonly maxPendingChoiceSets: number;
   private choiceSequence = 0;
 
-  constructor(private readonly options: YouTubeTranscriptServiceOptions) {}
+  constructor(private readonly options: YouTubeTranscriptServiceOptions) {
+    this.choiceTtlMs = positiveInteger(
+      options.choiceTtlMs,
+      DEFAULT_CHOICE_TTL_MS,
+      "choice TTL",
+    );
+    this.maxPendingChoiceSets = positiveInteger(
+      options.maxPendingChoiceSets,
+      DEFAULT_MAX_PENDING_CHOICE_SETS,
+      "pending choice capacity",
+    );
+  }
 
   async get(
     request: YouTubeTranscriptRequest,
   ): Promise<YouTubeTranscriptServiceResult> {
     assertRequest(request);
-    const key = requestKey(request.itemId, request.videoId);
-    const active = this.inFlight.get(key);
-    if (active) return await active;
-
-    const operation = this.getInternal(request, key);
-    this.inFlight.set(key, operation);
-    try {
-      return await operation;
-    } finally {
-      if (this.inFlight.get(key) === operation) this.inFlight.delete(key);
-    }
+    this.cleanupExpiredChoices();
+    const resourceKey = requestKey(request.itemId, request.videoId);
+    const workKey = requestWorkKey(resourceKey, request);
+    const operationToken = Symbol(workKey);
+    const pendingTokenAtStart = this.pendingChoices.get(resourceKey)?.token;
+    return await this.subscribeToWork(
+      workKey,
+      request.signal,
+      async (sharedSignal) =>
+        await this.getInternal(
+          { ...request, signal: sharedSignal },
+          resourceKey,
+          operationToken,
+        ),
+      () => {
+        const pending = this.pendingChoices.get(resourceKey);
+        if (
+          request.trackId !== undefined
+            ? pending?.choices.has(request.trackId)
+            : pendingTokenAtStart !== undefined &&
+              pending?.token === pendingTokenAtStart
+        ) {
+          this.deletePendingChoiceSet(resourceKey);
+        }
+      },
+    );
   }
 
   private async getInternal(
     request: YouTubeTranscriptRequest,
     key: string,
+    operationToken: symbol,
   ): Promise<YouTubeTranscriptServiceResult> {
-    assertNotAborted(request.signal);
+    let ownedChoiceToken = operationToken;
+    try {
+      assertNotAborted(request.signal);
 
-    if (!request.refresh && request.trackId === undefined) {
-      const cached = await this.options.contentRepository.read(request.itemId);
-      if (isMatchingTranscriptCache(cached, request)) {
-        await this.repairMetadata(
+      if (!request.refresh && request.trackId === undefined) {
+        const cachedResult = await this.options.contentRepository.transaction(
           request.itemId,
-          this.options.contentRepository.pathFor(request.itemId),
+          async (transaction) => {
+            assertNotAborted(request.signal);
+            const cached = await transaction.read();
+            assertNotAborted(request.signal);
+            if (!isMatchingTranscriptCache(cached, request)) return null;
+            await this.repairMetadata(request.itemId, transaction.pathFor());
+            return { status: "ready", source: "cache", content: cached } as const;
+          },
         );
-        return { status: "ready", source: "cache", content: cached };
+        if (cachedResult) {
+          this.deletePendingChoiceSet(key);
+          return cachedResult;
+        }
       }
-    }
 
-    const registered =
-      request.trackId === undefined
-        ? undefined
-        : this.pendingChoices.get(key)?.get(request.trackId);
-    if (request.trackId !== undefined && !registered) {
-      throw new YouTubeTranscriptServiceError("temporarily-unavailable");
-    }
+      const pendingSet =
+        request.trackId === undefined ? undefined : this.pendingChoices.get(key);
+      const registered =
+        request.trackId === undefined
+          ? undefined
+          : pendingSet?.choices.get(request.trackId);
+      if (request.trackId !== undefined && (!registered || !pendingSet)) {
+        throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+      }
 
-    if (registered) {
+      if (registered && pendingSet) {
+        ownedChoiceToken = pendingSet.token;
+        try {
+          return await this.fetchAndPersist(
+            request,
+            key,
+            pendingSet.token,
+            registered.provider,
+            registered.track,
+          );
+        } catch (error) {
+          const primary = normalizeProviderError(error);
+          if (
+            registered.track.source !== "innertube" ||
+            !isFallbackEligible(primary.code)
+          ) {
+            throw primary;
+          }
+          return await this.runFallback(
+            request,
+            key,
+            pendingSet.token,
+            primary.code,
+          );
+        }
+      }
+
+      this.deletePendingChoiceSet(key);
       try {
-        return await this.fetchAndPersist(
+        return await this.runProvider(
           request,
           key,
-          registered.provider,
-          registered.track,
+          operationToken,
+          this.options.innerTube,
+          "innertube",
         );
       } catch (error) {
         const primary = normalizeProviderError(error);
-        if (
-          registered.track.source !== "innertube" ||
-          !isFallbackEligible(primary.code)
-        ) {
-          throw primary;
-        }
-        return await this.runFallback(request, key, primary.code);
+        if (!isFallbackEligible(primary.code)) throw primary;
+        return await this.runFallback(
+          request,
+          key,
+          operationToken,
+          primary.code,
+        );
       }
-    }
-
-    try {
-      return await this.runProvider(
-        request,
-        key,
-        this.options.innerTube,
-        "innertube",
-      );
     } catch (error) {
-      const primary = normalizeProviderError(error);
-      if (!isFallbackEligible(primary.code)) throw primary;
-      return await this.runFallback(request, key, primary.code);
+      this.clearPendingChoices(key, ownedChoiceToken);
+      throw error;
     }
   }
 
   private async runProvider(
     request: YouTubeTranscriptRequest,
     key: string,
+    operationToken: symbol,
     provider: TranscriptProvider,
     expectedSource: "innertube" | "yt-dlp",
   ): Promise<YouTubeTranscriptServiceResult> {
@@ -214,11 +296,12 @@ export class YouTubeTranscriptService {
 
     const selected = selectTracks(eligible, request.preferredLanguage);
     if (selected.length > 1) {
-      return this.registerChoices(key, provider, selected);
+      return this.registerChoices(key, operationToken, provider, selected);
     }
     return await this.fetchAndPersist(
       request,
       key,
+      operationToken,
       provider,
       selected[0],
     );
@@ -227,6 +310,7 @@ export class YouTubeTranscriptService {
   private async fetchAndPersist(
     request: YouTubeTranscriptRequest,
     key: string,
+    operationToken: symbol,
     provider: TranscriptProvider,
     selectedTrack: YouTubeCaptionTrack,
   ): Promise<YouTubeTranscriptServiceResult> {
@@ -236,15 +320,22 @@ export class YouTubeTranscriptService {
     );
     assertNotAborted(request.signal);
     const content = createCachedTranscript(request, transcript, this.options.clock);
-    const path = await this.options.contentRepository.write(content);
-    this.pendingChoices.delete(key);
-    await this.repairMetadata(request.itemId, path);
+    await this.options.contentRepository.transaction(
+      request.itemId,
+      async (transaction) => {
+        assertNotAborted(request.signal);
+        const path = await transaction.write(content);
+        await this.repairMetadata(request.itemId, path);
+      },
+    );
+    this.clearPendingChoices(key, operationToken);
     return { status: "ready", source: "fresh", content };
   }
 
   private async runFallback(
     request: YouTubeTranscriptRequest,
     key: string,
+    operationToken: symbol,
     primaryCode: YouTubeTranscriptErrorCode,
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(request.signal);
@@ -269,6 +360,7 @@ export class YouTubeTranscriptService {
       return await this.runProvider(
         request,
         key,
+        operationToken,
         this.options.ytDlp,
         "yt-dlp",
       );
@@ -279,6 +371,7 @@ export class YouTubeTranscriptService {
 
   private registerChoices(
     key: string,
+    operationToken: symbol,
     provider: TranscriptProvider,
     tracks: readonly YouTubeCaptionTrack[],
   ): YouTubeTranscriptServiceResult {
@@ -294,7 +387,17 @@ export class YouTubeTranscriptService {
         provider: candidate.source,
       });
     });
-    this.pendingChoices.set(key, registered);
+    this.deletePendingChoiceSet(key);
+    const expirationTimer = window.setTimeout(() => {
+      this.clearPendingChoices(key, operationToken);
+    }, this.choiceTtlMs);
+    this.pendingChoices.set(key, {
+      token: operationToken,
+      expiresAt: this.options.clock().getTime() + this.choiceTtlMs,
+      expirationTimer,
+      choices: registered,
+    });
+    this.enforceChoiceCapacity();
     return {
       status: "selection-required",
       tracks: Object.freeze(choices),
@@ -314,6 +417,111 @@ export class YouTubeTranscriptService {
     } catch {
       // The durable cache remains authoritative. A later cache read retries.
     }
+  }
+
+  private async subscribeToWork(
+    key: string,
+    callerSignal: AbortSignal | undefined,
+    operation: (signal: AbortSignal) => Promise<YouTubeTranscriptServiceResult>,
+    onAllCancelled: () => void,
+  ): Promise<YouTubeTranscriptServiceResult> {
+    assertNotAborted(callerSignal);
+    let work = this.inFlight.get(key);
+    if (!work) {
+      const controller = new AbortController();
+      work = {
+        controller,
+        promise: Promise.resolve().then(async () => await operation(controller.signal)),
+        subscribers: 0,
+        settled: false,
+        onAllCancelled,
+      };
+      this.inFlight.set(key, work);
+      const created = work;
+      void created.promise.then(
+        () => this.settleWork(key, created),
+        () => this.settleWork(key, created),
+      );
+    }
+    work.subscribers += 1;
+    return await this.awaitSharedWork(key, work, callerSignal);
+  }
+
+  private async awaitSharedWork(
+    key: string,
+    work: SharedWork,
+    callerSignal: AbortSignal | undefined,
+  ): Promise<YouTubeTranscriptServiceResult> {
+    return await new Promise<YouTubeTranscriptServiceResult>((resolve, reject) => {
+      let released = false;
+      const release = (cancelled: boolean) => {
+        if (released) return;
+        released = true;
+        callerSignal?.removeEventListener("abort", onAbort);
+        work.subscribers = Math.max(0, work.subscribers - 1);
+        if (cancelled && work.subscribers === 0 && !work.settled) {
+          if (this.inFlight.get(key) === work) this.inFlight.delete(key);
+          work.onAllCancelled();
+          work.controller.abort();
+        }
+      };
+      const onAbort = () => {
+        release(true);
+        reject(new YouTubeTranscriptServiceError("aborted"));
+      };
+      callerSignal?.addEventListener("abort", onAbort, { once: true });
+      if (callerSignal?.aborted) {
+        onAbort();
+        return;
+      }
+      void work.promise.then(
+        (value) => {
+          if (released) return;
+          release(false);
+          resolve(value);
+        },
+        (error: unknown) => {
+          if (released) return;
+          release(false);
+          reject(
+            error instanceof Error
+              ? error
+              : new YouTubeTranscriptServiceError("temporarily-unavailable"),
+          );
+        },
+      );
+    });
+  }
+
+  private settleWork(key: string, work: SharedWork): void {
+    work.settled = true;
+    if (this.inFlight.get(key) === work) this.inFlight.delete(key);
+  }
+
+  private cleanupExpiredChoices(): void {
+    const now = this.options.clock().getTime();
+    for (const [key, entry] of this.pendingChoices) {
+      if (entry.expiresAt <= now) this.deletePendingChoiceSet(key);
+    }
+  }
+
+  private enforceChoiceCapacity(): void {
+    while (this.pendingChoices.size > this.maxPendingChoiceSets) {
+      const oldest = this.pendingChoices.keys().next().value;
+      if (oldest === undefined) return;
+      this.deletePendingChoiceSet(oldest);
+    }
+  }
+
+  private clearPendingChoices(key: string, token: symbol): void {
+    this.deletePendingChoiceSet(key, token);
+  }
+
+  private deletePendingChoiceSet(key: string, token?: symbol): void {
+    const pending = this.pendingChoices.get(key);
+    if (!pending || (token !== undefined && pending.token !== token)) return;
+    window.clearTimeout(pending.expirationTimer);
+    this.pendingChoices.delete(key);
   }
 }
 
@@ -443,6 +651,33 @@ function assertNotAborted(signal: AbortSignal | undefined): void {
 
 function requestKey(itemId: string, videoId: string): string {
   return `${itemId}\0${videoId}`;
+}
+
+function requestWorkKey(
+  resourceKey: string,
+  request: YouTubeTranscriptRequest,
+): string {
+  if (request.trackId !== undefined) {
+    return `${resourceKey}\0select:${request.trackId}`;
+  }
+  const mode = request.refresh ? "refresh" : "cache";
+  return [
+    resourceKey,
+    mode,
+    request.preferredLanguage?.trim().toLowerCase() ?? "",
+  ].join("\0");
+}
+
+function positiveInteger(
+  value: number | undefined,
+  fallback: number,
+  label: string,
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved <= 0) {
+    throw new Error(`Invalid ${label}`);
+  }
+  return resolved;
 }
 
 function hasUnsafeControl(value: string): boolean {

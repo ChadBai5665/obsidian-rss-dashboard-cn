@@ -1,7 +1,14 @@
 import type { Vault } from "obsidian";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { CollectionRepository } from "../../../src/collection/collection-repository";
 import { ContentRepository } from "../../../src/collection/content-repository";
 import { ExplicitContentCoordinator } from "../../../src/collection/explicit-content-coordinator";
+import {
+  YouTubeTranscriptService,
+  type TranscriptMetadataRepository,
+  type TranscriptProvider,
+} from "../../../src/youtube-transcript/youtube-transcript-service";
+import type { YouTubeCaptionTrack } from "../../../src/youtube-transcript/transcript-types";
 
 const DATA_ROOT = ".rss-dashboard-data";
 const ITEM_ID = "f".repeat(64);
@@ -70,6 +77,55 @@ function parentPath(path: string): string {
   return separator === -1 ? "" : path.slice(0, separator);
 }
 
+const CAPTION_TRACK: YouTubeCaptionTrack = {
+  languageCode: "en",
+  languageName: "English",
+  isGenerated: false,
+  source: "innertube",
+  url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en",
+  format: "json3",
+};
+
+function createTranscriptService(
+  repository: ContentRepository,
+  metadataRepository: TranscriptMetadataRepository,
+): YouTubeTranscriptService {
+  const innerTube: TranscriptProvider = {
+    async listTracks() {
+      return [CAPTION_TRACK];
+    },
+    async fetchTrack() {
+      return {
+        videoId: "dQw4w9WgXcQ",
+        languageCode: "en",
+        languageName: "English",
+        isGenerated: false,
+        provider: "innertube",
+        text: "Fresh transcript wins only with matching metadata.",
+      };
+    },
+  };
+  return new YouTubeTranscriptService({
+    innerTube,
+    ytDlp: {
+      ...innerTube,
+      async isAvailable() {
+        return false;
+      },
+    },
+    contentRepository: repository,
+    metadataRepository,
+    clock: () => new Date("2026-07-28T06:00:00.000Z"),
+  });
+}
+
+function fullTextFetch() {
+  return Promise.resolve({
+    content: "<p>" + "Publisher article content ".repeat(20) + "</p>",
+    failureType: "none" as const,
+  });
+}
+
 describe("ExplicitContentCoordinator", () => {
   it("ignores a transcript artifact when ordinary article full text is requested", async () => {
     const adapter = new InMemoryAdapter();
@@ -105,5 +161,182 @@ describe("ExplicitContentCoordinator", () => {
     expect(fetches).toBe(1);
     expect(result.content).toContain("Publisher article content");
     expect((await repository.read(ITEM_ID))?.contentBasis).toBe("full-text");
+  });
+
+  it("keeps transcript metadata consistent when full-text sync starts first", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+    const repository = new ContentRepository(vault, DATA_ROOT, () => new Date());
+    let metadataBasis: "full-text" | "youtube-transcript" | undefined;
+    let markFullSync!: () => void;
+    const fullSyncReached = new Promise<void>((resolve) => {
+      markFullSync = resolve;
+    });
+    let releaseFullSync!: () => void;
+    const holdFullSync = new Promise<void>((resolve) => {
+      releaseFullSync = resolve;
+    });
+    const updateSpy = vi
+      .spyOn(CollectionRepository.prototype, "updateContentMetadata")
+      .mockImplementation(async (_id, _path, basis = "full-text") => {
+        markFullSync();
+        await holdFullSync;
+        metadataBasis = basis;
+      });
+    const transcriptService = createTranscriptService(repository, {
+      async updateContentMetadata(_id, _path, basis) {
+        metadataBasis = basis;
+      },
+    });
+
+    try {
+      const fullText = new ExplicitContentCoordinator(vault).readOrFetch({
+        dataRoot: DATA_ROOT,
+        itemId: ITEM_ID,
+        fetch: fullTextFetch,
+      });
+      await fullSyncReached;
+      let transcriptFinished = false;
+      const transcript = transcriptService.get({
+        itemId: ITEM_ID,
+        videoId: "dQw4w9WgXcQ",
+        refresh: true,
+      }).then((result) => {
+        transcriptFinished = true;
+        return result;
+      });
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+      expect(transcriptFinished).toBe(false);
+
+      releaseFullSync();
+      await Promise.all([fullText, transcript]);
+      expect((await repository.read(ITEM_ID))?.contentBasis).toBe(
+        "youtube-transcript",
+      );
+      expect(metadataBasis).toBe("youtube-transcript");
+    } finally {
+      updateSpy.mockRestore();
+    }
+  });
+
+  it("keeps full-text metadata consistent when transcript sync starts first", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+    const repository = new ContentRepository(vault, DATA_ROOT, () => new Date());
+    let metadataBasis: "full-text" | "youtube-transcript" | undefined;
+    let markTranscriptSync!: () => void;
+    const transcriptSyncReached = new Promise<void>((resolve) => {
+      markTranscriptSync = resolve;
+    });
+    let releaseTranscriptSync!: () => void;
+    const holdTranscriptSync = new Promise<void>((resolve) => {
+      releaseTranscriptSync = resolve;
+    });
+    const updateSpy = vi
+      .spyOn(CollectionRepository.prototype, "updateContentMetadata")
+      .mockImplementation(async (_id, _path, basis = "full-text") => {
+        metadataBasis = basis;
+      });
+    const transcriptService = createTranscriptService(repository, {
+      async updateContentMetadata(_id, _path, basis) {
+        markTranscriptSync();
+        await holdTranscriptSync;
+        metadataBasis = basis;
+      },
+    });
+
+    try {
+      const transcript = transcriptService.get({
+        itemId: ITEM_ID,
+        videoId: "dQw4w9WgXcQ",
+        refresh: true,
+      });
+      await transcriptSyncReached;
+      let fullTextFinished = false;
+      const fullText = new ExplicitContentCoordinator(vault).readOrFetch({
+        dataRoot: DATA_ROOT,
+        itemId: ITEM_ID,
+        fetch: fullTextFetch,
+      }).then((result) => {
+        fullTextFinished = true;
+        return result;
+      });
+      await Promise.resolve();
+      expect(fullTextFinished).toBe(false);
+
+      releaseTranscriptSync();
+      await Promise.all([transcript, fullText]);
+      expect((await repository.read(ITEM_ID))?.contentBasis).toBe("full-text");
+      expect(metadataBasis).toBe("full-text");
+    } finally {
+      updateSpy.mockRestore();
+    }
+  });
+
+  it("serializes transcript cache repair with a competing full-text write", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+    const repository = new ContentRepository(vault, DATA_ROOT, () => new Date());
+    await repository.write({
+      schemaVersion: 2,
+      contentBasis: "youtube-transcript",
+      itemId: ITEM_ID,
+      fetchedAt: "2026-07-28T05:00:00.000Z",
+      videoId: "dQw4w9WgXcQ",
+      languageCode: "en",
+      languageName: "English",
+      isGenerated: false,
+      provider: "innertube",
+      text: "Cached transcript awaiting metadata repair.",
+    });
+    let metadataBasis: "full-text" | "youtube-transcript" | undefined;
+    let markRepair!: () => void;
+    const repairReached = new Promise<void>((resolve) => {
+      markRepair = resolve;
+    });
+    let releaseRepair!: () => void;
+    const holdRepair = new Promise<void>((resolve) => {
+      releaseRepair = resolve;
+    });
+    const updateSpy = vi
+      .spyOn(CollectionRepository.prototype, "updateContentMetadata")
+      .mockImplementation(async (_id, _path, basis = "full-text") => {
+        metadataBasis = basis;
+      });
+    const transcriptService = createTranscriptService(repository, {
+      async updateContentMetadata(_id, _path, basis) {
+        markRepair();
+        await holdRepair;
+        metadataBasis = basis;
+      },
+    });
+
+    try {
+      const repair = transcriptService.get({
+        itemId: ITEM_ID,
+        videoId: "dQw4w9WgXcQ",
+      });
+      await repairReached;
+      let fullTextFinished = false;
+      const fullText = new ExplicitContentCoordinator(vault).readOrFetch({
+        dataRoot: DATA_ROOT,
+        itemId: ITEM_ID,
+        fetch: fullTextFetch,
+      }).then((result) => {
+        fullTextFinished = true;
+        return result;
+      });
+      await Promise.resolve();
+      expect(fullTextFinished).toBe(false);
+
+      releaseRepair();
+      await Promise.all([repair, fullText]);
+      expect((await repository.read(ITEM_ID))?.contentBasis).toBe("full-text");
+      expect(metadataBasis).toBe("full-text");
+    } finally {
+      updateSpy.mockRestore();
+    }
   });
 });

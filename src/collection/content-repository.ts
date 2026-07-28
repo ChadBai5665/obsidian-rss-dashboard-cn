@@ -28,6 +28,13 @@ export type CachedItemContent =
   | FullTextCachedItemContent
   | YouTubeTranscriptCachedItemContent;
 
+export interface ContentItemTransaction {
+  read(): Promise<CachedItemContent | null>;
+  write(content: CachedItemContent): Promise<string>;
+  remove(): Promise<void>;
+  pathFor(): string;
+}
+
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/;
 const LANGUAGE_CODE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u;
 const TRANSCRIPT_FIELDS = new Set([
@@ -66,36 +73,54 @@ export class ContentRepository {
 
   async read(itemId: string): Promise<CachedItemContent | null> {
     assertStableItemId(itemId);
-    return await this.withItemLock(itemId, async () => {
-      const path = this.contentPath(itemId);
-      await this.recoverAtomicTarget(path);
-      if (!(await this.vault.adapter.exists(path))) return null;
-      const content = parseCachedItemContent(await this.vault.adapter.read(path));
-      return content?.itemId === itemId ? content : null;
-    });
+    return await this.transaction(itemId, async (transaction) =>
+      await transaction.read(),
+    );
   }
 
   async write(content: CachedItemContent): Promise<string> {
     assertCachedItemContent(content);
-    return await this.withItemLock(content.itemId, async () =>
-      await this.writeInternal(content),
+    return await this.transaction(content.itemId, async (transaction) =>
+      await transaction.write(content),
     );
   }
 
   async remove(itemId: string): Promise<void> {
     assertStableItemId(itemId);
-    await this.withItemLock(itemId, async () => {
-      const path = this.contentPath(itemId);
-      await this.recoverAtomicTarget(path);
-      const adapter = this.vault.adapter as Partial<DataAdapter>;
-      if (typeof adapter.remove === "function" && (await this.vault.adapter.exists(path))) {
-        await adapter.remove.call(this.vault.adapter, path);
-      }
-    });
+    await this.transaction(itemId, async (transaction) =>
+      await transaction.remove(),
+    );
   }
 
   pathFor(itemId: string): string {
     return this.contentPath(itemId);
+  }
+
+  /**
+   * Serializes a complete content-and-metadata operation for one stable item.
+   * The transaction methods bypass the outer queue intentionally, preventing
+   * nested-lock deadlocks while the caller coordinates a second repository.
+   */
+  async transaction<T>(
+    itemId: string,
+    operation: (transaction: ContentItemTransaction) => Promise<T>,
+  ): Promise<T> {
+    assertStableItemId(itemId);
+    return await this.withItemLock(itemId, async () => {
+      const transaction: ContentItemTransaction = Object.freeze({
+        read: async () => await this.readInternal(itemId),
+        write: async (content: CachedItemContent) => {
+          assertCachedItemContent(content);
+          if (content.itemId !== itemId) {
+            throw new Error("Content transaction item mismatch");
+          }
+          return await this.writeInternal(content);
+        },
+        remove: async () => await this.removeInternal(itemId),
+        pathFor: () => this.contentPath(itemId),
+      });
+      return await operation(transaction);
+    });
   }
 
   private async withItemLock<T>(
@@ -123,6 +148,26 @@ export class ContentRepository {
     const path = this.contentPath(content.itemId);
     await this.atomicWrite(path, serializeCachedItemContent(content));
     return path;
+  }
+
+  private async readInternal(itemId: string): Promise<CachedItemContent | null> {
+    const path = this.contentPath(itemId);
+    await this.recoverAtomicTarget(path);
+    if (!(await this.vault.adapter.exists(path))) return null;
+    const content = parseCachedItemContent(await this.vault.adapter.read(path));
+    return content?.itemId === itemId ? content : null;
+  }
+
+  private async removeInternal(itemId: string): Promise<void> {
+    const path = this.contentPath(itemId);
+    await this.recoverAtomicTarget(path);
+    const adapter = this.vault.adapter as Partial<DataAdapter>;
+    if (
+      typeof adapter.remove === "function" &&
+      (await this.vault.adapter.exists(path))
+    ) {
+      await adapter.remove.call(this.vault.adapter, path);
+    }
   }
 
   private get contentDirectory(): string {

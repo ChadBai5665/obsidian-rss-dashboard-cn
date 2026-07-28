@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   CachedItemContent,
   YouTubeTranscriptCachedItemContent,
@@ -123,6 +123,7 @@ class FakeContentRepository implements TranscriptCacheRepository {
   value: CachedItemContent | null;
   readonly writes: YouTubeTranscriptCachedItemContent[] = [];
   readCalls = 0;
+  private transactionTail: Promise<void> = Promise.resolve();
 
   constructor(initial: CachedItemContent | null = null) {
     this.value = initial;
@@ -144,6 +145,31 @@ class FakeContentRepository implements TranscriptCacheRepository {
 
   pathFor(): string {
     return CONTENT_PATH;
+  }
+
+  async transaction<T>(
+    _itemId: string,
+    operation: (transaction: {
+      read(): Promise<CachedItemContent | null>;
+      write(value: CachedItemContent): Promise<string>;
+      pathFor(): string;
+    }) => Promise<T>,
+  ): Promise<T> {
+    const prior = this.transactionTail;
+    let release!: () => void;
+    this.transactionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prior;
+    try {
+      return await operation({
+        read: async () => await this.read(),
+        write: async (value) => await this.write(value),
+        pathFor: () => this.pathFor(),
+      });
+    } finally {
+      release();
+    }
   }
 }
 
@@ -173,6 +199,9 @@ function createService(options: {
   ytDlp?: FakeOptionalProvider;
   content?: FakeContentRepository;
   metadata?: FakeMetadataRepository;
+  clock?: () => Date;
+  choiceTtlMs?: number;
+  maxPendingChoiceSets?: number;
 } = {}): {
   service: YouTubeTranscriptService;
   innerTube: TranscriptProvider;
@@ -190,7 +219,9 @@ function createService(options: {
       ytDlp,
       contentRepository: content,
       metadataRepository: metadata,
-      clock: () => new Date("2026-07-28T06:00:00.000Z"),
+      clock: options.clock ?? (() => new Date("2026-07-28T06:00:00.000Z")),
+      choiceTtlMs: options.choiceTtlMs,
+      maxPendingChoiceSets: options.maxPendingChoiceSets,
     }),
     innerTube,
     ytDlp,
@@ -545,5 +576,541 @@ describe("YouTubeTranscriptService", () => {
     expect(innerTube.listCalls).toBe(1);
     expect(innerTube.fetchCalls).toBe(1);
     expect(content.writes).toHaveLength(1);
+  });
+
+  it("does not let a cache read swallow an explicit refresh", async () => {
+    const content = new FakeContentRepository(cached());
+    const innerTube = new FakeProvider(
+      [track()],
+      transcript(track(), { text: "Explicitly refreshed transcript." }),
+    );
+    const { service } = createService({ content, innerTube });
+
+    const [cacheResult, refreshResult] = await Promise.all([
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ]);
+
+    expect(cacheResult).toMatchObject({ status: "ready", source: "cache" });
+    expect(refreshResult).toMatchObject({
+      status: "ready",
+      source: "fresh",
+      content: { text: "Explicitly refreshed transcript." },
+    });
+    expect(innerTube.listCalls).toBe(1);
+    expect(innerTube.fetchCalls).toBe(1);
+    expect(content.writes).toHaveLength(1);
+  });
+
+  it("does not merge a track selection with a new refresh", async () => {
+    const first = track({ languageName: "English A" });
+    const second = track({
+      languageName: "English B",
+      url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+    });
+    const innerTube = new FakeProvider([first, second]);
+    const { service } = createService({ innerTube });
+    const choice = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choice.status !== "selection-required") throw new Error("expected choices");
+
+    const [selection, refresh] = await Promise.all([
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: choice.tracks[0].id,
+      }),
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ]);
+
+    expect(selection).toMatchObject({
+      status: "ready",
+      content: { languageName: "English A" },
+    });
+    expect(refresh.status).toBe("selection-required");
+    expect(innerTube.listCalls).toBe(2);
+    expect(innerTube.fetchCalls).toBe(1);
+  });
+
+  it("does not merge two different track selections", async () => {
+    const first = track({ languageName: "English A" });
+    const second = track({
+      languageName: "English B",
+      url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+    });
+    const innerTube = new FakeProvider([first, second]);
+    const { service, content } = createService({ innerTube });
+    const choice = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choice.status !== "selection-required") throw new Error("expected choices");
+
+    const [left, right] = await Promise.all([
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: choice.tracks[0].id,
+      }),
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: choice.tracks[1].id,
+      }),
+    ]);
+
+    expect(left).toMatchObject({ content: { languageName: "English A" } });
+    expect(right).toMatchObject({ content: { languageName: "English B" } });
+    expect(innerTube.fetchCalls).toBe(2);
+    expect(content.writes).toHaveLength(2);
+  });
+
+  it("shares one provider fetch and write for the same track selection", async () => {
+    const tracks = [
+      track({ languageName: "English A" }),
+      track({
+        languageName: "English B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+      }),
+    ];
+    let fetchCalls = 0;
+    const innerTube: TranscriptProvider = {
+      async listTracks() {
+        return tracks;
+      },
+      async fetchTrack(selectedTrack) {
+        fetchCalls += 1;
+        await Promise.resolve();
+        return transcript(selectedTrack);
+      },
+    };
+    const content = new FakeContentRepository();
+    const { service } = createService({ innerTube, content });
+    const choice = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choice.status !== "selection-required") throw new Error("expected choices");
+    const request = {
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      trackId: choice.tracks[0].id,
+    };
+
+    const [left, right] = await Promise.all([
+      service.get(request),
+      service.get(request),
+    ]);
+
+    expect(left).toEqual(right);
+    expect(fetchCalls).toBe(1);
+    expect(content.writes).toHaveLength(1);
+  });
+
+  it("keeps shared refresh work alive when only one caller aborts", async () => {
+    let release!: (tracks: YouTubeCaptionTrack[]) => void;
+    let reject!: (error: YouTubeTranscriptError) => void;
+    const pending = new Promise<YouTubeCaptionTrack[]>((resolve, rejectPromise) => {
+      release = resolve;
+      reject = rejectPromise;
+    });
+    let underlyingAborts = 0;
+    const innerTube: TranscriptProvider = {
+      async listTracks(_videoId, signal) {
+        signal?.addEventListener("abort", () => {
+          underlyingAborts += 1;
+          reject(new YouTubeTranscriptError("aborted"));
+        }, { once: true });
+        return await pending;
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+    };
+    const { service, content } = createService({ innerTube });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+
+    const first = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      signal: firstController.signal,
+    });
+    const second = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      signal: secondController.signal,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    firstController.abort();
+    await expect(first).rejects.toMatchObject({ code: "aborted" });
+    expect(underlyingAborts).toBe(0);
+    release([track()]);
+
+    await expect(second).resolves.toMatchObject({ status: "ready" });
+    expect(underlyingAborts).toBe(0);
+    expect(content.writes).toHaveLength(1);
+  });
+
+  it("aborts shared provider work only after every caller cancels", async () => {
+    let reject!: (error: YouTubeTranscriptError) => void;
+    const pending = new Promise<YouTubeCaptionTrack[]>((_resolve, rejectPromise) => {
+      reject = rejectPromise;
+    });
+    let underlyingAborts = 0;
+    const innerTube: TranscriptProvider = {
+      async listTracks(_videoId, signal) {
+        signal?.addEventListener("abort", () => {
+          underlyingAborts += 1;
+          reject(new YouTubeTranscriptError("aborted"));
+        }, { once: true });
+        return await pending;
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+    };
+    const { service, content } = createService({ innerTube });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const first = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      signal: firstController.signal,
+    });
+    const second = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      signal: secondController.signal,
+    });
+
+    firstController.abort();
+    await expect(first).rejects.toMatchObject({ code: "aborted" });
+    expect(underlyingAborts).toBe(0);
+    secondController.abort();
+    await expect(second).rejects.toMatchObject({ code: "aborted" });
+    await Promise.resolve();
+
+    expect(underlyingAborts).toBe(1);
+    expect(content.writes).toEqual([]);
+  });
+
+  it("lets a new caller start fresh after every prior subscriber cancels", async () => {
+    let rejectFirst!: (error: YouTubeTranscriptError) => void;
+    const firstPending = new Promise<YouTubeCaptionTrack[]>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    let listCalls = 0;
+    const innerTube: TranscriptProvider = {
+      async listTracks(_videoId, signal) {
+        listCalls += 1;
+        if (listCalls > 1) return [track()];
+        signal?.addEventListener("abort", () => {
+          rejectFirst(new YouTubeTranscriptError("aborted"));
+        }, { once: true });
+        return await firstPending;
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+    };
+    const { service } = createService({ innerTube });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const first = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      signal: firstController.signal,
+    });
+    const second = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      signal: secondController.signal,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    firstController.abort();
+    secondController.abort();
+    const fresh = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+
+    await expect(first).rejects.toMatchObject({ code: "aborted" });
+    await expect(second).rejects.toMatchObject({ code: "aborted" });
+    await expect(fresh).resolves.toMatchObject({ status: "ready" });
+    expect(listCalls).toBe(2);
+  });
+
+  it("expires pending choices and never fetches their old signed track", async () => {
+    let now = Date.parse("2026-07-28T06:00:00.000Z");
+    const innerTube = new FakeProvider([
+      track({ languageName: "English A" }),
+      track({
+        languageName: "English B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+      }),
+    ]);
+    const { service } = createService({
+      innerTube,
+      clock: () => new Date(now),
+      choiceTtlMs: 1_000,
+    });
+    const choice = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choice.status !== "selection-required") throw new Error("expected choices");
+    now += 1_001;
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: choice.tracks[0].id,
+      }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(innerTube.fetchCalls).toBe(0);
+  });
+
+  it("actively releases pending choices when their short TTL elapses", async () => {
+    vi.useFakeTimers();
+    const innerTube = new FakeProvider([
+      track({ languageName: "English A" }),
+      track({
+        languageName: "English B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+      }),
+    ]);
+    const { service } = createService({ innerTube, choiceTtlMs: 1_000 });
+    try {
+      const choice = await service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+      });
+      if (choice.status !== "selection-required") throw new Error("expected choices");
+      await vi.advanceTimersByTimeAsync(1_001);
+
+      await expect(
+        service.get({
+          itemId: ITEM_ID,
+          videoId: VIDEO_ID,
+          trackId: choice.tracks[0].id,
+        }),
+      ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+      expect(innerTube.fetchCalls).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("evicts the oldest pending choice set at the configured capacity", async () => {
+    const innerTube = new FakeProvider([
+      track({ languageName: "English A" }),
+      track({
+        languageName: "English B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+      }),
+    ]);
+    const { service } = createService({
+      innerTube,
+      maxPendingChoiceSets: 2,
+    });
+    const ids = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+    const choices = [];
+    for (const itemId of ids) {
+      const result = await service.get({ itemId, videoId: VIDEO_ID, refresh: true });
+      if (result.status !== "selection-required") throw new Error("expected choices");
+      choices.push(result);
+    }
+
+    await expect(
+      service.get({
+        itemId: ids[0],
+        videoId: VIDEO_ID,
+        trackId: choices[0].tracks[0].id,
+      }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(innerTube.fetchCalls).toBe(0);
+  });
+
+  it("invalidates an old choice after a cache hit", async () => {
+    const first = track({ languageName: "English A" });
+    const second = track({
+      languageName: "English B",
+      url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+    });
+    const content = new FakeContentRepository();
+    const innerTube = new FakeProvider([first, second]);
+    const { service } = createService({ innerTube, content });
+    const choice = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choice.status !== "selection-required") throw new Error("expected choices");
+    content.value = cached();
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+    ).resolves.toMatchObject({ source: "cache" });
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: choice.tracks[0].id,
+      }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(innerTube.fetchCalls).toBe(0);
+  });
+
+  it("invalidates old track IDs when a new refresh lists choices", async () => {
+    const innerTube = new FakeProvider([
+      track({ languageName: "English A" }),
+      track({
+        languageName: "English B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+      }),
+    ]);
+    const { service } = createService({ innerTube });
+    const first = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (first.status !== "selection-required") throw new Error("expected choices");
+    const second = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (second.status !== "selection-required") throw new Error("expected choices");
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: first.tracks[0].id,
+      }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: second.tracks[0].id,
+      }),
+    ).resolves.toMatchObject({ status: "ready" });
+  });
+
+  it("invalidates an old choice after its selected fetch fails", async () => {
+    const tracks = [
+      track({ languageName: "English A" }),
+      track({
+        languageName: "English B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+      }),
+    ];
+    let fetchCalls = 0;
+    const innerTube: TranscriptProvider = {
+      async listTracks() {
+        return tracks;
+      },
+      async fetchTrack(selectedTrack) {
+        fetchCalls += 1;
+        if (fetchCalls === 1) throw new YouTubeTranscriptError("login-required");
+        return transcript(selectedTrack);
+      },
+    };
+    const { service } = createService({ innerTube });
+    const choice = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choice.status !== "selection-required") throw new Error("expected choices");
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: choice.tracks[0].id,
+      }),
+    ).rejects.toMatchObject({ code: "login-required" });
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: choice.tracks[0].id,
+      }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(fetchCalls).toBe(1);
+  });
+
+  it("invalidates a selected choice immediately when its last caller cancels", async () => {
+    const tracks = [
+      track({ languageName: "English A" }),
+      track({
+        languageName: "English B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+      }),
+    ];
+    let fetchCalls = 0;
+    let rejectFetch!: (error: YouTubeTranscriptError) => void;
+    const pendingFetch = new Promise<YouTubeTranscript>((_resolve, reject) => {
+      rejectFetch = reject;
+    });
+    const innerTube: TranscriptProvider = {
+      async listTracks() {
+        return tracks;
+      },
+      async fetchTrack(_selectedTrack, signal) {
+        fetchCalls += 1;
+        signal?.addEventListener("abort", () => {
+          rejectFetch(new YouTubeTranscriptError("aborted"));
+        }, { once: true });
+        return await pendingFetch;
+      },
+    };
+    const { service } = createService({ innerTube });
+    const choice = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choice.status !== "selection-required") throw new Error("expected choices");
+    const controller = new AbortController();
+    const selection = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      trackId: choice.tracks[0].id,
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(selection).rejects.toMatchObject({ code: "aborted" });
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: choice.tracks[0].id,
+      }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(fetchCalls).toBe(1);
   });
 });
