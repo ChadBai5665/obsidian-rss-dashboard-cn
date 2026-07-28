@@ -7,6 +7,7 @@ import {
   providerErrorForStatus,
   providerResponseTooLarge,
 } from "./provider-error";
+import { FinalTextCollector } from "./final-text-collector";
 import { BoundedSseDecoder, type ServerSentEvent } from "./sse-decoder";
 import { createNodeAiStreamingTransport } from "./streaming-ai-transport";
 import {
@@ -59,6 +60,13 @@ const PRIVATE_STATE = new WeakMap<
   AnthropicMessagesProvider,
   AnthropicPrivateState
 >();
+const ANTHROPIC_LIFECYCLE_EVENT_TYPES = new Set([
+  "content_block_start",
+  "content_block_delta",
+  "content_block_stop",
+  "message_delta",
+  "message_stop",
+]);
 const parseUnknownJson = JSON.parse as (text: string) => unknown;
 
 export class AnthropicMessagesProvider implements TextGenerationProvider {
@@ -200,14 +208,13 @@ class AnthropicStreamState {
       throw malformedProviderResponse();
     }
 
-    if (type === "ping") {
-      if (!this.messageStarted) throw malformedProviderResponse();
-      return;
-    }
+    if (type === "ping") return;
+    if (type === "error") throw anthropicStreamFailure();
     if (type === "message_start") {
       this.consumeMessageStart(root);
       return;
     }
+    if (!ANTHROPIC_LIFECYCLE_EVENT_TYPES.has(type)) return;
     if (!this.messageStarted) throw malformedProviderResponse();
     if (type === "content_block_start") {
       this.consumeBlockStart(root);
@@ -230,7 +237,6 @@ class AnthropicStreamState {
       this.stopped = true;
       return;
     }
-    throw malformedProviderResponse();
   }
 
   private consumeMessageStart(root: Record<string, unknown>): void {
@@ -317,45 +323,6 @@ class AnthropicStreamState {
       if (inputTokens !== undefined) this.inputTokens = inputTokens;
       if (outputTokens !== undefined) this.outputTokens = outputTokens;
     }
-  }
-}
-
-class FinalTextCollector {
-  private value = "";
-  private pending = "";
-
-  constructor(
-    private readonly maximum: number,
-    private readonly apiKey: string,
-    private readonly onTextDelta?: TextDeltaHandler,
-  ) {}
-
-  append(delta: string): void {
-    const nextLength = this.value.length + delta.length;
-    if (!Number.isSafeInteger(nextLength) || nextLength > this.maximum) {
-      throw providerResponseTooLarge();
-    }
-    this.value += delta;
-    this.pending += delta;
-    if (this.value.includes(this.apiKey)) {
-      throw new ProviderError("empty-output", "The AI provider returned no text.");
-    }
-    const hold = Math.max(0, this.apiKey.length - 1);
-    const emitLength = Math.max(0, this.pending.length - hold);
-    if (emitLength > 0) {
-      emitSafely(this.onTextDelta, this.pending.slice(0, emitLength));
-      this.pending = this.pending.slice(emitLength);
-    }
-  }
-
-  finish(): string {
-    emitSafely(this.onTextDelta, this.pending);
-    this.pending = "";
-    const text = this.value.trim();
-    if (!text) {
-      throw new ProviderError("empty-output", "The AI provider returned no text.");
-    }
-    return text;
   }
 }
 
@@ -481,11 +448,19 @@ function safeTransportFailure(error: unknown): ProviderError {
 function safeProtocolFailure(error: unknown): ProviderError {
   if (error instanceof ProviderError) {
     if (error.code === "response-too-large") return providerResponseTooLarge();
+    if (error.code === "provider-failure") return anthropicStreamFailure();
     if (error.code === "empty-output") {
       return new ProviderError("empty-output", "The AI provider returned no text.");
     }
   }
   return malformedProviderResponse();
+}
+
+function anthropicStreamFailure(): ProviderError {
+  return new ProviderError(
+    "provider-failure",
+    "The AI provider is unavailable.",
+  );
 }
 
 function parseEventJson(text: string): unknown {

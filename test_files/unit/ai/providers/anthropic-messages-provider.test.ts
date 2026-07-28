@@ -366,4 +366,176 @@ describe("Anthropic-compatible streaming provider", () => {
     });
     expect(recording).toHaveBeenCalledOnce();
   });
+
+  it("streams exactly the trim-normalized final text across whitespace boundaries", async () => {
+    const payload = [
+      event("message_start", {
+        type: "message_start",
+        message: { id: "m", content: [], usage: {} },
+      }),
+      event("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: " \n\u00a0" },
+      }),
+      event("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "# 标题" },
+      }),
+      event("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "  \n" },
+      }),
+      event("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "- 项目" },
+      }),
+      event("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "\n\t\ufeff" },
+      }),
+      event("content_block_stop", { type: "content_block_stop", index: 0 }),
+      event("message_stop", { type: "message_stop" }),
+    ].join("");
+    const deltas: string[] = [];
+
+    const result = await harness(
+      streamTransport([encoder.encode(payload)]),
+    ).provider.generate(
+      { system: "s", user: "u", maxOutputTokens: 100 },
+      (delta) => deltas.push(delta),
+    );
+
+    expect(result.text).toBe("# 标题  \n- 项目");
+    expect(deltas.join("")).toBe(result.text);
+  });
+
+  it("does not callback whitespace-only streamed output", async () => {
+    const payload = [
+      event("message_start", {
+        type: "message_start",
+        message: { id: "m", content: [], usage: {} },
+      }),
+      event("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: " \t\u00a0\n\ufeff" },
+      }),
+      event("content_block_stop", { type: "content_block_stop", index: 0 }),
+      event("message_stop", { type: "message_stop" }),
+    ].join("");
+    const deltas: string[] = [];
+
+    await expect(harness(
+      streamTransport([encoder.encode(payload)]),
+    ).provider.generate(
+      { system: "s", user: "u", maxOutputTokens: 100 },
+      (delta) => deltas.push(delta),
+    )).rejects.toMatchObject({ code: "empty-output" });
+
+    expect(deltas).toEqual([]);
+  });
+
+  it("ignores ping and future event types without advancing message lifecycle", async () => {
+    const payload = [
+      event("ping", { type: "ping", text: "hidden-before" }),
+      event("future_notice", {
+        type: "future_notice",
+        text: "hidden-unknown-before",
+      }),
+      event("message_start", {
+        type: "message_start",
+        message: { id: "m", content: [], usage: {} },
+      }),
+      event("ping", { type: "ping", text: "hidden-during" }),
+      event("future_notice", {
+        type: "future_notice",
+        text: "hidden-unknown-during",
+      }),
+      event("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "visible" },
+      }),
+      event("content_block_stop", { type: "content_block_stop", index: 0 }),
+      event("message_stop", { type: "message_stop" }),
+    ].join("");
+    const deltas: string[] = [];
+
+    const result = await harness(
+      streamTransport([encoder.encode(payload)]),
+    ).provider.generate(
+      { system: "s", user: "u", maxOutputTokens: 100 },
+      (delta) => deltas.push(delta),
+    );
+
+    expect(result.text).toBe("visible");
+    expect(deltas.join("")).toBe("visible");
+    expect(deltas.join("")).not.toContain("hidden");
+  });
+
+  it.each(["before-message-start", "after-message-start"] as const)(
+    "maps a safe terminal SSE error %s to provider-failure",
+    async (position) => {
+      const errorEvent = event("error", {
+        type: "error",
+        error: {
+          type: "overloaded_error",
+          message: `${API_KEY} raw-provider-error`,
+        },
+        text: "hidden-error-text",
+      });
+      const startEvent = event("message_start", {
+        type: "message_start",
+        message: { id: "m", content: [], usage: {} },
+      });
+      const laterText = [
+        event("content_block_start", {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "must-not-emit" },
+        }),
+        event("content_block_stop", { type: "content_block_stop", index: 0 }),
+        event("message_stop", { type: "message_stop" }),
+      ].join("");
+      const transport = streamTransport(position === "before-message-start"
+        ? [encoder.encode(errorEvent), encoder.encode(startEvent + laterText)]
+        : [encoder.encode(startEvent + errorEvent), encoder.encode(laterText)]);
+      const deltas: string[] = [];
+
+      const caught = await harness(transport).provider.generate(
+        { system: "s", user: "u", maxOutputTokens: 100 },
+        (delta) => deltas.push(delta),
+      ).catch((error: unknown) => error);
+
+      expect(caught).toMatchObject({ code: "provider-failure" });
+      expect(String(caught)).not.toContain(API_KEY);
+      expect(String(caught)).not.toContain("raw-provider-error");
+      expect(deltas).toEqual([]);
+      expect(transport).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    [
+      "ping after message stop",
+      validStream() + event("ping", { type: "ping" }),
+    ],
+    [
+      "mismatched unknown event type",
+      event("future_notice", { type: "different_future_notice" }),
+    ],
+  ] as const)("rejects auxiliary event order: %s", async (_label, payload) => {
+    await expect(harness(
+      streamTransport([encoder.encode(payload)]),
+    ).provider.generate({
+      system: "s",
+      user: "u",
+      maxOutputTokens: 100,
+    })).rejects.toMatchObject({ code: "malformed-response" });
+  });
 });

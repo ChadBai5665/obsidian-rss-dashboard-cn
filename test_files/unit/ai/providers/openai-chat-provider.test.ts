@@ -330,4 +330,42 @@ describe("OpenAI-compatible streaming provider", () => {
     expect(body).not.toHaveProperty("max_tokens");
     expect(test.transport).toHaveBeenCalledOnce();
   });
+
+  it("streams exactly the trim-normalized final text across whitespace boundaries", async () => {
+    const payload = [
+      event({ choices: [{ index: 0, delta: { content: " \n\u00a0" }, finish_reason: null }] }),
+      event({ choices: [{ index: 0, delta: { content: "# 标题" }, finish_reason: null }] }),
+      event({ choices: [{ index: 0, delta: { content: "  \n" }, finish_reason: null }] }),
+      event({ choices: [{ index: 0, delta: { content: "- 项目" }, finish_reason: null }] }),
+      event({ choices: [{ index: 0, delta: { content: "\n\t\ufeff" }, finish_reason: null }] }),
+      event("[DONE]"),
+    ].join("");
+    const deltas: string[] = [];
+
+    const result = await harness(streamTransport([payload])).provider.generate(
+      { system: "s", user: "u", maxOutputTokens: 100 },
+      (delta) => deltas.push(delta),
+    );
+
+    expect(result.text).toBe("# 标题  \n- 项目");
+    expect(deltas.join("")).toBe(result.text);
+  });
+
+  it("does not callback whitespace-only streamed output", async () => {
+    const payload = event({
+      choices: [{
+        index: 0,
+        delta: { content: " \t\u00a0\n\ufeff" },
+        finish_reason: null,
+      }],
+    }) + event("[DONE]");
+    const deltas: string[] = [];
+
+    await expect(harness(streamTransport([payload])).provider.generate(
+      { system: "s", user: "u", maxOutputTokens: 100 },
+      (delta) => deltas.push(delta),
+    )).rejects.toMatchObject({ code: "empty-output" });
+
+    expect(deltas).toEqual([]);
+  });
 });
