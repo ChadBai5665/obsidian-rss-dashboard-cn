@@ -199,4 +199,104 @@ describe("public release documentation", () => {
       "打开 YouTube 播放器会请求",
     );
   });
+
+  it("documents direct manual AI authorization, connection choice, and cached-content boundaries", () => {
+    const readmeDocument = read("README.md");
+    const privacyDocument = read("docs/PRIVACY.zh-CN.md");
+    const troubleshootingDocument = read("docs/TROUBLESHOOTING.zh-CN.md");
+    const readme = section(readmeDocument, "## 按需 AI 与隐私边界");
+    const privacy = section(privacyDocument, "## AI 发送边界");
+    const troubleshooting = section(
+      troubleshootingDocument,
+      "## AI 按钮提示未配置或失败",
+    );
+
+    for (const document of [readme, privacy]) {
+      expect(document).toMatch(/AI.*仅.*手动.*不会自动/su);
+      expect(document).toMatch(/点击.*AI 操作.*直接授权.*开始请求/su);
+      expect(document).toMatch(
+        /优先.*已启用的默认连接.*默认连接不可用.*首个已启用连接/su,
+      );
+      expect(document).toMatch(/只.*切换连接.*不会.*请求/su);
+      expect(document).toMatch(/重新生成.*当前.*连接/su);
+      expect(document).toMatch(/流式.*最终答案/su);
+      expect(document).toMatch(/不.*隐藏推理.*深度思考/su);
+      expect(document).toContain("fetchFullText=false");
+      expect(document).toMatch(/缓存.*全文.*YouTube 字幕/su);
+      expect(document).toMatch(/不会.*点击 AI.*抓取全文/su);
+      expect(document).toMatch(/先.*获取全文.*获取字幕.*再.*AI/su);
+    }
+
+    expect(troubleshooting).toMatch(
+      /优先.*已启用的默认连接.*默认连接不可用.*首个已启用连接/su,
+    );
+    expect(troubleshooting).toMatch(
+      /缺少.*API.*密钥.*粘贴.*测试连接.*通过.*保存/su,
+    );
+    expect(troubleshooting).toMatch(
+      /密钥失效.*更新.*粘贴.*测试连接.*通过.*保存/su,
+    );
+
+    for (const document of [
+      readmeDocument,
+      privacyDocument,
+      troubleshootingDocument,
+    ]) {
+      expect(document).not.toContain("发送前确认");
+      expect(document).not.toContain("确认后");
+      expect(document).not.toContain("预览窗口");
+      expect(document).not.toMatch(/在预览中.*全文/su);
+    }
+  });
+
+  it("documents durable inline task lifecycle and immutable result persistence", () => {
+    const readme = section(
+      read("README.md"),
+      "## 按需 AI 与隐私边界",
+    );
+    const privacy = section(
+      read("docs/PRIVACY.zh-CN.md"),
+      "## AI 发送边界",
+    );
+    const troubleshooting = section(
+      read("docs/TROUBLESHOOTING.zh-CN.md"),
+      "## AI 结果找不到",
+    );
+
+    for (const document of [readme, privacy, troubleshooting]) {
+      expect(document).toMatch(/同一条信息.*同一种操作.*复用.*不会.*重复请求/su);
+      expect(document).toMatch(/重新打开.*运行中.*已完成/su);
+      expect(document).toMatch(/关闭.*折叠.*只.*界面.*不会.*取消/su);
+      expect(document).toMatch(/“停止”.*明确.*中止/su);
+      expect(document).toMatch(/禁用插件.*完全退出 Obsidian.*关闭.*任务/su);
+      expect(document).toMatch(/保存成功.*显示.*完成/su);
+      expect(document).toContain(
+        "{dataFolder}/analysis/{itemId}/YYYYMMDDTHHMMSSmmm-{operation}[-N].md",
+      );
+      expect(document).toMatch(/重新打开.*最新结果.*历史/su);
+      expect(document).toMatch(/重新生成.*新.*独立.*不会覆盖/su);
+      expect(document).toMatch(/失败.*缺少.*密钥.*不会.*空白.*文件/su);
+    }
+  });
+
+  it("documents current-only verified insertion and history remediation", () => {
+    const privacy = section(
+      read("docs/PRIVACY.zh-CN.md"),
+      "## AI 发送边界",
+    );
+    const troubleshooting = section(
+      read("docs/TROUBLESHOOTING.zh-CN.md"),
+      "## AI 结果找不到",
+    );
+
+    for (const document of [privacy, troubleshooting]) {
+      expect(document).toMatch(/当前.*精确.*结果.*插入/su);
+      expect(document).toMatch(/历史.*只能打开.*不能插入/su);
+      expect(document).toMatch(/先.*保存.*来源.*再.*验证.*结果/su);
+      expect(document).toContain("RSS-DASHBOARD-CN:AI");
+    }
+
+    expect(troubleshooting).toMatch(/找不到.*最新结果.*历史结果/su);
+    expect(troubleshooting).toMatch(/重新生成.*保留.*旧结果/su);
+  });
 });
