@@ -69,6 +69,26 @@ describe("parseXProfile", () => {
     });
   });
 
+  it("treats a null optional profile bio container as absent", () => {
+    expect(parseXProfile({
+      result: {
+        rest_id: "456",
+        core: { screen_name: "OpenAI", name: "OpenAI Research" },
+        avatar: {
+          image_url: "https://pbs.twimg.com/profile_images/current.png",
+        },
+        profile_bio: null,
+        verification: { verified: false },
+      },
+    })).toEqual({
+      restId: "456",
+      handle: "openai",
+      displayName: "OpenAI Research",
+      avatarUrl: "https://pbs.twimg.com/profile_images/current.png",
+      verified: false,
+    });
+  });
+
   it("rejects zero or multiple viable profile candidates", () => {
     expect(() => parseXProfile({ data: null })).toThrow(
       expect.objectContaining({ code: "malformed-profile" }),

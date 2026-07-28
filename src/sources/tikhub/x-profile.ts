@@ -196,7 +196,7 @@ function nestedPropertyValue(
   valueKey: string,
 ): unknown {
   const container = propertyValue(properties, containerKey);
-  if (container === undefined) return undefined;
+  if (container === undefined || container === null) return undefined;
   if (!isObject(container)) throw malformedProfile();
   const nested = ownDataProperties(container);
   return optionalPropertyValue(nested, valueKey);
