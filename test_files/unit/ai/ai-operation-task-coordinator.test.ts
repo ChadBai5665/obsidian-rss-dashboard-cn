@@ -536,10 +536,13 @@ describe("persistent AI operation task coordinator", () => {
     });
   });
 
-  it("queues regenerate behind an irreversible save", async () => {
+  it("deduplicates concurrent regenerate calls behind an irreversible save", async () => {
     const firstSave = deferred<string>();
     let saveCount = 0;
     const test = harness({
+      run: async (input) => operationResult({
+        connectionId: input.connectionId,
+      }),
       save: async () => {
         saveCount += 1;
         return saveCount === 1
@@ -549,10 +552,23 @@ describe("persistent AI operation task coordinator", () => {
       resultIds: [RESULT_ID, NEXT_RESULT_ID],
       timestamps: [CREATED_AT, NEXT_CREATED_AT],
     });
+    const states: AiTaskSnapshot[] = [];
+    test.coordinator.subscribe(ITEM_ID, "summary", (state) => {
+      states.push(state);
+    });
     const first = test.coordinator.start(startInput());
     await waitFor(() => saveCount === 1, "first repository save did not start");
 
     const regenerated = test.coordinator.regenerate(startInput());
+    const duplicate = test.coordinator.regenerate(startInput({
+      connectionId: "22222222-2222-4222-8222-222222222222",
+      fetchFullText: true,
+    }));
+    const third = test.coordinator.regenerate(startInput({
+      connectionId: "55555555-5555-4555-8555-555555555555",
+    }));
+    expect(duplicate).toBe(regenerated);
+    expect(third).toBe(regenerated);
     await flush();
     expect(test.run).toHaveBeenCalledTimes(1);
 
@@ -570,8 +586,84 @@ describe("persistent AI operation task coordinator", () => {
         NEXT_CREATED_AT,
       ),
     });
+    await expect(duplicate).resolves.toBe(await regenerated);
+    await expect(third).resolves.toBe(await regenerated);
     expect(test.run).toHaveBeenCalledTimes(2);
     expect(test.save).toHaveBeenCalledTimes(2);
+    expect(test.run.mock.calls[1]?.[0]).toMatchObject({
+      connectionId: CONNECTION_ID,
+      fetchFullText: false,
+    });
+    expect(test.save.mock.calls[1]?.[0]).toMatchObject({
+      id: NEXT_RESULT_ID,
+      connectionId: CONNECTION_ID,
+      createdAt: NEXT_CREATED_AT,
+    });
+    expect(uniqueStatuses(states)).toEqual([
+      "idle",
+      "preparing",
+      "generating",
+      "saving",
+      "complete",
+      "preparing",
+      "generating",
+      "saving",
+      "complete",
+    ]);
+  });
+
+  it("cancels queued regenerate on shutdown without a provider or unhandled rejection", async () => {
+    const firstSave = deferred<string>();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const test = harness({
+        save: async () => await firstSave.promise,
+      });
+      const first = test.coordinator.start(startInput());
+      await waitFor(
+        () => test.save.mock.calls.length === 1,
+        "repository save did not start",
+      );
+      const queued = test.coordinator.regenerate(startInput());
+      const duplicate = test.coordinator.regenerate(startInput({
+        connectionId: "22222222-2222-4222-8222-222222222222",
+      }));
+      expect(duplicate).toBe(queued);
+      let queuedSettled = false;
+      void queued.then(
+        () => {
+          queuedSettled = true;
+        },
+        () => {
+          queuedSettled = true;
+        },
+      );
+
+      const shutdown = test.coordinator.shutdown();
+      await flush();
+      expect(test.run).toHaveBeenCalledTimes(1);
+
+      firstSave.resolve(defaultArtifactPath());
+      await expect(first).resolves.toMatchObject({ status: "complete" });
+      await shutdown;
+      expect(queuedSettled).toBe(true);
+      await expect(queued).resolves.toMatchObject({
+        status: "aborted",
+        errorCode: "aborted",
+        connectionId: CONNECTION_ID,
+      });
+      await flush();
+
+      expect(test.run).toHaveBeenCalledTimes(1);
+      expect(test.save).toHaveBeenCalledTimes(1);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
   it("shutdown aborts all active tasks and waits for their safe settlement", async () => {

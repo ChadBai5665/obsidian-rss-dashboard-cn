@@ -85,6 +85,11 @@ interface DeferredSnapshot {
   resolve: (snapshot: AiTaskSnapshot) => void;
 }
 
+interface QueuedRegeneration {
+  request: StartInputSnapshot;
+  promise: Promise<AiTaskSnapshot>;
+}
+
 interface TaskRecord {
   internalKey: string;
   itemId: string;
@@ -95,6 +100,7 @@ interface TaskRecord {
   resolveTerminal?: (snapshot: AiTaskSnapshot) => void;
   controller?: AbortController;
   historyPromise?: Promise<AiTaskSnapshot>;
+  queuedRegeneration?: QueuedRegeneration;
   active: boolean;
   saveStarted: boolean;
   sawDelta: boolean;
@@ -256,17 +262,7 @@ export class AiOperationTaskCoordinator {
       internalTaskKey(request.itemId, request.operation),
     );
     if (existing?.active && existing.saveStarted) {
-      return existing.promise.then(() => {
-        try {
-          this.assertRunning();
-          return this.beginGeneration(
-            request,
-            this.tasks.get(existing.internalKey),
-          );
-        } catch (error) {
-          return Promise.reject(publicInputError(error));
-        }
-      });
+      return this.queueRegeneration(existing, request);
     }
     return this.beginGeneration(request, existing);
   }
@@ -377,6 +373,49 @@ export class AiOperationTaskCoordinator {
       this.executions.delete(execution);
     }).catch(() => undefined);
     return task.promise;
+  }
+
+  private queueRegeneration(
+    savingTask: TaskRecord,
+    request: StartInputSnapshot,
+  ): Promise<AiTaskSnapshot> {
+    if (savingTask.queuedRegeneration) {
+      return savingTask.queuedRegeneration.promise;
+    }
+    const promise = savingTask.promise.then(() => {
+      if (this.shuttingDown) {
+        return createSnapshot({
+          itemId: request.itemId,
+          operation: request.operation,
+          status: "aborted",
+          text: "",
+          connectionId: request.connectionId,
+          errorCode: "aborted",
+        });
+      }
+      try {
+        return this.beginGeneration(
+          request,
+          this.tasks.get(savingTask.internalKey),
+        );
+      } catch {
+        return createSnapshot({
+          itemId: request.itemId,
+          operation: request.operation,
+          status: "failed",
+          text: "",
+          connectionId: request.connectionId,
+          errorCode: "invalid-request",
+        });
+      }
+    });
+    savingTask.queuedRegeneration = { request, promise };
+    void promise.finally(() => {
+      if (savingTask.queuedRegeneration?.promise === promise) {
+        savingTask.queuedRegeneration = undefined;
+      }
+    }).catch(() => undefined);
+    return promise;
   }
 
   private async executeGeneration(
