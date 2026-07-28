@@ -349,18 +349,22 @@ class InlineAiPanel implements InlineAiPanelController {
 
   expand(): void {
     if (this.destroyed || !this.collapsed) return;
-    this.collapsed = false;
-    const epoch = ++this.epoch;
-    this.applyCollapsedState();
-    if (!this.operation || !this.selectedConnectionId) {
+    const operation = this.operation;
+    if (!operation) {
+      this.collapsed = false;
+      this.applyCollapsedState();
       this.renderNoConnectionOrIdle();
       return;
     }
-    try {
-      this.attach(this.operation, epoch);
-    } catch {
-      this.renderFailure("invalid-request");
-    }
+    observeAsyncResult(
+      this.show(operation),
+      () => undefined,
+      () => {
+        if (!this.destroyed && this.operation === operation) {
+          this.renderFailure("invalid-request");
+        }
+      },
+    );
   }
 
   destroy(): void {
@@ -443,7 +447,7 @@ class InlineAiPanel implements InlineAiPanelController {
       this.renderFailure("invalid-request");
       return;
     }
-    consumePromise(completion, (value) => {
+    observeAsyncResult(completion, (value) => {
       if (!this.isLive(epoch, operation)) return;
       const terminal = snapshotState(value, this.itemId, operation);
       if (terminal) this.receive(terminal, epoch, operation);
@@ -556,8 +560,7 @@ class InlineAiPanel implements InlineAiPanelController {
       this.body.replaceChildren(...Array.from(staging.childNodes));
     };
     try {
-      if (isThenable(result)) consumePromise(result, commit, () => undefined);
-      else commit();
+      if (!observeAsyncResult(result, commit, () => undefined)) commit();
     } catch {
       // A hostile thenable cannot replace the already-safe plain-text fallback.
     }
@@ -677,7 +680,7 @@ class InlineAiPanel implements InlineAiPanelController {
       this.renderHistoryFailure(epoch, operation);
       return;
     }
-    consumePromise(request, (value) => {
+    observeAsyncResult(request, (value) => {
       if (!this.isHistoryLive(epoch, operation)) return;
       this.renderHistoryEntries(snapshotHistory(value, this.itemId, operation));
     }, () => this.renderHistoryFailure(epoch, operation));
@@ -758,7 +761,7 @@ class InlineAiPanel implements InlineAiPanelController {
     if (this.destroyed) return;
     try {
       const result = action();
-      if (isThenable(result)) consumePromise(result, () => undefined, () => undefined);
+      observeAsyncResult(result, () => undefined, () => undefined);
     } catch {
       // User actions fail closed; Task 8 can surface host notices separately.
     }
@@ -1097,21 +1100,54 @@ function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function isThenable(value: unknown): value is PromiseLike<void> {
-  return (
-    (typeof value === "object" && value !== null) ||
-    typeof value === "function"
-  ) && typeof (value as PromiseLike<void>).then === "function";
-}
-
-function consumePromise<T>(
-  value: PromiseLike<T>,
+function observeAsyncResult<T>(
+  value: PromiseLike<T> | T | void,
   onFulfilled: (result: T) => void,
   onRejected: () => void,
-): void {
+): boolean {
+  if (value === undefined) return false;
+  let derived: Promise<unknown>;
   try {
-    void Promise.resolve(value).then(onFulfilled, onRejected).catch(() => undefined);
+    // Instance `.then` is intentionally bypassed to observe hostile Promises.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    derived = Reflect.apply(Promise.prototype.then, value, [
+      onFulfilled,
+      onRejected,
+    ]) as Promise<unknown>;
   } catch {
-    onRejected();
+    let assimilated: Promise<Awaited<T>>;
+    try {
+      assimilated = Promise.resolve(value);
+    } catch {
+      onRejected();
+      return true;
+    }
+    try {
+      // The assimilated native Promise is observed through the same intrinsic.
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      derived = Reflect.apply(Promise.prototype.then, assimilated, [
+        onFulfilled,
+        onRejected,
+      ]) as Promise<unknown>;
+    } catch {
+      onRejected();
+      return true;
+    }
+  }
+  sinkNativeRejection(derived);
+  return true;
+}
+
+function sinkNativeRejection(value: Promise<unknown>): void {
+  try {
+    // Avoid property access while adding the terminal rejection sink.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    void Reflect.apply(Promise.prototype.then, value, [
+      undefined,
+      () => undefined,
+    ]);
+  } catch {
+    // The original rejection is already observed; a hostile derived species
+    // cannot expose its reason through this fire-and-forget boundary.
   }
 }

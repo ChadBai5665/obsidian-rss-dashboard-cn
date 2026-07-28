@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import process from "node:process";
 import type {
   AiOperationTaskCoordinator,
   AiTaskSnapshot,
@@ -206,6 +207,32 @@ function click(element: HTMLElement): void {
 async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
+}
+
+function hostileRejectedPromise(rawReason: string): Promise<void> {
+  const promise = Promise.reject(new Error(rawReason));
+  void Object.defineProperty(promise, "then", {
+    configurable: true,
+    get() {
+      throw new Error("hostile then getter");
+    },
+  });
+  return promise;
+}
+
+async function collectUnhandled(run: () => void | Promise<void>): Promise<unknown[]> {
+  const reasons: unknown[] = [];
+  const listener = (reason: unknown): void => {
+    reasons.push(reason);
+  };
+  process.on("unhandledRejection", listener);
+  try {
+    await run();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    return reasons;
+  } finally {
+    process.off("unhandledRejection", listener);
+  }
 }
 
 function createPanel(
@@ -517,6 +544,25 @@ describe("createInlineAiPanel", () => {
     expect(coordinator.calls.loadLatest).toEqual([]);
   });
 
+  it("resumes an authorized pending history flow after collapse and expand", async () => {
+    const coordinator = new FakeCoordinator();
+    const history = deferred<AiTaskSnapshot>();
+    coordinator.loadLatestImpl = () => history.promise;
+    const { controller } = createPanel(coordinator);
+
+    const initialShow = controller.show("summary");
+    await flush();
+    controller.collapse();
+    controller.expand();
+    history.resolve(state("idle"));
+    await initialShow;
+    await flush();
+
+    expect(coordinator.calls.loadLatest).toHaveLength(2);
+    expect(coordinator.calls.start).toHaveLength(1);
+    expect(coordinator.calls.abort).toEqual([]);
+  });
+
   it("destroys only owned DOM, never aborts, and invalidates pending work and old actions", async () => {
     const coordinator = new FakeCoordinator(state("complete", {
       text: "Done",
@@ -627,6 +673,48 @@ describe("createInlineAiPanel", () => {
     expect(renderMarkdown).toHaveBeenCalled();
     expect(container.querySelector("strong")?.textContent)
       .toBe("**Rendered safely**");
+  });
+
+  it.each(["open", "insert", "settings"] as const)(
+    "sinks a hostile native Promise rejection from the %s action",
+    async (action) => {
+      const rawReason = `raw ${action} rejection`;
+      const coordinator = new FakeCoordinator(state("complete", {
+        text: "Done",
+        artifactPath: CURRENT_PATH,
+      }));
+      const callback = (): Promise<void> => hostileRejectedPromise(rawReason);
+      const overrides: Partial<InlineAiPanelOptions> = action === "open"
+        ? { openArtifact: callback }
+        : action === "insert"
+          ? { canInsertArtifact: () => true, insertArtifact: callback }
+          : { connections: [], openSettings: callback };
+      const { container, controller } = createPanel(coordinator, overrides);
+
+      const reasons = await collectUnhandled(async () => {
+        await controller.show("summary");
+        click(button(container, action));
+      });
+
+      expect(reasons).toEqual([]);
+      expect(container.textContent).not.toContain(rawReason);
+    },
+  );
+
+  it("sinks a hostile native Promise rejection from renderMarkdown", async () => {
+    const rawReason = "raw renderer rejection";
+    const coordinator = new FakeCoordinator(state("generating", {
+      text: "Safe visible stream",
+    }));
+    const { container, controller } = createPanel(coordinator, {
+      renderMarkdown: () => hostileRejectedPromise(rawReason),
+    });
+
+    const reasons = await collectUnhandled(() => controller.show("summary"));
+
+    expect(reasons).toEqual([]);
+    expect(container.textContent).toContain("Safe visible stream");
+    expect(container.textContent).not.toContain(rawReason);
   });
 
   it("ignores an old start completion after explicit regeneration begins", async () => {
