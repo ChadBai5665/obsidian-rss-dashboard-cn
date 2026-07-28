@@ -611,40 +611,7 @@ describe("YouTubeTranscriptService", () => {
     expect(content.writes).toHaveLength(1);
   });
 
-  it("does not merge a track selection with a new refresh", async () => {
-    const first = track({ languageName: "English A" });
-    const second = track({
-      languageName: "English B",
-      url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
-    });
-    const innerTube = new FakeProvider([first, second]);
-    const { service } = createService({ innerTube });
-    const choice = await service.get({
-      itemId: ITEM_ID,
-      videoId: VIDEO_ID,
-      refresh: true,
-    });
-    if (choice.status !== "selection-required") throw new Error("expected choices");
-
-    const [selection, refresh] = await Promise.all([
-      service.get({
-        itemId: ITEM_ID,
-        videoId: VIDEO_ID,
-        trackId: choice.tracks[0].id,
-      }),
-      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
-    ]);
-
-    expect(selection).toMatchObject({
-      status: "ready",
-      content: { languageName: "English A" },
-    });
-    expect(refresh.status).toBe("selection-required");
-    expect(innerTube.listCalls).toBe(2);
-    expect(innerTube.fetchCalls).toBe(1);
-  });
-
-  it("does not merge two different track selections", async () => {
+  it("makes a newer refresh current over an earlier track selection", async () => {
     const first = track({ languageName: "English A" });
     const second = track({
       languageName: "English B",
@@ -659,23 +626,63 @@ describe("YouTubeTranscriptService", () => {
     });
     if (choice.status !== "selection-required") throw new Error("expected choices");
 
-    const [left, right] = await Promise.all([
-      service.get({
-        itemId: ITEM_ID,
-        videoId: VIDEO_ID,
-        trackId: choice.tracks[0].id,
-      }),
-      service.get({
-        itemId: ITEM_ID,
-        videoId: VIDEO_ID,
-        trackId: choice.tracks[1].id,
-      }),
-    ]);
+    const selection = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      trackId: choice.tracks[0].id,
+    });
+    const refresh = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
 
-    expect(left).toMatchObject({ content: { languageName: "English A" } });
-    expect(right).toMatchObject({ content: { languageName: "English B" } });
+    await expect(selection).rejects.toMatchObject({
+      code: "temporarily-unavailable",
+    });
+    await expect(refresh).resolves.toMatchObject({
+      status: "selection-required",
+    });
+    expect(innerTube.listCalls).toBe(2);
+    expect(innerTube.fetchCalls).toBe(1);
+    expect(content.writes).toEqual([]);
+  });
+
+  it("lets only the latest of two different track selections write", async () => {
+    const first = track({ languageName: "English A" });
+    const second = track({
+      languageName: "English B",
+      url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+    });
+    const innerTube = new FakeProvider([first, second]);
+    const { service, content } = createService({ innerTube });
+    const choice = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choice.status !== "selection-required") throw new Error("expected choices");
+
+    const left = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      trackId: choice.tracks[0].id,
+    });
+    const right = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      trackId: choice.tracks[1].id,
+    });
+
+    await expect(left).rejects.toMatchObject({
+      code: "temporarily-unavailable",
+    });
+    await expect(right).resolves.toMatchObject({
+      content: { languageName: "English B" },
+    });
     expect(innerTube.fetchCalls).toBe(2);
-    expect(content.writes).toHaveLength(2);
+    expect(content.writes).toHaveLength(1);
+    expect(content.writes[0]?.languageName).toBe("English B");
   });
 
   it("shares one provider fetch and write for the same track selection", async () => {
@@ -1189,6 +1196,278 @@ describe("YouTubeTranscriptService", () => {
       status: "ready",
       content: { languageName: "新中文 A" },
     });
+  });
+
+  it("does not let an older slow cache miss reclaim a newer refresh generation", async () => {
+    let releaseRead!: () => void;
+    let markReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
+    class SlowMissRepository extends FakeContentRepository {
+      override async read(): Promise<CachedItemContent | null> {
+        this.readCalls += 1;
+        markReadStarted();
+        await new Promise<void>((resolve) => {
+          releaseRead = resolve;
+        });
+        return null;
+      }
+    }
+    const newerTracks = [
+      track({ languageCode: "zh-CN", languageName: "新中文 A" }),
+      track({
+        languageCode: "zh-TW",
+        languageName: "新中文 B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=zh-TW",
+      }),
+    ];
+    const content = new SlowMissRepository();
+    const innerTube = new FakeProvider(newerTracks);
+    const { service } = createService({ content, innerTube });
+    const older = service.get({ itemId: ITEM_ID, videoId: VIDEO_ID });
+    await readStarted;
+    const newer = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "zh",
+    });
+    if (newer.status !== "selection-required") throw new Error("expected choices");
+    releaseRead();
+
+    await expect(older).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(innerTube.listCalls).toBe(1);
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: newer.tracks[0].id,
+      }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { languageName: "新中文 A" },
+    });
+  });
+
+  it("does not fetch a delayed single track after a newer refresh becomes current", async () => {
+    let releaseOlderList!: (tracks: YouTubeCaptionTrack[]) => void;
+    let markOlderListStarted!: () => void;
+    const olderListStarted = new Promise<void>((resolve) => {
+      markOlderListStarted = resolve;
+    });
+    const newerTracks = [
+      track({ languageCode: "zh-CN", languageName: "新中文 A" }),
+      track({
+        languageCode: "zh-TW",
+        languageName: "新中文 B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=zh-TW",
+      }),
+    ];
+    let listCalls = 0;
+    let fetchCalls = 0;
+    const innerTube: TranscriptProvider = {
+      async listTracks() {
+        listCalls += 1;
+        if (listCalls === 1) {
+          markOlderListStarted();
+          return await new Promise<YouTubeCaptionTrack[]>((resolve) => {
+            releaseOlderList = resolve;
+          });
+        }
+        return newerTracks;
+      },
+      async fetchTrack(selectedTrack) {
+        fetchCalls += 1;
+        return transcript(selectedTrack);
+      },
+    };
+    const { service, content, metadata } = createService({ innerTube });
+    const older = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "en",
+    });
+    await olderListStarted;
+    const newer = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "zh",
+    });
+    if (newer.status !== "selection-required") throw new Error("expected choices");
+    releaseOlderList([track({ languageName: "Older single track" })]);
+
+    await expect(older).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(fetchCalls).toBe(0);
+    expect(content.writes).toEqual([]);
+    expect(metadata.updates).toEqual([]);
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: newer.tracks[0].id,
+      }),
+    ).resolves.toMatchObject({ status: "ready" });
+  });
+
+  it("does not persist an in-progress fetch after a newer refresh becomes current", async () => {
+    const olderTrack = track({ languageName: "Older fetched track" });
+    const newerTracks = [
+      track({ languageCode: "zh-CN", languageName: "新中文 A" }),
+      track({
+        languageCode: "zh-TW",
+        languageName: "新中文 B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=zh-TW",
+      }),
+    ];
+    let listCalls = 0;
+    let fetchCalls = 0;
+    let releaseOlderFetch!: (value: YouTubeTranscript) => void;
+    let markOlderFetchStarted!: () => void;
+    const olderFetchStarted = new Promise<void>((resolve) => {
+      markOlderFetchStarted = resolve;
+    });
+    const innerTube: TranscriptProvider = {
+      async listTracks() {
+        listCalls += 1;
+        return listCalls === 1 ? [olderTrack] : newerTracks;
+      },
+      async fetchTrack(selectedTrack) {
+        fetchCalls += 1;
+        if (fetchCalls === 1) {
+          markOlderFetchStarted();
+          return await new Promise<YouTubeTranscript>((resolve) => {
+            releaseOlderFetch = resolve;
+          });
+        }
+        return transcript(selectedTrack);
+      },
+    };
+    const { service, content, metadata } = createService({ innerTube });
+    const older = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "en",
+    });
+    await olderFetchStarted;
+    const newer = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "zh",
+    });
+    if (newer.status !== "selection-required") throw new Error("expected choices");
+    releaseOlderFetch(transcript(olderTrack));
+
+    await expect(older).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(fetchCalls).toBe(1);
+    expect(content.writes).toEqual([]);
+    expect(metadata.updates).toEqual([]);
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: newer.tracks[0].id,
+      }),
+    ).resolves.toMatchObject({ status: "ready" });
+  });
+
+  it("rechecks a selected fetch after its item transaction wait before writing", async () => {
+    let markSelectionTransactionRequested!: () => void;
+    const selectionTransactionRequested = new Promise<void>((resolve) => {
+      markSelectionTransactionRequested = resolve;
+    });
+    class ObservableTransactionRepository extends FakeContentRepository {
+      transactionCalls = 0;
+
+      override async transaction<T>(
+        itemId: string,
+        operation: (transaction: {
+          read(): Promise<CachedItemContent | null>;
+          write(value: CachedItemContent): Promise<string>;
+          pathFor(): string;
+        }) => Promise<T>,
+      ): Promise<T> {
+        this.transactionCalls += 1;
+        if (this.transactionCalls === 2) markSelectionTransactionRequested();
+        return await super.transaction(itemId, operation);
+      }
+    }
+    const firstTracks = [
+      track({ languageName: "English A" }),
+      track({
+        languageName: "English B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en-B",
+      }),
+    ];
+    const newerTracks = [
+      track({ languageCode: "zh-CN", languageName: "新中文 A" }),
+      track({
+        languageCode: "zh-TW",
+        languageName: "新中文 B",
+        url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=zh-TW",
+      }),
+    ];
+    let listCalls = 0;
+    const innerTube: TranscriptProvider = {
+      async listTracks() {
+        listCalls += 1;
+        return listCalls === 1 ? firstTracks : newerTracks;
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+    };
+    const content = new ObservableTransactionRepository();
+    const { service, metadata } = createService({ innerTube, content });
+    const first = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "en",
+    });
+    if (first.status !== "selection-required") throw new Error("expected choices");
+    let releaseHold!: () => void;
+    let markHoldStarted!: () => void;
+    const holdStarted = new Promise<void>((resolve) => {
+      markHoldStarted = resolve;
+    });
+    const hold = content.transaction(ITEM_ID, async () => {
+      markHoldStarted();
+      await new Promise<void>((resolve) => {
+        releaseHold = resolve;
+      });
+    });
+    await holdStarted;
+    const selection = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      trackId: first.tracks[0].id,
+    });
+    await selectionTransactionRequested;
+    const newer = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "zh",
+    });
+    if (newer.status !== "selection-required") throw new Error("expected choices");
+    releaseHold();
+    await hold;
+
+    await expect(selection).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(content.writes).toEqual([]);
+    expect(metadata.updates).toEqual([]);
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: newer.tracks[0].id,
+      }),
+    ).resolves.toMatchObject({ status: "ready" });
   });
 
   it("prevents an older delayed fallback from replacing newer InnerTube choices", async () => {

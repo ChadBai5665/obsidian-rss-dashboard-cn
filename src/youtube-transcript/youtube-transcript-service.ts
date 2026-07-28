@@ -112,6 +112,11 @@ interface PendingChoiceSet {
   choices: Map<string, RegisteredChoice>;
 }
 
+interface SelectionAtStart {
+  pendingGeneration: symbol;
+  registered: RegisteredChoice;
+}
+
 interface SharedWork {
   controller: AbortController;
   promise: Promise<YouTubeTranscriptServiceResult>;
@@ -169,8 +174,18 @@ export class YouTubeTranscriptService {
     const resourceKey = requestKey(request.itemId, request.videoId);
     const workKey = requestWorkKey(resourceKey, request);
     const operationGeneration = Symbol(workKey);
-    const pendingGenerationAtStart =
-      this.pendingChoices.get(resourceKey)?.generation;
+    const pendingAtStart = this.pendingChoices.get(resourceKey);
+    const registeredAtStart =
+      request.trackId === undefined
+        ? undefined
+        : pendingAtStart?.choices.get(request.trackId);
+    const selectionAtStart =
+      registeredAtStart === undefined || pendingAtStart === undefined
+        ? undefined
+        : {
+            pendingGeneration: pendingAtStart.generation,
+            registered: registeredAtStart,
+          };
     return await this.subscribeToWork(
       workKey,
       request.signal,
@@ -179,20 +194,26 @@ export class YouTubeTranscriptService {
           { ...request, signal: sharedSignal },
           resourceKey,
           operationGeneration,
-          pendingGenerationAtStart,
+          selectionAtStart,
         ),
       () => {
         const pending = this.pendingChoices.get(resourceKey);
         if (
           request.trackId !== undefined
             ? pending?.choices.has(request.trackId)
-            : pendingGenerationAtStart !== undefined &&
-              pending?.generation === pendingGenerationAtStart
+            : false
         ) {
           this.deletePendingChoiceSet(resourceKey);
         }
-        if (request.trackId === undefined) {
-          this.clearGeneration(resourceKey, operationGeneration);
+        this.clearGeneration(resourceKey, operationGeneration);
+      },
+      () => {
+        if (request.trackId === undefined || selectionAtStart !== undefined) {
+          this.beginGeneration(
+            resourceKey,
+            operationGeneration,
+            request.trackId === undefined,
+          );
         }
       },
     );
@@ -202,9 +223,8 @@ export class YouTubeTranscriptService {
     request: YouTubeTranscriptRequest,
     key: string,
     operationGeneration: symbol,
-    pendingGenerationAtStart: symbol | undefined,
+    selectionAtStart: SelectionAtStart | undefined,
   ): Promise<YouTubeTranscriptServiceResult> {
-    let ownedChoiceGeneration = operationGeneration;
     try {
       assertNotAborted(request.signal);
 
@@ -221,78 +241,90 @@ export class YouTubeTranscriptService {
           },
         );
         if (cachedResult) {
-          if (pendingGenerationAtStart !== undefined) {
-            this.deletePendingChoiceSet(key, pendingGenerationAtStart);
-          }
+          this.clearGeneration(key, operationGeneration);
           return cachedResult;
         }
       }
 
-      const pendingSet =
-        request.trackId === undefined ? undefined : this.pendingChoices.get(key);
-      const registered =
-        request.trackId === undefined
-          ? undefined
-          : pendingSet?.choices.get(request.trackId);
-      if (request.trackId !== undefined && (!registered || !pendingSet)) {
+      if (request.trackId !== undefined && selectionAtStart === undefined) {
         throw new YouTubeTranscriptServiceError("temporarily-unavailable");
       }
 
-      if (registered && pendingSet) {
-        ownedChoiceGeneration = pendingSet.generation;
+      if (selectionAtStart !== undefined) {
         try {
-          return await this.fetchAndPersist(
+          const result = await this.fetchAndPersist(
             request,
             key,
-            pendingSet.generation,
-            registered.provider,
-            registered.track,
+            operationGeneration,
+            selectionAtStart.registered.provider,
+            selectionAtStart.registered.track,
           );
+          this.deletePendingChoiceSet(key, selectionAtStart.pendingGeneration);
+          this.clearGeneration(key, operationGeneration);
+          return result;
         } catch (error) {
           const primary = normalizeProviderError(error);
-          if (this.currentGenerations.get(key) !== pendingSet.generation) {
+          if (this.currentGenerations.get(key) !== operationGeneration) {
             throw new YouTubeTranscriptServiceError("temporarily-unavailable");
           }
           if (
-            registered.track.source !== "innertube" ||
+            selectionAtStart.registered.track.source !== "innertube" ||
             !isFallbackEligible(primary.code)
           ) {
             throw primary;
           }
-          return await this.runFallback(
+          const result = await this.runFallback(
             request,
             key,
-            pendingSet.generation,
+            operationGeneration,
             primary.code,
           );
+          if (result.status === "ready") {
+            this.deletePendingChoiceSet(
+              key,
+              selectionAtStart.pendingGeneration,
+            );
+            this.clearGeneration(key, operationGeneration);
+          }
+          return result;
         }
       }
 
-      this.deletePendingChoiceSet(key);
-      this.currentGenerations.set(key, operationGeneration);
+      this.assertCurrentGeneration(key, operationGeneration);
       try {
-        return await this.runProvider(
+        const result = await this.runProvider(
           request,
           key,
           operationGeneration,
           this.options.innerTube,
           "innertube",
         );
+        if (result.status === "ready") {
+          this.clearGeneration(key, operationGeneration);
+        }
+        return result;
       } catch (error) {
         const primary = normalizeProviderError(error);
         if (this.currentGenerations.get(key) !== operationGeneration) {
           throw new YouTubeTranscriptServiceError("temporarily-unavailable");
         }
         if (!isFallbackEligible(primary.code)) throw primary;
-        return await this.runFallback(
+        const result = await this.runFallback(
           request,
           key,
           operationGeneration,
           primary.code,
         );
+        if (result.status === "ready") {
+          this.clearGeneration(key, operationGeneration);
+        }
+        return result;
       }
     } catch (error) {
-      this.clearGeneration(key, ownedChoiceGeneration);
+      if (selectionAtStart !== undefined) {
+        this.deletePendingChoiceSet(key, selectionAtStart.pendingGeneration);
+      }
+      this.clearGeneration(key, operationGeneration);
       throw error;
     }
   }
@@ -305,8 +337,10 @@ export class YouTubeTranscriptService {
     expectedSource: "innertube" | "yt-dlp",
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(request.signal);
+    this.assertCurrentGeneration(key, operationGeneration);
     const tracks = await provider.listTracks(request.videoId, request.signal);
     assertNotAborted(request.signal);
+    this.assertCurrentGeneration(key, operationGeneration);
     const eligible = tracks.filter(
       (candidate) => candidate.source === expectedSource,
     );
@@ -334,21 +368,24 @@ export class YouTubeTranscriptService {
     provider: TranscriptProvider,
     selectedTrack: YouTubeCaptionTrack,
   ): Promise<YouTubeTranscriptServiceResult> {
+    this.assertCurrentGeneration(key, operationGeneration);
     const transcript = await provider.fetchTrack(
       selectedTrack,
       request.signal,
     );
     assertNotAborted(request.signal);
+    this.assertCurrentGeneration(key, operationGeneration);
     const content = createCachedTranscript(request, transcript, this.options.clock);
     await this.options.contentRepository.transaction(
       request.itemId,
       async (transaction) => {
         assertNotAborted(request.signal);
+        this.assertCurrentGeneration(key, operationGeneration);
         const path = await transaction.write(content);
+        this.assertCurrentGeneration(key, operationGeneration);
         await this.repairMetadata(request.itemId, path);
       },
     );
-    this.clearGeneration(key, operationGeneration);
     return { status: "ready", source: "fresh", content };
   }
 
@@ -359,6 +396,7 @@ export class YouTubeTranscriptService {
     primaryCode: YouTubeTranscriptErrorCode,
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(request.signal);
+    this.assertCurrentGeneration(key, operationGeneration);
     let available: boolean;
     try {
       available = await this.options.ytDlp.isAvailable();
@@ -369,6 +407,7 @@ export class YouTubeTranscriptService {
       );
     }
     assertNotAborted(request.signal);
+    this.assertCurrentGeneration(key, operationGeneration);
     if (!available) {
       throw new YouTubeTranscriptServiceError(
         "fallback-unavailable",
@@ -395,9 +434,7 @@ export class YouTubeTranscriptService {
     provider: TranscriptProvider,
     tracks: readonly YouTubeCaptionTrack[],
   ): YouTubeTranscriptServiceResult {
-    if (this.currentGenerations.get(key) !== operationGeneration) {
-      throw new YouTubeTranscriptServiceError("temporarily-unavailable");
-    }
+    this.assertCurrentGeneration(key, operationGeneration);
     const registered = new Map<string, RegisteredChoice>();
     const choices = tracks.map((candidate) => {
       const id = `track-${++this.choiceSequence}`;
@@ -447,19 +484,30 @@ export class YouTubeTranscriptService {
     callerSignal: AbortSignal | undefined,
     operation: (signal: AbortSignal) => Promise<YouTubeTranscriptServiceResult>,
     onAllCancelled: () => void,
+    onStart: () => void,
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(callerSignal);
     let work = this.inFlight.get(key);
     if (!work) {
+      onStart();
       const controller = new AbortController();
+      let resolveWork!: (value: YouTubeTranscriptServiceResult) => void;
+      let rejectWork!: (reason: unknown) => void;
+      const promise = new Promise<YouTubeTranscriptServiceResult>(
+        (resolve, reject) => {
+          resolveWork = resolve;
+          rejectWork = reject;
+        },
+      );
       work = {
         controller,
-        promise: Promise.resolve().then(async () => await operation(controller.signal)),
+        promise,
         subscribers: 0,
         settled: false,
         onAllCancelled,
       };
       this.inFlight.set(key, work);
+      void operation(controller.signal).then(resolveWork, rejectWork);
       const created = work;
       void created.promise.then(
         () => this.settleWork(key, created),
@@ -524,7 +572,7 @@ export class YouTubeTranscriptService {
   private cleanupExpiredChoices(): void {
     const now = this.options.clock().getTime();
     for (const [key, entry] of this.pendingChoices) {
-      if (entry.expiresAt <= now) this.deletePendingChoiceSet(key);
+      if (entry.expiresAt <= now) this.clearGeneration(key, entry.generation);
     }
   }
 
@@ -532,12 +580,29 @@ export class YouTubeTranscriptService {
     while (this.pendingChoices.size > this.maxPendingChoiceSets) {
       const oldest = this.pendingChoices.keys().next().value;
       if (oldest === undefined) return;
-      this.deletePendingChoiceSet(oldest);
+      const pending = this.pendingChoices.get(oldest);
+      if (pending === undefined) return;
+      this.clearGeneration(oldest, pending.generation);
     }
   }
 
   private clearPendingChoices(key: string, generation: symbol): void {
     this.deletePendingChoiceSet(key, generation);
+  }
+
+  private beginGeneration(
+    key: string,
+    generation: symbol,
+    invalidateChoices: boolean,
+  ): void {
+    this.currentGenerations.set(key, generation);
+    if (invalidateChoices) this.deletePendingChoiceSet(key);
+  }
+
+  private assertCurrentGeneration(key: string, generation: symbol): void {
+    if (this.currentGenerations.get(key) !== generation) {
+      throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+    }
   }
 
   private clearGeneration(key: string, generation: symbol): void {
@@ -557,9 +622,6 @@ export class YouTubeTranscriptService {
     }
     window.clearTimeout(pending.expirationTimer);
     this.pendingChoices.delete(key);
-    if (this.currentGenerations.get(key) === pending.generation) {
-      this.currentGenerations.delete(key);
-    }
   }
 }
 
