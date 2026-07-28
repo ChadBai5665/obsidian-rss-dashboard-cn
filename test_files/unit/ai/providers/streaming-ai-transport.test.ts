@@ -1,13 +1,18 @@
 import { Buffer } from "node:buffer";
 import { getEventListeners } from "node:events";
 import {
+  ClientRequest,
+  IncomingMessage,
   createServer,
-  type IncomingMessage,
   type Server,
   type ServerResponse,
 } from "node:http";
 import { Socket } from "node:net";
-import { setImmediate as scheduleImmediate } from "node:timers";
+import {
+  clearTimeout as cancelTimer,
+  setImmediate as scheduleImmediate,
+  setTimeout as scheduleTimer,
+} from "node:timers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createNodeAiStreamingTransport,
@@ -220,6 +225,34 @@ describe("secure AI streaming transport", () => {
     expect(onChunk).not.toHaveBeenCalled();
   });
 
+  it("bounds and discards an unknown successful content type", async () => {
+    const exact = await localServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/octet-stream" });
+      response.end("12345678");
+    });
+    const onChunk = vi.fn();
+    await expect(createNodeAiStreamingTransport({ maxResponseBytes: 8 })(
+      request(`${exact.origin}/unknown-exact`),
+      onChunk,
+    )).resolves.toEqual({
+      status: 200,
+      headers: { "content-type": "application/octet-stream" },
+      contentType: "",
+    });
+    expect(onChunk).not.toHaveBeenCalled();
+
+    const oversized = await localServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/octet-stream" });
+      response.end("123456789");
+    });
+    const error = await createNodeAiStreamingTransport({ maxResponseBytes: 8 })(
+      request(`${oversized.origin}/unknown-oversized`),
+      onChunk,
+    ).catch((reason: unknown) => reason);
+    expectProviderCode(error, "response-too-large");
+    expect(onChunk).not.toHaveBeenCalled();
+  });
+
   it("maps timeout and caller abort to stable errors and removes abort listeners", async () => {
     const fixture = await localServer(() => undefined);
     const timeoutError = await createNodeAiStreamingTransport({ timeoutMs: 25 })(
@@ -239,6 +272,36 @@ describe("secure AI streaming transport", () => {
     controller.abort();
     const abortError = await pending.catch((reason: unknown) => reason);
     expectProviderCode(abortError, "aborted");
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+  });
+
+  it("settles an abort-timeout race once and cleans the caller listener", async () => {
+    const fixture = await localServer(() => undefined);
+    const controller = new AbortController();
+    let settlements = 0;
+    const pending = createNodeAiStreamingTransport({ timeoutMs: 10 })(
+      request(`${fixture.origin}/abort-timeout-race`, {
+        signal: controller.signal,
+      }),
+      vi.fn(),
+    ).then(
+      () => {
+        settlements += 1;
+        return undefined;
+      },
+      (error: unknown) => {
+        settlements += 1;
+        return error;
+      },
+    );
+    const abortTimer = scheduleTimer(() => controller.abort(), 10);
+    const error = await pending;
+    cancelTimer(abortTimer);
+
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(["aborted", "timeout"]).toContain((error as ProviderError).code);
+    await new Promise<void>((resolve) => scheduleTimer(resolve, 20));
+    expect(settlements).toBe(1);
     expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
   });
 
@@ -270,20 +333,116 @@ describe("secure AI streaming transport", () => {
     expect(JSON.stringify(callbackError)).not.toContain(callbackSentinel);
   });
 
-  it("follows only bounded same-origin redirects and preserves authorization", async () => {
-    const seen: Array<{ path: string; authorization: string }> = [];
-    const fixture = await localServer((incoming, response) => {
-      seen.push({
-        path: incoming.url ?? "",
-        authorization: String(incoming.headers.authorization ?? ""),
-      });
-      if (incoming.url === "/start") {
-        response.writeHead(307, { location: "/final" });
-        response.end();
-        return;
+  it("keeps request and response error sinks through close after normal end", async () => {
+    const captured: {
+      request?: ClientRequest;
+      response?: IncomingMessage;
+    } = {};
+    let requestListenersDuringEnd = -1;
+    let responseListenersDuringEnd = -1;
+    let lateErrorThrew = false;
+    let endProbeInstalled = false;
+    const originalRequestOn: unknown = Reflect.get(ClientRequest.prototype, "on");
+    const originalResponseOn: unknown = Reflect.get(IncomingMessage.prototype, "on");
+    const originalResponseOnce: unknown = Reflect.get(
+      IncomingMessage.prototype,
+      "once",
+    );
+    vi.spyOn(ClientRequest.prototype, "on").mockImplementation(function (
+      this: ClientRequest,
+      event: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ): ClientRequest {
+      if (event === "error") Reflect.set(captured, "request", this);
+      return Reflect.apply(originalRequestOn, this, [event, listener]);
+    });
+    vi.spyOn(IncomingMessage.prototype, "on").mockImplementation(function (
+      this: IncomingMessage,
+      event: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ): IncomingMessage {
+      if (event === "data" && typeof this.statusCode === "number") {
+        Reflect.set(captured, "response", this);
       }
+      if (
+        event === "close" &&
+        typeof this.statusCode === "number" &&
+        !endProbeInstalled
+      ) {
+        endProbeInstalled = true;
+        Reflect.apply(originalResponseOnce, this, ["end", () => {
+          requestListenersDuringEnd = captured.request?.listenerCount("error") ?? -1;
+          responseListenersDuringEnd = captured.response?.listenerCount("error") ?? -1;
+          try {
+            captured.request?.emit("error", new Error("late request"));
+            captured.response?.emit("error", new Error("late response"));
+          } catch {
+            lateErrorThrew = true;
+          }
+        }]);
+      }
+      return Reflect.apply(originalResponseOn, this, [event, listener]);
+    });
+    const fixture = await localServer((_request, response) => {
       response.writeHead(200, { "content-type": "text/event-stream" });
-      response.end("data: ok\n\n");
+      response.end("data: complete\n\n");
+    });
+    let settlements = 0;
+    const pending = createNodeAiStreamingTransport()(
+      request(`${fixture.origin}/late-errors`),
+      vi.fn(),
+    ).then((result) => {
+      settlements += 1;
+      return result;
+    });
+
+    await expect(pending).resolves.toMatchObject({ status: 200 });
+    expect(captured.request).toBeDefined();
+    expect(captured.response).toBeDefined();
+    expect(requestListenersDuringEnd).toBeGreaterThan(0);
+    expect(responseListenersDuringEnd).toBeGreaterThan(0);
+    expect(lateErrorThrew).toBe(false);
+    expect(settlements).toBe(1);
+    await vi.waitFor(() => {
+      expect(captured.request?.closed).toBe(true);
+      expect(captured.response?.closed).toBe(true);
+    });
+    expect(captured.request?.listenerCount("error")).toBe(0);
+    expect(captured.response?.listenerCount("error")).toBe(0);
+  });
+
+  it.each([307, 308])(
+    "follows same-origin %i without changing POST body, authorization, or content length",
+    async (status) => {
+    const seen: Array<{
+      path: string;
+      method: string;
+      authorization: string;
+      contentLength: string;
+      body: string;
+    }> = [];
+    const fixture = await localServer((incoming, response) => {
+      let body = "";
+      incoming.setEncoding("utf8");
+      incoming.on("data", (chunk: string) => {
+        body += chunk;
+      });
+      incoming.on("end", () => {
+        seen.push({
+          path: incoming.url ?? "",
+          method: incoming.method ?? "",
+          authorization: String(incoming.headers.authorization ?? ""),
+          contentLength: String(incoming.headers["content-length"] ?? ""),
+          body,
+        });
+        if (incoming.url === "/start") {
+          response.writeHead(status, { location: "/final" });
+          response.end();
+          return;
+        }
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end("data: ok\n\n");
+      });
     });
 
     await expect(createNodeAiStreamingTransport()(
@@ -291,9 +450,65 @@ describe("secure AI streaming transport", () => {
       vi.fn(),
     )).resolves.toMatchObject({ status: 200 });
     expect(seen).toEqual([
-      { path: "/start", authorization: "Bearer test-key" },
-      { path: "/final", authorization: "Bearer test-key" },
+      {
+        path: "/start",
+        method: "POST",
+        authorization: "Bearer test-key",
+        contentLength: "18",
+        body: "{\"prompt\":\"hello\"}",
+      },
+      {
+        path: "/final",
+        method: "POST",
+        authorization: "Bearer test-key",
+        contentLength: "18",
+        body: "{\"prompt\":\"hello\"}",
+      },
     ]);
+  });
+
+  it.each([301, 302, 303])(
+    "rejects same-origin %i without creating a second side-effecting POST",
+    async (status) => {
+      let requests = 0;
+      const fixture = await localServer((incoming, response) => {
+        requests += 1;
+        if (incoming.url === "/start") {
+          response.writeHead(status, { location: "/must-not-run" });
+          response.end();
+          return;
+        }
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end("data: duplicate\n\n");
+      });
+
+      const error = await createNodeAiStreamingTransport()(
+        request(`${fixture.origin}/start`),
+        vi.fn(),
+      ).catch((reason: unknown) => reason);
+
+      expectProviderCode(error, "network-failure");
+      expect(requests).toBe(1);
+    },
+  );
+
+  it("returns a redirect status without Location as an ordinary response", async () => {
+    let requests = 0;
+    const fixture = await localServer((_incoming, response) => {
+      requests += 1;
+      response.writeHead(302, { "content-type": "application/json" });
+      response.end("{\"ignored\":true}");
+    });
+
+    await expect(createNodeAiStreamingTransport()(
+      request(`${fixture.origin}/no-location`),
+      vi.fn(),
+    )).resolves.toEqual({
+      status: 302,
+      headers: { "content-type": "application/json" },
+      contentType: "application/json",
+    });
+    expect(requests).toBe(1);
   });
 
   it("enforces the redirect limit", async () => {
@@ -342,6 +557,7 @@ describe("secure AI streaming transport", () => {
     "http://127.1/v1/chat/completions",
     "http://2130706433/v1/chat/completions",
     "http://127.0.0.1:0/v1/chat/completions",
+    "http://[::1]:11434/v1/chat/completions",
     "ftp://localhost/v1/chat/completions",
     "https://127.0.0.1:0/v1/chat/completions",
     "https://user:password@example.com/v1/chat/completions",
@@ -407,6 +623,81 @@ describe("secure AI streaming transport", () => {
     expect(getterCalls).toBe(0);
   });
 
+  it("rejects dangerous and duplicate header names without invoking accessors", async () => {
+    const connect = vi.spyOn(Socket.prototype, "connect")
+      .mockImplementation(function blockedSocket(): Socket {
+        throw new Error("test blocked an unsafe socket attempt");
+      });
+    const transport = createNodeAiStreamingTransport();
+
+    for (const dangerousName of ["__proto__", "prototype", "constructor"]) {
+      const headers = Object.create(null) as Record<string, string>;
+      Object.defineProperty(headers, "authorization", {
+        enumerable: true,
+        value: "Bearer fixture",
+      });
+      Object.defineProperty(headers, dangerousName, {
+        enumerable: true,
+        value: "unsafe",
+      });
+      const error = await transport(
+        request("http://127.0.0.1:1/v1", { headers }),
+        vi.fn(),
+      ).catch((reason: unknown) => reason);
+      expectProviderCode(error, "invalid-request");
+    }
+
+    const duplicate = Object.create(null) as Record<string, string>;
+    duplicate.Authorization = "Bearer fixture";
+    duplicate.authorization = "Bearer fixture";
+    expectProviderCode(
+      await transport(request("http://127.0.0.1:1/v1", { headers: duplicate }), vi.fn())
+        .catch((reason: unknown) => reason),
+      "invalid-request",
+    );
+
+    let getterCalls = 0;
+    const accessor = Object.create(null) as Record<string, string>;
+    Object.defineProperty(accessor, "x-api-key", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "must-not-read";
+      },
+    });
+    expectProviderCode(
+      await transport(request("http://127.0.0.1:1/v1", { headers: accessor }), vi.fn())
+        .catch((reason: unknown) => reason),
+      "invalid-request",
+    );
+    expect(getterCalls).toBe(0);
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("supports null-prototype header records without inheriting values", async () => {
+    let authorization = "";
+    const fixture = await localServer((incoming, response) => {
+      authorization = String(incoming.headers.authorization ?? "");
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end("data: ok\n\n");
+    });
+    const headers = Object.create(null) as Record<string, string>;
+    Object.defineProperty(headers, "authorization", {
+      enumerable: true,
+      value: "Bearer null-prototype",
+    });
+    Object.defineProperty(headers, "content-type", {
+      enumerable: true,
+      value: "application/json",
+    });
+
+    await expect(createNodeAiStreamingTransport()(
+      request(`${fixture.origin}/null-prototype`, { headers }),
+      vi.fn(),
+    )).resolves.toMatchObject({ status: 200 });
+    expect(authorization).toBe("Bearer null-prototype");
+  });
+
   it("allows exact localhost and 127.0.0.1 HTTP origins", async () => {
     const fixture = await localServer((_request, response) => {
       response.writeHead(200, { "content-type": "text/event-stream" });
@@ -467,6 +758,53 @@ describe("secure AI streaming transport", () => {
     expect(JSON.stringify(result)).not.toContain(bodySentinel);
     expect(consoleError).not.toHaveBeenCalled();
     expect(consoleWarn).not.toHaveBeenCalled();
+  });
+
+  it("filters short structured credentials from response request IDs without filtering ordinary labels", async () => {
+    const cases = [
+      { header: "authorization", value: "Bearer k", requestId: "k" },
+      { header: "authorization", value: "Basic eA==", requestId: "eA==" },
+      { header: "x-api-key", value: "z", requestId: "z" },
+      { header: "x-auth-token", value: "Token q", requestId: "q" },
+    ] as const;
+    for (const fixtureCase of cases) {
+      const fixture = await localServer((_request, response) => {
+        response.writeHead(200, {
+          "content-type": "text/event-stream",
+          "x-request-id": fixtureCase.requestId,
+        });
+        response.end("data: ok\n\n");
+      });
+      const result = await createNodeAiStreamingTransport()(
+        request(`${fixture.origin}/short-secret`, {
+          headers: {
+            [fixtureCase.header]: fixtureCase.value,
+            "content-type": "application/json",
+          },
+        }),
+        vi.fn(),
+      );
+      expect(result.requestId).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain(fixtureCase.requestId);
+    }
+
+    const ordinary = await localServer((_request, response) => {
+      response.writeHead(200, {
+        "content-type": "text/event-stream",
+        "x-request-id": "ok",
+      });
+      response.end("data: ok\n\n");
+    });
+    const ordinaryResult = await createNodeAiStreamingTransport()(
+      request(`${ordinary.origin}/ordinary`, {
+        headers: {
+          "x-client-label": "ok",
+          "content-type": "application/json",
+        },
+      }),
+      vi.fn(),
+    );
+    expect(ordinaryResult.requestId).toBe("ok");
   });
 
   it("exposes the planned optional text-delta provider contract", () => {

@@ -1801,42 +1801,56 @@
   {
     "path": "test_files/unit/ai/providers/streaming-ai-transport.test.ts",
     "rule": "credential-value",
-    "line": 72,
+    "line": 77,
     "fingerprint": "sha256:c3def7d7fa3b7b2bab108ca9b6f79659275797b7c4dc844ec75f98ad5a7e6110",
     "reason": "Security transport test intentionally uses a synthetic bearer credential to verify exact authorization forwarding."
   },
   {
     "path": "test_files/unit/ai/providers/streaming-ai-transport.test.ts",
     "rule": "credential-value",
-    "line": 294,
-    "fingerprint": "sha256:451337b314fd3519ec46ca4af474bc6e4fd0369a5d3874fff71ec63359c738f2",
-    "reason": "Security transport test intentionally uses a synthetic bearer credential to verify same-origin redirect forwarding."
+    "line": 456,
+    "fingerprint": "sha256:726610c2efa30b50e4e18e10eeb6d61e2c8c1e424270659dfc89ee6ee1196e8f",
+    "reason": "Security transport test intentionally verifies bearer forwarding on the first POST before a preserving redirect."
   },
   {
     "path": "test_files/unit/ai/providers/streaming-ai-transport.test.ts",
     "rule": "credential-value",
-    "line": 295,
-    "fingerprint": "sha256:fae59e863d312a61fd9d3a2a459a20f2705b36317b8bf33595ece503f3f5d5b6",
-    "reason": "Security transport test intentionally uses a synthetic bearer credential to verify same-origin redirect forwarding."
+    "line": 463,
+    "fingerprint": "sha256:726610c2efa30b50e4e18e10eeb6d61e2c8c1e424270659dfc89ee6ee1196e8f",
+    "reason": "Security transport test intentionally verifies bearer forwarding on the second POST after a preserving redirect."
   },
   {
     "path": "test_files/unit/ai/providers/streaming-ai-transport.test.ts",
     "rule": "credential-url",
-    "line": 347,
+    "line": 563,
     "fingerprint": "sha256:e82b3a9e1eca20d01d5f0dc3eac5d1ca3edaea84564adc5b782f247cc3f5430c",
     "reason": "Security transport test intentionally uses a reserved example credential URL to verify rejection before socket creation."
   },
   {
     "path": "test_files/unit/ai/providers/streaming-ai-transport.test.ts",
     "rule": "credential-value",
-    "line": 381,
+    "line": 597,
     "fingerprint": "sha256:46dd9336a6a5a2666081825dc11ee8902336988830d6ea2932af230ed9ea6d24",
     "reason": "Security transport test intentionally uses a synthetic sentinel to verify unknown credential fields are rejected."
   },
   {
     "path": "test_files/unit/ai/providers/streaming-ai-transport.test.ts",
+    "rule": "credential-value",
+    "line": 651,
+    "fingerprint": "sha256:f900ae24efa5359b637b330800983b52f44ed0c12a2e718e989f2e16b7c6e55f",
+    "reason": "Security transport test intentionally uses a synthetic uppercase authorization header to verify duplicate rejection."
+  },
+  {
+    "path": "test_files/unit/ai/providers/streaming-ai-transport.test.ts",
+    "rule": "credential-value",
+    "line": 652,
+    "fingerprint": "sha256:83ef159a2313e31a7e09ecfa690ac6a358a325b89b6c85a60785c690e3717cb3",
+    "reason": "Security transport test intentionally uses a synthetic lowercase authorization header to verify duplicate rejection."
+  },
+  {
+    "path": "test_files/unit/ai/providers/streaming-ai-transport.test.ts",
     "rule": "credential-url",
-    "line": 433,
+    "line": 724,
     "fingerprint": "sha256:523af3579745f25af202877ab727c185afb1cc18871b515f13ae7f25b91c5b26",
     "reason": "Security transport test intentionally uses a reserved example credential URL to verify redirect rejection."
   }

@@ -38,6 +38,7 @@ const MAX_RESPONSE_HEADER_CHARACTERS = 1_024;
 const MAX_REQUEST_ID_CHARACTERS = 256;
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const POST_PRESERVING_REDIRECT_STATUSES = new Set([307, 308]);
 const BLOCKED_REQUEST_HEADERS = new Set([
   "connection",
   "content-length",
@@ -46,6 +47,11 @@ const BLOCKED_REQUEST_HEADERS = new Set([
   "proxy-authorization",
   "set-cookie",
   "transfer-encoding",
+]);
+const DANGEROUS_OBJECT_KEYS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
 ]);
 
 const SIGNAL_EVENT_TARGET = Reflect.getPrototypeOf(AbortSignal.prototype) as object;
@@ -329,6 +335,10 @@ async function requestHop(
                 });
                 return;
               }
+              if (!POST_PRESERVING_REDIRECT_STATUSES.has(status)) {
+                terminate(networkError());
+                return;
+              }
               let redirect: URL;
               try {
                 redirect = validateAiStreamingRedirect(url, location);
@@ -406,6 +416,8 @@ async function requestHop(
                   return;
                 }
               }
+              installTerminalErrorSink(request);
+              installTerminalErrorSink(response);
               finish(undefined, {
                 kind: "response",
                 response: responseResult(
@@ -513,7 +525,7 @@ function snapshotHeaders(input: unknown): {
   }
   const keys = Reflect.ownKeys(input);
   if (keys.length > MAX_REQUEST_HEADERS) throw invalidRequestError();
-  const values: Record<string, string> = {};
+  const values = Object.create(null) as Record<string, string>;
   const sensitiveValues: string[] = [];
   const normalizedNames = new Set<string>();
   let totalBytes = 0;
@@ -530,6 +542,7 @@ function snapshotHeaders(input: unknown): {
     if (
       normalizedNames.has(name) ||
       BLOCKED_REQUEST_HEADERS.has(name) ||
+      DANGEROUS_OBJECT_KEYS.has(name) ||
       hasControlCharacters(value)
     ) throw invalidRequestError();
     const valueBytes = Buffer.byteLength(value, "utf8");
@@ -539,12 +552,16 @@ function snapshotHeaders(input: unknown): {
       totalBytes > MAX_REQUEST_HEADER_BYTES
     ) throw invalidRequestError();
     normalizedNames.add(name);
-    values[key] = value;
+    Object.defineProperty(values, key, {
+      configurable: false,
+      enumerable: true,
+      value,
+      writable: false,
+    });
     if (isSensitiveHeader(name)) {
-      sensitiveValues.push(value);
-      for (const part of value.split(/\s+/u)) {
-        if (part.length >= 8) sensitiveValues.push(part);
-      }
+      appendUnique(sensitiveValues, value);
+      const credential = structuredCredential(value);
+      if (credential) appendUnique(sensitiveValues, credential);
     }
   }
   return {
@@ -720,11 +737,12 @@ function safeBuffer(chunk: unknown): Buffer {
 function installTerminalErrorSink(
   emitter: ClientRequest | IncomingMessage | undefined,
 ): void {
-  if (!emitter || emitter.destroyed) return;
+  if (!emitter || emitter.closed) return;
   const sink = (): void => undefined;
   const remove = (): void => {
     try {
       emitter.off("error", sink);
+      emitter.off("close", remove);
     } catch {
       // The emitter is already closed.
     }
@@ -732,6 +750,7 @@ function installTerminalErrorSink(
   try {
     emitter.on("error", sink);
     emitter.once("close", remove);
+    if (emitter.closed) remove();
   } catch {
     // A closing emitter may reject listener installation.
   }
@@ -752,6 +771,19 @@ function isSensitiveHeader(name: string): boolean {
     name === "x-api-key" ||
     name.endsWith("-api-key") ||
     name.includes("token");
+}
+
+function structuredCredential(value: string): string | undefined {
+  const separator = value.indexOf(" ");
+  if (separator <= 0 || !HEADER_NAME.test(value.slice(0, separator))) {
+    return undefined;
+  }
+  const credential = value.slice(separator + 1).trim();
+  return credential || undefined;
+}
+
+function appendUnique(values: string[], value: string): void {
+  if (!values.includes(value)) values.push(value);
 }
 
 function hasControlOrWhitespace(value: string): boolean {
