@@ -9,7 +9,7 @@ Host: Obsidian 1.12.7 on macOS
 ## Automated gates
 
 - `npm run check`: PASS.
-  - Vitest: 274 files passed, 1 skipped; 3334 tests passed, 1 skipped.
+  - Vitest: 274 files passed, 1 skipped; 3342 tests passed, 1 skipped.
   - i18n audit, public-repository scan, workflow policy, version consistency, CSS scope, platform compatibility, `!important` audit, commit-message policy, ESLint, TypeScript, and production build all passed.
 - `npm run release:stage && npm run release:check`: PASS.
   - The staged release contained only `main.js`, `manifest.json`, and `styles.css`.
@@ -21,8 +21,8 @@ Host: Obsidian 1.12.7 on macOS
 - `npm run install:local -- --target <verified-plugin-directory>` completed with `install-local-success` and created one timestamped sibling backup inside the plugin directory area.
 - The installed hashes for all three program artifacts matched the staged release.
 - The `data.json` hash and size were unchanged across installation.
-- The nine pre-existing collection/history files had the same aggregate hash across installation.
-- All 1569 pre-existing Markdown files had the same aggregate hash across installation.
+- The twelve pre-existing collection/history/state files had the same aggregate hash across installation.
+- All 1570 pre-existing Markdown files had the same aggregate hash across installation.
 - The external secret status was configured before installation and remained configured after installation and after a later Obsidian restart. No key value or secret-store location was read into this record.
 
 ## Live source matrix
@@ -39,8 +39,8 @@ Host: Obsidian 1.12.7 on macOS
 | Malformed YouTube URL | PASS | A watch-page URL was rejected with channel-input guidance and no subscribe action. |
 | Default and bounded history choices | PASS | The default was 7 days; now, 3, 7, 14, 30, and 90 days, custom date, and all-available choices were present. RSS and YouTube displayed bounded-history wording. |
 | Custom date | PARTIAL | Selecting custom date exposed a required date control and disabled confirmation while empty. The macOS accessibility bridge could not assign the segmented HTML date value; valid/invalid custom-date behavior remains covered by the passing unit suite. |
-| TikHub public X profile | PENDING RETEST | The first UI attempt ended before transport and did not consume request budget. Diagnosis found that the public modal passed `@账号` directly into a strict provider resolver. The modal now normalizes account, `@account`, `x.com/account`, and `twitter.com/account` forms to one pure handle; ambiguous routes, queries, and fragments fail locally. Focused and full regression suites pass. One authorized live retry remains pending until the Mac can be unlocked and the updated build can be safely installed. |
-| X all-history second confirmation | PENDING LIVE | The passing unit suite covers the cap wording, required second confirmation, and cancel-without-post-request behavior. Live confirmation remains pending behind the same safe reinstall and public-profile retry. |
+| TikHub public X profile | PENDING DIAGNOSTIC RETEST | The corrected onboarding build was safely installed and one authorized `@OpenAI` verification was attempted. The local paid-request ledger recorded exactly one attempt, but the modal returned the generic `provider-failure` message and TikHub's refreshed usage log did not yet show a request for the local date. Both documented TikHub origins were reachable over HTTPS, and the configured origin, key status, timeout, and caps were valid. The installed resolver collapsed network failure, malformed provider envelopes, and unsupported profile payloads into the same generic result, so this run cannot honestly identify the failing boundary. A new candidate now exposes only three fixed, non-secret diagnostic classes for those cases; its focused tests, full gate, and independent review pass. It still requires safe installation and a separately authorized live retry. |
+| X all-history second confirmation | PENDING LIVE | The passing unit suite covers the cap wording, required second confirmation, and cancel-without-post-request behavior. Live confirmation remains pending because profile verification did not succeed; no source was saved and no history request was sent. |
 | Unified management | PASS | The manager showed source type, normal/paused status, last success, first-import progress, refresh, pause, resume, edit, address-change, and delete actions. |
 | Default delete wording | PASS | Delete defaulted to preserving collected history; permanent history deletion was an unchecked opt-in. |
 
@@ -59,4 +59,4 @@ The disposable subscription configuration was removed. Its two retained collecti
 
 ## Release decision
 
-Automated gates, release staging, the previous safe installation, RSS/website/YouTube onboarding, manager lifecycle, deduplication, and default history preservation pass. The X public-entry defect is fixed and covered by regression tests. Empty-source policy is also enforced at both UI and service boundaries: only a structurally valid empty RSS may proceed after explicit warning acceptance; an empty YouTube source is rejected even if a caller forges the acceptance flag, without settings or collection persistence. Final release acceptance still requires installing this updated candidate while Obsidian is closed, re-running the single authorized public TikHub profile check, and cancelling the X all-history confirmation without saving a source. The Mac was locked before those final live steps, so this record does not yet claim TikHub or X all-history live acceptance.
+Automated gates, release staging, the previous safe installation, RSS/website/YouTube onboarding, manager lifecycle, deduplication, and default history preservation pass. X input normalization and the new safe diagnostic split are covered by regression tests and independent review. Empty-source policy is also enforced at both UI and service boundaries: only a structurally valid empty RSS may proceed after explicit warning acceptance; an empty YouTube source is rejected even if a caller forges the acceptance flag, without settings or collection persistence. Final release acceptance still requires installing the diagnostic candidate while Obsidian is closed, obtaining explicit authorization for one additional public TikHub profile verification, and—only after successful profile verification—cancelling the X all-history confirmation without saving a source. The Mac locked again before the diagnostic candidate could be installed, so this record does not claim TikHub or X all-history live acceptance and does not authorize merge yet.
