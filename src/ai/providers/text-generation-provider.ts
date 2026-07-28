@@ -37,8 +37,13 @@ export interface TextGenerationResult {
   outputTokens?: number;
 }
 
+export type TextDeltaHandler = (text: string) => void;
+
 export interface TextGenerationProvider {
-  generate(request: TextGenerationRequest): Promise<TextGenerationResult>;
+  generate(
+    request: TextGenerationRequest,
+    onTextDelta?: TextDeltaHandler,
+  ): Promise<TextGenerationResult>;
 }
 
 export interface TextGenerationRequestSnapshot {
@@ -70,6 +75,19 @@ export interface AiTransportResponse {
 export type AiTransport = (
   request: AiTransportRequest,
 ) => unknown;
+
+export interface AiStreamingTransportResponse {
+  status: number;
+  headers: Record<string, string>;
+  contentType: string;
+  requestId?: string;
+  bodyText?: string;
+}
+
+export type AiStreamingTransport = (
+  request: AiTransportRequest,
+  onChunk: (chunk: Uint8Array) => void,
+) => Promise<AiStreamingTransportResponse>;
 
 export interface SafeAiResponse {
   status: number;
