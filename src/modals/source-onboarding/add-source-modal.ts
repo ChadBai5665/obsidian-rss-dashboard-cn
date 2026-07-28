@@ -452,7 +452,7 @@ export class AddSourceModal extends Modal {
         if (!this.isCurrent(epoch, token)) return;
         const snapshot = Object.freeze({ kind, verification: value });
         if (value.hasEntries) this.verification.succeed(token, snapshot);
-        else this.verification.warn(token, snapshot, "empty-feed");
+        else this.verification.fail(token, "youtube-feed-invalid");
       } else {
         const normalizedInput = normalizeXAccountInput(input);
         const value = projectVerifiedXProfile(
@@ -648,7 +648,7 @@ export class AddSourceModal extends Modal {
         verification: snapshot.verification,
         displayName: snapshot.verification.channelName,
         mediaType: "video",
-        acceptedEmptyFeedWarning: !snapshot.verification.hasEntries,
+        acceptedEmptyFeedWarning: false,
         ...common,
       };
     } else {

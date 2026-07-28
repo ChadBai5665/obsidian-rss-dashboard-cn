@@ -9,7 +9,7 @@ Host: Obsidian 1.12.7 on macOS
 ## Automated gates
 
 - `npm run check`: PASS.
-  - Vitest: 274 files passed, 1 skipped; 3319 tests passed, 1 skipped.
+  - Vitest: 274 files passed, 1 skipped; 3334 tests passed, 1 skipped.
   - i18n audit, public-repository scan, workflow policy, version consistency, CSS scope, platform compatibility, `!important` audit, commit-message policy, ESLint, TypeScript, and production build all passed.
 - `npm run release:stage && npm run release:check`: PASS.
   - The staged release contained only `main.js`, `manifest.json`, and `styles.css`.
@@ -39,8 +39,8 @@ Host: Obsidian 1.12.7 on macOS
 | Malformed YouTube URL | PASS | A watch-page URL was rejected with channel-input guidance and no subscribe action. |
 | Default and bounded history choices | PASS | The default was 7 days; now, 3, 7, 14, 30, and 90 days, custom date, and all-available choices were present. RSS and YouTube displayed bounded-history wording. |
 | Custom date | PARTIAL | Selecting custom date exposed a required date control and disabled confirmation while empty. The macOS accessibility bridge could not assign the segmented HTML date value; valid/invalid custom-date behavior remains covered by the passing unit suite. |
-| TikHub public X profile | BLOCKED | One UI resolve was attempted for a public test account. It ended in the plugin's safe provider-failure state before transport: the paid-request ledger count did not change, so no provider request or charge occurred. Enabled state, official-origin selection, request caps, configured secret status, safe data root, and ledger recovery state were all valid. No second paid attempt was made. |
-| X all-history second confirmation | BLOCKED LIVE | The X verification blocker prevented reaching the live all-history confirmation. The passing unit suite covers the cap wording, required second confirmation, and cancel-without-post-request behavior. |
+| TikHub public X profile | PENDING RETEST | The first UI attempt ended before transport and did not consume request budget. Diagnosis found that the public modal passed `@账号` directly into a strict provider resolver. The modal now normalizes account, `@account`, `x.com/account`, and `twitter.com/account` forms to one pure handle; ambiguous routes, queries, and fragments fail locally. Focused and full regression suites pass. One authorized live retry remains pending until the Mac can be unlocked and the updated build can be safely installed. |
+| X all-history second confirmation | PENDING LIVE | The passing unit suite covers the cap wording, required second confirmation, and cancel-without-post-request behavior. Live confirmation remains pending behind the same safe reinstall and public-profile retry. |
 | Unified management | PASS | The manager showed source type, normal/paused status, last success, first-import progress, refresh, pause, resume, edit, address-change, and delete actions. |
 | Default delete wording | PASS | Delete defaulted to preserving collected history; permanent history deletion was an unchecked opt-in. |
 
@@ -59,4 +59,4 @@ The disposable subscription configuration was removed. Its two retained collecti
 
 ## Release decision
 
-Automated gates, release staging, safe installation, RSS/website/YouTube onboarding, manager lifecycle, deduplication, and default history preservation pass. The remaining release blocker is the live X profile path: it currently fails locally before a TikHub transport attempt despite a configured secret and valid non-secret settings. This record does not claim TikHub live acceptance or X all-history live acceptance until that path is diagnosed and re-run once.
+Automated gates, release staging, the previous safe installation, RSS/website/YouTube onboarding, manager lifecycle, deduplication, and default history preservation pass. The X public-entry defect is fixed and covered by regression tests. Empty-source policy is also enforced at both UI and service boundaries: only a structurally valid empty RSS may proceed after explicit warning acceptance; an empty YouTube source is rejected even if a caller forges the acceptance flag, without settings or collection persistence. Final release acceptance still requires installing this updated candidate while Obsidian is closed, re-running the single authorized public TikHub profile check, and cancelling the X all-history confirmation without saving a source. The Mac was locked before those final live steps, so this record does not yet claim TikHub or X all-history live acceptance.

@@ -1675,7 +1675,7 @@
   {
     "path": "test_files/unit/services/source-verification/source-identifier.test.ts",
     "rule": "credential-url",
-    "line": 71,
+    "line": 82,
     "fingerprint": "sha256:a877cf004d00c726870845de52473e5dc287c36f40e9dcd57c3a1c898ef5f2b5",
     "reason": "Security test fixture verifies that credential-bearing YouTube URLs are rejected."
   },

@@ -740,6 +740,9 @@ export class SubscriptionService {
     previous?: Feed,
   ): Promise<Feed> {
     const verified = verifiedFeedDetails(request);
+    if (request.kind === "youtube" && !verified.hasEntries) {
+      throw new SubscriptionServiceError("invalid-subscription-request");
+    }
     if (!verified.hasEntries && request.acceptedEmptyFeedWarning !== true) {
       throw new SubscriptionServiceError("invalid-subscription-request");
     }

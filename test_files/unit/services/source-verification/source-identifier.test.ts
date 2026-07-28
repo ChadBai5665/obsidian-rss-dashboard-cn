@@ -44,6 +44,14 @@ describe("source identifier normalization", () => {
     expect(() => normalizeXAccountInput(input)).toThrow();
   });
 
+  it.each([
+    "https://x.com/OpenAI/status/1",
+    "https://x.com/OpenAI?screen_name=Other",
+    "https://twitter.com/OpenAI#Other",
+  ])("uses the X non-profile error code for an ambiguous profile input: %s", (input) => {
+    expect(() => normalizeXAccountInput(input)).toThrow("x-not-profile");
+  });
+
   it("normalizes supported YouTube channel identifiers", () => {
     expect(normalizeYouTubeInput("https://www.youtube.com/@OpenAI")).toEqual({
       kind: "handle",

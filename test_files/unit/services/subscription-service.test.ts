@@ -223,6 +223,48 @@ beforeEach(async () => {
 });
 
 describe("SubscriptionService", () => {
+  it("rejects an empty YouTube verification even when a caller forges warning acceptance", async () => {
+    const test = harness();
+    const request = youtubeRequest();
+
+    await expect(test.service.add({
+      ...request,
+      verification: {
+        ...request.verification,
+        latestTitle: undefined,
+        latestPubDate: undefined,
+        hasEntries: false,
+      },
+      acceptedEmptyFeedWarning: true,
+    })).rejects.toMatchObject({ code: "invalid-subscription-request" });
+
+    expect(test.settings.feeds).toEqual([]);
+    expect(test.snapshots).toEqual([]);
+    expect(test.parseFeed).not.toHaveBeenCalled();
+    expect(test.ensureFolder).not.toHaveBeenCalled();
+    expect(test.saveSettings).not.toHaveBeenCalled();
+    expect(test.collectionService.collectFeedRefresh).not.toHaveBeenCalled();
+  });
+
+  it("keeps explicit warning acceptance valid for a structurally valid empty RSS feed", async () => {
+    const test = harness();
+    const request = rssRequest();
+
+    await expect(test.service.add({
+      ...request,
+      verification: {
+        ...request.verification,
+        latestTitle: undefined,
+        latestPubDate: undefined,
+        hasEntries: false,
+      },
+      acceptedEmptyFeedWarning: true,
+    })).resolves.toMatchObject({ url: "https://example.com/feed.xml" });
+
+    expect(test.settings.feeds).toHaveLength(1);
+    expect(test.collectionService.collectFeedRefresh).toHaveBeenCalledOnce();
+  });
+
   it("publishes a recoverable pending RSS source, collects the complete selected history, then retains the cache", async () => {
     const test = harness();
 

@@ -246,6 +246,40 @@ describe("AddSourceModal", () => {
     }));
   });
 
+  it("fails closed for an empty YouTube feed without an acceptance or subscribe path", async () => {
+    const emptyYouTube: YouTubeChannelVerification = Object.freeze({
+      ...youtube,
+      latestTitle: undefined,
+      latestPubDate: undefined,
+      hasEntries: false,
+    });
+    const onSubscribe = vi.fn(async () => true);
+    const modal = new AddSourceModal(obsidian.App.createMock(), options({
+      initialKind: "youtube",
+      verifyYouTube: vi.fn(async () => emptyYouTube),
+      onSubscribe,
+    }));
+    modal.open();
+    const input = modal.contentEl.querySelector(
+      ".rss-source-identity-input",
+    ) as HTMLInputElement;
+    input.value = "https://www.youtube.com/@EmptyChannel";
+    input.dispatchEvent(new Event("input"));
+    (modal.contentEl.querySelector(
+      ".rss-source-detect-button",
+    ) as HTMLButtonElement).click();
+    await flush();
+
+    expect(modal.contentEl.textContent).toContain(
+      "已找到频道，但频道的 YouTube RSS 无效。",
+    );
+    expect(modal.contentEl.querySelector(".rss-source-empty-warning")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-verification-card")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-initial-import")).toBeNull();
+    expect(modal.contentEl.querySelector(".rss-source-subscribe-button")).toBeNull();
+    expect(onSubscribe).not.toHaveBeenCalled();
+  });
+
   it("lets the user choose among multiple RSS candidates before subscribing", async () => {
     const verification: RssWebsiteVerification = {
       inputUrl: "https://example.com",
