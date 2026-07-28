@@ -209,6 +209,7 @@ interface AiArticleSaveSnapshot {
 
 interface AiRuntime {
   dataRoot: string;
+  lifecycle: { revoked: boolean };
   contentRepository: ContentRepository;
   contentSelector: AiContentSelector;
   operationService: AiOperationService;
@@ -1790,6 +1791,18 @@ export default class RssDashboardPlugin extends Plugin {
       const saveSnapshot = this.createAiArticleSaveSnapshot(source);
       let savedNotePath = this.resolveExistingSavedNotePath(source.item);
       const itemId = selectedItem.id;
+      const currentInsertableResult = (
+        path: string,
+      ): Readonly<AiAnalysisResult> => {
+        if (runtime.lifecycle.revoked) {
+          throw new Error("The AI runtime is no longer active");
+        }
+        const result = runtime.generatedResults.get(path);
+        if (!result || result.itemId !== itemId) {
+          throw new Error("The AI result is not insertable");
+        }
+        return result;
+      };
 
       return {
         itemId,
@@ -1813,33 +1826,37 @@ export default class RssDashboardPlugin extends Plugin {
           await this.openSettingsToTab("ai");
         },
         canInsertArtifact: (path) =>
+          !runtime.lifecycle.revoked &&
           runtime.generatedResults.get(path)?.itemId === itemId,
         insertArtifact: async (path) => {
-          const result = runtime.generatedResults.get(path);
-          if (!result || result.itemId !== itemId) {
-            throw new Error("The AI result is not insertable");
-          }
+          const result = currentInsertableResult(path);
           if (!savedNotePath) {
             savedNotePath = await this.saveArticleForAiInsertion(saveSnapshot);
           }
-          const currentResult = runtime.generatedResults.get(path);
-          if (currentResult !== result || currentResult.itemId !== itemId) {
+          const currentResult = currentInsertableResult(path);
+          if (currentResult !== result) {
             throw new Error("The AI result is no longer current");
           }
           const notePath = savedNotePath;
           const insertion = await runtime.analysisRepository.withVerifiedArtifact(
             path,
             currentResult,
-            async (trustedResult) => await runtime.noteInserter.insert({
-              notePath,
-              result: trustedResult,
-              operationLabel: this.aiOperationLabel(trustedResult.operation),
-              contentBasisLabel: getContentBasisLabel(
-                trustedResult.contentBasis,
-                this.settings.locale ?? "zh-CN",
-              ),
-            }),
+            async (trustedResult) => {
+              if (currentInsertableResult(path) !== currentResult) {
+                throw new Error("The AI result is no longer current");
+              }
+              return await runtime.noteInserter.insert({
+                notePath,
+                result: trustedResult,
+                operationLabel: this.aiOperationLabel(trustedResult.operation),
+                contentBasisLabel: getContentBasisLabel(
+                  trustedResult.contentBasis,
+                  this.settings.locale ?? "zh-CN",
+                ),
+              });
+            },
           );
+          currentInsertableResult(path);
           await this.openAiVaultFile(notePath, insertion.marker);
         },
       };
@@ -1872,11 +1889,13 @@ export default class RssDashboardPlugin extends Plugin {
     });
     const analysisRepository = new AnalysisRepository(this.app.vault, dataRoot);
     const noteInserter = new AnalysisNoteInserter(this.app.vault);
+    const lifecycle = { revoked: false };
     const generatedResults = new Map<string, Readonly<AiAnalysisResult>>();
     const rememberGeneratedResult = (
       path: string,
       value: Readonly<AiAnalysisResult>,
     ): void => {
+      if (lifecycle.revoked) return;
       generatedResults.delete(path);
       generatedResults.set(path, value);
       while (generatedResults.size > MAX_CURRENT_AI_INSERTION_RESULTS) {
@@ -1900,6 +1919,7 @@ export default class RssDashboardPlugin extends Plugin {
     });
     const candidate: AiRuntime = {
       dataRoot,
+      lifecycle,
       contentRepository,
       contentSelector,
       operationService,
@@ -1909,9 +1929,15 @@ export default class RssDashboardPlugin extends Plugin {
       generatedResults,
     };
     const previous = this.aiRuntime;
+    if (previous) this.revokeAiRuntime(previous);
     this.aiRuntime = candidate;
-    if (previous) void previous.coordinator.shutdown();
     return candidate;
+  }
+
+  private revokeAiRuntime(runtime: AiRuntime): void {
+    runtime.lifecycle.revoked = true;
+    runtime.generatedResults.clear();
+    void runtime.coordinator.shutdown();
   }
 
   private aiOperationLabel(operation: AiOperation): string {
@@ -5638,8 +5664,7 @@ export default class RssDashboardPlugin extends Plugin {
   onunload() {
     this.isUnloading = true;
     if (this.aiRuntime) {
-      void this.aiRuntime.coordinator.shutdown();
-      this.aiRuntime.generatedResults.clear();
+      this.revokeAiRuntime(this.aiRuntime);
       this.aiRuntime = null;
     }
     this.youtubeTranscriptRuntime?.service.dispose();

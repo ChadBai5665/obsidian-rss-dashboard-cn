@@ -131,6 +131,30 @@ function analysisResult(itemId: string, index: number): AiAnalysisResult {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+interface TestAiRuntime {
+  generatedResults: Map<string, Readonly<AiAnalysisResult>>;
+  coordinator: {
+    saveAnalysis(result: AiAnalysisResult): Promise<string>;
+  };
+}
+
+function currentAiRuntime(plugin: RssDashboardPlugin): TestAiRuntime {
+  return (plugin as unknown as { aiRuntime: TestAiRuntime }).aiRuntime;
+}
+
+function generatedPath(result: AiAnalysisResult): string {
+  const timestamp = result.createdAt.replace(/[-:.Z]/gu, "");
+  return `.rss-dashboard-data/analysis/${result.itemId}/${timestamp}-${result.operation}.md`;
+}
+
 beforeEach(() => {
   installObsidianDomPolyfills();
   secretState.constructed = 0;
@@ -173,6 +197,90 @@ describe("production inline AI composition", () => {
 
     expect(next.coordinator).not.toBe(first.coordinator);
     expect(shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("revokes old panel insertion authority while the replacement runtime remains usable", async () => {
+    const test = harness();
+    const saveSource = vi.spyOn(
+      test.plugin as unknown as { saveArticleForAiInsertion(): Promise<string> },
+      "saveArticleForAiInsertion",
+    ).mockResolvedValue("Notes/source.md");
+    vi.spyOn(AnalysisRepository.prototype, "save")
+      .mockImplementation(async (value) => generatedPath(value as AiAnalysisResult));
+    const oldOptions = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const oldRuntime = currentAiRuntime(test.plugin);
+    const oldPath = await oldRuntime.coordinator.saveAnalysis(
+      analysisResult(oldOptions.itemId, 10),
+    );
+    expect(oldOptions.canInsertArtifact(oldPath)).toBe(true);
+
+    test.settings.collection.dataFolder = ".rss-dashboard-data-next";
+    const nextOptions = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const nextRuntime = currentAiRuntime(test.plugin);
+
+    expect(oldOptions.canInsertArtifact(oldPath)).toBe(false);
+    await expect(oldOptions.insertArtifact(oldPath)).rejects.toThrow();
+    expect(saveSource).not.toHaveBeenCalled();
+    const nextPath = await nextRuntime.coordinator.saveAnalysis(
+      analysisResult(nextOptions.itemId, 11),
+    );
+    expect(nextOptions.canInsertArtifact(nextPath)).toBe(true);
+  });
+
+  it("lets an old saving task finish without restoring authority after a root switch", async () => {
+    const test = harness();
+    mockGeneration();
+    const saveGate = deferred<string>();
+    let savingResult: AiAnalysisResult | undefined;
+    vi.spyOn(AnalysisRepository.prototype, "save")
+      .mockImplementation(async (value) => {
+        savingResult = value as AiAnalysisResult;
+        return await saveGate.promise;
+      });
+    const oldOptions = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const oldRuntime = currentAiRuntime(test.plugin);
+    const terminalPromise = oldOptions.coordinator.start(
+      oldOptions.createStartInput("summary", CONNECTION_ID),
+    );
+    await vi.waitFor(() => expect(savingResult).toBeDefined());
+
+    test.settings.collection.dataFolder = ".rss-dashboard-data-next";
+    const nextOptions = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const oldPath = generatedPath(savingResult!);
+    saveGate.resolve(oldPath);
+    const terminal = await terminalPromise;
+
+    expect(terminal).toMatchObject({ status: "complete", artifactPath: oldPath });
+    expect(oldRuntime.generatedResults.size).toBe(0);
+    expect(oldOptions.canInsertArtifact(oldPath)).toBe(false);
+    expect(nextOptions.canInsertArtifact(oldPath)).toBe(false);
+  });
+
+  it("does not restore insertion authority when a current save completes after unload", async () => {
+    const test = harness();
+    mockGeneration();
+    const saveGate = deferred<string>();
+    let savingResult: AiAnalysisResult | undefined;
+    vi.spyOn(AnalysisRepository.prototype, "save")
+      .mockImplementation(async (value) => {
+        savingResult = value as AiAnalysisResult;
+        return await saveGate.promise;
+      });
+    const options = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const runtime = currentAiRuntime(test.plugin);
+    const terminalPromise = options.coordinator.start(
+      options.createStartInput("summary", CONNECTION_ID),
+    );
+    await vi.waitFor(() => expect(savingResult).toBeDefined());
+
+    test.plugin.onunload();
+    const path = generatedPath(savingResult!);
+    saveGate.resolve(path);
+    const terminal = await terminalPromise;
+
+    expect(terminal).toMatchObject({ status: "complete", artifactPath: path });
+    expect(runtime.generatedResults.size).toBe(0);
+    expect(options.canInsertArtifact(path)).toBe(false);
   });
 
   it("keeps the old runtime alive when the candidate data root is invalid", () => {
@@ -251,6 +359,75 @@ describe("production inline AI composition", () => {
       note.path,
       expect.stringMatching(/^RSS-DASHBOARD-CN:AI:/u),
     );
+  });
+
+  it("revokes insertion while an old panel waits for its source note save", async () => {
+    const test = harness();
+    const sourceSave = deferred<string>();
+    const saveSource = vi.spyOn(
+      test.plugin as unknown as { saveArticleForAiInsertion(): Promise<string> },
+      "saveArticleForAiInsertion",
+    ).mockImplementation(async () => await sourceSave.promise);
+    const verify = vi.spyOn(AnalysisRepository.prototype, "withVerifiedArtifact");
+    vi.spyOn(AnalysisRepository.prototype, "save")
+      .mockImplementation(async (value) => generatedPath(value as AiAnalysisResult));
+    const options = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const runtime = currentAiRuntime(test.plugin);
+    const path = await runtime.coordinator.saveAnalysis(
+      analysisResult(options.itemId, 12),
+    );
+    const insertion = options.insertArtifact(path);
+    await vi.waitFor(() => expect(saveSource).toHaveBeenCalledTimes(1));
+
+    test.settings.collection.dataFolder = ".rss-dashboard-data-next";
+    test.plugin.createAiPanelOptionsForItem(test.selected);
+    sourceSave.resolve("Notes/source.md");
+
+    await expect(insertion).rejects.toThrow();
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it("rechecks revocation inside verified-artifact consumption before note insertion", async () => {
+    const test = harness();
+    await test.app.vault.createFolder("Notes");
+    const note = await test.app.vault.create("Notes/source.md", "Source bytes");
+    test.selected.saved = true;
+    test.selected.savedFilePath = note.path;
+    vi.spyOn(AnalysisRepository.prototype, "save")
+      .mockImplementation(async (value) => generatedPath(value as AiAnalysisResult));
+    const consumeGate = deferred<void>();
+    const verificationEntered = deferred<void>();
+    vi.spyOn(AnalysisRepository.prototype, "withVerifiedArtifact")
+      .mockImplementation(async (_path, value, consume) => {
+        verificationEntered.resolve();
+        await consumeGate.promise;
+        return await consume(value as AiAnalysisResult);
+      });
+    const insert = vi.spyOn(AnalysisNoteInserter.prototype, "insert")
+      .mockResolvedValue({
+        status: "inserted",
+        notePath: note.path,
+        marker: "RSS-DASHBOARD-CN:AI:verified",
+      });
+    const open = vi.spyOn(
+      test.plugin as unknown as { openAiVaultFile(): Promise<void> },
+      "openAiVaultFile",
+    ).mockResolvedValue(undefined);
+    const options = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const runtime = currentAiRuntime(test.plugin);
+    const path = await runtime.coordinator.saveAnalysis(
+      analysisResult(options.itemId, 13),
+    );
+    const insertion = options.insertArtifact(path);
+    await verificationEntered.promise;
+
+    test.settings.collection.dataFolder = ".rss-dashboard-data-next";
+    test.plugin.createAiPanelOptionsForItem(test.selected);
+    consumeGate.resolve();
+
+    await expect(insertion).rejects.toThrow();
+    expect(insert).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("does not grant insertion authority to repository history", async () => {
