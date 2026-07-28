@@ -157,6 +157,7 @@ describe("XProfileResolver", () => {
 
     const error = await test.resolver.resolve("openai").catch((caught) => caught);
     expect(error).toMatchObject({ code });
+    expect(error).not.toHaveProperty("diagnostic");
     expect(String(error)).not.toContain("unsafe");
   });
 
@@ -171,12 +172,50 @@ describe("XProfileResolver", () => {
     );
   });
 
-  it("maps an unsupported profile payload to a safe profile-shape diagnostic", async () => {
-    const test = harness({ fetch: async () => ({ data: { unknown: true } }) });
-
-    await expect(test.resolver.resolve("openai")).rejects.toMatchObject({
-      code: "profile-shape-unsupported",
+  it("attaches only a frozen value-free diagnostic after one unsupported-shape request", async () => {
+    const providerSentinel = "SECRET_NAVAL_VALUE";
+    const providerUrl = `https://provider.example/${providerSentinel}`;
+    const test = harness({
+      apiKey: `${API_KEY}-${providerSentinel}`,
+      fetch: async () => ({
+        data: {
+          providerSecretField: providerUrl,
+          result: {
+            rest_id: { providerSecretField: providerSentinel },
+            legacy: {
+              screen_name: providerSentinel,
+              name: providerSentinel,
+            },
+          },
+        },
+      }),
     });
+
+    const error = await test.resolver.resolve("openai").catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      code: "profile-shape-unsupported",
+      diagnostic: {
+        issue: "required-field-invalid",
+        visitedContainers: 4,
+        candidateCount: 1,
+        hasLegacyContainer: true,
+        hasCoreContainer: false,
+      },
+    });
+    expect(error.message).toBe("profile-shape-unsupported");
+    expect(test.fetchUserProfile).toHaveBeenCalledTimes(1);
+    expect(Object.isFrozen(error.diagnostic)).toBe(true);
+    expect(Object.keys(error.diagnostic)).toEqual([
+      "issue",
+      "visitedContainers",
+      "candidateCount",
+      "hasLegacyContainer",
+      "hasCoreContainer",
+    ]);
+    expect(JSON.stringify(error)).not.toContain(providerSentinel);
+    expect(JSON.stringify(error.diagnostic)).not.toContain(providerUrl);
+    expect(String(error)).not.toContain(providerSentinel);
   });
 
   it("rejects a returned handle that does not match the requested account", async () => {

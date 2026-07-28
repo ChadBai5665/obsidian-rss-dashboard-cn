@@ -7,6 +7,10 @@ import {
 } from "./tikhub-client";
 import type { TikHubResult } from "./tikhub-types";
 import {
+  diagnoseXProfileShape,
+  type XProfileShapeDiagnostic,
+} from "./x-profile-shape-diagnostic";
+import {
   parseXProfile,
   type XProfile,
   XProfileParseError,
@@ -26,9 +30,15 @@ export type XProfileResolverErrorCode =
   | "provider-failure";
 
 export class XProfileResolverError extends Error {
-  constructor(readonly code: XProfileResolverErrorCode) {
+  readonly diagnostic?: XProfileShapeDiagnostic;
+
+  constructor(
+    readonly code: XProfileResolverErrorCode,
+    diagnostic?: XProfileShapeDiagnostic,
+  ) {
     super(code);
     this.name = "XProfileResolverError";
+    if (diagnostic) this.diagnostic = Object.freeze({ ...diagnostic });
   }
 }
 
@@ -207,7 +217,10 @@ export class XProfileResolver {
         if (error instanceof XProfileParseError && error.code === "not-found") {
           throw resolverError("not-found");
         }
-        throw resolverError("profile-shape-unsupported");
+        throw resolverError(
+          "profile-shape-unsupported",
+          diagnoseXProfileShape(payload),
+        );
       }
       if (profile.handle !== normalizedHandle) throw resolverError("not-found");
       const verifiedAt = this.now().getTime();
@@ -279,6 +292,9 @@ function isLocallyValidApiKey(value: string): boolean {
   return true;
 }
 
-function resolverError(code: XProfileResolverErrorCode): XProfileResolverError {
-  return new XProfileResolverError(code);
+function resolverError(
+  code: XProfileResolverErrorCode,
+  diagnostic?: XProfileShapeDiagnostic,
+): XProfileResolverError {
+  return new XProfileResolverError(code, diagnostic);
 }

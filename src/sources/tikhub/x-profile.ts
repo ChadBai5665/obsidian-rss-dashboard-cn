@@ -18,10 +18,10 @@ export class XProfileParseError extends Error {
   }
 }
 
-const MAX_WALK_DEPTH = 32;
-const MAX_WALK_NODES = 25_000;
-const MAX_ARRAY_ENTRIES = 100_000;
-const MAX_OBJECT_PROPERTIES = 10_000;
+export const X_PROFILE_MAX_WALK_DEPTH = 32;
+export const X_PROFILE_MAX_WALK_NODES = 25_000;
+export const X_PROFILE_MAX_ARRAY_ENTRIES = 100_000;
+export const X_PROFILE_MAX_OBJECT_PROPERTIES = 10_000;
 const MAX_REST_ID_LENGTH = 128;
 const MAX_DISPLAY_NAME_LENGTH = 256;
 const MAX_DESCRIPTION_LENGTH = 1_600;
@@ -59,13 +59,13 @@ export function parseXProfile(payload: unknown): XProfile {
     while (stack.length > 0) {
       const current = stack.pop();
       if (!current) continue;
-      if (current.depth > MAX_WALK_DEPTH) throw malformedProfile();
+      if (current.depth > X_PROFILE_MAX_WALK_DEPTH) throw malformedProfile();
       const value = current.value;
       if (!isObject(value)) continue;
       if (seen.has(value)) continue;
       seen.add(value);
       visited += 1;
-      if (visited > MAX_WALK_NODES) throw malformedProfile();
+      if (visited > X_PROFILE_MAX_WALK_NODES) throw malformedProfile();
 
       const properties = ownDataProperties(value);
       if (isNotFoundRecord(properties)) notFound = true;
@@ -229,13 +229,13 @@ function ownDataProperties(value: object): DataProperty[] {
   ) {
     throw malformedProfile();
   }
-  if (Array.isArray(value) && value.length > MAX_ARRAY_ENTRIES) {
+  if (Array.isArray(value) && value.length > X_PROFILE_MAX_ARRAY_ENTRIES) {
     throw malformedProfile();
   }
   if (Object.getOwnPropertySymbols(value).length > 0) throw malformedProfile();
 
   const names = Object.getOwnPropertyNames(value);
-  if (names.length > MAX_OBJECT_PROPERTIES) throw malformedProfile();
+  if (names.length > X_PROFILE_MAX_OBJECT_PROPERTIES) throw malformedProfile();
   const properties: DataProperty[] = [];
   for (const key of names) {
     if (Array.isArray(value) && key === "length") continue;
