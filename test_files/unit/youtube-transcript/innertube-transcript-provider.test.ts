@@ -58,9 +58,9 @@ function playerWithTracks(
 
 function queuedTransport(
   responses: readonly (TranscriptHttpResponse | Error | DOMException)[],
-): TranscriptHttpTransport & ReturnType<typeof vi.fn> {
+): TranscriptHttpTransport & ReturnType<typeof vi.fn<TranscriptHttpTransport>> {
   let index = 0;
-  return vi.fn(async () => {
+  return vi.fn<TranscriptHttpTransport>(async () => {
     const next = responses[index++];
     if (next instanceof Error || next instanceof DOMException) throw next;
     if (!next) throw new Error("Unexpected transport call");
@@ -98,7 +98,7 @@ describe("InnerTubeTranscriptProvider", () => {
       method: "GET",
       body: undefined,
     });
-    const playerRequest = transport.mock.calls[1]?.[0] as TranscriptHttpRequest;
+    const playerRequest = transport.mock.calls[1]?.[0];
     expect(playerRequest).toMatchObject({
       url: PLAYER_URL,
       method: "POST",
@@ -164,9 +164,7 @@ describe("InnerTubeTranscriptProvider", () => {
 
     expect(tracks).toHaveLength(1);
     expect(transport).toHaveBeenCalledTimes(4);
-    const requests = transport.mock.calls
-      .slice(1)
-      .map((call) => call[0] as TranscriptHttpRequest);
+    const requests = transport.mock.calls.slice(1).map((call) => call[0]);
     expect(
       requests.map((request) => request.headers["X-YouTube-Client-Name"]),
     ).toEqual(["3", "1", "5"]);
@@ -182,6 +180,59 @@ describe("InnerTubeTranscriptProvider", () => {
           ).clientName,
       ),
     ).toEqual(["ANDROID", "WEB", "IOS"]);
+  });
+
+  it.each([
+    ["non-object captions", null],
+    ["array captions", []],
+    ["missing renderer", {}],
+    ["non-object renderer", { playerCaptionsTracklistRenderer: null }],
+    [
+      "non-array tracks",
+      { playerCaptionsTracklistRenderer: { captionTracks: {} } },
+    ],
+  ])(
+    "falls back from Android when an OK response has %s",
+    async (_name, captions) => {
+      const transport = queuedTransport([
+        response(watchHtml()),
+        response(
+          JSON.stringify({
+            playabilityStatus: { status: "OK" },
+            captions,
+          }),
+        ),
+        response(playerWithTracks()),
+      ]);
+
+      const tracks = await new InnerTubeTranscriptProvider(
+        transport,
+      ).listTracks(VIDEO_ID);
+
+      expect(tracks).toHaveLength(1);
+      expect(transport).toHaveBeenCalledTimes(3);
+      expect(
+        transport.mock.calls[1]?.[0].headers["X-YouTube-Client-Name"],
+      ).toBe("3");
+      expect(
+        transport.mock.calls[2]?.[0].headers["X-YouTube-Client-Name"],
+      ).toBe("1");
+    },
+  );
+
+  it("stops after iOS when every player response is structurally unsupported", async () => {
+    const unsupported = JSON.stringify({ playabilityStatus: {} });
+    const transport = queuedTransport([
+      response(watchHtml()),
+      response(unsupported),
+      response(unsupported),
+      response(unsupported),
+    ]);
+
+    await expect(
+      new InnerTubeTranscriptProvider(transport).listTracks(VIDEO_ID),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(transport).toHaveBeenCalledTimes(4);
   });
 
   it("fetches the selected timed-text URL exactly once through the Task 1 parser", async () => {
@@ -245,6 +296,18 @@ describe("InnerTubeTranscriptProvider", () => {
     const transport = queuedTransport([
       response(watchHtml()),
       response(JSON.stringify({ playabilityStatus: { status: "OK" } })),
+    ]);
+
+    await expect(
+      new InnerTubeTranscriptProvider(transport).listTracks(VIDEO_ID),
+    ).rejects.toMatchObject({ code: "no-captions" });
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats an explicit empty caption-track array as authoritative no-captions", async () => {
+    const transport = queuedTransport([
+      response(watchHtml()),
+      response(playerWithTracks([])),
     ]);
 
     await expect(
@@ -325,6 +388,187 @@ describe("InnerTubeTranscriptProvider", () => {
       ),
     ).rejects.toMatchObject({ code: "aborted" });
     expect(transport).not.toHaveBeenCalled();
+  });
+
+  it("times out a transport that never settles without relying on transport behavior", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = vi.fn(
+        () => new Promise<TranscriptHttpResponse>(() => undefined),
+      );
+      const pending = new InnerTubeTranscriptProvider(transport).listTracks(
+        VIDEO_ID,
+      );
+      const rejection = expect(pending).rejects.toMatchObject({
+        code: "timeout",
+        message: "timeout",
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await rejection;
+      expect(transport).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives caller abort priority and does not continue to another client", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const addSpy = vi.spyOn(controller.signal, "addEventListener");
+      const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+      const transport = queuedTransport([
+        response(watchHtml()),
+        response(JSON.stringify({ playabilityStatus: {} })),
+      ]);
+      transport.mockImplementationOnce(async () => response(watchHtml()));
+      transport.mockImplementationOnce(async () =>
+        response(JSON.stringify({ playabilityStatus: {} })),
+      );
+      transport.mockImplementationOnce(
+        () => new Promise<TranscriptHttpResponse>(() => undefined),
+      );
+      const pending = new InnerTubeTranscriptProvider(transport).listTracks(
+        VIDEO_ID,
+        controller.signal,
+      );
+      const rejection = expect(pending).rejects.toMatchObject({
+        code: "aborted",
+        message: "aborted",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(transport).toHaveBeenCalledTimes(3);
+
+      await vi.advanceTimersByTimeAsync(19_999);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(1);
+
+      await rejection;
+      expect(transport).toHaveBeenCalledTimes(3);
+      expect(removeSpy).toHaveBeenCalledTimes(addSpy.mock.calls.length);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cleans its deadline timer and caller listener after success", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const addSpy = vi.spyOn(controller.signal, "addEventListener");
+      const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+      const transport = queuedTransport([
+        response(watchHtml()),
+        response(playerWithTracks()),
+      ]);
+
+      await new InnerTubeTranscriptProvider(transport).listTracks(
+        VIDEO_ID,
+        controller.signal,
+      );
+
+      expect(removeSpy).toHaveBeenCalledTimes(addSpy.mock.calls.length);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("handles a late transport rejection after its own timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = vi.fn(
+        () =>
+          new Promise<TranscriptHttpResponse>((_resolve, reject) => {
+            window.setTimeout(
+              () => reject(new Error("late private transport failure")),
+              30_000,
+            );
+          }),
+      );
+      const pending = new InnerTubeTranscriptProvider(transport).listTracks(
+        VIDEO_ID,
+      );
+      const rejection = expect(pending).rejects.toMatchObject({
+        code: "timeout",
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      await rejection;
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(transport).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("applies the same provider deadline to a selected timed-text request", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = queuedTransport([
+        response(watchHtml()),
+        response(playerWithTracks()),
+      ]);
+      const provider = new InnerTubeTranscriptProvider(transport);
+      const [track] = await provider.listTracks(VIDEO_ID);
+      transport.mockImplementationOnce(
+        () => new Promise<TranscriptHttpResponse>(() => undefined),
+      );
+      const pending = provider.fetchTrack(track);
+      const rejection = expect(pending).rejects.toMatchObject({
+        code: "timeout",
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      await rejection;
+      expect(transport).toHaveBeenCalledTimes(3);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not follow another caption redirect after caller abort", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = queuedTransport([
+        response(watchHtml()),
+        response(playerWithTracks()),
+      ]);
+      const provider = new InnerTubeTranscriptProvider(transport);
+      const [track] = await provider.listTracks(VIDEO_ID);
+      transport.mockImplementationOnce(async () =>
+        response("", 302, {
+          location: `https://rr1---sn-safe.googlevideo.com/api/timedtext?v=${VIDEO_ID}&lang=en&fmt=json3`,
+        }),
+      );
+      transport.mockImplementationOnce(
+        () => new Promise<TranscriptHttpResponse>(() => undefined),
+      );
+      const controller = new AbortController();
+      const pending = provider.fetchTrack(track, controller.signal);
+      const rejection = expect(pending).rejects.toMatchObject({
+        code: "aborted",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(transport).toHaveBeenCalledTimes(4);
+
+      controller.abort();
+      await rejection;
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(transport).toHaveBeenCalledTimes(4);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([
@@ -442,8 +686,7 @@ describe("InnerTubeTranscriptProvider", () => {
       url: redirectedWatch,
       method: "GET",
     });
-    const redirectedCaption = transport.mock
-      .calls[4]?.[0] as TranscriptHttpRequest;
+    const redirectedCaption = transport.mock.calls[4]?.[0];
     expect(redirectedCaption.url).toContain("googlevideo.com/api/timedtext");
     expect(redirectedCaption.headers).not.toHaveProperty("Origin");
     expect(redirectedCaption.headers).not.toHaveProperty("Referer");

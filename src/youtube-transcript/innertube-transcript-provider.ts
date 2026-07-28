@@ -57,6 +57,7 @@ const MAX_REDIRECTS = 3;
 const MAX_TRACKS = 100;
 const MAX_URL_CHARACTERS = 8_192;
 const MAX_LANGUAGE_NAME_CHARACTERS = 200;
+const PROVIDER_DEADLINE_MS = 20_000;
 
 const CLIENTS: readonly ClientDescriptor[] = Object.freeze([
   Object.freeze({
@@ -94,6 +95,78 @@ const CLIENTS: readonly ClientDescriptor[] = Object.freeze([
   }),
 ]);
 
+class ProviderDeadline {
+  readonly signal: AbortSignal;
+
+  private readonly controller = new AbortController();
+  private readonly callerSignal: AbortSignal | undefined;
+  private readonly onCallerAbort: () => void;
+  private timeoutId: number | undefined;
+  private cause: "caller" | "timeout" | undefined;
+  private disposed = false;
+
+  constructor(callerSignal: AbortSignal | undefined) {
+    this.signal = this.controller.signal;
+    this.callerSignal = callerSignal;
+    this.onCallerAbort = () => this.abort("caller");
+
+    if (callerSignal?.aborted) {
+      this.abort("caller");
+      return;
+    }
+    callerSignal?.addEventListener("abort", this.onCallerAbort, {
+      once: true,
+    });
+    this.timeoutId = window.setTimeout(() => {
+      this.timeoutId = undefined;
+      this.abort("timeout");
+    }, PROVIDER_DEADLINE_MS);
+  }
+
+  assertActive(): void {
+    if (this.signal.aborted) throw stableError(this.failureCode());
+  }
+
+  async run<T>(operation: () => Promise<T>): Promise<T> {
+    this.assertActive();
+    const pendingOperation = Promise.resolve().then(operation);
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(stableError(this.failureCode()));
+      this.signal.addEventListener("abort", onAbort, { once: true });
+      if (this.signal.aborted) onAbort();
+    });
+    try {
+      return await Promise.race([pendingOperation, aborted]);
+    } finally {
+      if (onAbort) this.signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  failureCode(): "aborted" | "timeout" {
+    if (this.callerSignal?.aborted || this.cause === "caller") {
+      return "aborted";
+    }
+    return "timeout";
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    if (this.timeoutId !== undefined) {
+      window.clearTimeout(this.timeoutId);
+      this.timeoutId = undefined;
+    }
+    this.callerSignal?.removeEventListener("abort", this.onCallerAbort);
+  }
+
+  private abort(cause: "caller" | "timeout"): void {
+    if (this.cause !== undefined) return;
+    this.cause = cause;
+    this.controller.abort();
+  }
+}
+
 export class InnerTubeTranscriptProvider {
   private readonly registeredTracks = new WeakMap<
     YouTubeCaptionTrack,
@@ -107,84 +180,97 @@ export class InnerTubeTranscriptProvider {
     signal?: AbortSignal,
   ): Promise<YouTubeCaptionTrack[]> {
     const videoId = assertYouTubeVideoId(requestedVideoId);
-    throwIfAborted(signal);
-    const watchUrl = `${WATCH_URL_PREFIX}${videoId}&hl=en&persist_hl=1&has_verified=1&bpctr=9999999999`;
-    const watchResponse = await this.requestWithRedirects(
-      {
-        url: watchUrl,
-        method: "GET",
-        headers: watchHeaders(),
-        body: undefined,
-        ...(signal === undefined ? {} : { signal }),
-      },
-      "watch",
-    );
-    const session = extractSession(watchResponse.text);
-
-    for (const client of CLIENTS) {
-      throwIfAborted(signal);
-      const projection = await this.requestPlayer(
-        videoId,
-        session,
-        client,
-        signal,
+    const deadline = new ProviderDeadline(signal);
+    try {
+      deadline.assertActive();
+      const watchUrl = `${WATCH_URL_PREFIX}${videoId}&hl=en&persist_hl=1&has_verified=1&bpctr=9999999999`;
+      const watchResponse = await this.requestWithRedirects(
+        {
+          url: watchUrl,
+          method: "GET",
+          headers: watchHeaders(),
+          body: undefined,
+          signal: deadline.signal,
+        },
+        "watch",
+        deadline,
       );
-      if (projection.kind === "structurally-unsupported") continue;
-      for (const track of projection.tracks) {
-        this.registeredTracks.set(track, {
-          videoId,
-          snapshot: track,
-        });
-      }
-      return projection.tracks;
-    }
+      const session = extractSession(watchResponse.text);
 
-    throw stableError("temporarily-unavailable");
+      for (const client of CLIENTS) {
+        deadline.assertActive();
+        const projection = await this.requestPlayer(
+          videoId,
+          session,
+          client,
+          deadline,
+        );
+        if (projection.kind === "structurally-unsupported") continue;
+        for (const track of projection.tracks) {
+          this.registeredTracks.set(track, {
+            videoId,
+            snapshot: track,
+          });
+        }
+        return projection.tracks;
+      }
+
+      throw stableError("temporarily-unavailable");
+    } catch (error) {
+      throw normalizeFailure(error, deadline);
+    } finally {
+      deadline.dispose();
+    }
   }
 
   async fetchTrack(
     track: YouTubeCaptionTrack,
     signal?: AbortSignal,
   ): Promise<YouTubeTranscript> {
-    throwIfAborted(signal);
-    const registered = this.registeredTracks.get(track);
-    if (!registered || track !== registered.snapshot) {
-      throw stableError("temporarily-unavailable");
-    }
-
-    const response = await this.requestWithRedirects(
-      {
-        url: registered.snapshot.url,
-        method: "GET",
-        headers: captionHeaders(registered.videoId),
-        body: undefined,
-        ...(signal === undefined ? {} : { signal }),
-      },
-      "caption",
-    );
-    throwIfAborted(signal);
-
-    let text: string;
+    const deadline = new ProviderDeadline(signal);
     try {
-      text = parseTranscriptPayload(registered.snapshot.format, response.text);
+      deadline.assertActive();
+      const registered = this.registeredTracks.get(track);
+      if (!registered || track !== registered.snapshot) {
+        throw stableError("temporarily-unavailable");
+      }
+
+      const response = await this.requestWithRedirects(
+        {
+          url: registered.snapshot.url,
+          method: "GET",
+          headers: captionHeaders(registered.videoId),
+          body: undefined,
+          signal: deadline.signal,
+        },
+        "caption",
+        deadline,
+      );
+      deadline.assertActive();
+      const text = parseTranscriptPayload(
+        registered.snapshot.format,
+        response.text,
+      );
+      return {
+        videoId: registered.videoId,
+        languageCode: registered.snapshot.languageCode,
+        languageName: registered.snapshot.languageName,
+        isGenerated: registered.snapshot.isGenerated,
+        provider: "innertube",
+        text,
+      };
     } catch (error) {
-      throw normalizeFailure(error, signal);
+      throw normalizeFailure(error, deadline);
+    } finally {
+      deadline.dispose();
     }
-    return {
-      videoId: registered.videoId,
-      languageCode: registered.snapshot.languageCode,
-      languageName: registered.snapshot.languageName,
-      isGenerated: registered.snapshot.isGenerated,
-      provider: "innertube",
-      text,
-    };
   }
 
   private async requestPlayer(
     videoId: string,
     session: InnerTubeSession,
     client: ClientDescriptor,
-    signal: AbortSignal | undefined,
+    deadline: ProviderDeadline,
   ): Promise<PlayerProjection> {
     const clientVersion = client.clientVersion ?? session.webClientVersion;
     const headers: Record<string, string> = {
@@ -222,9 +308,10 @@ export class InnerTubeTranscriptProvider {
         method: "POST",
         headers,
         body,
-        ...(signal === undefined ? {} : { signal }),
+        signal: deadline.signal,
       },
       "player",
+      deadline,
     );
     return projectPlayerResponse(response.text, videoId);
   }
@@ -232,6 +319,7 @@ export class InnerTubeTranscriptProvider {
   private async requestWithRedirects(
     initialRequest: TranscriptHttpRequest,
     boundary: RequestBoundary,
+    deadline: ProviderDeadline,
   ): Promise<TranscriptHttpResponse> {
     let request = snapshotRequest(initialRequest);
     validateOutboundUrl(request.url, boundary);
@@ -241,14 +329,16 @@ export class InnerTubeTranscriptProvider {
       redirectCount <= MAX_REDIRECTS;
       redirectCount += 1
     ) {
-      throwIfAborted(request.signal);
+      deadline.assertActive();
       let response: TranscriptHttpResponse;
       try {
-        response = validateResponse(await this.transport(request));
+        response = validateResponse(
+          await deadline.run(() => this.transport(request)),
+        );
       } catch (error) {
-        throw normalizeFailure(error, request.signal);
+        throw normalizeFailure(error, deadline);
       }
-      throwIfAborted(request.signal);
+      deadline.assertActive();
 
       if (isRedirect(response.status)) {
         if (redirectCount === MAX_REDIRECTS || response.status === 303) {
@@ -511,12 +601,18 @@ function projectPlayerResponse(
     throw mapPlayabilityFailure(status, collectPlayabilityReason(playability));
   }
 
-  const captions = ownRecord(value, "captions");
-  if (!captions) throw stableError("no-captions");
+  const captionsDescriptor = Object.getOwnPropertyDescriptor(value, "captions");
+  if (!captionsDescriptor) throw stableError("no-captions");
+  if (!("value" in captionsDescriptor) || !isRecord(captionsDescriptor.value)) {
+    return { kind: "structurally-unsupported" };
+  }
+  const captions = captionsDescriptor.value;
   const renderer = ownRecord(captions, "playerCaptionsTracklistRenderer");
-  if (!renderer) throw stableError("temporarily-unavailable");
+  if (!renderer) return { kind: "structurally-unsupported" };
   const rawTracks = ownValue(renderer, "captionTracks");
-  if (!Array.isArray(rawTracks)) throw stableError("temporarily-unavailable");
+  if (!Array.isArray(rawTracks)) {
+    return { kind: "structurally-unsupported" };
+  }
   if (rawTracks.length === 0) throw stableError("no-captions");
   if (rawTracks.length > MAX_TRACKS) {
     throw stableError("temporarily-unavailable");
@@ -663,15 +759,11 @@ function ownString(
   return typeof candidate === "string" ? candidate : undefined;
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw stableError("aborted");
-}
-
 function normalizeFailure(
   error: unknown,
-  signal: AbortSignal | undefined,
+  deadline: ProviderDeadline,
 ): YouTubeTranscriptError {
-  if (signal?.aborted) return stableError("aborted");
+  if (deadline.signal.aborted) return stableError(deadline.failureCode());
   if (error instanceof YouTubeTranscriptError) return error;
   const name = readErrorField(error, "name");
   const code = readErrorField(error, "code");
