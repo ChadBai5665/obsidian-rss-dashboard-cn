@@ -454,7 +454,12 @@ class SafeTextDeltaForwarder {
     this.chunks.push(value);
     if (!this.callback) return;
     try {
-      this.callback(value);
+      const callbackResult = Reflect.apply(
+        this.callback,
+        undefined,
+        [value],
+      ) as unknown;
+      consumeCallbackRejection(callbackResult);
     } catch {
       // Caller/UI callback failures cannot change provider completion.
     }
@@ -488,6 +493,19 @@ class SafeTextDeltaForwarder {
     this.failure = code;
     this.terminal = true;
   }
+}
+
+function consumeCallbackRejection(value: unknown): void {
+  if (
+    value === null ||
+    (typeof value !== "object" && typeof value !== "function")
+  ) return;
+  const assimilated = Promise.resolve(value);
+  void Promise.prototype.then.call(
+    assimilated,
+    undefined,
+    () => undefined,
+  );
 }
 
 function publicOperationError(

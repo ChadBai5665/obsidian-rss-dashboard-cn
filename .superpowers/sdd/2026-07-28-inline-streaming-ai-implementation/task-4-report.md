@@ -58,3 +58,41 @@ or public network endpoint was used.
 
 The public repository scan produced no new finding, so no allowlist or scanner
 change was required.
+
+## FixRound1 — consume asynchronous callback failures
+
+Review found that synchronous caller callback exceptions were isolated, but a
+callback returning a rejected Promise could still produce an unhandled
+rejection. Returned custom thenables were ignored rather than safely consumed.
+
+- RED: the expanded operation suite ran 38 tests and failed 1. The resolving
+  custom thenable was never consumed (`then` call count 0 instead of 1); the
+  same regression test also exercised rejected Promises, rejecting thenables,
+  and a throwing `then` getter.
+- GREEN: the service still keeps the public callback type `void`, invokes it
+  through `Reflect.apply`, captures the runtime result as `unknown`, and
+  attaches a rejection-only sink through native Promise assimilation.
+- The callback result is never awaited. A permanently pending result neither
+  delays provider completion nor reorders later deltas.
+- A custom resolving or rejecting `then` is called exactly once. A throwing
+  `then` getter becomes a consumed rejection, synchronous callback throws remain
+  isolated, and no callback failure or synthetic credential/provider canary
+  reaches `unhandledRejection`.
+
+### FixRound1 verification
+
+- Focused operation suite — PASS (38 tests).
+- Guarded operation/privacy/SSE/transport/provider slice — PASS: 7 files,
+  249 tests.
+- Guarded full `npm run check` — PASS: 285 files passed, 1 skipped; 3,800 tests
+  passed, 1 skipped.
+- `npm run lint` and `npx tsc --noEmit --skipLibCheck` — PASS.
+- Build, i18n audit, public repository scan, workflow policy, version
+  consistency, CSS scope, platform compatibility, and CSS `!important` checks
+  — PASS.
+- `git diff --check` — PASS.
+
+The guarded runs blocked every non-loopback socket. No real provider, paid API,
+user credential/content, or public endpoint was used. The synthetic
+`external-secret raw-provider-error` regression canary produced no new public
+scan finding, so no allowlist or scanner change was needed.

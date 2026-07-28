@@ -1,3 +1,6 @@
+import process from "node:process";
+import { setImmediate } from "node:timers";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { AiConnection, AiSettings } from "../../../src/ai/ai-types";
@@ -587,6 +590,100 @@ describe("manual AI operation service", () => {
     expect(result.text).toBe("第一段第二段");
     expect(original).toHaveBeenCalledTimes(2);
     expect(replacement).not.toHaveBeenCalled();
+  });
+
+  it("consumes async callback failures and hostile thenables without leaking", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    let callbackIndex = 0;
+    let resolvingThenCalls = 0;
+    let rejectingThenCalls = 0;
+    let throwingGetterReads = 0;
+    const resolvingThenable = {
+      then(resolve: (value: undefined) => void) {
+        resolvingThenCalls += 1;
+        resolve(undefined);
+      },
+    };
+    const rejectingThenable = {
+      then(_resolve: (value: never) => void, reject: (reason: unknown) => void) {
+        rejectingThenCalls += 1;
+        reject(new Error("external-secret raw-provider-error"));
+      },
+    };
+    const throwingGetterThenable = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(throwingGetterThenable, "then", {
+      get: () => {
+        throwingGetterReads += 1;
+        throw new Error("external-secret raw-provider-error");
+      },
+    });
+    const results = [
+      () => Promise.reject(new Error("external-secret raw-provider-error")),
+      () => resolvingThenable,
+      () => rejectingThenable,
+      () => throwingGetterThenable,
+    ];
+    const callback = vi.fn((_text: string): unknown =>
+      results[callbackIndex++]?.());
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      onTextDelta?.("一");
+      onTextDelta?.("二");
+      onTextDelta?.("三");
+      onTextDelta?.("四");
+      return { text: "一二三四" };
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      const result = await test.service.run(runInput({
+        onTextDelta: callback as unknown as (text: string) => void,
+      }));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(result.text).toBe("一二三四");
+      expect(callback.mock.calls.map(([text]) => text)).toEqual([
+        "一",
+        "二",
+        "三",
+        "四",
+      ]);
+      expect(resolvingThenCalls).toBe(1);
+      expect(rejectingThenCalls).toBe(1);
+      expect(throwingGetterReads).toBe(1);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("does not await a pending callback result or reorder later deltas", async () => {
+    const forwarded: string[] = [];
+    const pending = new Promise<never>(() => undefined);
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      onTextDelta?.("第一段");
+      onTextDelta?.("第二段");
+      return { text: "第一段第二段" };
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+    const callback = (text: string): unknown => {
+      forwarded.push(text);
+      return pending;
+    };
+
+    const result = await test.service.run(runInput({
+      onTextDelta: callback as unknown as (text: string) => void,
+    }));
+
+    expect(result.text).toBe("第一段第二段");
+    expect(forwarded).toEqual(["第一段", "第二段"]);
   });
 
   it("rejects accessor, inherited, undefined, and non-function callbacks before side effects", async () => {
