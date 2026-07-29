@@ -60,6 +60,21 @@ export interface TikHubSearchRequest extends CommonRequestInput {
   batch?: TikHubBatchHandle;
 }
 
+export interface TikHubYouTubeCaptionRequest {
+  apiKey: string;
+  videoId: string;
+  languageCode?: string;
+  format?: "txt";
+  signal?: AbortSignal;
+}
+
+export interface TikHubYouTubeCaptionResultRequest {
+  apiKey: string;
+  jobId: string;
+  format: "txt";
+  signal?: AbortSignal;
+}
+
 declare const batchHandleType: unique symbol;
 export type TikHubBatchHandle = object & {
   readonly [batchHandleType]: "TikHubBatchHandle";
@@ -74,6 +89,10 @@ interface TikHubBatchState {
 }
 
 const BATCH_BRAND = Symbol("tikhub-client-batch");
+const MAX_TIKHUB_RESPONSE_TEXT_LENGTH = 5_000_000;
+const YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{11}$/u;
+const YOUTUBE_LANGUAGE_CODE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+const TIKHUB_JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export class TikHubClientError extends Error {
   constructor(
@@ -116,6 +135,55 @@ export class TikHubClient {
       undefined,
       false,
     );
+  }
+
+  async fetchYouTubeCaptions<T = unknown>(
+    input: TikHubYouTubeCaptionRequest,
+  ): Promise<TikHubResult<T>> {
+    const videoId = requirePattern(
+      input.videoId,
+      YOUTUBE_VIDEO_ID,
+      "YouTube video ID",
+    );
+    const query: Record<string, string> = { video_id: videoId };
+    if (input.languageCode !== undefined || input.format !== undefined) {
+      const languageCode = requirePattern(
+        input.languageCode,
+        YOUTUBE_LANGUAGE_CODE,
+        "YouTube caption language code",
+      );
+      if (input.format !== "txt") {
+        throw new TikHubClientError(
+          "invalid-query",
+          "TikHub YouTube caption format is invalid.",
+        );
+      }
+      query.language_code = languageCode;
+      query.format = "txt";
+    }
+    return await this.request<T>(
+      "/api/v1/youtube/web_v2/get_video_captions",
+      query,
+      input,
+    );
+  }
+
+  async fetchYouTubeCaptionResult<T = unknown>(
+    input: TikHubYouTubeCaptionResultRequest,
+  ): Promise<TikHubResult<T>> {
+    const jobId = requirePattern(input.jobId, TIKHUB_JOB_ID, "caption job ID");
+    if (input.format !== "txt") {
+      throw new TikHubClientError(
+        "invalid-query",
+        "TikHub YouTube caption format is invalid.",
+      );
+    }
+    const result = await this.requestYouTubeCaptionResult<T>(
+      { job_id: jobId, format: "txt" },
+      input,
+    );
+    requireMatchingCaptionJobId(result.data, jobId);
+    return result;
   }
 
   async fetchUserPosts<T = unknown>(
@@ -230,86 +298,117 @@ export class TikHubClient {
       if (batchState) this.assertActiveBatch(batch as TikHubBatchHandle, batchState);
       else if (reservation.remaining <= 0) throw invalidBatchError();
 
-      let pendingRequest: Promise<TikHubTransportResponse>;
-      try {
-        if (batchState) {
-          this.assertActiveBatch(batch as TikHubBatchHandle, batchState);
-        }
-        pendingRequest = this.transport({
-          url: url.toString(),
-          method: "GET",
-          headers: { Authorization: `Bearer ${apiKey}` },
-        });
-      } catch (error) {
-        throw errorForTransportFailure(error);
-      }
-      if (batchState) {
-        this.commitBatchAttempt(batch as TikHubBatchHandle, batchState);
-      } else {
-        reservation.markAttempted();
-      }
-      let response: TikHubTransportResponse;
-      try {
-        response = await raceRequest(
-          pendingRequest,
-          this.timeoutMs,
-          input.signal,
-        );
-      } catch (error) {
-        if (isTikHubClientError(error)) throw error;
-        throw errorForTransportFailure(error);
-      }
-
-      const extractedResponse = extractTransportResponse(response, apiKey);
-      if (extractedResponse.status < 200 || extractedResponse.status >= 300) {
-        throw errorForStatus(
-          extractedResponse.status,
-          extractedResponse.headerRequestId,
-        );
-      }
-
-      let envelope: unknown;
-      try {
-        envelope = JSON.parse(extractedResponse.text);
-      } catch {
-        throw new TikHubClientError(
-          "malformed-response",
-          "TikHub returned malformed JSON.",
-          extractedResponse.status,
-          extractedResponse.headerRequestId,
-        );
-      }
-      if (!isEnvelope(envelope)) {
-        throw new TikHubClientError(
-          "malformed-response",
-          "TikHub returned an invalid response envelope.",
-          extractedResponse.status,
-          extractedResponse.headerRequestId,
-        );
-      }
-
-      const requestId =
-        safeTikHubRequestId(envelope.request_id, apiKey) ??
-        safeTikHubRequestId(envelope.requestId, apiKey) ??
-        extractedResponse.headerRequestId;
-      if (envelope.code !== 200) {
-        throw errorForProviderCode(envelope.code, requestId);
-      }
-      if (requireData && !("data" in envelope)) {
-        throw new TikHubClientError(
-          "malformed-response",
-          "TikHub response data is missing.",
-          extractedResponse.status,
-          requestId,
-        );
-      }
-
-      return requestId
-        ? { data: envelope.data as T, requestId }
-        : { data: envelope.data as T };
+      return await this.performRequest<T>(
+        url,
+        apiKey,
+        input.signal,
+        () => {
+          if (batchState) {
+            this.commitBatchAttempt(batch as TikHubBatchHandle, batchState);
+          } else {
+            reservation.markAttempted();
+          }
+        },
+        requireData,
+      );
     } finally {
       if (ownsReservation) await reservation.releaseUnused();
     }
+  }
+
+  /** The only budget-free request capability: fixed YouTube result polling. */
+  private async requestYouTubeCaptionResult<T>(
+    query: { job_id: string; format: "txt" },
+    input: TikHubYouTubeCaptionResultRequest,
+  ): Promise<TikHubResult<T>> {
+    const apiKey = input.apiKey.trim();
+    if (!apiKey) {
+      throw new TikHubClientError("missing-key", "TikHub API key is not configured.");
+    }
+    const url = new URL(
+      "/api/v1/youtube/web_v2/get_video_captions_result",
+      `${this.baseUrl}/`,
+    );
+    url.searchParams.set("job_id", query.job_id);
+    url.searchParams.set("format", query.format);
+    return await this.performRequest<T>(url, apiKey, input.signal, () => undefined);
+  }
+
+  private async performRequest<T>(
+    url: URL,
+    apiKey: string,
+    signal: AbortSignal | undefined,
+    markAttempted: () => void,
+    requireData = true,
+  ): Promise<TikHubResult<T>> {
+    if (signal?.aborted) throw abortedError();
+    let pendingRequest: Promise<TikHubTransportResponse>;
+    try {
+      pendingRequest = this.transport({
+        url: url.toString(),
+        method: "GET",
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+    } catch (error) {
+      throw errorForTransportFailure(error);
+    }
+    markAttempted();
+
+    let response: TikHubTransportResponse;
+    try {
+      response = await raceRequest(pendingRequest, this.timeoutMs, signal);
+    } catch (error) {
+      if (isTikHubClientError(error)) throw error;
+      throw errorForTransportFailure(error);
+    }
+
+    const extractedResponse = extractTransportResponse(response, apiKey);
+    if (extractedResponse.status < 200 || extractedResponse.status >= 300) {
+      throw errorForStatus(
+        extractedResponse.status,
+        extractedResponse.headerRequestId,
+      );
+    }
+
+    let envelope: unknown;
+    try {
+      envelope = JSON.parse(extractedResponse.text);
+    } catch {
+      throw new TikHubClientError(
+        "malformed-response",
+        "TikHub returned malformed JSON.",
+        extractedResponse.status,
+        extractedResponse.headerRequestId,
+      );
+    }
+    if (!isEnvelope(envelope)) {
+      throw new TikHubClientError(
+        "malformed-response",
+        "TikHub returned an invalid response envelope.",
+        extractedResponse.status,
+        extractedResponse.headerRequestId,
+      );
+    }
+
+    const requestId =
+      safeTikHubRequestId(envelope.request_id, apiKey) ??
+      safeTikHubRequestId(envelope.requestId, apiKey) ??
+      extractedResponse.headerRequestId;
+    if (envelope.code !== 200) {
+      throw errorForProviderCode(envelope.code, requestId);
+    }
+    if (requireData && !("data" in envelope)) {
+      throw new TikHubClientError(
+        "malformed-response",
+        "TikHub response data is missing.",
+        extractedResponse.status,
+        requestId,
+      );
+    }
+
+    return requestId
+      ? { data: envelope.data as T, requestId }
+      : { data: envelope.data as T };
   }
 
   private requireBatchState(handle: TikHubBatchHandle): TikHubBatchState {
@@ -602,7 +701,8 @@ function extractTransportResponse(
       !Number.isInteger(status) ||
       status < 100 ||
       status > 599 ||
-      typeof text !== "string"
+      typeof text !== "string" ||
+      text.length > MAX_TIKHUB_RESPONSE_TEXT_LENGTH
     ) {
       throw new Error("invalid transport response");
     }
@@ -680,6 +780,36 @@ function requireNonBlank(value: string, label: string): string {
     throw new TikHubClientError("invalid-query", `TikHub ${label} is required.`);
   }
   return normalized;
+}
+
+function requirePattern(
+  value: unknown,
+  pattern: RegExp,
+  label: string,
+): string {
+  if (typeof value !== "string" || !pattern.test(value)) {
+    throw new TikHubClientError("invalid-query", `TikHub ${label} is invalid.`);
+  }
+  return value;
+}
+
+function requireMatchingCaptionJobId(value: unknown, expectedJobId: string): void {
+  try {
+    if (!isObjectRecord(value)) throw new Error("invalid caption result");
+    const descriptor = Object.getOwnPropertyDescriptor(value, "job_id");
+    if (
+      !descriptor ||
+      !("value" in descriptor) ||
+      descriptor.value !== expectedJobId
+    ) {
+      throw new Error("invalid caption result");
+    }
+  } catch {
+    throw new TikHubClientError(
+      "malformed-response",
+      "TikHub returned an invalid caption job result.",
+    );
+  }
 }
 
 function abortedError(): TikHubClientError {
