@@ -8,12 +8,14 @@ import {
   YouTubeTranscriptServiceError,
   type TranscriptCacheRepository,
   type TranscriptMetadataRepository,
-  type TranscriptProvider,
 } from "../../../src/youtube-transcript/youtube-transcript-service";
 import {
   YouTubeTranscriptError,
+  type TranscriptProvider,
+  type TranscriptProviderRegistration,
   type YouTubeCaptionTrack,
   type YouTubeTranscript,
+  type YouTubeTranscriptProgress,
 } from "../../../src/youtube-transcript/transcript-types";
 
 const ITEM_ID = "a".repeat(64);
@@ -216,7 +218,9 @@ class FakeMetadataRepository implements TranscriptMetadataRepository {
 
 function createService(options: {
   innerTube?: TranscriptProvider;
+  tikHub?: FakeOptionalProvider;
   ytDlp?: FakeOptionalProvider;
+  providers?: TranscriptProviderRegistration[];
   content?: FakeContentRepository;
   metadata?: FakeMetadataRepository;
   clock?: () => Date;
@@ -225,18 +229,31 @@ function createService(options: {
 } = {}): {
   service: YouTubeTranscriptService;
   innerTube: TranscriptProvider;
+  tikHub: FakeOptionalProvider;
   ytDlp: FakeOptionalProvider;
   content: FakeContentRepository;
   metadata: FakeMetadataRepository;
 } {
   const innerTube = options.innerTube ?? new FakeProvider();
+  const tikHub = options.tikHub ?? new FakeOptionalProvider(false);
   const ytDlp = options.ytDlp ?? new FakeOptionalProvider(true);
   const content = options.content ?? new FakeContentRepository();
   const metadata = options.metadata ?? new FakeMetadataRepository();
   return {
     service: new YouTubeTranscriptService({
-      innerTube,
-      ytDlp,
+      providers: options.providers ?? [
+        { source: "innertube", provider: innerTube },
+        {
+          source: "tikhub",
+          provider: tikHub,
+          isAvailable: async () => await tikHub.isAvailable(),
+        },
+        {
+          source: "yt-dlp",
+          provider: ytDlp,
+          isAvailable: async () => await ytDlp.isAvailable(),
+        },
+      ],
       contentRepository: content,
       metadataRepository: metadata,
       clock: options.clock ?? (() => new Date("2026-07-28T06:00:00.000Z")),
@@ -244,6 +261,7 @@ function createService(options: {
       maxPendingChoiceSets: options.maxPendingChoiceSets,
     }),
     innerTube,
+    tikHub,
     ytDlp,
     content,
     metadata,
@@ -251,6 +269,18 @@ function createService(options: {
 }
 
 describe("YouTubeTranscriptService", () => {
+  it("rejects empty and duplicate-source provider chains", () => {
+    expect(() => createService({ providers: [] })).toThrow(
+      "Invalid transcript provider chain",
+    );
+    expect(() => createService({
+      providers: [
+        { source: "innertube", provider: new FakeProvider() },
+        { source: "innertube", provider: new FakeProvider() },
+      ],
+    })).toThrow("Invalid transcript provider chain");
+  });
+
   it("rejects unbounded pending-choice retention settings", () => {
     expect(() => createService({ choiceTtlMs: 60 * 60 * 1_000 })).toThrow(
       "Invalid choice TTL",
@@ -258,6 +288,347 @@ describe("YouTubeTranscriptService", () => {
     expect(() => createService({ maxPendingChoiceSets: 1_000 })).toThrow(
       "Invalid pending choice capacity",
     );
+  });
+
+  it("tries available providers in registration order and skips unavailable ones", async () => {
+    const events: string[] = [];
+    const innerTube: TranscriptProvider = {
+      async listTracks() {
+        events.push("innertube:list");
+        throw new YouTubeTranscriptError("temporarily-unavailable");
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+    };
+    const tikHub = new FakeOptionalProvider(false, [track({ source: "tikhub" })]);
+    const localTrack = track({ source: "yt-dlp" });
+    const ytDlp: TranscriptProvider = {
+      async listTracks() {
+        events.push("yt-dlp:list");
+        return [localTrack];
+      },
+      async fetchTrack(selectedTrack) {
+        events.push("yt-dlp:fetch");
+        return transcript(selectedTrack);
+      },
+    };
+    const { service } = createService({
+      providers: [
+        { source: "innertube", provider: innerTube },
+        {
+          source: "tikhub",
+          provider: tikHub,
+          isAvailable: async () => {
+            events.push("tikhub:available");
+            return false;
+          },
+        },
+        {
+          source: "yt-dlp",
+          provider: ytDlp,
+          isAvailable: async () => {
+            events.push("yt-dlp:available");
+            return true;
+          },
+        },
+      ],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { provider: "yt-dlp" },
+      usage: { tikhubPaidRequests: 0 },
+    });
+    expect(events).toEqual([
+      "innertube:list",
+      "tikhub:available",
+      "yt-dlp:available",
+      "yt-dlp:list",
+      "yt-dlp:fetch",
+    ]);
+  });
+
+  it("continues from a failed TikHub provider to local yt-dlp", async () => {
+    const innerTube = new FakeProvider(
+      new YouTubeTranscriptError("temporarily-unavailable"),
+    );
+    const tikHub = new FakeOptionalProvider(
+      true,
+      new YouTubeTranscriptError("tikhub-rate-limited"),
+    );
+    const ytDlp = new FakeOptionalProvider(true, [track({ source: "yt-dlp" })]);
+    const { service } = createService({ innerTube, tikHub, ytDlp });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { provider: "yt-dlp" },
+      usage: { tikhubPaidRequests: 0 },
+    });
+    expect(tikHub.listCalls).toBe(1);
+    expect(ytDlp.listCalls).toBe(1);
+  });
+
+  it("stops the chain while TikHub processing is resumable", async () => {
+    const tikHub = new FakeOptionalProvider(
+      true,
+      new YouTubeTranscriptError("tikhub-processing"),
+    );
+    const ytDlp = new FakeOptionalProvider(true, [track({ source: "yt-dlp" })]);
+    const progress: YouTubeTranscriptProgress[] = [];
+    const { service } = createService({
+      innerTube: new FakeProvider(
+        new YouTubeTranscriptError("temporarily-unavailable"),
+      ),
+      tikHub,
+      ytDlp,
+    });
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        onProgress: (entry) => progress.push(entry),
+      }),
+    ).rejects.toMatchObject({
+      code: "tikhub-processing",
+      usage: { tikhubPaidRequests: 0 },
+    });
+    expect(progress[progress.length - 1]).toEqual({
+      stage: "waiting-tikhub",
+      usage: { tikhubPaidRequests: 0 },
+    });
+    expect(ytDlp.availabilityChecks).toBe(0);
+    expect(ytDlp.listCalls).toBe(0);
+  });
+
+  it("prefers actionable TikHub failures over generic local unavailability", async () => {
+    const secret = "provider-secret-that-must-not-survive";
+    const tikHub = new FakeOptionalProvider(
+      true,
+      new YouTubeTranscriptError("tikhub-missing-key"),
+    );
+    const ytDlp = new FakeOptionalProvider(false);
+    const { service } = createService({
+      innerTube: new FakeProvider(
+        new YouTubeTranscriptError("temporarily-unavailable"),
+      ),
+      tikHub,
+      ytDlp,
+    });
+
+    let failure: unknown;
+    try {
+      await service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      code: "tikhub-missing-key",
+      usage: { tikhubPaidRequests: 0 },
+      failures: [
+        { source: "innertube", code: "temporarily-unavailable" },
+        { source: "tikhub", code: "tikhub-missing-key" },
+        { source: "yt-dlp", code: "fallback-unavailable" },
+      ],
+    });
+    expect(JSON.stringify(failure)).not.toContain(secret);
+    expect((failure as Error).message).toBe("tikhub-missing-key");
+  });
+
+  it("keeps TikHub choices bound to TikHub and reports two valid paid responses", async () => {
+    const tracks = [
+      track({
+        source: "tikhub",
+        languageName: "English",
+        url: "tikhub:caption/en/one",
+      }),
+      track({
+        source: "tikhub",
+        languageName: "English (United States)",
+        url: "tikhub:caption/en/two",
+      }),
+    ];
+    const tikHub = new FakeOptionalProvider(true, tracks);
+    const ytDlp = new FakeOptionalProvider(true, [track({ source: "yt-dlp" })]);
+    const { service } = createService({
+      innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+      tikHub,
+      ytDlp,
+    });
+
+    const choices = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choices.status !== "selection-required") {
+      throw new Error("expected TikHub choices");
+    }
+    expect(choices.tracks.map(({ provider }) => provider)).toEqual([
+      "tikhub",
+      "tikhub",
+    ]);
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        trackId: choices.tracks[1].id,
+      }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { provider: "tikhub", languageName: "English (United States)" },
+      usage: { tikhubPaidRequests: 2 },
+    });
+    expect(tikHub.listCalls).toBe(1);
+    expect(tikHub.fetchCalls).toBe(1);
+    expect(ytDlp.availabilityChecks).toBe(0);
+  });
+
+  it("coalesces duplicate TikHub track selections without double usage", async () => {
+    const tracks = [
+      track({ source: "tikhub", languageName: "English", url: "tikhub:en" }),
+      track({ source: "tikhub", languageName: "English US", url: "tikhub:en-us" }),
+    ];
+    let releaseFetch!: () => void;
+    const fetchGate = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    let fetchCalls = 0;
+    const tikHub: TranscriptProvider = {
+      async listTracks() {
+        return tracks;
+      },
+      async fetchTrack(selectedTrack) {
+        fetchCalls += 1;
+        await fetchGate;
+        return transcript(selectedTrack);
+      },
+    };
+    const { service } = createService({
+      innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+      providers: [
+        {
+          source: "innertube",
+          provider: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+        },
+        { source: "tikhub", provider: tikHub },
+      ],
+    });
+    const choices = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choices.status !== "selection-required") throw new Error("expected choices");
+    const request = {
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      trackId: choices.tracks[0].id,
+    } as const;
+
+    const first = service.get(request);
+    const second = service.get(request);
+    await Promise.resolve();
+    releaseFetch();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ usage: { tikhubPaidRequests: 2 } }),
+      expect.objectContaining({ usage: { tikhubPaidRequests: 2 } }),
+    ]);
+    expect(fetchCalls).toBe(1);
+  });
+
+  it("reports exact TikHub usage after valid empty-list and content responses", async () => {
+    const emptyTikHub = new FakeOptionalProvider(true, []);
+    const local = new FakeOptionalProvider(true, [track({ source: "yt-dlp" })]);
+    const emptyResult = createService({
+      innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+      tikHub: emptyTikHub,
+      ytDlp: local,
+    });
+    await expect(
+      emptyResult.service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).resolves.toMatchObject({ usage: { tikhubPaidRequests: 1 } });
+
+    const oneTrackTikHub = new FakeOptionalProvider(
+      true,
+      [track({ source: "tikhub", url: "tikhub:caption/en" })],
+    );
+    const success = createService({
+      innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+      tikHub: oneTrackTikHub,
+    });
+    await expect(
+      success.service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).resolves.toMatchObject({ usage: { tikhubPaidRequests: 2 } });
+  });
+
+  it("guards progress callbacks and invokes cleanup only after a durable write", async () => {
+    const stages: string[] = [];
+    const persisted: Array<{ track: YouTubeCaptionTrack; value: CachedItemContent | null }> = [];
+    const content = new FakeContentRepository();
+    const selected = track();
+    const innerTube: TranscriptProvider = {
+      async listTracks() {
+        return [selected];
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+      async onPersisted(savedTrack) {
+        persisted.push({ track: savedTrack, value: content.value });
+      },
+    };
+    const { service } = createService({ innerTube, content });
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        onProgress: (entry) => {
+          stages.push(entry.stage);
+          throw new Error("UI callback failed");
+        },
+      }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      usage: { tikhubPaidRequests: 0 },
+    });
+    expect(stages).toEqual(["checking-cache", "trying-innertube", "saving"]);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].track).toBe(selected);
+    expect(persisted[0].value).toMatchObject({ contentBasis: "youtube-transcript" });
+
+    const failedPersist: YouTubeCaptionTrack[] = [];
+    const providerAfterFailedWrite: TranscriptProvider = {
+      async listTracks() {
+        return [selected];
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+      async onPersisted(savedTrack) {
+        failedPersist.push(savedTrack);
+      },
+    };
+    const failed = createService({
+      innerTube: providerAfterFailedWrite,
+      content: new FailingWriteContentRepository(),
+    });
+    await expect(
+      failed.service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(failedPersist).toEqual([]);
   });
 
   it("returns a matching cache and repairs metadata without provider calls", async () => {
@@ -273,6 +644,7 @@ describe("YouTubeTranscriptService", () => {
       status: "ready",
       source: "cache",
       content: cached(),
+      usage: { tikhubPaidRequests: 0 },
     });
     expect(content.writes).toEqual([]);
     expect(metadata.updates).toEqual([

@@ -4,9 +4,40 @@ import {
   assertYouTubeVideoId,
   isValidYouTubeVideoId,
   YouTubeTranscriptError,
+  type TranscriptProviderRegistration,
+  type YouTubeCaptionTrack,
+  type YouTubeTranscriptProvider,
 } from "../../../src/youtube-transcript/transcript-types";
 
+const ALL_PROVIDERS: readonly YouTubeTranscriptProvider[] = [
+  "innertube",
+  "tikhub",
+  "yt-dlp",
+];
+
+const registrations: TranscriptProviderRegistration[] = ALL_PROVIDERS.map(
+  (source) => ({
+    source,
+    provider: {
+      async listTracks(): Promise<YouTubeCaptionTrack[]> {
+        return [];
+      },
+      async fetchTrack(): Promise<never> {
+        throw new YouTubeTranscriptError("no-captions");
+      },
+    },
+  }),
+);
+
 describe("YouTube transcript video IDs", () => {
+  it("exposes TikHub as a stable provider registration source", () => {
+    expect(registrations.map(({ source }) => source)).toEqual([
+      "innertube",
+      "tikhub",
+      "yt-dlp",
+    ]);
+  });
+
   it.each(["dQw4w9WgXcQ", "abc_DEF-123", "___________"])(
     "accepts the exact eleven-character YouTube ID %s",
     (videoId) => {

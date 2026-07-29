@@ -272,6 +272,19 @@ describe("ContentRepository", () => {
     expect(adapter.files.get(path)).toContain('languageCode: "en"');
   });
 
+  it("round-trips a TikHub schemaVersion 2 transcript without migrating it", async () => {
+    const adapter = new InMemoryAdapter();
+    const repository = createRepository(adapter);
+    const transcript = createTranscriptContent({ provider: "tikhub" });
+
+    await repository.write(transcript);
+
+    expect(await repository.read(ITEM_ID)).toEqual(transcript);
+    expect(adapter.files.get(`${DATA_ROOT}/content/${ITEM_ID}.md`)).toContain(
+      'provider: "tikhub"',
+    );
+  });
+
   it("rejects invalid or undocumented schemaVersion 2 metadata", async () => {
     const repository = createRepository(new InMemoryAdapter());
     const invalid = [

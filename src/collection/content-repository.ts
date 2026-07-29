@@ -1,6 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { normalizePath, type DataAdapter, type Vault } from "obsidian";
-import { isValidYouTubeVideoId } from "../youtube-transcript/transcript-types";
+import {
+  isValidYouTubeVideoId,
+  type YouTubeTranscriptProvider,
+} from "../youtube-transcript/transcript-types";
 
 export interface FullTextCachedItemContent {
   schemaVersion: 1;
@@ -21,7 +24,7 @@ export interface YouTubeTranscriptCachedItemContent {
   languageCode: string;
   languageName: string;
   isGenerated: boolean;
-  provider: "innertube" | "yt-dlp";
+  provider: YouTubeTranscriptProvider;
   text: string;
 }
 
@@ -410,7 +413,7 @@ function parseCachedItemContent(raw: string): CachedItemContent | null {
       languageCode: fields.get("languageCode") as string,
       languageName: fields.get("languageName") as string,
       isGenerated: fields.get("isGenerated") as boolean,
-      provider: fields.get("provider") as "innertube" | "yt-dlp",
+      provider: fields.get("provider") as YouTubeTranscriptProvider,
       text: frontmatter[2],
     };
   } else {
@@ -473,7 +476,11 @@ function assertCachedItemContent(content: CachedItemContent): void {
   if (typeof content.isGenerated !== "boolean") {
     throw new Error("Invalid cached transcript generation flag");
   }
-  if (content.provider !== "innertube" && content.provider !== "yt-dlp") {
+  if (
+    content.provider !== "innertube" &&
+    content.provider !== "tikhub" &&
+    content.provider !== "yt-dlp"
+  ) {
     throw new Error("Invalid cached transcript provider");
   }
 }

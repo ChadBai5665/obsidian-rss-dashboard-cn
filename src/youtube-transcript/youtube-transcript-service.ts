@@ -5,21 +5,21 @@ import type {
 import {
   assertYouTubeVideoId,
   YouTubeTranscriptError,
+  type TranscriptProvider,
+  type TranscriptProviderRegistration,
   type YouTubeCaptionTrack,
   type YouTubeTranscript,
   type YouTubeTranscriptErrorCode,
+  type YouTubeTranscriptProgress,
+  type YouTubeTranscriptProgressStage,
+  type YouTubeTranscriptProvider,
+  type YouTubeTranscriptUsage,
 } from "./transcript-types";
 
-export interface TranscriptProvider {
-  listTracks(
-    videoId: string,
-    signal?: AbortSignal,
-  ): Promise<YouTubeCaptionTrack[]>;
-  fetchTrack(
-    track: YouTubeCaptionTrack,
-    signal?: AbortSignal,
-  ): Promise<YouTubeTranscript>;
-}
+export type {
+  TranscriptProvider,
+  TranscriptProviderRegistration,
+} from "./transcript-types";
 
 export interface OptionalTranscriptProvider extends TranscriptProvider {
   isAvailable(): Promise<boolean>;
@@ -47,6 +47,15 @@ export interface TranscriptMetadataRepository {
 }
 
 export interface YouTubeTranscriptServiceOptions {
+  providers: readonly TranscriptProviderRegistration[];
+  contentRepository: TranscriptCacheRepository;
+  metadataRepository: TranscriptMetadataRepository;
+  clock: () => Date;
+  choiceTtlMs?: number;
+  maxPendingChoiceSets?: number;
+}
+
+interface LegacyYouTubeTranscriptServiceOptions {
   innerTube: TranscriptProvider;
   ytDlp: OptionalTranscriptProvider;
   contentRepository: TranscriptCacheRepository;
@@ -64,6 +73,7 @@ export interface YouTubeTranscriptRequest {
   refresh?: boolean;
   trackId?: string;
   signal?: AbortSignal;
+  onProgress?: (progress: YouTubeTranscriptProgress) => void;
 }
 
 export interface YouTubeTranscriptCacheRequest {
@@ -77,7 +87,7 @@ export interface YouTubeTranscriptTrackChoice {
   languageCode: string;
   languageName: string;
   isGenerated: boolean;
-  provider: "innertube" | "yt-dlp";
+  provider: YouTubeTranscriptProvider;
 }
 
 export type YouTubeTranscriptServiceResult =
@@ -85,6 +95,7 @@ export type YouTubeTranscriptServiceResult =
       status: "ready";
       source: "cache" | "fresh";
       content: YouTubeTranscriptCachedItemContent;
+      usage: YouTubeTranscriptUsage;
     }
   | {
       status: "selection-required";
@@ -96,15 +107,26 @@ export type YouTubeTranscriptServiceErrorCode =
   | YouTubeTranscriptErrorCode
   | "fallback-unavailable";
 
+export interface YouTubeTranscriptProviderFailure {
+  source: YouTubeTranscriptProvider;
+  code: YouTubeTranscriptServiceErrorCode;
+}
+
 /** Stable service error that does not expose provider payloads or executable output. */
 export class YouTubeTranscriptServiceError extends Error {
   constructor(
     readonly code: YouTubeTranscriptServiceErrorCode,
     readonly primaryCode?: YouTubeTranscriptErrorCode,
+    failures: readonly YouTubeTranscriptProviderFailure[] = [],
+    usage: YouTubeTranscriptUsage = ZERO_USAGE,
   ) {
     super(code);
     this.name = "YouTubeTranscriptServiceError";
+    this.failures = freezeFailures(failures);
+    this.usage = freezeUsage(usage.tikhubPaidRequests);
   }
+  readonly failures: readonly YouTubeTranscriptProviderFailure[];
+  readonly usage: YouTubeTranscriptUsage;
 }
 
 /** Internal marker that distinguishes provider/tool failures from local state. */
@@ -116,9 +138,11 @@ class TranscriptProviderStageError extends Error {
 }
 
 interface RegisteredChoice {
-  provider: TranscriptProvider;
+  registration: TranscriptProviderRegistration;
+  providerIndex: number;
   track: YouTubeCaptionTrack;
-  fallbackPrimaryCode?: YouTubeTranscriptErrorCode;
+  failures: readonly YouTubeTranscriptProviderFailure[];
+  usage: YouTubeTranscriptUsage;
 }
 
 interface PendingChoiceSet {
@@ -148,12 +172,26 @@ interface RankedTrack {
   generatedRank: number;
 }
 
+interface ProviderChainState {
+  failures: YouTubeTranscriptProviderFailure[];
+  tikhubPaidRequests: 0 | 1 | 2;
+}
+
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/u;
 const LANGUAGE_CODE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u;
 const FALLBACK_ELIGIBLE = new Set<YouTubeTranscriptErrorCode>([
   "no-captions",
   "temporarily-unavailable",
   "timeout",
+]);
+const TIKHUB_ACTIONABLE = new Set<YouTubeTranscriptErrorCode>([
+  "tikhub-missing-key",
+  "tikhub-invalid-key",
+  "tikhub-insufficient-balance",
+  "tikhub-budget-unavailable",
+  "tikhub-rate-limited",
+  "tikhub-job-expired",
+  "tikhub-malformed-response",
 ]);
 const NO_CAPTIONS_PRESERVABLE_FALLBACK_FAILURES = new Set<
   YouTubeTranscriptServiceErrorCode
@@ -162,6 +200,9 @@ const DEFAULT_CHOICE_TTL_MS = 2 * 60 * 1_000;
 const DEFAULT_MAX_PENDING_CHOICE_SETS = 20;
 const MAX_CHOICE_TTL_MS = 10 * 60 * 1_000;
 const MAX_PENDING_CHOICE_SETS = 100;
+const ZERO_USAGE: YouTubeTranscriptUsage = Object.freeze({
+  tikhubPaidRequests: 0,
+});
 
 export class YouTubeTranscriptService {
   private readonly inFlight = new Map<string, SharedWork>();
@@ -174,11 +215,20 @@ export class YouTubeTranscriptService {
   private readonly cacheReadControllers = new Set<AbortController>();
   private readonly choiceTtlMs: number;
   private readonly maxPendingChoiceSets: number;
+  private readonly providers: readonly TranscriptProviderRegistration[];
   private choiceSequence = 0;
   private choiceSetSequence = 0;
   private disposed = false;
 
-  constructor(private readonly options: YouTubeTranscriptServiceOptions) {
+  constructor(options: YouTubeTranscriptServiceOptions);
+  // Temporary compatibility until runtime wiring adopts ordered registrations.
+  constructor(options: LegacyYouTubeTranscriptServiceOptions);
+  constructor(
+    private readonly options:
+      | YouTubeTranscriptServiceOptions
+      | LegacyYouTubeTranscriptServiceOptions,
+  ) {
+    this.providers = providerChainFromOptions(options);
     this.choiceTtlMs = positiveInteger(
       options.choiceTtlMs,
       DEFAULT_CHOICE_TTL_MS,
@@ -330,10 +380,18 @@ export class YouTubeTranscriptService {
     operationGeneration: symbol,
     selectionAtStart: SelectionAtStart | undefined,
   ): Promise<YouTubeTranscriptServiceResult> {
+    const state: ProviderChainState = selectionAtStart === undefined
+      ? { failures: [], tikhubPaidRequests: 0 }
+      : {
+          failures: [...selectionAtStart.registered.failures],
+          tikhubPaidRequests:
+            selectionAtStart.registered.usage.tikhubPaidRequests,
+        };
     try {
       assertNotAborted(request.signal);
 
       if (!request.refresh && request.trackId === undefined) {
+        emitProgress(request, "checking-cache", state);
         const cachedResult = await this.options.contentRepository.transaction(
           request.itemId,
           async (transaction) => {
@@ -342,7 +400,12 @@ export class YouTubeTranscriptService {
             assertNotAborted(request.signal);
             if (!isMatchingTranscriptCache(cached, request)) return null;
             await this.repairMetadata(request.itemId, transaction.pathFor());
-            return { status: "ready", source: "cache", content: cached } as const;
+            return {
+              status: "ready",
+              source: "cache",
+              content: cached,
+              usage: ZERO_USAGE,
+            } as const;
           },
         );
         if (cachedResult) {
@@ -356,41 +419,46 @@ export class YouTubeTranscriptService {
       }
 
       if (selectionAtStart !== undefined) {
+        const { registration, providerIndex, track: selectedTrack } =
+          selectionAtStart.registered;
+        emitProgress(request, stageForSource(registration.source), state);
         try {
           const result = await this.fetchAndPersist(
             request,
             key,
             operationGeneration,
-            selectionAtStart.registered.provider,
-            selectionAtStart.registered.track,
+            registration,
+            selectedTrack,
+            state,
           );
           this.deletePendingChoiceSet(key, selectionAtStart.pendingGeneration);
           this.clearGeneration(key, operationGeneration);
           return result;
         } catch (error) {
-          const primary = normalizeProviderError(error);
           if (request.signal?.aborted || this.disposed) {
             throw new YouTubeTranscriptServiceError("aborted");
           }
           if (this.currentGenerations.get(key) !== operationGeneration) {
             throw new YouTubeTranscriptServiceError("temporarily-unavailable");
           }
-          if (
-            selectionAtStart.registered.fallbackPrimaryCode === "no-captions" &&
-            preservesNoCaptions(error)
-          ) {
-            throw new YouTubeTranscriptServiceError("no-captions");
+          if (!(error instanceof TranscriptProviderStageError)) {
+            throw normalizeProviderError(error);
           }
-          if (selectionAtStart.registered.track.source !== "innertube") {
-            throw primary;
+          const failure = error.failure;
+          addFailure(state, registration.source, failure.code);
+          if (failure.code === "tikhub-processing") {
+            emitProgress(request, "waiting-tikhub", state);
+            throw chainFailure(state, failure.code);
           }
-          const fallbackCode = providerStageFallbackCode(error);
-          if (fallbackCode === undefined) throw primary;
-          const result = await this.runFallback(
+          if (!isProviderFallbackEligible(registration.source, failure.code)) {
+            throw chainFailure(state, failure.code);
+          }
+          const result = await this.runProvidersFrom(
             request,
             key,
             operationGeneration,
-            fallbackCode,
+            providerIndex + 1,
+            state,
           );
           if (result.status === "ready") {
             this.deletePendingChoiceSet(
@@ -404,39 +472,17 @@ export class YouTubeTranscriptService {
       }
 
       this.assertCurrentGeneration(key, operationGeneration);
-      try {
-        const result = await this.runProvider(
-          request,
-          key,
-          operationGeneration,
-          this.options.innerTube,
-          "innertube",
-        );
-        if (result.status === "ready") {
-          this.clearGeneration(key, operationGeneration);
-        }
-        return result;
-      } catch (error) {
-        const primary = normalizeProviderError(error);
-        if (request.signal?.aborted || this.disposed) {
-          throw new YouTubeTranscriptServiceError("aborted");
-        }
-        if (this.currentGenerations.get(key) !== operationGeneration) {
-          throw new YouTubeTranscriptServiceError("temporarily-unavailable");
-        }
-        const fallbackCode = providerStageFallbackCode(error);
-        if (fallbackCode === undefined) throw primary;
-        const result = await this.runFallback(
-          request,
-          key,
-          operationGeneration,
-          fallbackCode,
-        );
-        if (result.status === "ready") {
-          this.clearGeneration(key, operationGeneration);
-        }
-        return result;
+      const result = await this.runProvidersFrom(
+        request,
+        key,
+        operationGeneration,
+        0,
+        state,
+      );
+      if (result.status === "ready") {
+        this.clearGeneration(key, operationGeneration);
       }
+      return result;
     } catch (error) {
       if (selectionAtStart !== undefined) {
         this.deletePendingChoiceSet(key, selectionAtStart.pendingGeneration);
@@ -446,19 +492,86 @@ export class YouTubeTranscriptService {
     }
   }
 
+  private async runProvidersFrom(
+    request: YouTubeTranscriptRequest,
+    key: string,
+    operationGeneration: symbol,
+    startIndex: number,
+    state: ProviderChainState,
+  ): Promise<YouTubeTranscriptServiceResult> {
+    for (let index = startIndex; index < this.providers.length; index += 1) {
+      const registration = this.providers[index];
+      assertNotAborted(request.signal);
+      this.assertCurrentGeneration(key, operationGeneration);
+
+      if (registration.isAvailable) {
+        let available: boolean;
+        try {
+          available = await registration.isAvailable();
+        } catch {
+          assertNotAborted(request.signal);
+          this.assertCurrentGeneration(key, operationGeneration);
+          addFailure(state, registration.source, "temporarily-unavailable");
+          continue;
+        }
+        assertNotAborted(request.signal);
+        this.assertCurrentGeneration(key, operationGeneration);
+        if (!available) {
+          addFailure(state, registration.source, "fallback-unavailable");
+          continue;
+        }
+      }
+
+      try {
+        return await this.runProvider(
+          request,
+          key,
+          operationGeneration,
+          registration,
+          index,
+          state,
+        );
+      } catch (error) {
+        if (request.signal?.aborted || this.disposed) {
+          throw new YouTubeTranscriptServiceError("aborted");
+        }
+        if (this.currentGenerations.get(key) !== operationGeneration) {
+          throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+        }
+        if (!(error instanceof TranscriptProviderStageError)) {
+          throw normalizeProviderError(error);
+        }
+        const failure = error.failure;
+        addFailure(state, registration.source, failure.code);
+        if (failure.code === "tikhub-processing") {
+          emitProgress(request, "waiting-tikhub", state);
+          throw chainFailure(state, failure.code);
+        }
+        if (!isProviderFallbackEligible(registration.source, failure.code)) {
+          throw chainFailure(state, failure.code);
+        }
+      }
+    }
+    throw chainFailure(state);
+  }
+
   private async runProvider(
     request: YouTubeTranscriptRequest,
     key: string,
     operationGeneration: symbol,
-    provider: TranscriptProvider,
-    expectedSource: "innertube" | "yt-dlp",
-    fallbackPrimaryCode?: YouTubeTranscriptErrorCode,
+    registration: TranscriptProviderRegistration,
+    providerIndex: number,
+    state: ProviderChainState,
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
+    emitProgress(request, stageForSource(registration.source), state);
     let tracks: YouTubeCaptionTrack[];
     try {
-      tracks = await provider.listTracks(request.videoId, request.signal);
+      tracks = await registration.provider.listTracks(
+        request.videoId,
+        request.signal,
+      );
     } catch (error) {
       throw providerStageError(error);
     }
@@ -467,13 +580,17 @@ export class YouTubeTranscriptService {
     let selected: YouTubeCaptionTrack[];
     try {
       assertProviderTracks(tracks);
-      const eligible = tracks.filter(
-        (candidate) => candidate.source === expectedSource,
-      );
-      if (eligible.length === 0) {
+      if (tracks.some((candidate) => candidate.source !== registration.source)) {
+        throw malformedProviderResponse(registration.source);
+      }
+      if (registration.source === "tikhub") {
+        incrementTikHubUsage(state);
+        emitProgress(request, "trying-tikhub", state);
+      }
+      if (tracks.length === 0) {
         throw new YouTubeTranscriptServiceError("no-captions");
       }
-      selected = selectTracks(eligible, request.preferredLanguage);
+      selected = selectTracks(tracks, request.preferredLanguage);
     } catch (error) {
       throw providerStageError(error);
     }
@@ -482,17 +599,19 @@ export class YouTubeTranscriptService {
       return this.registerChoices(
         key,
         operationGeneration,
-        provider,
+        registration,
+        providerIndex,
         selected,
-        fallbackPrimaryCode,
+        state,
       );
     }
     return await this.fetchAndPersist(
       request,
       key,
       operationGeneration,
-      provider,
+      registration,
       selected[0],
+      state,
     );
   }
 
@@ -500,119 +619,85 @@ export class YouTubeTranscriptService {
     request: YouTubeTranscriptRequest,
     key: string,
     operationGeneration: symbol,
-    provider: TranscriptProvider,
+    registration: TranscriptProviderRegistration,
     selectedTrack: YouTubeCaptionTrack,
+    state: ProviderChainState,
   ): Promise<YouTubeTranscriptServiceResult> {
     this.assertCurrentGeneration(key, operationGeneration);
     let transcript: YouTubeTranscript;
     try {
-      transcript = await provider.fetchTrack(selectedTrack, request.signal);
+      transcript = await registration.provider.fetchTrack(
+        selectedTrack,
+        request.signal,
+      );
     } catch (error) {
       throw providerStageError(error);
     }
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
     try {
-      assertProviderTranscript(request, transcript);
+      assertProviderTranscript(request, transcript, registration.source);
+      if (registration.source === "tikhub") {
+        incrementTikHubUsage(state);
+        emitProgress(request, "trying-tikhub", state);
+      }
     } catch (error) {
       throw providerStageError(error);
     }
+    emitProgress(request, "saving", state);
     const content = createCachedTranscript(
       request,
       transcript,
       this.options.clock,
     );
-    await this.options.contentRepository.transaction(
-      request.itemId,
-      async (transaction) => {
-        assertNotAborted(request.signal);
-        this.assertCurrentGeneration(key, operationGeneration);
-        const path = await transaction.write(content);
-        await this.repairMetadata(request.itemId, path);
-        this.assertCurrentGeneration(key, operationGeneration);
-      },
-    );
-    return { status: "ready", source: "fresh", content };
-  }
-
-  private async runFallback(
-    request: YouTubeTranscriptRequest,
-    key: string,
-    operationGeneration: symbol,
-    primaryCode: YouTubeTranscriptErrorCode,
-  ): Promise<YouTubeTranscriptServiceResult> {
-    assertNotAborted(request.signal);
-    this.assertCurrentGeneration(key, operationGeneration);
-    const preserveNoCaptions = primaryCode === "no-captions";
-    let available: boolean;
+    let durable = false;
     try {
-      available = await this.options.ytDlp.isAvailable();
-    } catch {
-      if (request.signal?.aborted || this.disposed) {
-        throw new YouTubeTranscriptServiceError("aborted");
-      }
-      if (this.currentGenerations.get(key) !== operationGeneration) {
-        throw new YouTubeTranscriptServiceError("temporarily-unavailable");
-      }
-      if (preserveNoCaptions) {
-        throw new YouTubeTranscriptServiceError("no-captions");
-      }
-      throw new YouTubeTranscriptServiceError(
-        "temporarily-unavailable",
-        primaryCode,
+      await this.options.contentRepository.transaction(
+        request.itemId,
+        async (transaction) => {
+          assertNotAborted(request.signal);
+          this.assertCurrentGeneration(key, operationGeneration);
+          const path = await transaction.write(content);
+          durable = true;
+          await this.repairMetadata(request.itemId, path);
+          this.assertCurrentGeneration(key, operationGeneration);
+        },
       );
+    } finally {
+      if (durable && registration.provider.onPersisted) {
+        try {
+          await registration.provider.onPersisted(selectedTrack, transcript);
+        } catch {
+          // Durable content is authoritative; cleanup can be retried separately.
+        }
+      }
     }
-    assertNotAborted(request.signal);
-    this.assertCurrentGeneration(key, operationGeneration);
-    if (!available) {
-      if (preserveNoCaptions) {
-        throw new YouTubeTranscriptServiceError("no-captions");
-      }
-      throw new YouTubeTranscriptServiceError(
-        "fallback-unavailable",
-        primaryCode,
-      );
-    }
-
-    try {
-      return await this.runProvider(
-        request,
-        key,
-        operationGeneration,
-        this.options.ytDlp,
-        "yt-dlp",
-        primaryCode,
-      );
-    } catch (error) {
-      const failure = normalizeProviderError(error);
-      if (request.signal?.aborted || this.disposed) {
-        throw new YouTubeTranscriptServiceError("aborted");
-      }
-      if (this.currentGenerations.get(key) !== operationGeneration) {
-        throw new YouTubeTranscriptServiceError("temporarily-unavailable");
-      }
-      if (preserveNoCaptions && preservesNoCaptions(error)) {
-        throw new YouTubeTranscriptServiceError("no-captions");
-      }
-      throw failure;
-    }
+    return {
+      status: "ready",
+      source: "fresh",
+      content,
+      usage: freezeUsage(state.tikhubPaidRequests),
+    };
   }
 
   private registerChoices(
     key: string,
     operationGeneration: symbol,
-    provider: TranscriptProvider,
+    registration: TranscriptProviderRegistration,
+    providerIndex: number,
     tracks: readonly YouTubeCaptionTrack[],
-    fallbackPrimaryCode?: YouTubeTranscriptErrorCode,
+    state: ProviderChainState,
   ): YouTubeTranscriptServiceResult {
     this.assertCurrentGeneration(key, operationGeneration);
     const registered = new Map<string, RegisteredChoice>();
     const choices = tracks.map((candidate) => {
       const id = `track-${++this.choiceSequence}`;
       registered.set(id, {
-        provider,
+        registration,
+        providerIndex,
         track: candidate,
-        ...(fallbackPrimaryCode === undefined ? {} : { fallbackPrimaryCode }),
+        failures: freezeFailures(state.failures),
+        usage: freezeUsage(state.tikhubPaidRequests),
       });
       return Object.freeze({
         id,
@@ -880,6 +965,7 @@ function createCachedTranscript(
 function assertProviderTranscript(
   request: YouTubeTranscriptRequest,
   transcript: YouTubeTranscript,
+  expectedSource: YouTubeTranscriptProvider,
 ): void {
   if (
     transcript.videoId !== request.videoId ||
@@ -889,12 +975,11 @@ function assertProviderTranscript(
     transcript.languageName.length > 200 ||
     hasUnsafeControl(transcript.languageName) ||
     typeof transcript.isGenerated !== "boolean" ||
-    (transcript.provider !== "innertube" &&
-      transcript.provider !== "yt-dlp") ||
+    transcript.provider !== expectedSource ||
     typeof transcript.text !== "string" ||
     !transcript.text.trim()
   ) {
-    throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+    throw malformedProviderResponse(expectedSource);
   }
 }
 
@@ -910,7 +995,9 @@ function isMatchingTranscriptCache(
     LANGUAGE_CODE.test(content.languageCode) &&
     typeof content.languageName === "string" &&
     Boolean(content.languageName.trim()) &&
-    (content.provider === "innertube" || content.provider === "yt-dlp") &&
+    (content.provider === "innertube" ||
+      content.provider === "tikhub" ||
+      content.provider === "yt-dlp") &&
     typeof content.text === "string" &&
     Boolean(content.text.trim())
   );
@@ -930,29 +1017,13 @@ function providerStageError(error: unknown): TranscriptProviderStageError {
   return new TranscriptProviderStageError(normalizeProviderError(error));
 }
 
-function preservesNoCaptions(error: unknown): boolean {
-  return (
-    error instanceof TranscriptProviderStageError &&
-    NO_CAPTIONS_PRESERVABLE_FALLBACK_FAILURES.has(error.failure.code)
-  );
-}
-
-function providerStageFallbackCode(
-  error: unknown,
-): YouTubeTranscriptErrorCode | undefined {
-  if (!(error instanceof TranscriptProviderStageError)) return undefined;
-  return isFallbackEligible(error.failure.code)
-    ? error.failure.code
-    : undefined;
-}
-
-function isFallbackEligible(
+function isProviderFallbackEligible(
+  source: YouTubeTranscriptProvider,
   code: YouTubeTranscriptServiceErrorCode,
-): code is YouTubeTranscriptErrorCode {
-  return (
-    code !== "fallback-unavailable" &&
-    FALLBACK_ELIGIBLE.has(code)
-  );
+): boolean {
+  if (code === "fallback-unavailable" || code === "aborted") return false;
+  if (source === "tikhub") return code !== "tikhub-processing";
+  return FALLBACK_ELIGIBLE.has(code);
 }
 
 function assertProviderTracks(
@@ -974,7 +1045,9 @@ function isValidProviderTrack(value: unknown): value is YouTubeCaptionTrack {
     candidate.languageName.length <= 200 &&
     !hasUnsafeControl(candidate.languageName) &&
     typeof candidate.isGenerated === "boolean" &&
-    (candidate.source === "innertube" || candidate.source === "yt-dlp") &&
+    (candidate.source === "innertube" ||
+      candidate.source === "tikhub" ||
+      candidate.source === "yt-dlp") &&
     typeof candidate.url === "string" &&
     Boolean(candidate.url.trim()) &&
     !hasUnsafeControl(candidate.url) &&
@@ -982,6 +1055,188 @@ function isValidProviderTrack(value: unknown): value is YouTubeCaptionTrack {
       candidate.format === "srv3" ||
       candidate.format === "vtt")
   );
+}
+
+function providerChainFromOptions(
+  options:
+    | YouTubeTranscriptServiceOptions
+    | LegacyYouTubeTranscriptServiceOptions,
+): readonly TranscriptProviderRegistration[] {
+  if ("providers" in options) return validateProviderChain(options.providers);
+  return validateProviderChain([
+    { source: "innertube", provider: options.innerTube },
+    {
+      source: "yt-dlp",
+      provider: options.ytDlp,
+      isAvailable: async () => await options.ytDlp.isAvailable(),
+    },
+  ]);
+}
+
+function validateProviderChain(
+  providers: readonly TranscriptProviderRegistration[],
+): readonly TranscriptProviderRegistration[] {
+  if (providers.length === 0) {
+    throw new Error("Invalid transcript provider chain");
+  }
+  const sources = new Set<YouTubeTranscriptProvider>();
+  const validated = providers.map((registration) => {
+    if (
+      typeof registration !== "object" ||
+      registration === null ||
+      (registration.source !== "innertube" &&
+        registration.source !== "tikhub" &&
+        registration.source !== "yt-dlp") ||
+      sources.has(registration.source) ||
+      typeof registration.provider !== "object" ||
+      registration.provider === null ||
+      typeof registration.provider.listTracks !== "function" ||
+      typeof registration.provider.fetchTrack !== "function" ||
+      (registration.isAvailable !== undefined &&
+        typeof registration.isAvailable !== "function")
+    ) {
+      throw new Error("Invalid transcript provider chain");
+    }
+    sources.add(registration.source);
+    return Object.freeze({ ...registration });
+  });
+  return Object.freeze(validated);
+}
+
+function stageForSource(
+  source: YouTubeTranscriptProvider,
+): YouTubeTranscriptProgressStage {
+  switch (source) {
+    case "innertube":
+      return "trying-innertube";
+    case "tikhub":
+      return "trying-tikhub";
+    case "yt-dlp":
+      return "trying-yt-dlp";
+  }
+}
+
+function emitProgress(
+  request: YouTubeTranscriptRequest,
+  stage: YouTubeTranscriptProgressStage,
+  state: ProviderChainState,
+): void {
+  if (!request.onProgress) return;
+  const progress: YouTubeTranscriptProgress = Object.freeze({
+    stage,
+    usage: freezeUsage(state.tikhubPaidRequests),
+  });
+  try {
+    request.onProgress(progress);
+  } catch {
+    // UI progress is advisory and cannot alter transcript retrieval.
+  }
+}
+
+function incrementTikHubUsage(state: ProviderChainState): void {
+  state.tikhubPaidRequests = Math.min(
+    2,
+    state.tikhubPaidRequests + 1,
+  ) as 0 | 1 | 2;
+}
+
+function addFailure(
+  state: ProviderChainState,
+  source: YouTubeTranscriptProvider,
+  code: YouTubeTranscriptServiceErrorCode,
+): void {
+  state.failures.push({ source, code });
+}
+
+function chainFailure(
+  state: ProviderChainState,
+  preferredCode?: YouTubeTranscriptServiceErrorCode,
+): YouTubeTranscriptServiceError {
+  const failures = freezeFailures(state.failures);
+  const firstMeaningful = failures.find(
+    ({ code }) => code !== "fallback-unavailable",
+  );
+  const primaryCode = firstMeaningful?.code === "fallback-unavailable"
+    ? undefined
+    : firstMeaningful?.code;
+  let code = preferredCode;
+
+  if (!code) {
+    const actionableTikHub = failures.find(
+      (failure) =>
+        failure.source === "tikhub" &&
+        failure.code !== "fallback-unavailable" &&
+        TIKHUB_ACTIONABLE.has(failure.code),
+    );
+    if (actionableTikHub) code = actionableTikHub.code;
+  }
+  if (!code) {
+    const ambiguousTikHub = failures.find(
+      (failure) =>
+        failure.source === "tikhub" &&
+        (failure.code === "temporarily-unavailable" ||
+          failure.code === "timeout"),
+    );
+    if (ambiguousTikHub) code = ambiguousTikHub.code;
+  }
+  if (!code && preservesAuthoritativeNoCaptions(failures)) {
+    code = "no-captions";
+  }
+  if (!code) {
+    const last = failures[failures.length - 1];
+    const lastMeaningful = [...failures].reverse().find(
+      ({ code: candidate }) => candidate !== "fallback-unavailable",
+    );
+    code = last?.code === "fallback-unavailable"
+      ? "fallback-unavailable"
+      : lastMeaningful?.code ?? "fallback-unavailable";
+  }
+
+  return new YouTubeTranscriptServiceError(
+    code,
+    primaryCode,
+    failures,
+    freezeUsage(state.tikhubPaidRequests),
+  );
+}
+
+function preservesAuthoritativeNoCaptions(
+  failures: readonly YouTubeTranscriptProviderFailure[],
+): boolean {
+  const firstMeaningful = failures.find(
+    ({ code }) => code !== "fallback-unavailable",
+  );
+  return firstMeaningful?.code === "no-captions" && failures.every(
+    ({ source, code }) =>
+      code === "fallback-unavailable" ||
+      code === "no-captions" ||
+      (source !== "tikhub" &&
+        NO_CAPTIONS_PRESERVABLE_FALLBACK_FAILURES.has(code)),
+  );
+}
+
+function malformedProviderResponse(
+  source: YouTubeTranscriptProvider,
+): YouTubeTranscriptServiceError {
+  return new YouTubeTranscriptServiceError(
+    source === "tikhub"
+      ? "tikhub-malformed-response"
+      : "temporarily-unavailable",
+  );
+}
+
+function freezeFailures(
+  failures: readonly YouTubeTranscriptProviderFailure[],
+): readonly YouTubeTranscriptProviderFailure[] {
+  return Object.freeze(
+    failures.map(({ source, code }) => Object.freeze({ source, code })),
+  );
+}
+
+function freezeUsage(
+  tikhubPaidRequests: 0 | 1 | 2,
+): YouTubeTranscriptUsage {
+  return Object.freeze({ tikhubPaidRequests });
 }
 
 function assertRequest(request: YouTubeTranscriptRequest): void {

@@ -2,6 +2,7 @@ import { parseTranscriptPayload } from "./transcript-parser";
 import {
   assertYouTubeVideoId,
   YouTubeTranscriptError,
+  type TranscriptProvider,
   type YouTubeCaptionTrack,
   type YouTubeTranscript,
 } from "./transcript-types";
@@ -167,7 +168,7 @@ class ProviderDeadline {
   }
 }
 
-export class InnerTubeTranscriptProvider {
+export class InnerTubeTranscriptProvider implements TranscriptProvider {
   private readonly registeredTracks = new WeakMap<
     YouTubeCaptionTrack,
     RegisteredTrack

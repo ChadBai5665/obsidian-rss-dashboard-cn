@@ -13,6 +13,7 @@ import {
 import {
   assertYouTubeVideoId,
   YouTubeTranscriptError,
+  type TranscriptProvider,
   type YouTubeCaptionFormat,
   type YouTubeCaptionTrack,
   type YouTubeTranscript,
@@ -196,7 +197,7 @@ class CaptionActionDeadline {
   }
 }
 
-export class YtDlpTranscriptProvider {
+export class YtDlpTranscriptProvider implements TranscriptProvider {
   private readonly runner: ExecutableRunner;
   private readonly access: YtDlpExecutableAccess;
   private readonly pathValue: string;
