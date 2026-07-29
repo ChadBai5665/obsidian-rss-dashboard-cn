@@ -291,7 +291,11 @@ export class YtDlpTranscriptProvider implements TranscriptProvider {
     try {
       deadline.assertActive();
       const registered = this.registeredTracks.get(track);
-      if (!registered || track !== registered.snapshot) {
+      if (
+        !registered ||
+        track !== registered.snapshot ||
+        registered.snapshot.source !== "yt-dlp"
+      ) {
         throw stableError("temporarily-unavailable");
       }
 

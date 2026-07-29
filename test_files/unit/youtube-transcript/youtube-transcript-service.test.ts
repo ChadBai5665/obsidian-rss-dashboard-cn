@@ -17,6 +17,7 @@ import {
   type YouTubeCaptionTrack,
   type YouTubeTranscript,
   type YouTubeTranscriptProgress,
+  type YouTubeTranscriptProvider,
 } from "../../../src/youtube-transcript/transcript-types";
 
 const ITEM_ID = "a".repeat(64);
@@ -27,15 +28,31 @@ const CONTENT_PATH = `.rss-dashboard-data/content/${ITEM_ID}.md`;
 function track(
   overrides: Partial<YouTubeCaptionTrack> = {},
 ): YouTubeCaptionTrack {
-  return {
+  const { source = "innertube", format, ...details } = overrides;
+  const base = {
     languageCode: "en",
     languageName: "English",
     isGenerated: false,
-    source: "innertube",
     url: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en",
-    format: "json3",
-    ...overrides,
+    ...details,
   };
+  if (source === "tikhub") return { ...base, source, format: "txt" };
+  return {
+    ...base,
+    source,
+    format: format === "srv3" || format === "vtt" ? format : "json3",
+  };
+}
+
+function runtimeTrack(
+  source: YouTubeTranscriptProvider,
+  format: "json3" | "srv3" | "vtt" | "txt",
+  overrides: Partial<YouTubeCaptionTrack> = {},
+): YouTubeCaptionTrack {
+  const candidate = track(overrides);
+  Reflect.set(candidate, "source", source);
+  Reflect.set(candidate, "format", format);
+  return candidate;
 }
 
 function transcript(
@@ -528,6 +545,210 @@ describe("YouTubeTranscriptService", () => {
     expect(innerTube.listCalls).toBe(1);
     expect(innerTube.fetchCalls).toBe(1);
     expect(ytDlp.availabilityChecks).toBe(0);
+  });
+
+  it.each([
+    { registrationSource: "innertube", trackSource: "innertube", format: "json3", accepted: true },
+    { registrationSource: "innertube", trackSource: "innertube", format: "srv3", accepted: true },
+    { registrationSource: "innertube", trackSource: "innertube", format: "vtt", accepted: true },
+    { registrationSource: "innertube", trackSource: "innertube", format: "txt", accepted: false },
+    { registrationSource: "yt-dlp", trackSource: "yt-dlp", format: "json3", accepted: true },
+    { registrationSource: "yt-dlp", trackSource: "yt-dlp", format: "srv3", accepted: true },
+    { registrationSource: "yt-dlp", trackSource: "yt-dlp", format: "vtt", accepted: true },
+    { registrationSource: "yt-dlp", trackSource: "yt-dlp", format: "txt", accepted: false },
+    { registrationSource: "tikhub", trackSource: "tikhub", format: "json3", accepted: false },
+    { registrationSource: "tikhub", trackSource: "tikhub", format: "srv3", accepted: false },
+    { registrationSource: "tikhub", trackSource: "tikhub", format: "vtt", accepted: false },
+    { registrationSource: "tikhub", trackSource: "tikhub", format: "txt", accepted: true },
+    { registrationSource: "tikhub", trackSource: "innertube", format: "json3", accepted: false },
+  ] as const)(
+    "accepts=$accepted for $registrationSource registration returning $trackSource/$format",
+    async ({ registrationSource, trackSource, format, accepted }) => {
+      const candidate = runtimeTrack(trackSource, format);
+      let fetchCalls = 0;
+      let persistedCalls = 0;
+      const provider: TranscriptProvider = {
+        async listTracks() {
+          return [candidate];
+        },
+        async fetchTrack(selectedTrack) {
+          fetchCalls += 1;
+          return transcript(selectedTrack);
+        },
+        async onPersisted() {
+          persistedCalls += 1;
+        },
+      };
+      const content = new FakeContentRepository();
+      const { service } = createService({
+        content,
+        providers: [{ source: registrationSource, provider }],
+      });
+      const request = service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+      });
+
+      if (accepted) {
+        await expect(request).resolves.toMatchObject({
+          status: "ready",
+          content: { provider: registrationSource },
+        });
+        expect(fetchCalls).toBe(1);
+        expect(persistedCalls).toBe(1);
+        expect(content.writes).toHaveLength(1);
+      } else {
+        await expect(request).rejects.toBeInstanceOf(
+          YouTubeTranscriptServiceError,
+        );
+        expect(fetchCalls).toBe(0);
+        expect(persistedCalls).toBe(0);
+        expect(content.writes).toEqual([]);
+      }
+    },
+  );
+
+  it("persists a selected TikHub txt choice without exposing its locator", async () => {
+    const tracks = [
+      runtimeTrack("tikhub", "txt", {
+        languageName: "English",
+        url: "tikhub:caption/en",
+      }),
+      runtimeTrack("tikhub", "txt", {
+        languageName: "English (United States)",
+        url: "tikhub:caption/en-us",
+      }),
+    ];
+    let persistedTrack: YouTubeCaptionTrack | undefined;
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return tracks;
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+      async onPersisted(selectedTrack) {
+        persistedTrack = selectedTrack;
+      },
+    };
+    const content = new FakeContentRepository();
+    const { service } = createService({
+      content,
+      providers: [{ source: "tikhub", provider }],
+    });
+    const choices = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choices.status !== "selection-required") {
+      throw new Error("expected TikHub choices");
+    }
+    expect(choices.tracks[0]).not.toHaveProperty("url");
+    expect(choices.tracks[0]).not.toHaveProperty("format");
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        trackId: choices.tracks[1].id,
+      }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { provider: "tikhub", languageName: "English (United States)" },
+    });
+    expect(persistedTrack).toBe(tracks[1]);
+    expect(persistedTrack?.format).toBe("txt");
+    expect(content.writes).toHaveLength(1);
+  });
+
+  it.each([
+    { field: "format", value: "json3" },
+    { field: "source", value: "yt-dlp" },
+  ] as const)(
+    "rejects a selected TikHub choice whose retained $field is modified",
+    async ({ field, value }) => {
+      const tracks = [
+        runtimeTrack("tikhub", "txt", { url: "tikhub:caption/en" }),
+        runtimeTrack("tikhub", "txt", {
+          languageName: "English (United States)",
+          url: "tikhub:caption/en-us",
+        }),
+      ];
+      let fetchCalls = 0;
+      let persistedCalls = 0;
+      const provider: TranscriptProvider = {
+        async listTracks() {
+          return tracks;
+        },
+        async fetchTrack(selectedTrack) {
+          fetchCalls += 1;
+          return transcript(selectedTrack, { provider: "tikhub" });
+        },
+        async onPersisted() {
+          persistedCalls += 1;
+        },
+      };
+      const content = new FakeContentRepository();
+      const { service } = createService({
+        content,
+        providers: [{ source: "tikhub", provider }],
+      });
+      const choices = await service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+      });
+      if (choices.status !== "selection-required") {
+        throw new Error("expected TikHub choices");
+      }
+      Reflect.set(tracks[0], field, value);
+
+      await expect(
+        service.get({
+          itemId: ITEM_ID,
+          videoId: VIDEO_ID,
+          refresh: true,
+          trackId: choices.tracks[0].id,
+        }),
+      ).rejects.toBeInstanceOf(YouTubeTranscriptServiceError);
+      expect(fetchCalls).toBe(0);
+      expect(persistedCalls).toBe(0);
+      expect(content.writes).toEqual([]);
+    },
+  );
+
+  it("revalidates a TikHub txt track after provider fetch before persistence", async () => {
+    const selected = runtimeTrack("tikhub", "txt");
+    let fetchCalls = 0;
+    let persistedCalls = 0;
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return [selected];
+      },
+      async fetchTrack(selectedTrack) {
+        fetchCalls += 1;
+        Reflect.set(selectedTrack, "format", "json3");
+        return transcript(selectedTrack, { provider: "tikhub" });
+      },
+      async onPersisted() {
+        persistedCalls += 1;
+      },
+    };
+    const content = new FakeContentRepository();
+    const { service } = createService({
+      content,
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toBeInstanceOf(YouTubeTranscriptServiceError);
+    expect(fetchCalls).toBe(1);
+    expect(persistedCalls).toBe(0);
+    expect(content.writes).toEqual([]);
   });
 
   it("continues from a failed TikHub provider to local yt-dlp", async () => {

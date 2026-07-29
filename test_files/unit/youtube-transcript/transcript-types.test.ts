@@ -15,6 +15,15 @@ const ALL_PROVIDERS: readonly YouTubeTranscriptProvider[] = [
   "yt-dlp",
 ];
 
+const TIKHUB_TEXT_TRACK: YouTubeCaptionTrack = {
+  languageCode: "en",
+  languageName: "English",
+  isGenerated: false,
+  source: "tikhub",
+  url: "tikhub:caption/en",
+  format: "txt",
+};
+
 const registrations: TranscriptProviderRegistration[] = ALL_PROVIDERS.map(
   (source) => ({
     source,
@@ -36,6 +45,17 @@ describe("YouTube transcript video IDs", () => {
       "tikhub",
       "yt-dlp",
     ]);
+  });
+
+  it("represents TikHub plain-text locators in the caption-track domain", () => {
+    expect(TIKHUB_TEXT_TRACK).toEqual({
+      languageCode: "en",
+      languageName: "English",
+      isGenerated: false,
+      source: "tikhub",
+      url: "tikhub:caption/en",
+      format: "txt",
+    });
   });
 
   it.each(["dQw4w9WgXcQ", "abc_DEF-123", "___________"])(

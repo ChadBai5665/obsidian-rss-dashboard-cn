@@ -232,7 +232,11 @@ export class InnerTubeTranscriptProvider implements TranscriptProvider {
     try {
       deadline.assertActive();
       const registered = this.registeredTracks.get(track);
-      if (!registered || track !== registered.snapshot) {
+      if (
+        !registered ||
+        track !== registered.snapshot ||
+        registered.snapshot.source !== "innertube"
+      ) {
         throw stableError("temporarily-unavailable");
       }
 

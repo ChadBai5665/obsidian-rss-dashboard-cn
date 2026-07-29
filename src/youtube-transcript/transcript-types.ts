@@ -35,14 +35,23 @@ export interface YouTubeTranscriptProgress {
   usage: YouTubeTranscriptUsage;
 }
 
-export interface YouTubeCaptionTrack {
+interface YouTubeCaptionTrackBase {
   languageCode: string;
   languageName: string;
   isGenerated: boolean;
-  source: YouTubeTranscriptProvider;
   url: string;
-  format: YouTubeCaptionFormat;
 }
+
+export type YouTubeCaptionTrack = YouTubeCaptionTrackBase & (
+  | {
+      source: "tikhub";
+      format: "txt";
+    }
+  | {
+      source: "innertube" | "yt-dlp";
+      format: YouTubeCaptionFormat;
+    }
+);
 
 export interface YouTubeTranscript {
   videoId: string;

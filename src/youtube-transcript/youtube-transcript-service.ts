@@ -592,10 +592,7 @@ export class YouTubeTranscriptService {
     this.assertCurrentGeneration(key, operationGeneration);
     let selected: YouTubeCaptionTrack[];
     try {
-      assertProviderTracks(tracks);
-      if (tracks.some((candidate) => candidate.source !== registration.source)) {
-        throw malformedProviderResponse(registration.source);
-      }
+      assertProviderTracks(tracks, registration.source);
       if (registration.source === "tikhub") {
         incrementTikHubUsage(state);
         emitProgress(request, "trying-tikhub", state);
@@ -642,6 +639,7 @@ export class YouTubeTranscriptService {
     this.assertCurrentGeneration(key, operationGeneration);
     let transcript: YouTubeTranscript;
     try {
+      assertProviderTrack(selectedTrack, registration.source);
       transcript = await registration.provider.fetchTrack(
         selectedTrack,
         request.signal,
@@ -653,6 +651,7 @@ export class YouTubeTranscriptService {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
     try {
+      assertProviderTrack(selectedTrack, registration.source);
       assertProviderTranscript(
         { ...request, itemId: context.itemId, videoId: context.videoId },
         transcript,
@@ -1069,13 +1068,31 @@ function isProviderFallbackEligible(
 
 function assertProviderTracks(
   value: unknown,
+  expectedSource: YouTubeTranscriptProvider,
 ): asserts value is YouTubeCaptionTrack[] {
-  if (!Array.isArray(value) || !value.every(isValidProviderTrack)) {
-    throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+  if (
+    !Array.isArray(value) ||
+    !value.every((candidate) =>
+      isValidProviderTrack(candidate, expectedSource)
+    )
+  ) {
+    throw malformedProviderResponse(expectedSource);
   }
 }
 
-function isValidProviderTrack(value: unknown): value is YouTubeCaptionTrack {
+function assertProviderTrack(
+  value: unknown,
+  expectedSource: YouTubeTranscriptProvider,
+): asserts value is YouTubeCaptionTrack {
+  if (!isValidProviderTrack(value, expectedSource)) {
+    throw malformedProviderResponse(expectedSource);
+  }
+}
+
+function isValidProviderTrack(
+  value: unknown,
+  expectedSource: YouTubeTranscriptProvider,
+): value is YouTubeCaptionTrack {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
   return (
@@ -1086,15 +1103,15 @@ function isValidProviderTrack(value: unknown): value is YouTubeCaptionTrack {
     candidate.languageName.length <= 200 &&
     !hasUnsafeControl(candidate.languageName) &&
     typeof candidate.isGenerated === "boolean" &&
-    (candidate.source === "innertube" ||
-      candidate.source === "tikhub" ||
-      candidate.source === "yt-dlp") &&
+    candidate.source === expectedSource &&
     typeof candidate.url === "string" &&
     Boolean(candidate.url.trim()) &&
     !hasUnsafeControl(candidate.url) &&
-    (candidate.format === "json3" ||
-      candidate.format === "srv3" ||
-      candidate.format === "vtt")
+    (expectedSource === "tikhub"
+      ? candidate.format === "txt"
+      : candidate.format === "json3" ||
+        candidate.format === "srv3" ||
+        candidate.format === "vtt")
   );
 }
 
