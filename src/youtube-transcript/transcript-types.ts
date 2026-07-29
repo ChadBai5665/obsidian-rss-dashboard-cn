@@ -66,29 +66,21 @@ export function createTranscriptProviderOperationResult<T>(
 export function isTranscriptProviderOperationResult(
   value: unknown,
 ): value is TranscriptProviderOperationResult<unknown> {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as Record<string, unknown>;
-  const keys = Reflect.ownKeys(candidate);
-  if (
-    !Object.isFrozen(candidate) ||
-    keys.some(
-      (key) =>
-        key !== "kind" &&
-        key !== "value" &&
-        key !== "evidence" &&
-        key !== "persistenceToken",
-    ) ||
-    !keys.includes("kind") ||
-    !keys.includes("value") ||
-    !keys.includes("evidence") ||
-    candidate.kind !== "transcript-provider-operation-result"
-  ) {
-    return false;
-  }
-  return (
-    Object.isFrozen(candidate.evidence) &&
-    isTranscriptProviderOperationEvidence(candidate.evidence)
-  );
+  return operationResultParts(value) !== null;
+}
+
+export function snapshotTranscriptProviderOperationResult(
+  value: unknown,
+): TranscriptProviderOperationResult<unknown> | null {
+  const parts = operationResultParts(value);
+  if (!parts) return null;
+  return parts.hasPersistenceToken
+    ? createTranscriptProviderOperationResult(
+        parts.value,
+        parts.evidence,
+        parts.persistenceToken,
+      )
+    : createTranscriptProviderOperationResult(parts.value, parts.evidence);
 }
 
 interface YouTubeCaptionTrackBase {
@@ -174,33 +166,124 @@ export class YouTubeTranscriptError extends Error {
   }
 }
 
-function isTranscriptProviderOperationEvidence(
-  value: unknown,
-): value is TranscriptProviderOperationEvidence {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as Record<string, unknown>;
-  const keys = Reflect.ownKeys(candidate);
-  return (
-    keys.length === 2 &&
-    keys.includes("tikhubPaidRequests") &&
-    keys.includes("paidRequestAttempted") &&
-    (candidate.tikhubPaidRequests === 0 ||
-      candidate.tikhubPaidRequests === 1) &&
-    typeof candidate.paidRequestAttempted === "boolean" &&
-    (candidate.tikhubPaidRequests === 0 || candidate.paidRequestAttempted)
-  );
-}
-
 function freezeTranscriptProviderOperationEvidence(
   value: unknown,
 ): TranscriptProviderOperationEvidence {
-  if (!isTranscriptProviderOperationEvidence(value)) {
+  const parts = operationEvidenceParts(value);
+  if (!parts) {
     throw new Error("Invalid transcript provider operation evidence");
   }
   return Object.freeze({
-    tikhubPaidRequests: value.tikhubPaidRequests,
-    paidRequestAttempted: value.paidRequestAttempted,
+    tikhubPaidRequests: parts.tikhubPaidRequests,
+    paidRequestAttempted: parts.paidRequestAttempted,
   });
+}
+
+interface OperationEvidenceParts {
+  tikhubPaidRequests: 0 | 1;
+  paidRequestAttempted: boolean;
+}
+
+interface OperationResultParts {
+  value: unknown;
+  evidence: TranscriptProviderOperationEvidence;
+  hasPersistenceToken: boolean;
+  persistenceToken?: unknown;
+}
+
+function operationEvidenceParts(value: unknown): OperationEvidenceParts | null {
+  const descriptors = ownDataDescriptors(
+    value,
+    ["tikhubPaidRequests", "paidRequestAttempted"],
+  );
+  if (!descriptors) return null;
+  const paidRequests = descriptors.tikhubPaidRequests.value;
+  const attempted = descriptors.paidRequestAttempted.value;
+  if (
+    (paidRequests !== 0 && paidRequests !== 1) ||
+    typeof attempted !== "boolean" ||
+    (paidRequests === 1 && !attempted)
+  ) {
+    return null;
+  }
+  return {
+    tikhubPaidRequests: paidRequests,
+    paidRequestAttempted: attempted,
+  };
+}
+
+function operationResultParts(value: unknown): OperationResultParts | null {
+  const descriptors = ownDataDescriptors(
+    value,
+    ["kind", "value", "evidence"],
+    ["persistenceToken"],
+  );
+  if (!descriptors) return null;
+  try {
+    if (
+      !Object.isFrozen(value) ||
+      descriptors.kind.value !== "transcript-provider-operation-result" ||
+      !Object.isFrozen(descriptors.evidence.value)
+    ) {
+      return null;
+    }
+    const evidence = operationEvidenceParts(descriptors.evidence.value);
+    if (!evidence) return null;
+    const hasPersistenceToken = Object.prototype.hasOwnProperty.call(
+      descriptors,
+      "persistenceToken",
+    );
+    return {
+      value: descriptors.value.value,
+      evidence: Object.freeze({ ...evidence }),
+      hasPersistenceToken,
+      ...(hasPersistenceToken
+        ? { persistenceToken: descriptors.persistenceToken?.value }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+interface OwnDataDescriptor {
+  configurable?: boolean;
+  enumerable?: boolean;
+  value: unknown;
+  writable?: boolean;
+}
+
+function ownDataDescriptors(
+  value: unknown,
+  requiredKeys: readonly string[],
+  optionalKeys: readonly string[] = [],
+): Record<string, OwnDataDescriptor> | null {
+  if (typeof value !== "object" || value === null) return null;
+  try {
+    if (Object.getPrototypeOf(value) !== Object.prototype) return null;
+    const allowedKeys = new Set([...requiredKeys, ...optionalKeys]);
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      requiredKeys.some((key) => !keys.includes(key))
+    ) {
+      return null;
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const key of keys) {
+      const descriptor = descriptors[key as string];
+      if (
+        descriptor === undefined ||
+        !Object.prototype.hasOwnProperty.call(descriptor, "value") ||
+        descriptor.enumerable !== true
+      ) {
+        return null;
+      }
+    }
+    return descriptors as Record<string, OwnDataDescriptor>;
+  } catch {
+    return null;
+  }
 }
 
 const YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{11}$/u;

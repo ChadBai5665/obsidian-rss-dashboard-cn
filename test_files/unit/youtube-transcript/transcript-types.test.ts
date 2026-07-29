@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertYouTubeVideoId,
   createTranscriptProviderOperationResult,
+  isTranscriptProviderOperationResult,
   isValidYouTubeVideoId,
   YouTubeTranscriptError,
   type TranscriptProviderRegistration,
@@ -104,6 +105,107 @@ describe("YouTube transcript video IDs", () => {
       .toBe(false);
   });
 
+  it("rejects accessor evidence without invoking its getter", () => {
+    let getterReads = 0;
+    const evidence = Object.defineProperties({}, {
+      tikhubPaidRequests: {
+        enumerable: true,
+        get() {
+          getterReads += 1;
+          return 1;
+        },
+      },
+      paidRequestAttempted: {
+        enumerable: true,
+        value: true,
+      },
+    });
+
+    expect(() =>
+      createTranscriptProviderOperationResult([], evidence as never),
+    ).toThrow("Invalid transcript provider operation evidence");
+    expect(getterReads).toBe(0);
+  });
+
+  it("rejects inherited evidence payloads and custom prototypes", () => {
+    const payloadMarker = "raw-provider-body-must-not-survive";
+    const evidence = Object.assign(
+      Object.create({ providerMessage: payloadMarker }) as Record<string, unknown>,
+      FREE_EVIDENCE,
+    );
+    let failure: unknown;
+
+    try {
+      createTranscriptProviderOperationResult([], evidence as never);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe(
+      "Invalid transcript provider operation evidence",
+    );
+    expect(JSON.stringify(failure)).not.toContain(payloadMarker);
+  });
+
+  it("rejects frozen accessor envelopes without reading their payload", () => {
+    let getterReads = 0;
+    const envelope = Object.freeze(
+      Object.defineProperties({}, {
+        kind: {
+          enumerable: true,
+          get() {
+            getterReads += 1;
+            return "transcript-provider-operation-result";
+          },
+        },
+        value: { enumerable: true, value: [TIKHUB_TEXT_TRACK] },
+        evidence: { enumerable: true, value: Object.freeze(FREE_EVIDENCE) },
+      }),
+    );
+
+    expect(isTranscriptProviderOperationResult(envelope)).toBe(false);
+    expect(getterReads).toBe(0);
+  });
+
+  it("rejects frozen accessor evidence and custom-prototype envelopes", () => {
+    let evidenceReads = 0;
+    const accessorEvidence = Object.freeze(
+      Object.defineProperties({}, {
+        tikhubPaidRequests: {
+          enumerable: true,
+          get() {
+            evidenceReads += 1;
+            return 0;
+          },
+        },
+        paidRequestAttempted: { enumerable: true, value: false },
+      }),
+    );
+    const accessorEnvelope = Object.freeze({
+      kind: "transcript-provider-operation-result",
+      value: [TIKHUB_TEXT_TRACK],
+      evidence: accessorEvidence,
+    });
+    const customEnvelope = Object.freeze(
+      Object.assign(
+        Object.create({ rawProviderBody: "private-payload" }) as Record<
+          string,
+          unknown
+        >,
+        {
+          kind: "transcript-provider-operation-result",
+          value: [TIKHUB_TEXT_TRACK],
+          evidence: Object.freeze({ ...FREE_EVIDENCE }),
+        },
+      ),
+    );
+
+    expect(isTranscriptProviderOperationResult(accessorEnvelope)).toBe(false);
+    expect(evidenceReads).toBe(0);
+    expect(isTranscriptProviderOperationResult(customEnvelope)).toBe(false);
+  });
+
   it("exposes TikHub as a stable provider registration source", () => {
     expect(registrations.map(({ source }) => source)).toEqual([
       "innertube",
@@ -152,3 +254,8 @@ describe("YouTube transcript video IDs", () => {
     }
   });
 });
+
+const FREE_EVIDENCE = {
+  tikhubPaidRequests: 0,
+  paidRequestAttempted: false,
+} as const;

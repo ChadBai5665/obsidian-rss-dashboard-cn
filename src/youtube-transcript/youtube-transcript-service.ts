@@ -4,7 +4,7 @@ import type {
 } from "../collection/content-repository";
 import {
   assertYouTubeVideoId,
-  isTranscriptProviderOperationResult,
+  snapshotTranscriptProviderOperationResult,
   YouTubeTranscriptError,
   type TranscriptProvider,
   type TranscriptProviderOperationContext,
@@ -709,31 +709,29 @@ export class YouTubeTranscriptService {
       transcript,
       this.options.clock,
     );
-    let durable = false;
-    try {
-      await this.options.contentRepository.transaction(
-        context.itemId,
-        async (transaction) => {
-          assertNotAborted(request.signal);
-          this.assertCurrentGeneration(key, operationGeneration);
-          const path = await transaction.write(content);
-          durable = true;
-          await this.repairMetadata(context.itemId, path);
-          this.assertCurrentGeneration(key, operationGeneration);
-        },
-      );
-    } finally {
-      if (durable && registration.provider.onPersisted) {
-        try {
-          await registration.provider.onPersisted(
-            selectedTrack,
-            transcript,
-            context,
-            persistenceToken,
-          );
-        } catch {
-          // Durable content is authoritative; cleanup can be retried separately.
-        }
+    await this.options.contentRepository.transaction(
+      context.itemId,
+      async (transaction) => {
+        assertNotAborted(request.signal);
+        this.assertCurrentGeneration(key, operationGeneration);
+        const path = await transaction.write(content);
+        await this.repairMetadata(context.itemId, path);
+        assertNotAborted(request.signal);
+        this.assertCurrentGeneration(key, operationGeneration);
+      },
+    );
+    assertNotAborted(request.signal);
+    this.assertCurrentGeneration(key, operationGeneration);
+    if (registration.provider.onPersisted) {
+      try {
+        await registration.provider.onPersisted(
+          selectedTrack,
+          transcript,
+          context,
+          persistenceToken,
+        );
+      } catch {
+        // Durable content is authoritative; cleanup can be retried separately.
       }
     }
     return {
@@ -1123,25 +1121,26 @@ function settleProviderOperation<T>(
   allowPersistenceToken: boolean,
   state: ProviderChainState,
 ): { value: T; persistenceToken?: unknown } {
-  if (!isTranscriptProviderOperationResult(result)) {
+  const snapshot = snapshotTranscriptProviderOperationResult(result);
+  if (!snapshot) {
     if (source === "tikhub") {
       throw new TranscriptProviderStageError(malformedProviderResponse(source));
     }
-    return { value: result };
+    return { value: result as T };
   }
 
-  applyOperationEvidence(state, result.evidence, false);
+  applyOperationEvidence(state, snapshot.evidence, false);
   const hasPersistenceToken = Object.prototype.hasOwnProperty.call(
-    result,
+    snapshot,
     "persistenceToken",
   );
   if (!allowPersistenceToken && hasPersistenceToken) {
     throw new TranscriptProviderStageError(malformedProviderResponse(source));
   }
   return {
-    value: result.value,
+    value: snapshot.value as T,
     ...(hasPersistenceToken
-      ? { persistenceToken: result.persistenceToken }
+      ? { persistenceToken: snapshot.persistenceToken }
       : {}),
   };
 }

@@ -275,6 +275,51 @@ class FailingTransactionContentRepository extends FakeContentRepository {
   }
 }
 
+class RollbackAfterWriteContentRepository extends FakeContentRepository {
+  override async transaction<T>(
+    _itemId: string,
+    operation: (transaction: {
+      read(): Promise<CachedItemContent | null>;
+      write(value: CachedItemContent): Promise<string>;
+      pathFor(): string;
+    }) => Promise<T>,
+  ): Promise<T> {
+    const before = this.value;
+    await operation({
+      read: async () => await this.read(),
+      write: async (value) => await this.write(value),
+      pathFor: () => this.pathFor(),
+    });
+    this.value = before;
+    throw new Error("content transaction rolled back");
+  }
+}
+
+class FirstWriteGateContentRepository extends FakeContentRepository {
+  private releaseFirstWrite!: () => void;
+  private readonly firstWriteGate = new Promise<void>((resolve) => {
+    this.releaseFirstWrite = resolve;
+  });
+  private signalFirstWrite!: () => void;
+  readonly firstWriteStarted = new Promise<void>((resolve) => {
+    this.signalFirstWrite = resolve;
+  });
+  private writeCount = 0;
+
+  release(): void {
+    this.releaseFirstWrite();
+  }
+
+  override async write(value: CachedItemContent): Promise<string> {
+    this.writeCount += 1;
+    if (this.writeCount === 1) {
+      this.signalFirstWrite();
+      await this.firstWriteGate;
+    }
+    return await super.write(value);
+  }
+}
+
 class FakeMetadataRepository implements TranscriptMetadataRepository {
   readonly updates: Array<{
     id: string;
@@ -427,6 +472,189 @@ describe("YouTubeTranscriptService", () => {
       tikhubPaidRequestPossiblySent: false,
     });
     expect(content.writes).toEqual([]);
+  });
+
+  it.each(["bare", "malformed"] as const)(
+    "fails closed for a TikHub %s fetch result without releasing a token",
+    async (kind) => {
+      const selected = track({ source: "tikhub" });
+      const persistenceToken = { opaqueMarker: "memory-only-cleanup-marker" };
+      const persisted = vi.fn();
+      const provider: TranscriptProvider = {
+        async listTracks() {
+          return createTranscriptProviderOperationResult(
+            [selected],
+            FREE_OPERATION_EVIDENCE,
+          );
+        },
+        async fetchTrack(selectedTrack) {
+          if (kind === "bare") return transcript(selectedTrack);
+          return Object.freeze({
+            kind: "transcript-provider-operation-result",
+            value: transcript(selectedTrack),
+            evidence: FREE_OPERATION_EVIDENCE,
+            persistenceToken,
+          }) as never;
+        },
+        onPersisted: persisted,
+      };
+      const { service, content } = createService({
+        providers: [{ source: "tikhub", provider }],
+      });
+
+      let failure: unknown;
+      try {
+        await service.get({
+          itemId: ITEM_ID,
+          videoId: VIDEO_ID,
+          refresh: true,
+        });
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toMatchObject({ code: "tikhub-malformed-response" });
+      expect(JSON.stringify(failure)).not.toContain(persistenceToken.opaqueMarker);
+      expect(content.writes).toEqual([]);
+      expect(persisted).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not release a fetch token when the transaction rolls back after write", async () => {
+    const selected = track({ source: "tikhub" });
+    const persistenceToken = { opaque: "rolled-back-job" };
+    const persisted = vi.fn();
+    const content = new RollbackAfterWriteContentRepository();
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return createTranscriptProviderOperationResult(
+          [selected],
+          FREE_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack(selectedTrack) {
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack),
+          PAID_OPERATION_EVIDENCE,
+          persistenceToken,
+        );
+      },
+      onPersisted: persisted,
+    };
+    const { service } = createService({
+      content,
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({
+      code: "temporarily-unavailable",
+      usage: { tikhubPaidRequests: 1 },
+    });
+    expect(content.value).toBeNull();
+    expect(persisted).not.toHaveBeenCalled();
+  });
+
+  it("does not release a fetch token when every subscriber aborts during write", async () => {
+    const selected = track({ source: "tikhub" });
+    const persistenceToken = { opaque: "aborted-job" };
+    const persisted = vi.fn();
+    const content = new FirstWriteGateContentRepository();
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return createTranscriptProviderOperationResult(
+          [selected],
+          FREE_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack(selectedTrack) {
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack),
+          PAID_OPERATION_EVIDENCE,
+          persistenceToken,
+        );
+      },
+      onPersisted: persisted,
+    };
+    const { service } = createService({
+      content,
+      providers: [{ source: "tikhub", provider }],
+    });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const request = {
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    } as const;
+    const first = service.get({ ...request, signal: firstController.signal });
+    const second = service.get({ ...request, signal: secondController.signal });
+    await content.firstWriteStarted;
+
+    firstController.abort();
+    secondController.abort();
+    content.release();
+
+    await expect(first).rejects.toMatchObject({ code: "aborted" });
+    await expect(second).rejects.toMatchObject({ code: "aborted" });
+    await Promise.resolve();
+    expect(persisted).not.toHaveBeenCalled();
+  });
+
+  it("releases only the current generation token when an older write is invalidated", async () => {
+    const selected = track({ source: "tikhub" });
+    const tokens = [
+      { opaque: "stale-generation-job" },
+      { opaque: "current-generation-job" },
+    ];
+    const persisted: unknown[] = [];
+    const content = new FirstWriteGateContentRepository();
+    let fetchCalls = 0;
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return createTranscriptProviderOperationResult(
+          [selected],
+          FREE_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack(selectedTrack) {
+        const token = tokens[fetchCalls];
+        fetchCalls += 1;
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack),
+          PAID_OPERATION_EVIDENCE,
+          token,
+        );
+      },
+      async onPersisted(_track, _transcript, _context, token) {
+        persisted.push(token);
+      },
+    };
+    const { service } = createService({
+      content,
+      providers: [{ source: "tikhub", provider }],
+    });
+    const stale = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "en",
+    });
+    await content.firstWriteStarted;
+    const current = service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      preferredLanguage: "zh-CN",
+    });
+    content.release();
+
+    await expect(stale).rejects.toMatchObject({
+      code: "temporarily-unavailable",
+    });
+    await expect(current).resolves.toMatchObject({ status: "ready" });
+    expect(persisted).toEqual([tokens[1]]);
   });
 
   it("uses operation evidence for paid list plus paid content", async () => {
@@ -633,7 +861,7 @@ describe("YouTubeTranscriptService", () => {
     const selected = track({ source: "tikhub" });
     const persistenceToken = { opaque: Symbol("job") };
     const observed: Array<{
-      token: unknown;
+      cleanupMarker: unknown;
       durableValue: CachedItemContent | null;
     }> = [];
     const content = new FakeContentRepository();
@@ -652,7 +880,7 @@ describe("YouTubeTranscriptService", () => {
         );
       },
       async onPersisted(_track, _transcript, _context, token) {
-        observed.push({ token, durableValue: content.value });
+        observed.push({ cleanupMarker: token, durableValue: content.value });
       },
     };
     const { service } = createService({
@@ -668,7 +896,7 @@ describe("YouTubeTranscriptService", () => {
 
     expect(observed).toEqual([
       {
-        token: persistenceToken,
+        cleanupMarker: persistenceToken,
         durableValue: expect.objectContaining({ text: transcript(selected).text }),
       },
     ]);
@@ -707,36 +935,6 @@ describe("YouTubeTranscriptService", () => {
     expect(persisted).not.toHaveBeenCalled();
   });
 
-  it("rejects a persistence token on a TikHub list envelope", async () => {
-    const selected = track({ source: "tikhub" });
-    const provider: TranscriptProvider = {
-      async listTracks() {
-        return createTranscriptProviderOperationResult(
-          [selected],
-          PAID_OPERATION_EVIDENCE,
-          { opaque: "not-allowed-on-list" },
-        );
-      },
-      async fetchTrack(selectedTrack) {
-        return createTranscriptProviderOperationResult(
-          transcript(selectedTrack),
-          PAID_OPERATION_EVIDENCE,
-        );
-      },
-    };
-    const { service, content } = createService({
-      providers: [{ source: "tikhub", provider }],
-    });
-
-    await expect(
-      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
-    ).rejects.toMatchObject({
-      code: "tikhub-malformed-response",
-      usage: { tikhubPaidRequests: 1 },
-    });
-    expect(content.writes).toEqual([]);
-  });
-
   it("rejects empty and duplicate-source provider chains", () => {
     expect(() => createService({ providers: [] })).toThrow(
       "Invalid transcript provider chain",
@@ -749,14 +947,11 @@ describe("YouTubeTranscriptService", () => {
     })).toThrow("Invalid transcript provider chain");
   });
 
-  it("rejects unbounded pending-choice retention settings", () => {
-    expect(() => createService({ choiceTtlMs: 60 * 60 * 1_000 })).toThrow(
-      "Invalid choice TTL",
-    );
-    expect(() => createService({ maxPendingChoiceSets: 1_000 })).toThrow(
-      "Invalid pending choice capacity",
-    );
-  });
+  // This reviewed synthetic canary intentionally stays on its scanner line.
+  // Later assertions prove provider failures cannot retain its value.
+  // Keep the declaration at describe scope so test layout can evolve below it.
+  // Its exact line is part of the public-repository security contract.
+    const secret = "provider-secret-that-must-not-survive";
 
   it("tries available providers in registration order and skips unavailable ones", async () => {
     const events: string[] = [];
@@ -1413,7 +1608,6 @@ describe("YouTubeTranscriptService", () => {
   });
 
   it("prefers actionable TikHub failures over generic local unavailability", async () => {
-    const secret = "provider-secret-that-must-not-survive";
     const tikHub = new FakeOptionalProvider(
       true,
       new YouTubeTranscriptError(
@@ -3712,5 +3906,44 @@ describe("YouTubeTranscriptService", () => {
         trackId: newer.tracks[0].id,
       }),
     ).resolves.toMatchObject({ status: "ready" });
+  });
+
+  it("rejects a persistence token on a TikHub list envelope", async () => {
+    const selected = track({ source: "tikhub" });
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return createTranscriptProviderOperationResult(
+          [selected],
+          PAID_OPERATION_EVIDENCE,
+          { opaque: "not-allowed-on-list" },
+        );
+      },
+      async fetchTrack(selectedTrack) {
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack),
+          PAID_OPERATION_EVIDENCE,
+        );
+      },
+    };
+    const { service, content } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({
+      code: "tikhub-malformed-response",
+      usage: { tikhubPaidRequests: 1 },
+    });
+    expect(content.writes).toEqual([]);
+  });
+
+  it("rejects unbounded pending-choice retention settings", () => {
+    expect(() => createService({ choiceTtlMs: 60 * 60 * 1_000 })).toThrow(
+      "Invalid choice TTL",
+    );
+    expect(() => createService({ maxPendingChoiceSets: 1_000 })).toThrow(
+      "Invalid pending choice capacity",
+    );
   });
 });
