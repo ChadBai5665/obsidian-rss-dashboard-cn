@@ -549,6 +549,100 @@ git add src/youtube-transcript/tikhub-transcript-provider.ts \
 git commit -m "feat: add TikHub transcript provider"
 ```
 
+### Task 51: Bridge Operation Evidence and Durable Cleanup Tokens
+
+This is an independently reviewed bridge task created after Task 4 reached its five-fix ceiling. It changes the generic provider/service contract only; Task 5 will consume the contract in its own fix loop.
+
+**Files:**
+- Modify: `src/youtube-transcript/transcript-types.ts`
+- Modify: `src/youtube-transcript/youtube-transcript-service.ts`
+- Modify: `test_files/unit/youtube-transcript/transcript-types.test.ts`
+- Modify: `test_files/unit/youtube-transcript/youtube-transcript-service.test.ts`
+
+**Interfaces:**
+- Produces: immutable per-operation TikHub billing evidence.
+- Produces: a success envelope with an optional opaque, memory-only persistence token.
+- Produces: sanitized ambiguous-attempt metadata on final service errors.
+- Consumes: the exact `TikHubClientError.paidRequestAttempted` boundary from Task 2.
+
+- [ ] **Step 1: Add failing contract and service tests**
+
+Use these exact public shapes:
+
+```ts
+export interface TranscriptProviderOperationEvidence {
+  readonly tikhubPaidRequests: 0 | 1;
+  readonly paidRequestAttempted: boolean;
+}
+
+export interface TranscriptProviderOperationResult<T> {
+  readonly kind: "transcript-provider-operation-result";
+  readonly value: T;
+  readonly evidence: TranscriptProviderOperationEvidence;
+  readonly persistenceToken?: unknown;
+}
+```
+
+Provide a validated factory that returns runtime-frozen envelopes and evidence. `tikhubPaidRequests: 1` requires `paidRequestAttempted: true`. Evidence contains no endpoint, key, request ID, raw provider body, or provider message.
+
+Extend provider `listTracks` and `fetchTrack` return types to accept either the existing bare value or an operation envelope. Existing InnerTube and `yt-dlp` implementations remain source-compatible and continue returning bare values. TikHub operations must fail closed unless they return a valid envelope or throw a `YouTubeTranscriptError` carrying valid operation evidence.
+
+Extend `YouTubeTranscriptError` with optional immutable operation evidence. Extend `YouTubeTranscriptServiceError` with a runtime-frozen boolean `tikhubPaidRequestPossiblySent`; do not add attempted requests to `YouTubeTranscriptUsage`, which continues to report only confirmed `0 | 1 | 2` paid calls.
+
+Cover: frozen validation; invalid evidence; non-TikHub bare compatibility; TikHub bare/malformed envelope rejection; paid list plus paid content = 2; free resumed list plus paid content = 1; free pending/expired = 0; paid processing = confirmed 1; ambiguous transport error = confirmed 0 plus `tikhubPaidRequestPossiblySent: true`; a paid list plus ambiguous content error = confirmed 1 plus possibly sent; provider choice leases preserve list evidence exactly once; repeated normalization cannot double-add evidence.
+
+- [ ] **Step 2: Run and verify RED**
+
+```bash
+npx vitest run --config vitest.config.mjs \
+  test_files/unit/youtube-transcript/transcript-types.test.ts \
+  test_files/unit/youtube-transcript/youtube-transcript-service.test.ts
+```
+
+Expected: missing operation evidence/envelope and incorrect inferred usage.
+
+- [ ] **Step 3: Replace source-based inference with operation-bound evidence**
+
+Remove every `source === "tikhub"` usage increment. Validate and apply each settled provider operation's evidence exactly once, including sanitized thrown errors. Never infer a charge from provider source, result shape, polling, or fallback order.
+
+Confirmed usage is the bounded sum of operation evidence, maximum two calls. `tikhubPaidRequestPossiblySent` becomes true only when a failed paid operation reached transport but has no confirmed paid response. Success envelopes with one confirmed request do not create an ambiguity warning. Progress and ready results expose confirmed usage only.
+
+List envelopes must not contain a persistence token. A fetch envelope may contain one opaque token. The service keeps it in memory only and passes it as the optional fourth argument to `onPersisted` only after the transcript cache write is durable. Do not pass it after a rollback, pre-write abort, malformed result, or provider failure. Do not retain it in choices, progress, service results, failures, logs, cache JSON, or locators.
+
+```ts
+onPersisted?(
+  track: YouTubeCaptionTrack,
+  transcript: YouTubeTranscript,
+  context: TranscriptProviderOperationContext,
+  persistenceToken?: unknown,
+): Promise<void>;
+```
+
+The existing rule remains: once the cache write is durable, cleanup failure cannot invalidate the saved transcript. Bare non-TikHub providers remain compatible and receive no token.
+
+- [ ] **Step 4: Verify orchestration regressions**
+
+```bash
+npx vitest run --config vitest.config.mjs \
+  test_files/unit/youtube-transcript/transcript-types.test.ts \
+  test_files/unit/youtube-transcript/youtube-transcript-service.test.ts \
+  test_files/unit/youtube-transcript/innertube-transcript-provider.test.ts \
+  test_files/unit/youtube-transcript/yt-dlp-transcript-provider.test.ts \
+  test_files/unit/collection/content-repository.test.ts
+```
+
+Expected: pass with fake providers only and no live TikHub request.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/youtube-transcript/transcript-types.ts \
+  src/youtube-transcript/youtube-transcript-service.ts \
+  test_files/unit/youtube-transcript/transcript-types.test.ts \
+  test_files/unit/youtube-transcript/youtube-transcript-service.test.ts
+git commit -m "refactor: bridge transcript operation evidence"
+```
+
 ### Task 6: Wire Current Settings, Secrets, Budget, and Jobs into the Runtime
 
 **Files:**
