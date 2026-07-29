@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App, Platform, type PluginManifest } from "obsidian";
+import {
+  App,
+  Platform,
+  WorkspaceLeaf,
+  type PluginManifest,
+} from "obsidian";
 
 const secretState = vi.hoisted(() => ({
   reads: [] as string[],
   constructed: 0,
+  get: vi.fn<(connectionId: string) => Promise<string | undefined>>(),
 }));
 
 vi.mock("../../../src/security/desktop-secret-store", () => ({
@@ -13,8 +19,7 @@ vi.mock("../../../src/security/desktop-secret-store", () => ({
     }
 
     async get(connectionId: string): Promise<string | undefined> {
-      secretState.reads.push(connectionId);
-      return `synthetic-key-for-${connectionId}`;
+      return await secretState.get(connectionId);
     }
   },
 }));
@@ -36,12 +41,19 @@ import {
 } from "../../../src/youtube-transcript/transcript-types";
 import { InnerTubeTranscriptProvider } from "../../../src/youtube-transcript/innertube-transcript-provider";
 import { YtDlpTranscriptProvider } from "../../../src/youtube-transcript/yt-dlp-transcript-provider";
+import { RssDashboardView, RSS_DASHBOARD_VIEW_TYPE } from "../../../src/views/dashboard-view";
+import { ReaderView, RSS_READER_VIEW_TYPE } from "../../../src/views/reader-view";
+import { createAiConnection } from "../../../src/ai/provider-presets";
+import type { AiContentSelector } from "../../../src/ai/content/ai-content-selector";
+import type { CollectionService } from "../../../src/services/collection-service";
 import {
   DEFAULT_SETTINGS,
+  type Feed,
   type FeedItem,
   type RssDashboardSettings,
 } from "../../../src/types/types";
 import type { YouTubeTranscriptService } from "../../../src/youtube-transcript/youtube-transcript-service";
+import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 
 const ITEM_ID = "a".repeat(64);
 const VIDEO_ID = "dQw4w9WgXcQ";
@@ -51,6 +63,20 @@ const JOB_ID = "323e4567-e89b-42d3-a456-426614174000";
 
 interface TranscriptRuntime {
   service: YouTubeTranscriptService;
+  contentRepository: {
+    write(content: {
+      schemaVersion: 2;
+      contentBasis: "youtube-transcript";
+      itemId: string;
+      fetchedAt: string;
+      videoId: string;
+      languageCode: string;
+      languageName: string;
+      isGenerated: boolean;
+      provider: "innertube" | "tikhub" | "yt-dlp";
+      text: string;
+    }): Promise<string>;
+  };
 }
 
 interface ProviderOptions {
@@ -78,6 +104,35 @@ function createPlugin(): RssDashboardPlugin {
     connectionId: FIRST_CONNECTION_ID,
   };
   return plugin;
+}
+
+function prepareOnload(plugin: RssDashboardPlugin): void {
+  plugin.loadData = vi.fn().mockResolvedValue(structuredClone(plugin.settings));
+  plugin.saveData = vi.fn().mockResolvedValue(undefined);
+  plugin.registerView = vi.fn();
+  plugin.addRibbonIcon = vi.fn().mockReturnValue({ onClick: vi.fn() });
+  plugin.addCommand = vi.fn();
+  plugin.addSettingTab = vi.fn();
+  plugin.registerInterval = vi.fn((id: number) => id);
+  plugin.registerObsidianProtocolHandler = vi.fn();
+}
+
+function watchTikHubClient(): Array<ReturnType<typeof vi.spyOn>> {
+  return [
+    vi.spyOn(TikHubClient.prototype, "fetchYouTubeCaptions"),
+    vi.spyOn(TikHubClient.prototype, "fetchYouTubeCaptionResult"),
+    vi.spyOn(TikHubClient.prototype, "fetchUserPosts"),
+    vi.spyOn(TikHubClient.prototype, "fetchUserReplies"),
+    vi.spyOn(TikHubClient.prototype, "fetchSearchTimeline"),
+  ];
+}
+
+function expectPassiveTikHubIsolation(
+  methods: readonly { mock: { calls: unknown[][] } }[],
+): void {
+  expect(secretState.reads).toEqual([]);
+  expect(secretState.get).not.toHaveBeenCalled();
+  for (const method of methods) expect(method).not.toHaveBeenCalled();
 }
 
 function runtimeFor(plugin: RssDashboardPlugin): TranscriptRuntime {
@@ -174,8 +229,9 @@ function article(): FeedItem {
   return {
     guid: "passive-article",
     title: "Passive article",
-    link: "https://example.com/passive-article",
+    link: "https://example.substack.com/passive-article",
     description: "No transcript action was requested.",
+    content: '<p class="image-link image2 is-viewable-img">Passive article body.</p>',
     pubDate: "2026-07-30T00:00:00.000Z",
     feedUrl: "https://example.com/feed.xml",
     feedTitle: "Example feed",
@@ -184,15 +240,57 @@ function article(): FeedItem {
   };
 }
 
+function passiveFeed(item = article()): Feed {
+  return {
+    feedId: "passive-feed",
+    sourceKind: "feed",
+    sourceConfig: { kind: "feed" },
+    title: "Passive feed",
+    url: item.feedUrl,
+    folder: "Research",
+    items: [item],
+    lastUpdated: 1,
+    mediaType: "article",
+  };
+}
+
+function registeredViewFactory<T>(
+  plugin: RssDashboardPlugin,
+  viewType: string,
+): (leaf: WorkspaceLeaf) => T {
+  const registration = vi.mocked(plugin.registerView).mock.calls.find(
+    ([registeredType]) => registeredType === viewType,
+  );
+  if (!registration) throw new Error(`Missing registered view: ${viewType}`);
+  return registration[1] as (leaf: WorkspaceLeaf) => T;
+}
+
+function collectionService(plugin: RssDashboardPlugin): CollectionService {
+  return (plugin as unknown as {
+    getCollectionService(): CollectionService;
+  }).getCollectionService();
+}
+
+let previousDesktopApp = false;
+
 beforeEach(() => {
+  installObsidianDomPolyfills();
   vi.restoreAllMocks();
+  previousDesktopApp = (Platform as typeof Platform & { isDesktopApp: boolean })
+    .isDesktopApp;
   (Platform as typeof Platform & { isDesktopApp: boolean }).isDesktopApp = true;
   secretState.reads = [];
   secretState.constructed = 0;
+  secretState.get.mockReset();
+  secretState.get.mockImplementation(async (connectionId) => {
+    secretState.reads.push(connectionId);
+    return `synthetic-key-for-${connectionId}`;
+  });
 });
 
 afterEach(() => {
-  (Platform as typeof Platform & { isDesktopApp: boolean }).isDesktopApp = false;
+  (Platform as typeof Platform & { isDesktopApp: boolean }).isDesktopApp =
+    previousDesktopApp;
 });
 
 describe("TikHub transcript runtime wiring", () => {
@@ -207,17 +305,156 @@ describe("TikHub transcript runtime wiring", () => {
     expect(secretState.reads).toEqual([]);
   });
 
-  it("does not read a TikHub key for dashboard, article, daily-refresh, or AI setup", async () => {
+  it("loads the real plugin lifecycle without reading a TikHub key or making a request", async () => {
     const plugin = createPlugin();
+    prepareOnload(plugin);
+    const clientMethods = watchTikHubClient();
 
+    await plugin.onload();
+
+    expect(secretState.constructed).toBeGreaterThan(0);
+    expectPassiveTikHubIsolation(clientMethods);
+    plugin.onunload();
+  });
+
+  it("renders a real registered dashboard with populated feed content without TikHub activity", async () => {
+    const plugin = createPlugin();
+    plugin.settings.feeds = [passiveFeed()];
+    prepareOnload(plugin);
+    const clientMethods = watchTikHubClient();
+
+    await plugin.onload();
+    const leaf = new WorkspaceLeaf(plugin.app);
+    const dashboard = registeredViewFactory<RssDashboardView>(
+      plugin,
+      RSS_DASHBOARD_VIEW_TYPE,
+    )(leaf);
+    leaf.view = dashboard;
+    (leaf as WorkspaceLeaf & { loadIfDeferred(): Promise<void> }).loadIfDeferred =
+      vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(plugin.app.workspace, "getLeavesOfType").mockImplementation(
+      (viewType) => viewType === RSS_DASHBOARD_VIEW_TYPE ? [leaf] : [],
+    );
+
+    await dashboard.onOpen();
     await plugin.refreshDashboardViews();
-    await plugin.getCollectedItemById(ITEM_ID);
-    plugin.createAiPanelOptionsForItem(article());
+
+    expect(dashboard.containerEl.textContent).toContain("Passive article");
+    expectPassiveTikHubIsolation(clientMethods);
+    await dashboard.onClose();
+  });
+
+  it("opens a persisted matching article in the real registered reader without TikHub activity", async () => {
+    const plugin = createPlugin();
+    const item = article();
+    const feed = passiveFeed(item);
+    plugin.settings.feeds = [feed];
+    prepareOnload(plugin);
+    const clientMethods = watchTikHubClient();
+
+    await plugin.onload();
+    const [persisted] = await collectionService(plugin).collectFeedRefresh({
+      feed,
+      previousItems: [],
+      refreshedItems: [item],
+      fetchedAt: new Date("2026-07-30T00:00:00.000Z"),
+    });
+    expect(await plugin.getCollectedItemById(persisted.id)).toMatchObject({
+      id: persisted.id,
+      sourceId: "passive-feed",
+    });
+    const reader = registeredViewFactory<ReaderView>(
+      plugin,
+      RSS_READER_VIEW_TYPE,
+    )(new WorkspaceLeaf(plugin.app));
+    (reader as unknown as { contentEl: HTMLElement }).contentEl =
+      reader.containerEl;
+
+    await reader.onOpen();
+    await reader.displayItem(item);
+
+    expect(reader.containerEl.textContent).toContain("Passive article");
+    expectPassiveTikHubIsolation(clientMethods);
+    await reader.onClose();
+  });
+
+  it("runs a due populated RSS refresh through the real parser without TikHub activity", async () => {
+    const plugin = createPlugin();
+    const feed = passiveFeed();
+    plugin.settings.feeds = [feed];
+    plugin.settings.refreshMode = "daily-on-open";
+    plugin.settings.startupRefreshDelaySeconds = 0;
+    prepareOnload(plugin);
+    const clientMethods = watchTikHubClient();
+    const rssRequest = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: {},
+      arrayBuffer: new ArrayBuffer(0),
+      json: {},
+      text: `<?xml version="1.0"?><rss version="2.0"><channel><title>Passive feed</title><link>https://example.com</link><description>test</description><item><title>Refreshed article</title><link>https://example.substack.com/refreshed</link><guid>refreshed-guid</guid><pubDate>Wed, 30 Jul 2026 00:00:00 GMT</pubDate><description><![CDATA[<p>Refreshed body</p>]]></description></item></channel></rss>`,
+    });
+    const obsidian = await import("obsidian");
+    vi.spyOn(obsidian, "requestUrl").mockImplementation(rssRequest);
+
+    await plugin.onload();
     await (plugin as unknown as {
       refreshOnOpenIfNeeded(): Promise<void>;
     }).refreshOnOpenIfNeeded();
 
-    expect(secretState.reads).toEqual([]);
+    expect(rssRequest).toHaveBeenCalledWith(expect.objectContaining({
+      url: feed.url,
+      method: "GET",
+    }));
+    expect(plugin.settings.feeds[0].items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        title: "Refreshed article",
+        link: "https://example.substack.com/refreshed",
+      }),
+    ]));
+    expectPassiveTikHubIsolation(clientMethods);
+  });
+
+  it("selects populated matching feed content for AI without TikHub activity", async () => {
+    const plugin = createPlugin();
+    const item = article();
+    const feed = passiveFeed(item);
+    plugin.settings.feeds = [feed];
+    plugin.settings.ai.connections = [createAiConnection({
+      id: CURRENT_CONNECTION_ID,
+      name: "Local selection connection",
+      providerKind: "kimi",
+      model: "local-test-model",
+    })];
+    plugin.settings.ai.defaultConnectionId = CURRENT_CONNECTION_ID;
+    prepareOnload(plugin);
+    const clientMethods = watchTikHubClient();
+
+    await plugin.onload();
+    const [persisted] = await collectionService(plugin).collectFeedRefresh({
+      feed,
+      previousItems: [],
+      refreshedItems: [item],
+      fetchedAt: new Date("2026-07-30T00:00:00.000Z"),
+    });
+    const options = plugin.createAiPanelOptionsForItem(item);
+    expect(options?.createStartInput("summary", CURRENT_CONNECTION_ID)).toMatchObject({
+      item: { id: persisted.id },
+      fetchFullText: false,
+    });
+    const selector = (plugin as unknown as {
+      aiRuntime: { contentSelector: AiContentSelector };
+    }).aiRuntime.contentSelector;
+
+    await expect(selector.select({
+      item: persisted,
+      fetchFullText: false,
+      maxInputCharacters: 4_000,
+    })).resolves.toMatchObject({
+      basis: "feed",
+      title: "Passive article",
+      content: expect.stringContaining("No transcript action was requested"),
+    });
+    expectPassiveTikHubIsolation(clientMethods);
   });
 
   it("uses the public service's InnerTube success without touching TikHub", async () => {
@@ -237,6 +474,33 @@ describe("TikHub transcript runtime wiring", () => {
     expect(secretState.reads).toEqual([]);
     expect(tikhubRequest).not.toHaveBeenCalled();
     expect(ytDlpTracks).not.toHaveBeenCalled();
+  });
+
+  it("serves a persisted transcript cache hit through service.get without probing providers", async () => {
+    const plugin = createPlugin();
+    const runtime = runtimeFor(plugin);
+    const clientMethods = watchTikHubClient();
+    const innerTube = vi.spyOn(InnerTubeTranscriptProvider.prototype, "listTracks");
+    const ytDlp = vi.spyOn(YtDlpTranscriptProvider.prototype, "listTracks");
+    await runtime.contentRepository.write({
+      schemaVersion: 2,
+      contentBasis: "youtube-transcript",
+      itemId: ITEM_ID,
+      fetchedAt: "2026-07-30T00:00:00.000Z",
+      videoId: VIDEO_ID,
+      languageCode: "en",
+      languageName: "English",
+      isGenerated: false,
+      provider: "innertube",
+      text: "Persisted synthetic transcript.",
+    });
+
+    await expect(runtime.service.get({ itemId: ITEM_ID, videoId: VIDEO_ID }))
+      .resolves.toMatchObject({ status: "ready", source: "cache" });
+
+    expectPassiveTikHubIsolation(clientMethods);
+    expect(innerTube).not.toHaveBeenCalled();
+    expect(ytDlp).not.toHaveBeenCalled();
   });
 
   it("uses yt-dlp when TikHub is disabled without reading a key", async () => {
