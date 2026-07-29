@@ -128,6 +128,8 @@ import { ContentRepository } from "./src/collection/content-repository";
 import { InnerTubeTranscriptProvider } from "./src/youtube-transcript/innertube-transcript-provider";
 import { YtDlpTranscriptProvider } from "./src/youtube-transcript/yt-dlp-transcript-provider";
 import { YouTubeTranscriptService } from "./src/youtube-transcript/youtube-transcript-service";
+import { TikHubCaptionJobRepository } from "./src/youtube-transcript/tikhub-caption-job-repository";
+import { TikHubTranscriptProvider } from "./src/youtube-transcript/tikhub-transcript-provider";
 import type { YouTubeTranscriptPanelRuntime } from "./src/components/youtube-transcript-panel";
 import { createRuntimeTranscriptHttpTransport } from "./src/youtube-transcript/runtime-transcript-transport";
 import { AiContentSelector } from "./src/ai/content/ai-content-selector";
@@ -710,6 +712,29 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value,
   );
+}
+
+/** Poll delays must stop promptly when the plugin-owned transcript service is disposed. */
+function waitForAbortableTranscriptPoll(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Transcript polling aborted"));
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error("Transcript polling aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1330,6 +1355,31 @@ export default class RssDashboardPlugin extends Plugin {
     );
     const transport = createRuntimeTranscriptHttpTransport();
     const innerTube = new InnerTubeTranscriptProvider(transport);
+    const tikhubJobs = new TikHubCaptionJobRepository(this.app.vault, dataRoot);
+    const tikhub = new TikHubTranscriptProvider({
+      getSettings: () => this.settings.tikhub,
+      getApiKey: async (connectionId) =>
+        await new DesktopSecretStore().get(connectionId),
+      createClient: (settings) => {
+        const connectionId = settings.connectionId.toLowerCase();
+        const ledger = new TikHubRequestLedger(this.app.vault, dataRoot, {
+          storageIdentity: `vault:${isUuid(connectionId) ? connectionId : "unconfigured"}`,
+        });
+        const budget = new TikHubRequestBudget({
+          ledger,
+          maxRequestsPerRun: settings.maxRequestsPerRun,
+          maxRequestsPerDay: settings.maxRequestsPerDay,
+        });
+        return new TikHubClient({
+          baseUrl: settings.baseUrl,
+          timeoutMs: settings.timeoutMs,
+          budget,
+        });
+      },
+      jobs: tikhubJobs,
+      clock: () => new Date(),
+      delay: waitForAbortableTranscriptPoll,
+    });
     const ytDlp = Platform.isDesktopApp
       ? new YtDlpTranscriptProvider(transport, {
           cookiesFromBrowser: () => {
@@ -1349,8 +1399,19 @@ export default class RssDashboardPlugin extends Plugin {
           },
         };
     const service = new YouTubeTranscriptService({
-      innerTube,
-      ytDlp,
+      providers: [
+        { source: "innertube", provider: innerTube },
+        {
+          source: "tikhub",
+          provider: tikhub,
+          isAvailable: async () => await tikhub.isAvailable(),
+        },
+        {
+          source: "yt-dlp",
+          provider: ytDlp,
+          isAvailable: async () => await ytDlp.isAvailable(),
+        },
+      ],
       contentRepository,
       metadataRepository,
       clock: () => new Date(),

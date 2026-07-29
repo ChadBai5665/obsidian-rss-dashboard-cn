@@ -2850,6 +2850,8 @@ describe("onunload()", () => {
     plugin.onunload();
 
     expect(dispose).toHaveBeenCalledTimes(1);
+    expect((plugin as unknown as { youtubeTranscriptRuntime: unknown })
+      .youtubeTranscriptRuntime).toBeNull();
   });
 });
 
