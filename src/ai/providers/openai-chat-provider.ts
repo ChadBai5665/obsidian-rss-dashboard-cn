@@ -1,4 +1,14 @@
-import type { AiConnection } from "../ai-types";
+import type {
+  AiConnection,
+  AiProviderKind,
+  AiReasoningEffort,
+  AiThinkingMode,
+} from "../ai-types";
+import {
+  effectiveAiReasoningEffort,
+  effectiveAiResponseMode,
+  effectiveAiThinkingMode,
+} from "../connection-controls";
 import { resolveAiConnectionForRequest } from "../provider-presets";
 import {
   ProviderError,
@@ -50,6 +60,10 @@ interface OpenAiPrivateState {
   baseUrl: string;
   model: string;
   usesMaxCompletionTokens: boolean;
+  providerKind: AiProviderKind;
+  thinkingMode: AiThinkingMode;
+  reasoningEffort: AiReasoningEffort;
+  stream: boolean;
 }
 
 interface OpenAiStreamMetadata {
@@ -83,6 +97,10 @@ export class OpenAiChatProvider implements TextGenerationProvider {
       baseUrl: connection.baseUrl,
       model: connection.model,
       usesMaxCompletionTokens: options.usesMaxCompletionTokens === true,
+      providerKind: connection.providerKind,
+      thinkingMode: effectiveAiThinkingMode(connection),
+      reasoningEffort: effectiveAiReasoningEffort(connection),
+      stream: effectiveAiResponseMode(connection) === "stream",
     });
   }
 
@@ -99,12 +117,13 @@ export class OpenAiChatProvider implements TextGenerationProvider {
         { role: "system", content: snapshot.system },
         { role: "user", content: snapshot.user },
       ],
-      stream: true,
+      stream: state.stream,
     };
     body[state.usesMaxCompletionTokens
       ? "max_completion_tokens"
       : "max_tokens"] = snapshot.maxOutputTokens;
     if (this.supportsStoreFalse) body.store = false;
+    applyProviderControls(body, state);
 
     const collector = new FinalTextCollector(
       outputCharacterLimit(snapshot.maxOutputTokens),
@@ -190,7 +209,7 @@ class OpenAiStreamState {
 
   finish(): OpenAiStreamMetadata {
     for (const current of this.decoder.finish()) this.consume(current);
-    if (!this.done) throw malformedProviderResponse();
+    if (!this.done && !this.finishSeen) throw malformedProviderResponse();
     return {
       ...(this.requestId ? { requestId: this.requestId } : {}),
       ...(this.inputTokens !== undefined ? { inputTokens: this.inputTokens } : {}),
@@ -268,6 +287,66 @@ class OpenAiStreamState {
     this.inputTokens = inputTokens;
     this.outputTokens = outputTokens;
   }
+}
+
+function applyProviderControls(
+  body: Record<string, unknown>,
+  state: OpenAiPrivateState,
+): void {
+  const { providerKind, thinkingMode, reasoningEffort } = state;
+  if (providerKind === "kimi") {
+    if (thinkingMode === "enabled" || thinkingMode === "disabled") {
+      body.thinking = { type: thinkingMode };
+    }
+    applyReasoningEffort(body, reasoningEffort, true);
+    return;
+  }
+  if (providerKind === "qwen") {
+    if (thinkingMode === "enabled" || thinkingMode === "disabled") {
+      body.enable_thinking = thinkingMode === "enabled";
+    }
+    applyReasoningEffort(body, reasoningEffort, false);
+    return;
+  }
+  if (providerKind === "openai") {
+    if (thinkingMode === "disabled") body.reasoning_effort = "none";
+    else if (thinkingMode === "enabled") {
+      body.reasoning_effort = reasoningEffort === "platform-default"
+        ? "medium"
+        : reasoningEffort === "max" ? "xhigh" : reasoningEffort;
+    }
+    return;
+  }
+  if (providerKind === "deepseek" || providerKind === "glm") {
+    if (thinkingMode === "enabled" || thinkingMode === "disabled") {
+      body.thinking = { type: thinkingMode };
+    }
+    if (providerKind === "deepseek") {
+      applyReasoningEffort(body, reasoningEffort, false);
+    }
+    return;
+  }
+  if (providerKind === "minimax-cn" || providerKind === "minimax-global") {
+    if (thinkingMode === "disabled" || thinkingMode === "adaptive") {
+      body.thinking = { type: thinkingMode };
+    }
+    return;
+  }
+  if (providerKind === "openai-compatible") {
+    if (thinkingMode !== "platform-default") {
+      body.thinking = { type: thinkingMode };
+    }
+    applyReasoningEffort(body, reasoningEffort, true);
+  }
+}
+
+function applyReasoningEffort(
+  body: Record<string, unknown>,
+  effort: AiReasoningEffort,
+  preserveMax: boolean,
+): void {
+  if (effort === "platform-default") return;
+  body.reasoning_effort = effort === "max" && !preserveMax ? "max" : effort;
 }
 
 function parseOpenAiResult(

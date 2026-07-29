@@ -113,6 +113,27 @@ export function renderMediaSettingsTab(
 
   new Setting(containerEl).setName(t("settings.media.services")).setHeading();
 
+  new Setting(containerEl)
+    .setName(t("settings.media.youtubeTranscriptBrowserAuth"))
+    .setDesc(t("settings.media.youtubeTranscriptBrowserAuthDesc"))
+    .addDropdown((dropdown) =>
+      dropdown
+        .addOption("none", t("settings.media.youtubeTranscriptBrowserNone"))
+        .addOption("chrome", "Chrome")
+        .addOption("safari", "Safari")
+        .addOption("firefox", "Firefox")
+        .setValue(
+          plugin.settings.media.youtubeTranscriptBrowserAuth ?? "none",
+        )
+        .onChange(async (value) => {
+          plugin.settings.media.youtubeTranscriptBrowserAuth =
+            value === "chrome" || value === "safari" || value === "firefox"
+              ? value
+              : "none";
+          await plugin.saveSettings();
+        }),
+    );
+
   const youtubeTosSetting = new Setting(containerEl).setName(
     t("settings.media.youtubeTos"),
   );

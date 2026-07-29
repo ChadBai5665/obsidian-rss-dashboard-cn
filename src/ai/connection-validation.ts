@@ -68,7 +68,7 @@ const VALIDATION_PROVIDER_PRESETS = Object.freeze({
   }),
 } as const satisfies Readonly<Record<AiProviderKind, AiProviderPreset>>);
 
-const CONNECTION_KEYS = new Set([
+const REQUIRED_CONNECTION_KEYS = new Set([
   "id",
   "name",
   "providerKind",
@@ -79,6 +79,15 @@ const CONNECTION_KEYS = new Set([
   "maxInputCharacters",
   "enabled",
 ]);
+const OPTIONAL_CONNECTION_KEYS = new Set([
+  "thinkingMode",
+  "reasoningEffort",
+  "responseMode",
+]);
+const CONNECTION_KEYS = new Set([
+  ...REQUIRED_CONNECTION_KEYS,
+  ...OPTIONAL_CONNECTION_KEYS,
+]);
 const SETTINGS_KEYS = new Set(["connections", "defaultConnectionId"]);
 const WHITESPACE = /\s/u;
 const MAX_CONNECTIONS = 1_000;
@@ -87,7 +96,11 @@ export function normalizeAiConnection(
   value: unknown,
 ): AiConnection | undefined {
   const record = plainRecord(value);
-  if (!record || !hasExactOwnDataKeys(record, CONNECTION_KEYS)) {
+  if (
+    !record ||
+    !hasOnlyAllowedOwnDataKeys(record, CONNECTION_KEYS) ||
+    !hasAllOwnDataKeys(record, REQUIRED_CONNECTION_KEYS)
+  ) {
     return undefined;
   }
 
@@ -103,6 +116,21 @@ export function normalizeAiConnection(
   const timeoutMs = ownData(record, "timeoutMs");
   const maxInputCharacters = ownData(record, "maxInputCharacters");
   const enabled = ownData(record, "enabled");
+  const thinkingMode = optionalEnum(
+    record,
+    "thinkingMode",
+    THINKING_MODES,
+  );
+  const reasoningEffort = optionalEnum(
+    record,
+    "reasoningEffort",
+    REASONING_EFFORTS,
+  );
+  const responseMode = optionalEnum(
+    record,
+    "responseMode",
+    RESPONSE_MODES,
+  );
 
   if (
     !id ||
@@ -118,7 +146,10 @@ export function normalizeAiConnection(
     !positiveSafeInteger(maxInputCharacters) ||
     maxInputCharacters < MIN_AI_INPUT_CHARACTERS ||
     maxInputCharacters > MAX_AI_SELECTED_CONTENT_CHARACTERS ||
-    typeof enabled !== "boolean"
+    typeof enabled !== "boolean" ||
+    thinkingMode === null ||
+    reasoningEffort === null ||
+    responseMode === null
   ) {
     return undefined;
   }
@@ -133,7 +164,38 @@ export function normalizeAiConnection(
     timeoutMs,
     maxInputCharacters,
     enabled,
+    ...(thinkingMode ? { thinkingMode } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(responseMode ? { responseMode } : {}),
   };
+}
+
+const THINKING_MODES = new Set([
+  "platform-default",
+  "disabled",
+  "enabled",
+  "adaptive",
+] as const);
+const REASONING_EFFORTS = new Set([
+  "platform-default",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "max",
+] as const);
+const RESPONSE_MODES = new Set(["stream", "complete"] as const);
+
+function optionalEnum<T extends string>(
+  record: Record<string, unknown>,
+  key: string,
+  values: ReadonlySet<T>,
+): T | undefined | null {
+  if (!hasOwnData(record, key)) return undefined;
+  const value = ownData(record, key);
+  return typeof value === "string" && values.has(value as T)
+    ? value as T
+    : null;
 }
 
 export function normalizeAiSettings(value: unknown): AiSettings {
@@ -352,26 +414,6 @@ function plainRecord(value: unknown): Record<string, unknown> | undefined {
   }
 }
 
-function hasExactOwnDataKeys(
-  record: Record<string, unknown>,
-  allowed: ReadonlySet<string>,
-): boolean {
-  try {
-    const keys = Reflect.ownKeys(record);
-    return (
-      keys.length === allowed.size &&
-      keys.every(
-        (key) =>
-          typeof key === "string" &&
-          allowed.has(key) &&
-          hasOwnData(record, key),
-      )
-    );
-  } catch {
-    return false;
-  }
-}
-
 function hasAllowedOwnDataKeys(
   record: Record<string, unknown>,
   allowed: ReadonlySet<string>,
@@ -386,6 +428,33 @@ function hasAllowedOwnDataKeys(
           hasOwnData(record, key),
       ) && hasOwnData(record, "connections")
     );
+  } catch {
+    return false;
+  }
+}
+
+function hasOnlyAllowedOwnDataKeys(
+  record: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+): boolean {
+  try {
+    return Reflect.ownKeys(record).every(
+      (key) =>
+        typeof key === "string" &&
+        allowed.has(key) &&
+        hasOwnData(record, key),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasAllOwnDataKeys(
+  record: Record<string, unknown>,
+  required: ReadonlySet<string>,
+): boolean {
+  try {
+    return [...required].every((key) => hasOwnData(record, key));
   } catch {
     return false;
   }

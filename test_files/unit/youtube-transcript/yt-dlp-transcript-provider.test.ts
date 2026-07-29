@@ -57,6 +57,9 @@ function accessOnly(
   executable: string | undefined,
 ): YtDlpExecutableAccess & ReturnType<typeof vi.fn> {
   return vi.fn(async (path, mode) => {
+    if (mode === constants.R_OK) {
+      throw Object.assign(new Error("not found"), { code: "ENOENT" });
+    }
     expect(mode).toBe(constants.X_OK);
     if (path !== executable) {
       throw Object.assign(new Error("not found"), { code: "ENOENT" });
@@ -92,7 +95,7 @@ describe("YtDlpTranscriptProvider", () => {
     expect(file).toBe("/safe/bin/yt-dlp");
     expect(args).toEqual(FIXED_ARGS);
     expect(options).toEqual({
-      timeout: 20_000,
+      timeout: 45_000,
       maxBuffer: 2_000_000,
       signal: controller.signal,
     });
@@ -126,6 +129,55 @@ describe("YtDlpTranscriptProvider", () => {
 
     expect(runner.execFile).toHaveBeenCalledOnce();
     expect(runner.execFile.mock.calls[0]?.[0]).toBe(executable);
+  });
+
+  it("passes a readable standard CA bundle to yt-dlp without disabling TLS verification", async () => {
+    const runner = runnerReturning(metadata());
+    const certificateFile = "/safe/certifi/cacert.pem";
+    const access = vi.fn<YtDlpExecutableAccess>(async (candidate, mode) => {
+      if (
+        (candidate === "/safe/bin/yt-dlp" && mode === constants.X_OK) ||
+        (candidate === certificateFile && mode === constants.R_OK)
+      ) return;
+      throw Object.assign(new Error("not found"), { code: "ENOENT" });
+    });
+    const provider = new YtDlpTranscriptProvider(transportReturning(""), {
+      runner,
+      access,
+      pathValue: "/safe/bin",
+      homeDirectory: "/Users/tester",
+      certificateFileValue: certificateFile,
+    });
+
+    await provider.listTracks(VIDEO_ID);
+
+    expect(runner.execFile.mock.calls[0]?.[2]).toMatchObject({
+      certificateFile,
+    });
+    expect(runner.execFile.mock.calls[0]?.[1]).not.toContain(
+      "--no-check-certificates",
+    );
+  });
+
+  it("uses browser cookies only after an explicit supported browser choice", async () => {
+    const runner = runnerReturning(metadata());
+    const provider = new YtDlpTranscriptProvider(transportReturning(""), {
+      runner,
+      access: accessOnly("/safe/bin/yt-dlp"),
+      pathValue: "/safe/bin",
+      homeDirectory: "/Users/tester",
+      cookiesFromBrowser: () => "chrome",
+    });
+
+    await provider.listTracks(VIDEO_ID);
+
+    expect(runner.execFile.mock.calls[0]?.[1]).toEqual([
+      ...FIXED_ARGS.slice(0, -2),
+      "--cookies-from-browser",
+      "chrome",
+      "--",
+      WATCH_URL,
+    ]);
   });
 
   it("treats a missing executable as unavailable without running a process", async () => {
@@ -299,7 +351,7 @@ describe("YtDlpTranscriptProvider", () => {
       "too many languages",
       metadata({
         subtitles: Object.fromEntries(
-          Array.from({ length: 101 }, (_, index) => [`x-${index}`, []]),
+          Array.from({ length: 501 }, (_, index) => [`x-${index}`, []]),
         ),
       }),
     ],

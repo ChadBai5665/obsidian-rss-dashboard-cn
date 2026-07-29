@@ -306,7 +306,7 @@ describe("renderAiSettingsTab", () => {
     expect(generate).toHaveBeenCalledWith({
       system: "",
       user: "回复 OK",
-      maxOutputTokens: 8,
+      maxOutputTokens: 32,
       signal: expect.any(AbortSignal),
     });
     expect(test.secretStore.set).not.toHaveBeenCalled();
@@ -744,7 +744,7 @@ describe("renderAiSettingsTab", () => {
     expect(test.generate).toHaveBeenCalledWith({
       system: "",
       user: "回复 OK",
-      maxOutputTokens: 8,
+      maxOutputTokens: 32,
       signal: expect.any(AbortSignal),
     });
     expect(test.containerEl.textContent).toContain("连接成功");

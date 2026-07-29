@@ -1,4 +1,9 @@
 import type { AiConnection } from "../ai-types";
+import {
+  effectiveAiReasoningEffort,
+  effectiveAiResponseMode,
+  effectiveAiThinkingMode,
+} from "../connection-controls";
 import { resolveAiConnectionForRequest } from "../provider-presets";
 import {
   ProviderError,
@@ -46,6 +51,9 @@ interface AnthropicPrivateState {
   apiKey: string;
   baseUrl: string;
   model: string;
+  stream: boolean;
+  thinkingMode: ReturnType<typeof effectiveAiThinkingMode>;
+  reasoningEffort: ReturnType<typeof effectiveAiReasoningEffort>;
 }
 
 interface AnthropicStreamMetadata {
@@ -88,6 +96,9 @@ export class AnthropicMessagesProvider implements TextGenerationProvider {
       apiKey,
       baseUrl: connection.baseUrl,
       model: connection.model,
+      stream: effectiveAiResponseMode(connection) === "stream",
+      thinkingMode: effectiveAiThinkingMode(connection),
+      reasoningEffort: effectiveAiReasoningEffort(connection),
     });
   }
 
@@ -116,13 +127,13 @@ export class AnthropicMessagesProvider implements TextGenerationProvider {
           "anthropic-version": "2023-06-01",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
+        body: JSON.stringify(anthropicRequestBody({
           model: state.model,
           max_tokens: snapshot.maxOutputTokens,
           system: snapshot.system,
           messages: [{ role: "user", content: snapshot.user }],
-          stream: true,
-        }),
+          stream: state.stream,
+        }, state)),
         ...(snapshot.signal ? { signal: snapshot.signal } : {}),
       },
       (chunk) => {
@@ -167,6 +178,19 @@ export class AnthropicMessagesProvider implements TextGenerationProvider {
       metadata.outputTokens,
     );
   }
+}
+
+function anthropicRequestBody(
+  base: Record<string, unknown>,
+  state: AnthropicPrivateState,
+): Record<string, unknown> {
+  if (state.thinkingMode === "adaptive") {
+    base.thinking = { type: "adaptive" };
+  }
+  if (state.reasoningEffort !== "platform-default") {
+    base.output_config = { effort: state.reasoningEffort };
+  }
+  return base;
 }
 
 class AnthropicStreamState {

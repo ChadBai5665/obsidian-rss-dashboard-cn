@@ -127,6 +127,37 @@ describe("renderMediaSettingsTab()", () => {
     expect(vi.mocked(plugin.clearPlaybackProgress)).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps browser cookie access opt-in and persists an explicit choice", async () => {
+    const containerEl = document.body.appendChild(
+      document.createElement("div"),
+    );
+    const settings = cloneSettings();
+    settings.media.youtubeTranscriptBrowserAuth = "none";
+    const plugin = {
+      app: obsidian.App.createMock(),
+      settings,
+      saveSettings: vi.fn(async () => {}),
+      clearPlaybackProgress: vi.fn(async () => 0),
+      getActiveReaderView: vi.fn(async () => null),
+    } as unknown as RssDashboardPlugin;
+
+    renderMediaSettingsTab(containerEl, plugin);
+
+    const setting = getSettingByName(
+      containerEl,
+      "YouTube transcript sign-in",
+    );
+    const select = setting.querySelector("select") as HTMLSelectElement;
+    expect(select.value).toBe("none");
+
+    select.value = "chrome";
+    select.dispatchEvent(new Event("change"));
+    await flushPromises();
+
+    expect(plugin.settings.media.youtubeTranscriptBrowserAuth).toBe("chrome");
+    expect(vi.mocked(plugin.saveSettings)).toHaveBeenCalledOnce();
+  });
+
   it("updates podcast theme and refreshes reader view when available", async () => {
     const containerEl = document.body.appendChild(
       document.createElement("div"),

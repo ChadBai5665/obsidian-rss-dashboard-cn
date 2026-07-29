@@ -412,7 +412,20 @@ function copyAiSettings(value: unknown): Record<string, unknown> {
   const connections: AiConnection[] = entries.map((entry) => {
     const source = objectRecord(entry);
     const snapshot = createRecord();
-    for (const key of ["id", "name", "providerKind", "protocol", "baseUrl", "model", "timeoutMs", "maxInputCharacters", "enabled"] as const) {
+    for (const key of [
+      "id",
+      "name",
+      "providerKind",
+      "protocol",
+      "baseUrl",
+      "model",
+      "timeoutMs",
+      "maxInputCharacters",
+      "enabled",
+      "thinkingMode",
+      "reasoningEffort",
+      "responseMode",
+    ] as const) {
       copyOwnDataIfPresent(source, snapshot, key);
     }
     const normalized = normalizeAiConnection(snapshot);
@@ -501,6 +514,7 @@ function copyMediaSettings(value: unknown): Record<string, unknown> {
     copyStringArray(input, output, field, 256);
   }
   copyEnum(input, output, "podcastTheme", new Set(["obsidian", "minimal", "gradient", "spotify", "nord", "dracula", "solarized", "catppuccin", "gruvbox", "tokyonight"]));
+  copyEnum(input, output, "youtubeTranscriptBrowserAuth", new Set(["none", "chrome", "safari", "firefox"]));
   copyInteger(input, output, "defaultPlaySpeed", 1, 10);
   return output;
 }

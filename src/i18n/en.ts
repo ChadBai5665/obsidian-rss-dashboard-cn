@@ -179,6 +179,9 @@ export const en = {
   "settings.media.themeSolarizedDark": "Solarized dark",
   "settings.media.themeTokyoNight": "Tokyo night",
   "settings.media.services": "Third-party services",
+  "settings.media.youtubeTranscriptBrowserAuth": "YouTube transcript sign-in",
+  "settings.media.youtubeTranscriptBrowserAuthDesc": "Browser sign-in data is not read by default. If YouTube requests bot verification, explicitly choose a signed-in browser. The local yt-dlp process reads that browser's cookies only when you request a transcript; the plugin does not copy or store them.",
+  "settings.media.youtubeTranscriptBrowserNone": "Do not read browser data (default)",
   "settings.media.youtubeTos": "YouTube terms of service",
   "settings.media.youtubeTosDesc": "This plugin uses the YouTube IFrame API for video playback. By using this feature, you agree to be bound by the ",
 
@@ -554,6 +557,27 @@ export const en = {
   "settings.ai.modelDefaultPlaceholder": "Leave blank to use default model: {model}",
   "settings.ai.modelRequiredDesc": "Required. Compatible relays do not have a shared default model.",
   "settings.ai.modelRequiredPlaceholder": "Enter a model ID",
+  "settings.ai.thinkingMode": "Thinking mode",
+  "settings.ai.thinkingModeDesc":
+    "Uses only controls supported by the selected platform. Providers that default to disabled return final text directly with less latency and overhead.",
+  "settings.ai.thinkingMode.platform-default": "Platform default",
+  "settings.ai.thinkingMode.disabled": "Thinking off",
+  "settings.ai.thinkingMode.enabled": "Thinking on",
+  "settings.ai.thinkingMode.adaptive": "Adaptive thinking",
+  "settings.ai.reasoningEffort": "Thinking depth",
+  "settings.ai.reasoningEffortDesc":
+    "Shown only when supported by the platform and thinking mode. Unsupported model-specific values return an explicit provider error.",
+  "settings.ai.reasoningEffort.platform-default": "Platform default",
+  "settings.ai.reasoningEffort.minimal": "Minimal",
+  "settings.ai.reasoningEffort.low": "Low",
+  "settings.ai.reasoningEffort.medium": "Medium",
+  "settings.ai.reasoningEffort.high": "High",
+  "settings.ai.reasoningEffort.max": "Maximum",
+  "settings.ai.responseMode": "Response mode",
+  "settings.ai.responseModeDesc":
+    "Streaming shows text as it arrives. Complete mode waits for one full provider response.",
+  "settings.ai.responseModeStream": "Streaming",
+  "settings.ai.responseModeComplete": "Complete response",
   "settings.ai.apiKey": "API key",
   "settings.ai.apiKeyDesc":
     "You can test the values entered here first. The key is written to external desktop secret storage only after you select Save.",
@@ -623,7 +647,7 @@ export const en = {
   "settings.ai.connectionFailed": "The connection test failed.",
   "settings.ai.confirmTestTitle": "Confirm a potentially billable test",
   "settings.ai.confirmTestDesc":
-    "Testing {name} sends exactly one minimal request asking it to reply OK. The provider or relay may charge for it. Continue?",
+    "Testing {name} sends exactly one minimal request asking it to reply OK. The test temporarily disables thinking and uses a complete response so reasoning tokens are not misreported as a failure. The provider or relay may still charge for it. Continue?",
   "settings.ai.confirmDeleteKeyTitle": "Delete API key",
   "settings.ai.confirmDeleteKeyDesc":
     "Delete the external key for {name}? The connection metadata will remain.",

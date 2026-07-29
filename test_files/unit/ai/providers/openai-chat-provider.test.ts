@@ -83,13 +83,13 @@ function harness(
 
 describe("OpenAI-compatible streaming provider", () => {
   it.each([
-    ["openai", "https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions"],
-    ["kimi", "https://api.moonshot.cn/v1", "https://api.moonshot.cn/v1/chat/completions"],
-    ["deepseek", "https://api.deepseek.com", "https://api.deepseek.com/chat/completions"],
-    ["qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"],
-    ["glm", "https://open.bigmodel.cn/api/paas/v4", "https://open.bigmodel.cn/api/paas/v4/chat/completions"],
-    ["openai-compatible", "https://relay.example.com/v1", "https://relay.example.com/v1/chat/completions"],
-  ] as const)("sends one narrow streaming request to %s", async (providerKind, baseUrl, expectedUrl) => {
+    ["openai", "https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions", { reasoning_effort: "none" }],
+    ["kimi", "https://api.moonshot.cn/v1", "https://api.moonshot.cn/v1/chat/completions", {}],
+    ["deepseek", "https://api.deepseek.com", "https://api.deepseek.com/chat/completions", { thinking: { type: "disabled" } }],
+    ["qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", { enable_thinking: false }],
+    ["glm", "https://open.bigmodel.cn/api/paas/v4", "https://open.bigmodel.cn/api/paas/v4/chat/completions", { thinking: { type: "disabled" } }],
+    ["openai-compatible", "https://relay.example.com/v1", "https://relay.example.com/v1/chat/completions", { thinking: { type: "disabled" } }],
+  ] as const)("sends one narrow streaming request to %s", async (providerKind, baseUrl, expectedUrl, controls) => {
     const test = harness(successJson(), { providerKind, baseUrl });
     const controller = new AbortController();
 
@@ -112,6 +112,7 @@ describe("OpenAI-compatible streaming provider", () => {
       ],
       stream: true,
       max_tokens: 512,
+      ...controls,
     });
     expect(body).not.toHaveProperty("stream_options");
   });
@@ -145,6 +146,71 @@ describe("OpenAI-compatible streaming provider", () => {
     expect(deltas.join("")).toBe("第一段🙂");
     expect(deltas.join("")).not.toContain("hidden");
     expect(test.transport).toHaveBeenCalledOnce();
+  });
+
+  it("accepts a provider finish_reason without a trailing DONE sentinel", async () => {
+    const transport = streamTransport([
+      event({ choices: [{ index: 0, delta: { content: "MiniMax 正常结果" }, finish_reason: null }] }) +
+      event({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+    ]);
+
+    await expect(harness(transport, {
+      providerKind: "minimax-cn",
+      baseUrl: "https://api.minimaxi.com/v1",
+      model: "MiniMax-M3",
+    }, false, true).provider.generate({
+      system: "s",
+      user: "u",
+      maxOutputTokens: 32,
+    })).resolves.toMatchObject({ text: "MiniMax 正常结果" });
+  });
+
+  it("sends configured thinking depth and complete-response controls", async () => {
+    const test = harness(successJson(), {
+      providerKind: "deepseek",
+      baseUrl: "https://api.deepseek.com",
+      model: "deepseek-v4-pro",
+      thinkingMode: "enabled",
+      reasoningEffort: "max",
+      responseMode: "complete",
+    });
+
+    await expect(test.provider.generate({
+      system: "s",
+      user: "u",
+      maxOutputTokens: 64,
+    })).resolves.toMatchObject({ text: "JSON 结果" });
+
+    expect(JSON.parse(test.requests[0]?.body ?? "{}")).toMatchObject({
+      stream: false,
+      thinking: { type: "enabled" },
+      reasoning_effort: "max",
+    });
+  });
+
+  it("keeps Kimi thinking model-specific while allowing K3 effort control", async () => {
+    const test = harness(successJson(), {
+      providerKind: "kimi",
+      baseUrl: "https://api.moonshot.cn/v1",
+      model: "kimi-k3",
+      thinkingMode: "platform-default",
+      reasoningEffort: "high",
+      responseMode: "complete",
+    });
+
+    await test.provider.generate({
+      system: "s",
+      user: "u",
+      maxOutputTokens: 64,
+    });
+
+    expect(JSON.parse(test.requests[0]?.body ?? "{}")).toMatchObject({
+      stream: false,
+      reasoning_effort: "high",
+    });
+    expect(JSON.parse(test.requests[0]?.body ?? "{}")).not.toHaveProperty(
+      "thinking",
+    );
   });
 
   it("keeps arbitrary byte fragmentation and UTF-8 splits in protocol order", async () => {

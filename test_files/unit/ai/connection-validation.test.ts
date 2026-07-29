@@ -91,6 +91,23 @@ describe("AI connection validation", () => {
     ).toBeUndefined();
   });
 
+  it("accepts legacy records and validates optional thinking and response controls", () => {
+    expect(normalizeAiConnection(connection())).toEqual(connection());
+    expect(normalizeAiConnection(connection({
+      thinkingMode: "enabled",
+      reasoningEffort: "high",
+      responseMode: "complete",
+    }))).toMatchObject({
+      thinkingMode: "enabled",
+      reasoningEffort: "high",
+      responseMode: "complete",
+    });
+    expect(normalizeAiConnection(connection({ thinkingMode: "invented" })))
+      .toBeUndefined();
+    expect(normalizeAiConnection(connection({ responseMode: "chunks" })))
+      .toBeUndefined();
+  });
+
   it.each(["model\nheader", "model\u0000secret", "model\u0085next"])(
     "rejects invalid model id %j",
     (model) => {

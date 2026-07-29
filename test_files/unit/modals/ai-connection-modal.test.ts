@@ -97,10 +97,10 @@ describe("AiConnectionModal", () => {
     );
     expect(
       modal.contentEl.querySelectorAll(".rss-dashboard-form-field"),
-    ).toHaveLength(7);
+    ).toHaveLength(10);
     expect(
       modal.contentEl.querySelectorAll(".rss-dashboard-ai-connection-field"),
-    ).toHaveLength(7);
+    ).toHaveLength(10);
     expect(
       modal.contentEl.querySelectorAll(".rss-dashboard-form-actions"),
     ).toHaveLength(1);
@@ -175,6 +175,43 @@ describe("AiConnectionModal", () => {
       providerKind: "minimax-cn",
       baseUrl: "https://api.minimaxi.com/v1",
       model: "",
+    }));
+  });
+
+  it("shows platform-specific thinking controls and persists response mode", async () => {
+    const { modal, onSave } = harness();
+    setInput(modal, "连接名称", "DeepSeek 分析");
+    const provider = setting(modal, "服务商或兼容接口")
+      .querySelector<HTMLSelectElement>("select")!;
+    provider.value = "deepseek";
+    provider.dispatchEvent(new Event("change"));
+
+    const thinking = setting(modal, "思考模式")
+      .querySelector<HTMLSelectElement>("select")!;
+    expect(Array.from(thinking.options).map(({ value }) => value))
+      .toEqual(["disabled", "enabled"]);
+    expect(setting(modal, "思考深度").hidden).toBe(true);
+    expect(setting(modal, "思考深度").style.display).toBe("none");
+
+    thinking.value = "enabled";
+    thinking.dispatchEvent(new Event("change"));
+    expect(setting(modal, "思考深度").hidden).toBe(false);
+    expect(setting(modal, "思考深度").style.display).toBe("");
+    const effort = setting(modal, "思考深度")
+      .querySelector<HTMLSelectElement>("select")!;
+    effort.value = "max";
+    effort.dispatchEvent(new Event("change"));
+    const response = setting(modal, "返回方式")
+      .querySelector<HTMLSelectElement>("select")!;
+    response.value = "complete";
+    response.dispatchEvent(new Event("change"));
+
+    button(modal, "保存").click();
+    await flushPromises();
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      thinkingMode: "enabled",
+      reasoningEffort: "max",
+      responseMode: "complete",
     }));
   });
 

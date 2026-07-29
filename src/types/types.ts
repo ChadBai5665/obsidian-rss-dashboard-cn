@@ -223,9 +223,16 @@ export type PodcastTheme =
   | "gruvbox"
   | "tokyonight";
 
+export type YouTubeTranscriptBrowserAuth =
+  | "none"
+  | "chrome"
+  | "safari"
+  | "firefox";
+
 export interface MediaSettings {
   autoTagVideos: boolean;
   rememberPlaybackProgress: boolean;
+  youtubeTranscriptBrowserAuth?: YouTubeTranscriptBrowserAuth;
   defaultTwitterFolder: string;
   defaultMastodonFolder: string;
   defaultYouTubeFolder: string;
@@ -689,6 +696,7 @@ export const DEFAULT_SETTINGS: RssDashboardSettings = {
   media: {
     autoTagVideos: true,
     rememberPlaybackProgress: true,
+    youtubeTranscriptBrowserAuth: "none",
     defaultTwitterFolder: "Twitter",
     defaultMastodonFolder: "Mastodon",
     defaultYouTubeFolder: "Videos",

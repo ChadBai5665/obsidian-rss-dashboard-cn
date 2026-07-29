@@ -177,6 +177,9 @@ export const zhCN = {
   "settings.media.themeSolarizedDark": "Solarized 深色",
   "settings.media.themeTokyoNight": "Tokyo Night",
   "settings.media.services": "第三方服务",
+  "settings.media.youtubeTranscriptBrowserAuth": "YouTube 字幕登录方式",
+  "settings.media.youtubeTranscriptBrowserAuthDesc": "默认不读取浏览器登录信息。若 YouTube 提示机器人验证，可明确选择已登录的浏览器；插件只在你点击获取字幕时让本机 yt-dlp 读取该浏览器的 Cookie，不会复制或保存 Cookie。",
+  "settings.media.youtubeTranscriptBrowserNone": "不读取浏览器（默认）",
   "settings.media.youtubeTos": "YouTube 服务条款",
   "settings.media.youtubeTosDesc": "本插件使用 YouTube IFrame API 播放视频。使用此功能即表示你同意遵守 ",
 
@@ -551,6 +554,27 @@ export const zhCN = {
   "settings.ai.modelDefaultPlaceholder": "留空使用默认模型：{model}",
   "settings.ai.modelRequiredDesc": "必填。兼容中转站没有统一默认模型。",
   "settings.ai.modelRequiredPlaceholder": "请输入模型 ID",
+  "settings.ai.thinkingMode": "思考模式",
+  "settings.ai.thinkingModeDesc":
+    "按当前平台支持的方式控制。默认关闭的平台会直接返回正文，减少延迟和额外消耗。",
+  "settings.ai.thinkingMode.platform-default": "跟随平台默认",
+  "settings.ai.thinkingMode.disabled": "关闭思考",
+  "settings.ai.thinkingMode.enabled": "开启思考",
+  "settings.ai.thinkingMode.adaptive": "自适应思考",
+  "settings.ai.reasoningEffort": "思考深度",
+  "settings.ai.reasoningEffortDesc":
+    "仅在平台和当前思考模式支持时生效；模型不支持该档位时会返回明确错误。",
+  "settings.ai.reasoningEffort.platform-default": "跟随平台默认",
+  "settings.ai.reasoningEffort.minimal": "极低",
+  "settings.ai.reasoningEffort.low": "低",
+  "settings.ai.reasoningEffort.medium": "中",
+  "settings.ai.reasoningEffort.high": "高",
+  "settings.ai.reasoningEffort.max": "最高",
+  "settings.ai.responseMode": "返回方式",
+  "settings.ai.responseModeDesc":
+    "流式会边生成边显示；非流式会等待服务商返回完整结果后一次显示。",
+  "settings.ai.responseModeStream": "流式返回",
+  "settings.ai.responseModeComplete": "非流式返回",
   "settings.ai.apiKey": "API 密钥",
   "settings.ai.apiKeyDesc":
     "可先在本窗口测试当前填写内容；只有点击“保存”后，密钥才会写入桌面端外部密钥文件。",
@@ -616,7 +640,7 @@ export const zhCN = {
   "settings.ai.connectionFailed": "连接测试失败。",
   "settings.ai.confirmTestTitle": "确认可能产生费用的测试",
   "settings.ai.confirmTestDesc":
-    "测试“{name}”会发送且只发送 1 次最小请求，请模型“回复 OK”；服务商或中转站可能收费，是否继续？",
+    "测试“{name}”会发送且只发送 1 次最小请求，请模型“回复 OK”。测试会临时关闭思考并使用非流式返回，避免把思考额度误判成失败；服务商或中转站仍可能收费，是否继续？",
   "settings.ai.confirmDeleteKeyTitle": "删除 API 密钥",
   "settings.ai.confirmDeleteKeyDesc": "删除“{name}”的外部密钥？连接元数据会保留。",
   "settings.ai.confirmDeleteConnectionTitle": "删除 AI 连接",

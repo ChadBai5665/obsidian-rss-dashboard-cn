@@ -23,7 +23,12 @@ export interface ExecutableRunner {
   execFile(
     file: string,
     args: readonly string[],
-    options: { timeout: number; maxBuffer: number; signal?: AbortSignal },
+    options: {
+      timeout: number;
+      maxBuffer: number;
+      signal?: AbortSignal;
+      certificateFile?: string;
+    },
   ): Promise<{ stdout: string; stderr: string }>;
 }
 
@@ -37,6 +42,8 @@ export interface YtDlpTranscriptProviderOptions {
   access?: YtDlpExecutableAccess;
   pathValue?: string;
   homeDirectory?: string;
+  certificateFileValue?: string;
+  cookiesFromBrowser?: () => "chrome" | "safari" | "firefox" | undefined;
 }
 
 interface RegisteredTrack {
@@ -56,14 +63,19 @@ const FIXED_ARGUMENTS_PREFIX = Object.freeze([
   "15",
   "--",
 ] as const);
-const EXECUTION_TIMEOUT_MS = 20_000;
+// Browser-cookie extraction can require a macOS keychain round trip before the
+// normal network request. Keep this user-initiated fallback bounded, but do not
+// abort it at the former 20-second boundary while YouTube is still responding.
+const EXECUTION_TIMEOUT_MS = 45_000;
 const MAX_PROCESS_BUFFER_BYTES = 2_000_000;
 const MAX_METADATA_BYTES = 2_000_000;
 const MAX_CAPTION_RESPONSE_BYTES = 2_000_000;
 const CAPTION_ACTION_DEADLINE_MS = 20_000;
 const MAX_REDIRECTS = 3;
 const MAX_URL_CHARACTERS = 8_192;
-const MAX_LANGUAGES_PER_KIND = 100;
+// yt-dlp exposes YouTube's translated automatic-caption variants as separate
+// language keys; current public videos can legitimately exceed 300 entries.
+const MAX_LANGUAGES_PER_KIND = 500;
 const MAX_FORMATS_PER_LANGUAGE = 50;
 const MAX_LANGUAGE_CODE_CHARACTERS = 64;
 const MAX_LANGUAGE_NAME_CHARACTERS = 200;
@@ -77,7 +89,12 @@ const defaultRunner: ExecutableRunner = Object.freeze({
   execFile(
     file: string,
     args: readonly string[],
-    options: { timeout: number; maxBuffer: number; signal?: AbortSignal },
+    options: {
+      timeout: number;
+      maxBuffer: number;
+      signal?: AbortSignal;
+      certificateFile?: string;
+    },
   ): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       nodeExecFile(
@@ -89,6 +106,9 @@ const defaultRunner: ExecutableRunner = Object.freeze({
           windowsHide: true,
           timeout: options.timeout,
           maxBuffer: options.maxBuffer,
+          ...(options.certificateFile
+            ? { env: { ...env, SSL_CERT_FILE: options.certificateFile } }
+            : {}),
           ...(options.signal === undefined ? {} : { signal: options.signal }),
         },
         (error, stdout, stderr) => {
@@ -181,6 +201,12 @@ export class YtDlpTranscriptProvider {
   private readonly access: YtDlpExecutableAccess;
   private readonly pathValue: string;
   private readonly homeDirectory: string;
+  private readonly certificateFileValue: string;
+  private readonly cookiesFromBrowser: () =>
+    | "chrome"
+    | "safari"
+    | "firefox"
+    | undefined;
   private readonly registeredTracks = new WeakMap<
     YouTubeCaptionTrack,
     RegisteredTrack
@@ -194,6 +220,9 @@ export class YtDlpTranscriptProvider {
     this.access = options.access ?? nodeAccess;
     this.pathValue = options.pathValue ?? env.PATH ?? "";
     this.homeDirectory = options.homeDirectory ?? homedir();
+    this.certificateFileValue = options.certificateFileValue ??
+      env.SSL_CERT_FILE ?? "";
+    this.cookiesFromBrowser = options.cookiesFromBrowser ?? (() => undefined);
   }
 
   async isAvailable(): Promise<boolean> {
@@ -211,14 +240,27 @@ export class YtDlpTranscriptProvider {
       const executable = await this.discoverExecutable();
       assertNotAborted(signal);
       if (!executable) throw stableError("temporarily-unavailable");
+      const certificateFile = await this.discoverCertificateFile();
+      assertNotAborted(signal);
+      const browser = this.cookiesFromBrowser();
+      const args = browser === undefined
+        ? [...FIXED_ARGUMENTS_PREFIX, `${WATCH_URL_PREFIX}${videoId}`]
+        : [
+            ...FIXED_ARGUMENTS_PREFIX.slice(0, -1),
+            "--cookies-from-browser",
+            browser,
+            "--",
+            `${WATCH_URL_PREFIX}${videoId}`,
+          ];
 
       let execution: { stdout: string; stderr: string } | undefined =
         await this.runner.execFile(
           executable,
-          [...FIXED_ARGUMENTS_PREFIX, `${WATCH_URL_PREFIX}${videoId}`],
+          args,
           {
             timeout: EXECUTION_TIMEOUT_MS,
             maxBuffer: MAX_PROCESS_BUFFER_BYTES,
+            ...(certificateFile ? { certificateFile } : {}),
             ...(signal === undefined ? {} : { signal }),
           },
         );
@@ -292,6 +334,18 @@ export class YtDlpTranscriptProvider {
     }
     return undefined;
   }
+
+  private async discoverCertificateFile(): Promise<string | undefined> {
+    for (const candidate of certificateCandidates(this.certificateFileValue)) {
+      try {
+        await this.access(candidate, constants.R_OK);
+        return candidate;
+      } catch {
+        // Fall through to the next standard trust-store location.
+      }
+    }
+    return undefined;
+  }
 }
 
 function executableCandidates(
@@ -310,6 +364,25 @@ function executableCandidates(
     "/usr/local/bin/yt-dlp",
     path.join(homeDirectory, ".local/bin/yt-dlp"),
   );
+  return Object.freeze([...new Set(candidates)]);
+}
+
+function certificateCandidates(configured: string): readonly string[] {
+  const candidates: string[] = [];
+  if (configured && path.isAbsolute(configured) && !configured.includes("\0")) {
+    candidates.push(configured);
+  }
+  candidates.push(
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/opt/homebrew/etc/openssl@3/cert.pem",
+    "/usr/local/etc/openssl@3/cert.pem",
+  );
+  for (const version of ["3.14", "3.13", "3.12", "3.11", "3.10", "3.9"]) {
+    candidates.push(
+      `/Library/Frameworks/Python.framework/Versions/${version}/lib/python${version}/site-packages/certifi/cacert.pem`,
+    );
+  }
   return Object.freeze([...new Set(candidates)]);
 }
 

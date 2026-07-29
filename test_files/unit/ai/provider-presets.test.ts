@@ -66,6 +66,9 @@ describe("AI provider presets", () => {
       timeoutMs: 60_000,
       maxInputCharacters: 80_000,
       enabled: true,
+      thinkingMode: "platform-default",
+      reasoningEffort: "platform-default",
+      responseMode: "stream",
     });
     expect(getAiProviderPreset("kimi")?.baseUrl).toBe(
       "https://api.moonshot.cn/v1",

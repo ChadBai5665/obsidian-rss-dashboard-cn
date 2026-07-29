@@ -1331,7 +1331,16 @@ export default class RssDashboardPlugin extends Plugin {
     const transport = createRuntimeTranscriptHttpTransport();
     const innerTube = new InnerTubeTranscriptProvider(transport);
     const ytDlp = Platform.isDesktopApp
-      ? new YtDlpTranscriptProvider(transport)
+      ? new YtDlpTranscriptProvider(transport, {
+          cookiesFromBrowser: () => {
+            const browser = this.settings.media.youtubeTranscriptBrowserAuth;
+            return browser === "chrome" ||
+              browser === "safari" ||
+              browser === "firefox"
+              ? browser
+              : undefined;
+          },
+        })
       : {
           isAvailable: async () => false,
           listTracks: async () => [],
