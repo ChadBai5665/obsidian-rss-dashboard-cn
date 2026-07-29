@@ -14,6 +14,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
+  assertTikHubRawFixtureSafe,
   assertTikHubFixtureSanitized,
   sanitizeTikHubFixture,
 } from "./sanitize-tikhub-fixture.mjs";
@@ -66,6 +67,7 @@ export async function captureTikHubFixtures(options) {
   const sanitizedFixtures = [];
   for (let index = 0; index < requests.length; index += 1) {
     const raw = await fetchFixture(fetchImpl, requests[index], apiKey, index + 1);
+    assertTikHubRawFixtureSafe(raw);
     const sanitized = sanitizeTikHubFixture(raw, { handle, query });
     assertTikHubFixtureSanitized(sanitized, { apiKey, handle, query });
     sanitizedFixtures.push(sanitized);

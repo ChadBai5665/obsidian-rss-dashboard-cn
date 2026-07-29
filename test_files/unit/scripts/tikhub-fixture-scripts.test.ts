@@ -543,12 +543,60 @@ describe("captureTikHubFixtures", () => {
   });
 });
 
+describe("TikHub raw capture fixture safety", () => {
+  for (const prohibitedField of [
+    "Authorization",
+    "raw_response",
+    "raw_payload",
+  ]) {
+    it(`rejects a nested ${prohibitedField} field before sanitizing or creating fixtures`, async () => {
+      const root = await temporaryDirectory();
+      const destinationDir = join(root, "fixtures", "tikhub");
+      const logs: string[] = [];
+      const raw = Object.assign(candidateFixture("capture"), {
+        nested: [{ [prohibitedField]: candidateFixture("private") }],
+      });
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify(raw), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      );
+
+      const captureInput = {
+        apiKey: ["fixture", "key"].join("-"),
+        handle: "fixture_ai",
+        query: "fixture topic",
+        cwd: root,
+        destinationDir,
+        fetchImpl,
+        isDestinationDirty: async () => false,
+        log: (message: string) => logs.push(message),
+      };
+      const error = await captureTikHubFixtures(captureInput).catch(
+        (caught: unknown) => caught,
+      );
+
+      expect(String(error)).toBe(
+        "Error: TikHub fixture response contains prohibited raw data.",
+      );
+      expect(String(error)).not.toContain(captureInput.apiKey);
+      expect(String(error)).not.toContain("private");
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(logs).toEqual([]);
+      await expect(readdir(destinationDir)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+  }
+});
+
 describe("TikHub fixture copy-on-write activation", () => {
   it("rejects Authorization values before creating files", async () => {
     const root = await temporaryDirectory();
     const destinationDir = join(root, "live");
+    const authorizationField = ["Author", "ization"].join("");
     const authorizationBearingFixture = Object.assign(candidateFixture("9"), {
-      Authorization: "Bearer sanitized-test-value",
+      [authorizationField]: "fixture",
     });
 
     await expect(
@@ -573,6 +621,23 @@ describe("TikHub fixture copy-on-write activation", () => {
         rawProviderResponse,
         candidateFixture("14"),
         candidateFixture("15"),
+      ]),
+    ).rejects.toThrow("TikHub fixture sanitization verification failed.");
+    await expect(readdir(destinationDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects raw provider payload wrappers before creating files", async () => {
+    const root = await temporaryDirectory();
+    const destinationDir = join(root, "live");
+    const rawProviderPayload = Object.assign(candidateFixture("16"), {
+      raw_payload: candidateFixture("17"),
+    });
+
+    await expect(
+      writeTikHubFixtureSet(destinationDir, [
+        rawProviderPayload,
+        candidateFixture("18"),
+        candidateFixture("19"),
       ]),
     ).rejects.toThrow("TikHub fixture sanitization verification failed.");
     await expect(readdir(destinationDir)).rejects.toMatchObject({ code: "ENOENT" });
