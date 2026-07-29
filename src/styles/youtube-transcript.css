@@ -41,7 +41,10 @@
 }
 
 .rss-reader-view .rss-youtube-transcript-meta,
-.rss-reader-view .rss-youtube-transcript-status {
+.rss-reader-view .rss-youtube-transcript-status,
+.rss-reader-view .rss-youtube-transcript-source,
+.rss-reader-view .rss-youtube-transcript-cost-warning,
+.rss-reader-view .rss-youtube-transcript-usage {
   margin: 0;
   color: var(--text-muted);
   font-size: var(--font-ui-small);
@@ -49,6 +52,10 @@
 
 .rss-reader-view .rss-youtube-transcript-error {
   color: var(--text-error);
+}
+
+.rss-reader-view .rss-youtube-transcript-cost-warning {
+  color: var(--text-warning);
 }
 
 .rss-reader-view .rss-youtube-transcript-details {
@@ -79,7 +86,7 @@
   white-space: normal;
 }
 
-@media (max-width: 700px) {
+@media (max-width: 720px) {
   .rss-reader-view .rss-youtube-transcript-header,
   .rss-reader-view .rss-youtube-transcript-actions,
   .rss-reader-view .rss-youtube-transcript-languages {
@@ -89,6 +96,10 @@
 
   .rss-reader-view .rss-youtube-transcript-actions > button,
   .rss-reader-view .rss-youtube-transcript-languages > button {
+    width: 100%;
+  }
+
+  .rss-reader-view .rss-youtube-transcript-actions > .rss-youtube-transcript-cost-warning {
     width: 100%;
   }
 }

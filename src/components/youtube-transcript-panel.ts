@@ -6,6 +6,10 @@ import {
   type YouTubeTranscriptRequest,
   type YouTubeTranscriptServiceResult,
 } from "../youtube-transcript/youtube-transcript-service";
+import type {
+  YouTubeTranscriptProgress,
+  YouTubeTranscriptProvider,
+} from "../youtube-transcript/transcript-types";
 
 export interface YouTubeTranscriptPanelService {
   get(request: YouTubeTranscriptRequest): Promise<YouTubeTranscriptServiceResult>;
@@ -23,6 +27,7 @@ export interface YouTubeTranscriptPanelRuntime {
 export interface YouTubeTranscriptRuntimeOptions {
   resolveRuntime(): YouTubeTranscriptPanelRuntime;
   openExternalUrl?: (url: string) => void;
+  openTikHubSettings?: () => void | Promise<void>;
 }
 
 export interface YouTubeTranscriptPanelController {
@@ -41,6 +46,7 @@ export interface YouTubeTranscriptPanelOptions {
   request: Omit<YouTubeTranscriptRequest, "refresh" | "trackId" | "signal">;
   resolveRuntime: () => YouTubeTranscriptPanelRuntime;
   openExternal: (url: string) => void;
+  openTikHubSettings?: () => void | Promise<void>;
   onReady?: (content: YouTubeTranscriptCachedItemContent) => void;
 }
 
@@ -58,12 +64,25 @@ type PanelState =
   | "login-required"
   | "unavailable"
   | "timeout"
+  | "tikhub-processing"
+  | "tikhub-invalid-key"
+  | "tikhub-missing-key"
+  | "tikhub-insufficient-balance"
+  | "tikhub-budget-unavailable"
+  | "tikhub-rate-limited"
+  | "tikhub-job-expired"
+  | "tikhub-malformed-response"
   | "aborted"
   | "destroyed";
 
 type StatusTranslationKey =
   | "transcript.status.checking"
   | "transcript.status.fetching"
+  | "transcript.status.tryingInnerTube"
+  | "transcript.status.tryingTikHub"
+  | "transcript.status.waitingTikHub"
+  | "transcript.status.tryingYtDlp"
+  | "transcript.status.saving"
   | "transcript.status.aborted"
   | "transcript.error.noCaptions"
   | "transcript.error.fallbackUnavailable"
@@ -88,6 +107,22 @@ type PanelSnapshot =
       kind: "ready";
       content: YouTubeTranscriptCachedItemContent;
       state: "cached" | undefined;
+      freshTikHubUsage: 0 | 1 | 2;
+    }
+  | {
+      kind: "tikhub-failure";
+      code: Extract<
+        PanelState,
+        | "tikhub-processing"
+        | "tikhub-invalid-key"
+        | "tikhub-missing-key"
+        | "tikhub-insufficient-balance"
+        | "tikhub-budget-unavailable"
+        | "tikhub-rate-limited"
+        | "tikhub-job-expired"
+        | "tikhub-malformed-response"
+      >;
+      possiblySent: boolean;
     };
 
 /** Compact, non-modal UI for one explicit YouTube transcript action. */
@@ -221,6 +256,7 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
         ...(request.refresh === undefined ? {} : { refresh: request.refresh }),
         ...(request.trackId === undefined ? {} : { trackId: request.trackId }),
         signal: controller.signal,
+        onProgress: (progress) => this.onProgress(runtime, operation, progress),
       });
       if (!this.confirmRuntime(runtime, operation)) return;
       this.activeController = null;
@@ -238,7 +274,13 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
   ): void {
     if (result.status === "ready") {
       this.choiceLease = null;
-      this.renderReady(result.content, result.source === "cache" ? "cached" : undefined);
+      this.renderReady(
+        result.content,
+        result.source === "cache" ? "cached" : undefined,
+        true,
+        true,
+        result.source === "fresh" ? result.usage?.tikhubPaidRequests ?? 0 : 0,
+      );
       return;
     }
     this.revokeChoiceLease();
@@ -277,12 +319,15 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     state: "cached" | undefined,
     notify = true,
     remember = true,
+    freshTikHubUsage: 0 | 1 | 2 = 0,
   ): void {
     if (!this.matchesRequest(content)) {
       this.renderError(new YouTubeTranscriptServiceError("temporarily-unavailable"));
       return;
     }
-    if (remember) this.snapshot = { kind: "ready", content, state };
+    if (remember) {
+      this.snapshot = { kind: "ready", content, state, freshTikHubUsage };
+    }
     this.prepare(state ?? (content.isGenerated ? "complete-auto" : "complete-manual"));
     const header = this.dom.createElement("div");
     header.className = "rss-youtube-transcript-header";
@@ -293,6 +338,10 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
       content.isGenerated ? "transcript.kind.generated" : "transcript.kind.manual",
     );
     header.appendChild(badge);
+    const provider = this.dom.createElement("span");
+    provider.className = "rss-youtube-transcript-badge rss-youtube-transcript-provider";
+    provider.textContent = this.providerName(content.provider);
+    header.appendChild(provider);
     this.root.appendChild(header);
 
     const meta = this.dom.createElement("div");
@@ -303,6 +352,10 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
       : fetched.toLocaleString(this.locale);
     meta.textContent = this.t("transcript.meta", {
       language: content.languageName,
+      kind: this.t(
+        content.isGenerated ? "transcript.kind.generated" : "transcript.kind.manual",
+      ),
+      source: this.providerName(content.provider),
       time: fetchedText,
     });
     this.root.appendChild(meta);
@@ -321,6 +374,10 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
 
     const actions = this.dom.createElement("div");
     actions.className = "rss-youtube-transcript-actions";
+    const refreshWarning = this.dom.createElement("p");
+    refreshWarning.className = "rss-youtube-transcript-cost-warning";
+    refreshWarning.textContent = this.t("transcript.cost.refreshWarning");
+    actions.appendChild(refreshWarning);
     const refresh = this.actionButton(
       this.t("transcript.refresh"),
       "rss-youtube-transcript-refresh",
@@ -338,6 +395,15 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     });
     actions.appendChild(external);
     this.root.appendChild(actions);
+    if (freshTikHubUsage > 0) {
+      const usage = this.dom.createElement("p");
+      usage.className = "rss-youtube-transcript-usage";
+      usage.textContent = this.t("transcript.cost.confirmedUsage", {
+        count: freshTikHubUsage,
+        cost: freshTikHubUsage === 1 ? "$0.008" : "$0.016",
+      });
+      this.root.appendChild(usage);
+    }
     if (notify) this.options.onReady?.(content);
   }
 
@@ -354,9 +420,14 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
   }
 
   private renderError(error: unknown): void {
-    const code = error instanceof YouTubeTranscriptServiceError
-      ? error.code
-      : "temporarily-unavailable";
+    const serviceError = error instanceof YouTubeTranscriptServiceError
+      ? error
+      : undefined;
+    const code = serviceError?.code ?? "temporarily-unavailable";
+    if (isTikHubPanelState(code)) {
+      this.renderTikHubFailure(code, serviceError?.tikhubPaidRequestPossiblySent === true);
+      return;
+    }
     switch (code) {
       case "no-captions":
         this.renderStatus("no-captions", "transcript.error.noCaptions", true);
@@ -394,6 +465,61 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     }
   }
 
+  private onProgress(
+    runtime: YouTubeTranscriptPanelRuntime,
+    operation: number,
+    progress: YouTubeTranscriptProgress,
+  ): void {
+    if (!this.confirmRuntime(runtime, operation)) return;
+    const key = progressKey(progress.stage);
+    this.renderStatus("fetching", key);
+  }
+
+  private renderTikHubFailure(
+    code: Extract<PanelState, `tikhub-${string}`>,
+    possiblySent: boolean,
+    remember = true,
+  ): void {
+    if (remember) this.snapshot = { kind: "tikhub-failure", code, possiblySent };
+    this.prepare(code);
+    this.root.appendChild(this.heading());
+    const status = this.dom.createElement("p");
+    status.className = code === "tikhub-processing"
+      ? "rss-youtube-transcript-status"
+      : "rss-youtube-transcript-status rss-youtube-transcript-error";
+    status.textContent = this.t(tikHubErrorKey(code));
+    this.root.appendChild(status);
+
+    const source = this.dom.createElement("p");
+    source.className = "rss-youtube-transcript-source";
+    source.textContent = this.t("transcript.sourceLine", { source: "TikHub" });
+    this.root.appendChild(source);
+
+    if (possiblySent) {
+      const warning = this.dom.createElement("p");
+      warning.className = "rss-youtube-transcript-cost-warning";
+      warning.textContent = this.t("transcript.cost.possiblySent");
+      this.root.appendChild(warning);
+    }
+
+    const actions = this.dom.createElement("div");
+    actions.className = "rss-youtube-transcript-actions";
+    const action = tikHubAction(code);
+    if (action.kind === "settings" && !this.options.openTikHubSettings) return;
+    const button = this.actionButton(this.t(action.key), action.className);
+    button.addEventListener("click", () => {
+      if (action.kind === "continue") {
+        void this.fetch();
+      } else if (action.kind === "refresh") {
+        void this.refresh();
+      } else {
+        void this.options.openTikHubSettings?.();
+      }
+    });
+    actions.appendChild(button);
+    this.root.appendChild(actions);
+  }
+
   private renderStatus(
     state: PanelState,
     key: StatusTranslationKey,
@@ -424,6 +550,10 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     heading.className = "rss-youtube-transcript-title";
     heading.textContent = this.t("transcript.title");
     return heading;
+  }
+
+  private providerName(provider: YouTubeTranscriptProvider): string {
+    return this.t(`transcript.provider.${provider}`);
   }
 
   private prepare(state: PanelState): void {
@@ -553,7 +683,89 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
           this.snapshot.state,
           false,
           false,
+          this.snapshot.freshTikHubUsage,
+        );
+        return;
+      case "tikhub-failure":
+        this.renderTikHubFailure(
+          this.snapshot.code,
+          this.snapshot.possiblySent,
+          false,
         );
     }
+  }
+}
+
+function isTikHubPanelState(
+  code: string,
+): code is Extract<PanelState, `tikhub-${string}`> {
+  return new Set<Extract<PanelState, `tikhub-${string}`>>([
+    "tikhub-processing",
+    "tikhub-invalid-key",
+    "tikhub-missing-key",
+    "tikhub-insufficient-balance",
+    "tikhub-budget-unavailable",
+    "tikhub-rate-limited",
+    "tikhub-job-expired",
+    "tikhub-malformed-response",
+  ]).has(code as Extract<PanelState, `tikhub-${string}`>);
+}
+
+function progressKey(
+  stage: YouTubeTranscriptProgress["stage"],
+): StatusTranslationKey {
+  switch (stage) {
+    case "trying-innertube":
+      return "transcript.status.tryingInnerTube";
+    case "trying-tikhub":
+      return "transcript.status.tryingTikHub";
+    case "waiting-tikhub":
+      return "transcript.status.waitingTikHub";
+    case "trying-yt-dlp":
+      return "transcript.status.tryingYtDlp";
+    case "saving":
+      return "transcript.status.saving";
+    case "checking-cache":
+      return "transcript.status.checking";
+  }
+}
+
+function tikHubErrorKey(
+  code: Extract<PanelState, `tikhub-${string}`>,
+): import("../i18n").TranslationKey {
+  switch (code) {
+    case "tikhub-processing": return "transcript.error.tikhubProcessing";
+    case "tikhub-invalid-key": return "transcript.error.tikhubInvalidKey";
+    case "tikhub-missing-key": return "transcript.error.tikhubMissingKey";
+    case "tikhub-insufficient-balance": return "transcript.error.tikhubBalance";
+    case "tikhub-budget-unavailable": return "transcript.error.tikhubBudget";
+    case "tikhub-rate-limited": return "transcript.error.tikhubRateLimit";
+    case "tikhub-job-expired": return "transcript.error.tikhubExpired";
+    case "tikhub-malformed-response": return "transcript.error.tikhubMalformed";
+  }
+}
+
+function tikHubAction(
+  code: Extract<PanelState, `tikhub-${string}`>,
+): {
+  key: import("../i18n").TranslationKey;
+  className: string;
+  kind: "continue" | "refresh" | "settings";
+} {
+  switch (code) {
+    case "tikhub-processing":
+      return { key: "transcript.action.continueQuery", className: "rss-youtube-transcript-continue", kind: "continue" };
+    case "tikhub-job-expired":
+      return { key: "transcript.action.refetchWithCost", className: "rss-youtube-transcript-refresh", kind: "refresh" };
+    case "tikhub-invalid-key":
+    case "tikhub-missing-key":
+    case "tikhub-insufficient-balance":
+      return { key: code === "tikhub-insufficient-balance" ? "transcript.action.checkTikHubBalance" : "transcript.action.openTikHubSettings", className: "rss-youtube-transcript-tikhub-settings", kind: "settings" };
+    case "tikhub-budget-unavailable":
+      return { key: "transcript.action.retryTomorrow", className: "rss-youtube-transcript-fetch", kind: "continue" };
+    case "tikhub-rate-limited":
+      return { key: "transcript.action.retryLater", className: "rss-youtube-transcript-fetch", kind: "continue" };
+    case "tikhub-malformed-response":
+      return { key: "transcript.refresh", className: "rss-youtube-transcript-refresh", kind: "refresh" };
   }
 }

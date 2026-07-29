@@ -320,6 +320,29 @@ describe("TikHub transcript runtime wiring", () => {
     plugin.onunload();
   });
 
+  it("wires transcript key recovery only to the TikHub settings tab", async () => {
+    const plugin = createPlugin();
+    prepareOnload(plugin);
+    const openSettingsToTab = vi.spyOn(plugin, "openSettingsToTab")
+      .mockResolvedValue(undefined);
+
+    await plugin.onload();
+    const reader = registeredViewFactory<ReaderView>(
+      plugin,
+      RSS_READER_VIEW_TYPE,
+    )(new WorkspaceLeaf(plugin.app));
+    const runtimeOptions = (reader as unknown as {
+      youtubeTranscript?: { openTikHubSettings?: () => void | Promise<void> };
+    }).youtubeTranscript;
+
+    await runtimeOptions?.openTikHubSettings?.();
+
+    expect(openSettingsToTab).toHaveBeenCalledTimes(1);
+    expect(openSettingsToTab).toHaveBeenCalledWith("tikhub");
+    expect(secretState.reads).toEqual([]);
+    plugin.onunload();
+  });
+
   it("renders a real registered dashboard with populated feed content without TikHub activity", async () => {
     const plugin = createPlugin();
     plugin.settings.feeds = [passiveFeed()];

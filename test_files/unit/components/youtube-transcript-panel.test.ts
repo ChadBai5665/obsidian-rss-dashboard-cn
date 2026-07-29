@@ -54,6 +54,7 @@ function createPanel(options: {
   cached?: YouTubeTranscriptCachedItemContent | null;
   get?: (request: YouTubeTranscriptRequest) => Promise<YouTubeTranscriptServiceResult>;
   locale?: "zh-CN" | "en";
+  openTikHubSettings?: () => void | Promise<void>;
 } = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -89,6 +90,7 @@ function createPanel(options: {
     },
     resolveRuntime: () => runtime,
     openExternal,
+    openTikHubSettings: options.openTikHubSettings,
     onReady,
   });
   return {
@@ -154,12 +156,185 @@ describe("YouTubeTranscriptPanel", () => {
       expect.objectContaining({ refresh: false, signal: expect.any(AbortSignal) }),
     );
 
-    pending.resolve({ status: "ready", source: "fresh", content: transcript() });
+    pending.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript(),
+      usage: { tikhubPaidRequests: 0 },
+    });
     await fetching;
 
     expect(state(container)).toBe("complete-manual");
     expect(container.textContent).toContain("A durable public transcript.");
     expect(container.querySelector(".rss-youtube-transcript-refresh")).not.toBeNull();
+  });
+
+  it("shows guarded provider progress inline for the current request", async () => {
+    const pending = deferred<YouTubeTranscriptServiceResult>();
+    let onProgress: YouTubeTranscriptRequest["onProgress"];
+    const { panel, container } = createPanel({
+      locale: "zh-CN",
+      get: async (request) => {
+        onProgress = request.onProgress;
+        return await pending.promise;
+      },
+    });
+
+    const fetching = panel.fetch();
+    onProgress?.({ stage: "trying-innertube", usage: { tikhubPaidRequests: 0 } });
+    expect(container.textContent).toContain("正在尝试免费字幕");
+
+    onProgress?.({ stage: "trying-tikhub", usage: { tikhubPaidRequests: 1 } });
+    expect(container.textContent).toContain("正在使用 TikHub");
+
+    onProgress?.({ stage: "waiting-tikhub", usage: { tikhubPaidRequests: 1 } });
+    expect(container.textContent).toContain("TikHub 正在处理");
+    expect(container.querySelector(".modal")).toBeNull();
+
+    pending.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript(),
+      usage: { tikhubPaidRequests: 1 },
+    });
+    await fetching;
+  });
+
+  it("drops stale provider progress after a newer request starts", async () => {
+    const first = deferred<YouTubeTranscriptServiceResult>();
+    const second = deferred<YouTubeTranscriptServiceResult>();
+    const requests: YouTubeTranscriptRequest[] = [];
+    const { panel, container } = createPanel({
+      locale: "zh-CN",
+      get: async (request) => {
+        requests.push(request);
+        return await (requests.length === 1 ? first.promise : second.promise);
+      },
+    });
+
+    const firstFetch = panel.fetch();
+    const secondFetch = panel.refresh();
+    requests[1]?.onProgress?.({
+      stage: "trying-innertube",
+      usage: { tikhubPaidRequests: 0 },
+    });
+    expect(container.textContent).toContain("正在尝试免费字幕");
+    requests[0]?.onProgress?.({
+      stage: "trying-tikhub",
+      usage: { tikhubPaidRequests: 1 },
+    });
+
+    expect(container.textContent).toContain("正在尝试免费字幕");
+    expect(container.textContent).not.toContain("正在使用 TikHub");
+    second.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript({ text: "Newest transcript." }),
+      usage: { tikhubPaidRequests: 0 },
+    });
+    first.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript({ text: "Stale transcript." }),
+      usage: { tikhubPaidRequests: 1 },
+    });
+    await Promise.all([firstFetch, secondFetch]);
+
+    expect(container.textContent).toContain("Newest transcript.");
+    expect(container.textContent).not.toContain("Stale transcript.");
+  });
+
+  it("shows fresh TikHub usage and provider metadata but never cache usage", async () => {
+    const { panel, container } = createPanel({
+      locale: "zh-CN",
+      cached: transcript({ provider: "tikhub" }),
+      get: async () => ({
+        status: "ready",
+        source: "fresh",
+        content: transcript({ provider: "tikhub" }),
+        usage: { tikhubPaidRequests: 2 },
+      }),
+    });
+
+    await panel.showCached();
+    expect(container.textContent).toContain("来源：TikHub");
+    expect(container.textContent).not.toContain("预计2次 TikHub 请求（约 $0.016）");
+
+    await panel.refresh();
+    expect(container.textContent).toContain("预计2次 TikHub 请求（约 $0.016）");
+    expect(container.textContent).toContain("重新获取可能产生 TikHub 费用");
+  });
+
+  it.each([
+    ["tikhub-processing", "TikHub 正在处理字幕", "继续查询"],
+    ["tikhub-invalid-key", "TikHub 密钥无效", "打开 TikHub 设置"],
+    ["tikhub-insufficient-balance", "TikHub 余额不足", "检查 TikHub 余额"],
+    ["tikhub-budget-unavailable", "今日 TikHub 请求额度已用完", "明天再试"],
+    ["tikhub-rate-limited", "TikHub 请求过于频繁", "稍后重试"],
+    ["tikhub-job-expired", "TikHub 的字幕任务已过期", "重新获取（可能产生 TikHub 费用）"],
+    ["tikhub-malformed-response", "TikHub 返回的数据无法使用", "重新获取字幕"],
+  ] as const)(
+    "renders %s as a safe inline actionable error",
+    async (code, message, action) => {
+      const { panel, container } = createPanel({
+        locale: "zh-CN",
+        ...(code === "tikhub-invalid-key" || code === "tikhub-insufficient-balance"
+          ? { openTikHubSettings: vi.fn() }
+          : {}),
+        get: async () => {
+          throw new YouTubeTranscriptServiceError(
+            code,
+            undefined,
+            [],
+            { tikhubPaidRequests: 0 },
+            true,
+          );
+        },
+      });
+
+      await panel.fetch();
+
+      expect(container.textContent).toContain(message);
+      expect(container.textContent).toContain(action);
+      expect(container.textContent).toContain("请求可能已发送，实际费用以 TikHub 账单为准");
+      expect(container.textContent).not.toContain("requestId");
+      expect(container.querySelector(".modal")).toBeNull();
+    },
+  );
+
+  it("opens TikHub settings exactly once for a key recovery without retrying", async () => {
+    const openTikHubSettings = vi.fn();
+    const { panel, container, get } = createPanel({
+      locale: "zh-CN",
+      openTikHubSettings,
+      get: async () => {
+        throw new YouTubeTranscriptServiceError("tikhub-invalid-key");
+      },
+    });
+
+    await panel.fetch();
+    container
+      .querySelector<HTMLButtonElement>(".rss-youtube-transcript-tikhub-settings")
+      ?.click();
+
+    expect(openTikHubSettings).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".modal")).toBeNull();
+  });
+
+  it("does not render a dead TikHub settings action without a recovery callback", async () => {
+    const { panel, container } = createPanel({
+      locale: "zh-CN",
+      get: async () => {
+        throw new YouTubeTranscriptServiceError("tikhub-missing-key");
+      },
+    });
+
+    await panel.fetch();
+
+    expect(
+      container.querySelector(".rss-youtube-transcript-tikhub-settings"),
+    ).toBeNull();
   });
 
   it.each([

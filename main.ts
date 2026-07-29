@@ -2267,6 +2267,7 @@ export default class RssDashboardPlugin extends Plugin {
                 this.createAiPanelOptionsForItem(item),
               youtubeTranscript: {
                 resolveRuntime: () => this.getYouTubeTranscriptRuntime(),
+                openTikHubSettings: () => this.openSettingsToTab("tikhub"),
               },
             },
           );

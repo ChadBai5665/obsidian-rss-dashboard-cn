@@ -1754,6 +1754,7 @@ export class ReaderView extends ItemView {
       openExternal: runtimeOptions.openExternalUrl ?? ((url) => {
         activeWindow.open(url, "_blank", "noopener,noreferrer");
       }),
+      openTikHubSettings: runtimeOptions.openTikHubSettings,
       onReady: () => {
         if (
           this.transcriptPanel === panel &&
