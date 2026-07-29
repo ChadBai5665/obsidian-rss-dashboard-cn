@@ -14,6 +14,7 @@
 | `.rss-dashboard-data/state/item-index.json` | 采集项目索引 |
 | `.rss-dashboard-data/state/source-refresh.json` | 每个来源的刷新状态 |
 | `.rss-dashboard-data/state/tikhub-requests.json` | 本机日 TikHub 请求预算账本 |
+| `.rss-dashboard-data/state/youtube-caption-jobs.json` | 仅保存可恢复的 TikHub 字幕待处理任务标识与阶段；不保存密钥或原始服务商响应 |
 | `.rss-dashboard-data/analysis/{itemId}/` | 手动 AI 操作生成的独立 Markdown 产物 |
 | `.rss-dashboard-data/feeds/` | 默认 Feed 分片 |
 | `.rss-dashboard-data/user-state.json` | 分片存储下的已读、收藏、保存等用户状态 |
@@ -24,7 +25,7 @@
 
 从分片存储切回传统 JSON 只改变当前写入模式，不自动删除 `.rss-dashboard-data/feeds/`。这些保留内容可能仍包含订阅和文章状态，不能把它们当成空目录公开分享。
 
-全文缓存使用 `schemaVersion 1`；现有文件会继续读取，迁移时不重写。YouTube 字幕缓存使用 `schemaVersion 2` 和 `youtube-transcript` 内容类型，并记录语言、人工/自动生成标记、提供路径和获取时间。读取匹配缓存不会产生网络请求，也不会运行 `yt-dlp`；只有用户明确点击“重新获取字幕”才重新联网，并在完整结果写入成功后原子替换同一条目的旧缓存。插件更新器不会修改 `.rss-dashboard-data/`，因此字幕缓存与其他历史数据会保留。
+全文缓存使用 `schemaVersion 1`；现有文件会继续读取，迁移时不重写。YouTube 字幕缓存使用 `schemaVersion 2` 和 `youtube-transcript` 内容类型，并记录语言、人工/自动生成标记、提供路径和获取时间；`schemaVersion 1` 与 `schemaVersion 2` 都会继续读取，不做批量改写。读取匹配缓存不会产生网络请求，也不会运行 `yt-dlp`；只有用户明确点击“重新获取字幕”才重新联网，并在完整结果写入成功后原子替换同一条目的旧缓存。若已有 TikHub 字幕待处理任务，会在 `.rss-dashboard-data/state/youtube-caption-jobs.json` 保存最小任务标识；重开文章后只会继续免费查询既有任务，避免重新创建付费任务。插件更新器不会修改 `.rss-dashboard-data/`，因此字幕缓存、待处理任务与其他历史数据会保留。
 
 ## 知识库外的密钥文件
 
@@ -51,7 +52,9 @@ TikHub 和所有 AI 连接共用一个外部 `secrets.json`。默认路径为：
 
 ### 采集请求
 
-插件可能请求你配置的 RSS、Atom、JSON Feed、播客 Feed 或网站，进行 Feed 自动发现，或获取你明确打开、保存的单条网页全文。YouTube 日常采集会请求频道/视频 Feed 和元数据；只有明确获取字幕时，内置路径才请求 YouTube 当前公开提供的公开人工字幕或自动生成字幕。标题和简介不会被表示为字幕；没有公开字幕轨道时会显示“无字幕”，不会拼造正文。可选 TikHub 只用于 X 账号/主题；可选 AI 只在你手动点击单条 AI 操作时访问所选服务商。AI 内容选择与内部阅读器是两条不同的内容/联网路径，详细边界见下文。
+插件可能请求你配置的 RSS、Atom、JSON Feed、播客 Feed 或网站，进行 Feed 自动发现，或获取你明确打开、保存的单条网页全文。YouTube 日常采集只请求频道/视频 Feed 和元数据；每天打开时刷新、订阅刷新、历史导入和其他后台任务不会获取字幕。只有明确获取字幕时，固定顺序才会运行：**本地缓存 → 免费字幕 → TikHub → yt-dlp**。其中免费字幕为 YouTube InnerTube 的公开人工字幕或自动生成字幕路径；标题和简介不会被表示为字幕；没有公开字幕轨道时会显示“无字幕”，不会拼造正文。
+
+TikHub 可选用于 X 账号/主题，也可在上述免费字幕失败后用作 YouTube 的按需回退。YouTube 字幕回退默认关闭，只有已开启回退、配置外部桌面端 `secrets.json` 密钥，并且用户明确点击“获取字幕”或“重新获取字幕”才会尝试；读取缓存、每日刷新和后台任务不会获取字幕或触发回退。两个付费字幕端点分别预计 $0.008 USD/次；异步任务状态轮询是免费查询，不记入付费请求账本。一项付费请求即使返回成功响应但没有可用字幕，也可能已经产生费用。字幕与 X 请求共享单次、每日上限和本机预算账本；插件无法决定实际扣费，最终计费以 TikHub 账单为准。可选 AI 只在你手动点击单条 AI 操作时访问所选服务商。AI 内容选择与内部阅读器是两条不同的内容/联网路径，详细边界见下文。
 
 内置公开字幕路径失败或返回空结果时，插件可把本机已有的 `yt-dlp` 作为可选本地回退。它不是必需依赖，插件不会自动安装或更新，也不会在读取缓存时调用。进程边界固定为 Node.js `execFile` 与固定参数，不启用 shell，不接受用户命令文本，不读取 Cookie，不使用浏览器登录，不写入任何输出文件；它只读取字幕元数据，随后由受限网络请求取得选定字幕，不下载视频或音频。标准错误和原始元数据不会展示为用户内容。
 

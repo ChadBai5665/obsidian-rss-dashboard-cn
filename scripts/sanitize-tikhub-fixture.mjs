@@ -162,6 +162,8 @@ function isProviderMetadataKey(key) {
   return (
     tokens.includes("cursor") ||
     tokens.includes("support") ||
+    hasTokenPair(tokens, "raw", "response") ||
+    hasTokenPair(tokens, "raw", "payload") ||
     compact.endsWith("requestid") ||
     compact.endsWith("cacheurl")
   );

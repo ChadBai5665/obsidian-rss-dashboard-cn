@@ -324,4 +324,37 @@ describe("public release documentation", () => {
     expect(troubleshooting).toMatch(/找不到.*最新结果.*历史结果/su);
     expect(troubleshooting).toMatch(/重新生成.*保留.*旧结果/su);
   });
+
+  it("documents the opt-in TikHub caption billing, cache, and release boundaries", () => {
+    const readme = section(read("README.md"), "## TikHub 与费用边界");
+    const privacyDocument = read("docs/PRIVACY.zh-CN.md");
+    const privacy = section(privacyDocument, "### 采集请求");
+    const privacyStorage = section(privacyDocument, "## 知识库内的数据");
+    const readiness = read("docs/release/0.1.0-readiness.md");
+    const smokeTest = read("docs/release/0.1.0-smoke-test.md");
+    const scorecard = read("docs/plugin-scorecard.md");
+
+    for (const document of [readme, privacy]) {
+      expect(document).toContain("本地缓存 → 免费字幕 → TikHub → yt-dlp");
+      expect(document).toContain("默认关闭");
+      expect(document).toContain("明确点击“获取字幕”或“重新获取字幕”");
+      expect(document).toContain("预计 $0.008");
+      expect(document).toContain("免费查询");
+      expect(document).toMatch(/成功响应.*没有.*可用字幕.*可能.*计费/su);
+      expect(document).toMatch(/共享.*单次.*每日.*上限/su);
+      expect(document).toMatch(/最终.*计费.*TikHub.*账单/su);
+      expect(document).toMatch(/每日刷新.*后台.*不会.*获取字幕/su);
+    }
+
+    expect(privacyStorage).toContain(
+      ".rss-dashboard-data/state/youtube-caption-jobs.json",
+    );
+    expect(privacyStorage).toMatch(/待处理.*任务.*重开.*继续.*查询/su);
+    expect(privacyStorage).toMatch(/schemaVersion 1.*schemaVersion 2.*继续读取/su);
+    expect(privacyDocument).toMatch(/外部.*secrets\.json/su);
+    expect(readiness).toContain("最多两次 TikHub 字幕请求");
+    expect(readiness).toMatch(/Task 10.*未运行/su);
+    expect(smokeTest).toMatch(/Task 10.*未运行/su);
+    expect(scorecard).toMatch(/TikHub.*字幕.*真实.*费用.*未运行/su);
+  });
 });

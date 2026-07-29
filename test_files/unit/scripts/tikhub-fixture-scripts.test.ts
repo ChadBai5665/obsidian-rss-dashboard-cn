@@ -544,6 +544,40 @@ describe("captureTikHubFixtures", () => {
 });
 
 describe("TikHub fixture copy-on-write activation", () => {
+  it("rejects Authorization values before creating files", async () => {
+    const root = await temporaryDirectory();
+    const destinationDir = join(root, "live");
+    const authorizationBearingFixture = Object.assign(candidateFixture("9"), {
+      Authorization: "Bearer sanitized-test-value",
+    });
+
+    await expect(
+      writeTikHubFixtureSet(destinationDir, [
+        authorizationBearingFixture,
+        candidateFixture("10"),
+        candidateFixture("11"),
+      ]),
+    ).rejects.toThrow("TikHub fixture sanitization verification failed.");
+    await expect(readdir(destinationDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects raw provider response wrappers before creating files", async () => {
+    const root = await temporaryDirectory();
+    const destinationDir = join(root, "live");
+    const rawProviderResponse = Object.assign(candidateFixture("12"), {
+      raw_response: candidateFixture("13"),
+    });
+
+    await expect(
+      writeTikHubFixtureSet(destinationDir, [
+        rawProviderResponse,
+        candidateFixture("14"),
+        candidateFixture("15"),
+      ]),
+    ).rejects.toThrow("TikHub fixture sanitization verification failed.");
+    await expect(readdir(destinationDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("refuses a non-canonical credential-bearing set before creating files", async () => {
     const root = await temporaryDirectory();
     const destinationDir = join(root, "live");
