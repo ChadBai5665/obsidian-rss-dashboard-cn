@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { App, type PluginManifest } from "obsidian";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { App, Platform, type PluginManifest } from "obsidian";
 
 const secretState = vi.hoisted(() => ({
   reads: [] as string[],
@@ -21,7 +21,10 @@ vi.mock("../../../src/security/desktop-secret-store", () => ({
 
 import RssDashboardPlugin from "../../../main";
 import { TikHubClient } from "../../../src/sources/tikhub/tikhub-client";
-import { TikHubRequestLedgerError } from "../../../src/sources/tikhub/request-ledger";
+import {
+  TikHubRequestLedger,
+  TikHubRequestLedgerError,
+} from "../../../src/sources/tikhub/request-ledger";
 import {
   TikHubCaptionJobRepository,
   type TikHubCaptionJobRecord,
@@ -32,6 +35,7 @@ import {
   type TranscriptProviderRegistration,
 } from "../../../src/youtube-transcript/transcript-types";
 import { InnerTubeTranscriptProvider } from "../../../src/youtube-transcript/innertube-transcript-provider";
+import { YtDlpTranscriptProvider } from "../../../src/youtube-transcript/yt-dlp-transcript-provider";
 import {
   DEFAULT_SETTINGS,
   type FeedItem,
@@ -109,6 +113,48 @@ function captionTracksResponse() {
   };
 }
 
+function captionContentResponse() {
+  return {
+    data: {
+      video_id: VIDEO_ID,
+      language_code: "en",
+      language_name: "English",
+      format: "txt",
+      content: "Synthetic caption text.",
+    },
+  };
+}
+
+function innerTubeTrack() {
+  return {
+    videoId: VIDEO_ID,
+    languageCode: "en",
+    languageName: "English",
+    isGenerated: false,
+    source: "innertube" as const,
+    format: "json3" as const,
+    url: "https://example.com/innertube-caption",
+  };
+}
+
+function ytDlpTrack() {
+  return {
+    ...innerTubeTrack(),
+    source: "yt-dlp" as const,
+  };
+}
+
+function transcript(provider: "innertube" | "yt-dlp") {
+  return {
+    videoId: VIDEO_ID,
+    languageCode: "en",
+    languageName: "English",
+    isGenerated: false,
+    provider,
+    text: "Synthetic free-provider caption.",
+  };
+}
+
 function processingJob(): TikHubCaptionJobRecord {
   return {
     schemaVersion: 1,
@@ -140,8 +186,13 @@ function article(): FeedItem {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  (Platform as typeof Platform & { isDesktopApp: boolean }).isDesktopApp = true;
   secretState.reads = [];
   secretState.constructed = 0;
+});
+
+afterEach(() => {
+  (Platform as typeof Platform & { isDesktopApp: boolean }).isDesktopApp = false;
 });
 
 describe("TikHub transcript runtime wiring", () => {
@@ -167,6 +218,51 @@ describe("TikHub transcript runtime wiring", () => {
     }).refreshOnOpenIfNeeded();
 
     expect(secretState.reads).toEqual([]);
+  });
+
+  it("uses the public service's InnerTube success without touching TikHub", async () => {
+    const plugin = createPlugin();
+    const runtime = runtimeFor(plugin);
+    const tikhubRequest = vi.spyOn(TikHubClient.prototype, "fetchYouTubeCaptions");
+    const ytDlpTracks = vi.spyOn(YtDlpTranscriptProvider.prototype, "listTracks");
+    vi.spyOn(InnerTubeTranscriptProvider.prototype, "listTracks")
+      .mockResolvedValue([innerTubeTrack()]);
+    vi.spyOn(InnerTubeTranscriptProvider.prototype, "fetchTrack")
+      .mockResolvedValue(transcript("innertube"));
+
+    await expect(runtime.service.get({ itemId: ITEM_ID, videoId: VIDEO_ID }))
+      .resolves.toMatchObject({ status: "ready", source: "fresh" });
+
+    expect(secretState.constructed).toBe(0);
+    expect(secretState.reads).toEqual([]);
+    expect(tikhubRequest).not.toHaveBeenCalled();
+    expect(ytDlpTracks).not.toHaveBeenCalled();
+  });
+
+  it("uses yt-dlp when TikHub is disabled without reading a key", async () => {
+    const plugin = createPlugin();
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: false,
+      youtubeTranscriptFallbackEnabled: false,
+    };
+    const runtime = runtimeFor(plugin);
+    const tikhubRequest = vi.spyOn(TikHubClient.prototype, "fetchYouTubeCaptions");
+    vi.spyOn(InnerTubeTranscriptProvider.prototype, "listTracks")
+      .mockRejectedValue(new YouTubeTranscriptError("no-captions"));
+    vi.spyOn(YtDlpTranscriptProvider.prototype, "isAvailable")
+      .mockResolvedValue(true);
+    vi.spyOn(YtDlpTranscriptProvider.prototype, "listTracks")
+      .mockResolvedValue([ytDlpTrack()]);
+    vi.spyOn(YtDlpTranscriptProvider.prototype, "fetchTrack")
+      .mockResolvedValue(transcript("yt-dlp"));
+
+    await expect(runtime.service.get({ itemId: ITEM_ID, videoId: VIDEO_ID }))
+      .resolves.toMatchObject({ status: "ready", source: "fresh" });
+
+    expect(secretState.constructed).toBe(0);
+    expect(secretState.reads).toEqual([]);
+    expect(tikhubRequest).not.toHaveBeenCalled();
   });
 
   it("reads only current settings and the current key when an explicit TikHub operation reaches the provider", async () => {
@@ -244,6 +340,103 @@ describe("TikHub transcript runtime wiring", () => {
       topics: [],
     }, { now: new Date("2026-07-30T00:00:00.000Z") }))
       .rejects.toMatchObject<TikHubRequestLedgerError>({ code: "daily-limit" });
+  });
+
+  it("serializes an old X reservation and a new-connection transcript reservation against one daily cap", async () => {
+    const plugin = createPlugin();
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      maxRequestsPerRun: 2,
+      maxRequestsPerDay: 3,
+    };
+    const runtime = runtimeFor(plugin);
+    const registry = (plugin as unknown as {
+      createSourceRegistryForRun(): {
+        get(kind: "x-account"): {
+          refresh(config: unknown, context: { now: Date }): Promise<unknown>;
+        };
+      };
+    }).createSourceRegistryForRun();
+    const adapter = plugin.app.vault.adapter as {
+      write(path: string, content: string): Promise<void>;
+    };
+    const originalWrite = adapter.write.bind(adapter);
+    let releaseOldWrite!: () => void;
+    const oldWriteReleased = new Promise<void>((resolve) => {
+      releaseOldWrite = resolve;
+    });
+    let oldWriteStarted!: () => void;
+    const oldWriteStartedPromise = new Promise<void>((resolve) => {
+      oldWriteStarted = resolve;
+    });
+    let holdFirstLedgerWrite = true;
+    let oldWriteHasReleased = false;
+    let newConnectionWriteOvertookOld = false;
+    adapter.write = async (path, content) => {
+      if (holdFirstLedgerWrite && path.includes("state/tikhub-requests.json.tmp-")) {
+        holdFirstLedgerWrite = false;
+        oldWriteStarted();
+        await oldWriteReleased;
+      } else if (
+        path.includes("state/tikhub-requests.json.tmp-") &&
+        !oldWriteHasReleased
+      ) {
+        newConnectionWriteOvertookOld = true;
+      }
+      await originalWrite(path, content);
+    };
+    vi.spyOn(TikHubClient.prototype, "fetchUserPosts")
+      .mockImplementation(async function (this: TikHubClient) {
+        const budget = (this as unknown as {
+          budget: { reserve(count: number): Promise<{ markAttempted(): void }> };
+        }).budget;
+        const reservation = await budget.reserve(1);
+        reservation.markAttempted();
+        return { data: { instructions: [] } };
+      });
+    vi.spyOn(InnerTubeTranscriptProvider.prototype, "listTracks")
+      .mockRejectedValue(new YouTubeTranscriptError("no-captions"));
+    vi.spyOn(TikHubClient.prototype, "fetchYouTubeCaptions")
+      .mockImplementation(async function (this: TikHubClient, input) {
+        const budget = (this as unknown as {
+          budget: { reserve(count: number): Promise<{ markAttempted(): void }> };
+        }).budget;
+        const reservation = await budget.reserve(1);
+        reservation.markAttempted();
+        return input.languageCode === undefined
+          ? captionTracksResponse()
+          : captionContentResponse();
+      });
+
+    const oldXRefresh = registry.get("x-account").refresh({
+      kind: "x-account",
+      id: "openai",
+      handle: "openai",
+      includeReplies: false,
+      includeReposts: false,
+      folder: "X",
+      topics: [],
+    }, { now: new Date("2026-07-30T00:00:00.000Z") }).catch(() => undefined);
+    await oldWriteStartedPromise;
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      connectionId: CURRENT_CONNECTION_ID,
+    };
+    const transcript = runtime.service.get({ itemId: ITEM_ID, videoId: VIDEO_ID });
+    window.setTimeout(() => {
+      oldWriteHasReleased = true;
+      releaseOldWrite();
+    }, 25);
+
+    await expect(transcript).resolves.toMatchObject({ status: "ready" });
+    await oldXRefresh;
+    expect(newConnectionWriteOvertookOld).toBe(false);
+    const ledger = new TikHubRequestLedger(
+      plugin.app.vault,
+      plugin.settings.collection.dataFolder,
+      { storageIdentity: "test:observer" },
+    );
+    await expect(ledger.getSnapshot()).resolves.toMatchObject({ count: 3 });
   });
 
   it("does not read a key for cache-only work, and disposal aborts a poll without deleting its job", async () => {

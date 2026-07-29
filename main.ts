@@ -708,10 +708,21 @@ function toFeedRefreshPipelineError(error: unknown): FeedRefreshPipelineError {
     : new FeedRefreshPipelineError("refresh-failed", "Source refresh failed.");
 }
 
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    value,
-  );
+const tikhubLedgerVaultIdentities = new WeakMap<object, string>();
+let tikhubLedgerVaultIdentitySequence = 0;
+
+/**
+ * A ledger lock belongs to the physical Vault and data root, never to a
+ * connection. Settings may switch connections while an old operation is
+ * writing the same daily ledger, so connection-scoped lock identities lose
+ * updates.
+ */
+function tikhubLedgerStorageIdentity(vault: object): string {
+  const existing = tikhubLedgerVaultIdentities.get(vault);
+  if (existing) return existing;
+  const identity = `vault:${++tikhubLedgerVaultIdentitySequence}`;
+  tikhubLedgerVaultIdentities.set(vault, identity);
+  return identity;
 }
 
 /** Poll delays must stop promptly when the plugin-owned transcript service is disposed. */
@@ -1131,7 +1142,7 @@ export default class RssDashboardPlugin extends Plugin {
         this.app.vault,
         this.settings.collection.dataFolder,
         {
-          storageIdentity: `vault:${isUuid(connectionId) ? connectionId : "unconfigured"}`,
+          storageIdentity: tikhubLedgerStorageIdentity(this.app.vault),
         },
       );
       const budget = new TikHubRequestBudget({
@@ -1361,9 +1372,8 @@ export default class RssDashboardPlugin extends Plugin {
       getApiKey: async (connectionId) =>
         await new DesktopSecretStore().get(connectionId),
       createClient: (settings) => {
-        const connectionId = settings.connectionId.toLowerCase();
         const ledger = new TikHubRequestLedger(this.app.vault, dataRoot, {
-          storageIdentity: `vault:${isUuid(connectionId) ? connectionId : "unconfigured"}`,
+          storageIdentity: tikhubLedgerStorageIdentity(this.app.vault),
         });
         const budget = new TikHubRequestBudget({
           ledger,
@@ -4377,12 +4387,11 @@ export default class RssDashboardPlugin extends Plugin {
         request: async (url) => await requestText(url, signal),
       }),
       verifyX: async (input, signal) => {
-        const connectionId = this.settings.tikhub.connectionId.toLowerCase();
         const ledger = new TikHubRequestLedger(
           this.app.vault,
           this.settings.collection.dataFolder,
           {
-            storageIdentity: `vault:${isUuid(connectionId) ? connectionId : "unconfigured"}`,
+            storageIdentity: tikhubLedgerStorageIdentity(this.app.vault),
           },
         );
         const budget = new TikHubRequestBudget({
