@@ -17,11 +17,18 @@ export interface TikHubCaptionJobRecord {
   status: "processing";
 }
 
+export interface TikHubCaptionJobIdentity {
+  key: string;
+  jobId: string;
+  connectionId: string;
+}
+
 const ITEM_ID = /^[a-f0-9]{64}$/u;
 const JOB_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const STORE_FIELDS = ["schemaVersion", "jobs"] as const;
+const IDENTITY_FIELDS = ["key", "jobId", "connectionId"] as const;
 const TRACK_JOB_FIELDS = [
   "schemaVersion",
   "itemId",
@@ -110,6 +117,55 @@ export class TikHubCaptionJobRepository {
       const jobs = await this.readJobs();
       jobs.set(key, projected);
       await this.atomicWrite(serializeJobs(jobs));
+    });
+  }
+
+  async createIfAbsent(record: TikHubCaptionJobRecord): Promise<boolean> {
+    const projected = projectRecord(record);
+    const key = keyForRecord(projected);
+    return await this.withLock(async () => {
+      const jobs = await this.readJobs();
+      if (jobs.has(key)) return false;
+      jobs.set(key, projected);
+      await this.atomicWrite(serializeJobs(jobs));
+      return true;
+    });
+  }
+
+  async replaceIfCurrent(
+    identity: TikHubCaptionJobIdentity,
+    replacement: TikHubCaptionJobRecord,
+  ): Promise<boolean> {
+    const projectedIdentity = projectIdentity(identity);
+    const projectedReplacement = projectRecord(replacement);
+    if (
+      keyForRecord(projectedReplacement) !== projectedIdentity.key ||
+      projectedReplacement.jobId !== projectedIdentity.jobId ||
+      projectedReplacement.connectionId !== projectedIdentity.connectionId
+    ) {
+      throw invalidReplacement();
+    }
+    return await this.withLock(async () => {
+      const jobs = await this.readJobs();
+      const current = jobs.get(projectedIdentity.key);
+      if (!current || !matchesIdentity(current, projectedIdentity)) return false;
+      jobs.set(projectedIdentity.key, projectedReplacement);
+      await this.atomicWrite(serializeJobs(jobs));
+      return true;
+    });
+  }
+
+  async removeIfCurrent(
+    identity: TikHubCaptionJobIdentity,
+  ): Promise<boolean> {
+    const projectedIdentity = projectIdentity(identity);
+    return await this.withLock(async () => {
+      const jobs = await this.readJobs();
+      const current = jobs.get(projectedIdentity.key);
+      if (!current || !matchesIdentity(current, projectedIdentity)) return false;
+      jobs.delete(projectedIdentity.key);
+      await this.atomicWrite(serializeJobs(jobs));
+      return true;
     });
   }
 
@@ -355,6 +411,40 @@ function projectRecord(value: unknown): TikHubCaptionJobRecord {
   }
 }
 
+function projectIdentity(value: unknown): TikHubCaptionJobIdentity {
+  try {
+    const identity = plainRecord(value);
+    if (!identity || !hasExactDataFields(identity, IDENTITY_FIELDS)) {
+      throw invalidIdentity();
+    }
+    const projected: TikHubCaptionJobIdentity = {
+      key: ownData(identity, "key") as string,
+      jobId: ownData(identity, "jobId") as string,
+      connectionId: ownData(identity, "connectionId") as string,
+    };
+    assertCaptionJobKey(projected.key);
+    if (
+      typeof projected.jobId !== "string" ||
+      !JOB_ID.test(projected.jobId) ||
+      !isCanonicalConnectionId(projected.connectionId)
+    ) {
+      throw invalidIdentity();
+    }
+    return projected;
+  } catch {
+    throw invalidIdentity();
+  }
+}
+
+function matchesIdentity(
+  record: TikHubCaptionJobRecord,
+  identity: TikHubCaptionJobIdentity,
+): boolean {
+  return keyForRecord(record) === identity.key &&
+    record.jobId === identity.jobId &&
+    record.connectionId === identity.connectionId;
+}
+
 function assertRecordValues(record: TikHubCaptionJobRecord): void {
   if (
     record.schemaVersion !== 1 ||
@@ -485,6 +575,14 @@ function invalidRecord(): Error {
 
 function invalidStore(): Error {
   return new Error("TikHub caption job storage is corrupt.");
+}
+
+function invalidIdentity(): Error {
+  return new Error("Invalid TikHub caption job identity.");
+}
+
+function invalidReplacement(): Error {
+  return new Error("Invalid TikHub caption job replacement.");
 }
 
 function nextTransactionId(): string {

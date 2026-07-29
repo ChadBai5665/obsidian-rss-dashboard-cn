@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   TikHubCaptionJobRepository,
   captionJobKey,
+  type TikHubCaptionJobIdentity,
   type TikHubCaptionJobRecord,
 } from "../../../src/youtube-transcript/tikhub-caption-job-repository";
 
@@ -13,7 +14,9 @@ const ITEM_ID = "a".repeat(64);
 const OTHER_ITEM_ID = "b".repeat(64);
 const VIDEO_ID = "dQw4w9WgXcQ";
 const CONNECTION_ID = "d4eb3f58-b672-4f73-b9f3-9cd2f0e57a8d";
+const OTHER_CONNECTION_ID = "e4eb3f58-b672-4f73-b9f3-9cd2f0e57a8d";
 const JOB_ID = "123e4567-e89b-12d3-a456-426614174000";
+const OTHER_JOB_ID = "223e4567-e89b-12d3-a456-426614174000";
 const INVALID_LANGUAGE_CODES = [
   ["empty", ""],
   ["control", "en\u0000"],
@@ -183,6 +186,21 @@ function seedState(adapter: InMemoryAdapter, raw: string): void {
   adapter.files.set(JOBS_PATH, raw);
 }
 
+function identityFor(
+  record: TikHubCaptionJobRecord,
+): TikHubCaptionJobIdentity {
+  return {
+    key: captionJobKey(
+      record.itemId,
+      record.videoId,
+      record.stage,
+      record.languageCode,
+    ),
+    jobId: record.jobId,
+    connectionId: record.connectionId,
+  };
+}
+
 function parentPath(path: string): string {
   const separator = path.lastIndexOf("/");
   return separator === -1 ? "" : path.slice(0, separator);
@@ -312,6 +330,274 @@ describe("TikHubCaptionJobRepository", () => {
     expect(
       [...adapter.files.keys()].filter(
         (path) => path.startsWith(`${JOBS_PATH}.tmp-`) || path.startsWith(`${JOBS_PATH}.backup-`),
+      ),
+    ).toEqual([]);
+  });
+
+  it("allows only one same-instance create-if-absent winner", async () => {
+    const test = createRepository();
+    const first = createRecord();
+    const second = createRecord({
+      jobId: OTHER_JOB_ID,
+      lastCheckedAt: "2026-07-29T08:02:00.000Z",
+    });
+
+    const results = await Promise.all([
+      test.repository.createIfAbsent(first),
+      test.repository.createIfAbsent(second),
+    ]);
+
+    expect(results).toEqual([true, false]);
+    expect(await test.repository.read(identityFor(first).key)).toEqual(first);
+    expect(
+      test.adapter.operations.filter((operation) =>
+        operation.startsWith(`write:${JOBS_PATH}.tmp-`)
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("allows only one cross-instance create-if-absent winner", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = { adapter } as unknown as Vault;
+    const firstRepository = createRepository(adapter, vault).repository;
+    const secondRepository = createRepository(adapter, vault).repository;
+    const first = createRecord();
+    const second = createRecord({
+      jobId: OTHER_JOB_ID,
+      lastCheckedAt: "2026-07-29T08:02:00.000Z",
+    });
+    const pause = adapter.pauseNextWriteWhere((path) =>
+      path.startsWith(`${JOBS_PATH}.tmp-`)
+    );
+
+    const firstCreate = firstRepository.createIfAbsent(first);
+    await pause.entered;
+    const secondCreate = secondRepository.createIfAbsent(second);
+    await Promise.resolve();
+    expect(
+      adapter.operations.filter((operation) =>
+        operation.startsWith(`write:${JOBS_PATH}.tmp-`)
+      ),
+    ).toHaveLength(1);
+    pause.resume();
+
+    expect(await Promise.all([firstCreate, secondCreate])).toEqual([true, false]);
+    expect(await firstRepository.read(identityFor(first).key)).toEqual(first);
+    expect(
+      adapter.operations.filter((operation) =>
+        operation.startsWith(`write:${JOBS_PATH}.tmp-`)
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("replaces only a strictly matching current job", async () => {
+    const test = createRepository();
+    const current = createRecord();
+    const replacement = createRecord({
+      lastCheckedAt: "2026-07-29T08:02:00.000Z",
+    });
+    await test.repository.write(current);
+
+    await expect(
+      test.repository.replaceIfCurrent(identityFor(current), replacement),
+    ).resolves.toBe(true);
+
+    expect(await test.repository.read(identityFor(current).key)).toEqual(
+      replacement,
+    );
+  });
+
+  it("returns false without writing when replace identity does not match", async () => {
+    const test = createRepository();
+    const current = createRecord();
+    await test.repository.write(current);
+    test.adapter.operations.length = 0;
+    const replacement = createRecord({
+      jobId: OTHER_JOB_ID,
+      lastCheckedAt: "2026-07-29T08:02:00.000Z",
+    });
+
+    await expect(test.repository.replaceIfCurrent(
+      identityFor(replacement),
+      replacement,
+    )).resolves.toBe(false);
+
+    expect(await test.repository.read(identityFor(current).key)).toEqual(current);
+    expect(
+      test.adapter.operations.some((operation) =>
+        operation.startsWith(`write:${JOBS_PATH}.tmp-`)
+      ),
+    ).toBe(false);
+  });
+
+  it("removes only a strictly matching current job", async () => {
+    const test = createRepository();
+    const current = createRecord();
+    await test.repository.write(current);
+
+    await expect(
+      test.repository.removeIfCurrent(identityFor(current)),
+    ).resolves.toBe(true);
+    await expect(
+      test.repository.removeIfCurrent(identityFor(current)),
+    ).resolves.toBe(false);
+
+    expect(await test.repository.read(identityFor(current).key)).toBeNull();
+  });
+
+  it("prevents an old poll from overwriting a newer same-key job", async () => {
+    const test = createRepository();
+    const oldJob = createRecord();
+    const newJob = createRecord({
+      jobId: OTHER_JOB_ID,
+      lastCheckedAt: "2026-07-29T08:02:00.000Z",
+    });
+    await test.repository.write(oldJob);
+    await test.repository.write(newJob);
+    test.adapter.operations.length = 0;
+
+    await expect(test.repository.replaceIfCurrent(
+      identityFor(oldJob),
+      createRecord({ lastCheckedAt: "2026-07-29T08:03:00.000Z" }),
+    )).resolves.toBe(false);
+
+    expect(await test.repository.read(identityFor(newJob).key)).toEqual(newJob);
+    expect(
+      test.adapter.operations.some((operation) =>
+        operation.startsWith(`write:${JOBS_PATH}.tmp-`)
+      ),
+    ).toBe(false);
+  });
+
+  it("prevents old-connection cleanup from deleting a new connection job", async () => {
+    const test = createRepository();
+    const oldConnection = createRecord();
+    const newConnection = createRecord({
+      jobId: OTHER_JOB_ID,
+      connectionId: OTHER_CONNECTION_ID,
+      lastCheckedAt: "2026-07-29T08:02:00.000Z",
+    });
+    await test.repository.write(newConnection);
+    test.adapter.operations.length = 0;
+
+    await expect(
+      test.repository.removeIfCurrent(identityFor(oldConnection)),
+    ).resolves.toBe(false);
+
+    expect(await test.repository.read(identityFor(newConnection).key)).toEqual(
+      newConnection,
+    );
+    expect(
+      test.adapter.operations.some((operation) =>
+        operation.startsWith(`write:${JOBS_PATH}.tmp-`)
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects invalid CAS identities and replacements without changing state", async () => {
+    const test = createRepository();
+    const current = createRecord();
+    await test.repository.write(current);
+    const identity = identityFor(current);
+    test.adapter.operations.length = 0;
+    const extraIdentity = { ...identity, endpoint: "private" };
+    const accessorIdentity = { ...identity } as Record<string, unknown>;
+    Object.defineProperty(accessorIdentity, "jobId", {
+      enumerable: true,
+      get() {
+        throw new Error("must not read accessor");
+      },
+    });
+    const inheritedIdentity = Object.create(identity) as TikHubCaptionJobIdentity;
+    let toStringCalled = false;
+    const coercibleIdentity = {
+      ...identity,
+      jobId: {
+        toString() {
+          toStringCalled = true;
+          return JOB_ID;
+        },
+      },
+    };
+
+    await expect(test.repository.replaceIfCurrent(
+      extraIdentity as unknown as TikHubCaptionJobIdentity,
+      current,
+    )).rejects.toThrow();
+    await expect(test.repository.removeIfCurrent(
+      accessorIdentity as unknown as TikHubCaptionJobIdentity,
+    )).rejects.toThrow();
+    await expect(
+      test.repository.removeIfCurrent(inheritedIdentity),
+    ).rejects.toThrow();
+    await expect(test.repository.removeIfCurrent(
+      coercibleIdentity as unknown as TikHubCaptionJobIdentity,
+    )).rejects.toThrow();
+    await expect(test.repository.replaceIfCurrent(
+      identity,
+      createRecord({ jobId: OTHER_JOB_ID }),
+    )).rejects.toThrow();
+    await expect(test.repository.replaceIfCurrent(
+      identity,
+      createRecord({ connectionId: OTHER_CONNECTION_ID }),
+    )).rejects.toThrow();
+    await expect(test.repository.replaceIfCurrent(
+      identity,
+      createRecord({ itemId: OTHER_ITEM_ID }),
+    )).rejects.toThrow();
+    await expect(test.repository.createIfAbsent({
+      ...createRecord({ itemId: OTHER_ITEM_ID }),
+      providerPayload: "private",
+    } as unknown as TikHubCaptionJobRecord)).rejects.toThrow();
+
+    expect(await test.repository.read(identity.key)).toEqual(current);
+    expect(toStringCalled).toBe(false);
+    expect(
+      test.adapter.operations.some((operation) =>
+        operation.startsWith(`write:${JOBS_PATH}.tmp-`)
+      ),
+    ).toBe(false);
+  });
+
+  it("rolls a failed CAS replacement back to the prior durable job", async () => {
+    const test = createRepository();
+    const prior = createRecord();
+    await test.repository.write(prior);
+    test.adapter.failNextRenameWhere(
+      (from, to) => from.startsWith(`${JOBS_PATH}.tmp-`) && to === JOBS_PATH,
+    );
+
+    await expect(test.repository.replaceIfCurrent(
+      identityFor(prior),
+      createRecord({ lastCheckedAt: "2026-07-29T08:02:00.000Z" }),
+    )).rejects.toThrow("Injected rename failure");
+
+    expect(await test.repository.read(identityFor(prior).key)).toEqual(prior);
+    expect(
+      [...test.adapter.files.keys()].filter((path) =>
+        path.startsWith(`${JOBS_PATH}.tmp-`) ||
+        path.startsWith(`${JOBS_PATH}.backup-`)
+      ),
+    ).toEqual([]);
+  });
+
+  it("rolls a failed CAS removal back to the prior durable job", async () => {
+    const test = createRepository();
+    const prior = createRecord();
+    await test.repository.write(prior);
+    test.adapter.failNextRenameWhere(
+      (from, to) => from.startsWith(`${JOBS_PATH}.tmp-`) && to === JOBS_PATH,
+    );
+
+    await expect(
+      test.repository.removeIfCurrent(identityFor(prior)),
+    ).rejects.toThrow("Injected rename failure");
+
+    expect(await test.repository.read(identityFor(prior).key)).toEqual(prior);
+    expect(
+      [...test.adapter.files.keys()].filter((path) =>
+        path.startsWith(`${JOBS_PATH}.tmp-`) ||
+        path.startsWith(`${JOBS_PATH}.backup-`)
       ),
     ).toEqual([]);
   });
