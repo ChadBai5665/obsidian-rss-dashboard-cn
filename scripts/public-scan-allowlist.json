@@ -1972,5 +1972,47 @@
     "line": 954,
     "fingerprint": "sha256:84df8bb6416314ff32b77a002429f880273c6e458edc461e1e67bf889f1995f2",
     "reason": "Synthetic provider secret verifies fallback errors do not retain or leak credential values."
+  },
+  {
+    "path": "src/youtube-transcript/tikhub-transcript-provider.ts",
+    "rule": "credential-value",
+    "line": 283,
+    "fingerprint": "sha256:7e427fb1879b4c101dd0c37278eef22231f3520951cf6bf0869d34d380a96ea6",
+    "reason": "Call-scoped resolved key session parameter for paid/free caption operation; never persisted/logged/projected."
+  },
+  {
+    "path": "src/youtube-transcript/tikhub-transcript-provider.ts",
+    "rule": "credential-value",
+    "line": 398,
+    "fingerprint": "sha256:7e427fb1879b4c101dd0c37278eef22231f3520951cf6bf0869d34d380a96ea6",
+    "reason": "Same call-scoped session for bounded free result polling; never persisted/logged/projected."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/tikhub-transcript-provider.test.ts",
+    "rule": "credential-value",
+    "line": 496,
+    "fingerprint": "sha256:f02c35339680aad13f67e0237f54c31495cc2c77125719ae3ae95a59905b2910",
+    "reason": "Synthetic credential fixture verifies the paid track-list request receives only the operation-scoped resolved key."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/tikhub-transcript-provider.test.ts",
+    "rule": "credential-value",
+    "line": 599,
+    "fingerprint": "sha256:6557453f68fece7ceabd32fa33611a60c2ee55602952986d70e0d0ac37bd9660",
+    "reason": "Synthetic credential fixture verifies an explicit list operation re-resolves and forwards its own operation-scoped key."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/tikhub-transcript-provider.test.ts",
+    "rule": "credential-value",
+    "line": 604,
+    "fingerprint": "sha256:6557453f68fece7ceabd32fa33611a60c2ee55602952986d70e0d0ac37bd9660",
+    "reason": "Synthetic credential fixture verifies an explicit content operation independently re-resolves its operation-scoped key."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/tikhub-transcript-provider.test.ts",
+    "rule": "credential-value",
+    "line": 778,
+    "fingerprint": "sha256:f02c35339680aad13f67e0237f54c31495cc2c77125719ae3ae95a59905b2910",
+    "reason": "Synthetic credential fixture verifies bounded free result polling uses the operation-scoped key while issuing zero paid requests."
   }
 ]

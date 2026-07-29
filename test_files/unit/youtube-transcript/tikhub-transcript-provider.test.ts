@@ -6,6 +6,7 @@ import type { TikHubResult } from "../../../src/sources/tikhub/tikhub-types";
 import type { TikHubSettings } from "../../../src/types/types";
 import {
   captionJobKey,
+  type TikHubCaptionJobIdentity,
   type TikHubCaptionJobRecord,
 } from "../../../src/youtube-transcript/tikhub-caption-job-repository";
 import {
@@ -14,8 +15,11 @@ import {
   type TikHubCaptionJobStore,
 } from "../../../src/youtube-transcript/tikhub-transcript-provider";
 import {
+  isTranscriptProviderOperationResult,
   YouTubeTranscriptError,
   type TranscriptProviderOperationContext,
+  type TranscriptProviderOperationEvidence,
+  type TranscriptProviderOperationResult,
   type YouTubeCaptionTrack,
   type YouTubeTranscript,
   type YouTubeTranscriptErrorCode,
@@ -47,6 +51,18 @@ const CONTEXT: TranscriptProviderOperationContext = Object.freeze({
   itemId: ITEM_ID,
   videoId: VIDEO_ID,
 });
+const FREE_EVIDENCE: TranscriptProviderOperationEvidence = Object.freeze({
+  tikhubPaidRequests: 0,
+  paidRequestAttempted: false,
+});
+const PAID_EVIDENCE: TranscriptProviderOperationEvidence = Object.freeze({
+  tikhubPaidRequests: 1,
+  paidRequestAttempted: true,
+});
+const ATTEMPTED_EVIDENCE: TranscriptProviderOperationEvidence = Object.freeze({
+  tikhubPaidRequests: 0,
+  paidRequestAttempted: true,
+});
 
 type ClientOutcome = TikHubResult<unknown> | Error;
 
@@ -76,11 +92,24 @@ class FakeCaptionClient implements TikHubCaptionClient {
 class FakeJobs implements TikHubCaptionJobStore {
   readonly records = new Map<string, TikHubCaptionJobRecord>();
   readonly readKeys: string[] = [];
-  readonly writes: TikHubCaptionJobRecord[] = [];
-  readonly removes: string[] = [];
+  readonly creates: TikHubCaptionJobRecord[] = [];
+  readonly replacements: Array<{
+    identity: TikHubCaptionJobIdentity;
+    replacement: TikHubCaptionJobRecord;
+  }> = [];
+  readonly conditionalRemoves: TikHubCaptionJobIdentity[] = [];
   readFailure?: Error;
-  writeFailure?: Error;
-  removeFailure?: Error;
+  createFailure?: Error;
+  replaceFailure?: Error;
+  conditionalRemoveFailure?: Error;
+  beforeCreate?: (record: TikHubCaptionJobRecord) => void | Promise<void>;
+  beforeReplace?: (
+    identity: TikHubCaptionJobIdentity,
+    replacement: TikHubCaptionJobRecord,
+  ) => void | Promise<void>;
+  beforeConditionalRemove?: (
+    identity: TikHubCaptionJobIdentity,
+  ) => void | Promise<void>;
 
   constructor(private readonly events?: string[]) {}
 
@@ -92,19 +121,47 @@ class FakeJobs implements TikHubCaptionJobStore {
     return record ? { ...record } : null;
   }
 
-  async write(record: TikHubCaptionJobRecord): Promise<void> {
-    this.events?.push("write-job");
-    this.writes.push({ ...record });
-    if (this.writeFailure) throw this.writeFailure;
-    this.records.set(keyFor(record), { ...record });
+  async createIfAbsent(record: TikHubCaptionJobRecord): Promise<boolean> {
+    this.events?.push("create-job");
+    this.creates.push({ ...record });
+    await this.beforeCreate?.(record);
+    if (this.createFailure) throw this.createFailure;
+    const key = keyFor(record);
+    if (this.records.has(key)) return false;
+    this.records.set(key, { ...record });
+    return true;
   }
 
-  async remove(key: string): Promise<void> {
-    this.events?.push("remove-job");
-    this.removes.push(key);
-    if (this.removeFailure) throw this.removeFailure;
-    this.records.delete(key);
+  async replaceIfCurrent(
+    identity: TikHubCaptionJobIdentity,
+    replacement: TikHubCaptionJobRecord,
+  ): Promise<boolean> {
+    this.events?.push("replace-job");
+    this.replacements.push({
+      identity: { ...identity },
+      replacement: { ...replacement },
+    });
+    await this.beforeReplace?.(identity, replacement);
+    if (this.replaceFailure) throw this.replaceFailure;
+    const current = this.records.get(identity.key);
+    if (!current || !matchesJobIdentity(current, identity)) return false;
+    this.records.set(identity.key, { ...replacement });
+    return true;
   }
+
+  async removeIfCurrent(
+    identity: TikHubCaptionJobIdentity,
+  ): Promise<boolean> {
+    this.events?.push("remove-current-job");
+    this.conditionalRemoves.push({ ...identity });
+    await this.beforeConditionalRemove?.(identity);
+    if (this.conditionalRemoveFailure) throw this.conditionalRemoveFailure;
+    const current = this.records.get(identity.key);
+    if (!current || !matchesJobIdentity(current, identity)) return false;
+    this.records.delete(identity.key);
+    return true;
+  }
+
 }
 
 interface HarnessOptions {
@@ -278,6 +335,23 @@ function putJob(jobs: FakeJobs, record: TikHubCaptionJobRecord): void {
   jobs.records.set(keyFor(record), { ...record });
 }
 
+function identityFor(record: TikHubCaptionJobRecord): TikHubCaptionJobIdentity {
+  return {
+    key: keyFor(record),
+    jobId: record.jobId,
+    connectionId: record.connectionId,
+  };
+}
+
+function matchesJobIdentity(
+  record: TikHubCaptionJobRecord,
+  identity: TikHubCaptionJobIdentity,
+): boolean {
+  return keyFor(record) === identity.key &&
+    record.jobId === identity.jobId &&
+    record.connectionId === identity.connectionId;
+}
+
 function decodeLocator(track: YouTubeCaptionTrack): Record<string, unknown> {
   expect(track.url.startsWith("tikhub:")).toBe(true);
   return JSON.parse(decodeURIComponent(track.url.slice("tikhub:".length))) as
@@ -289,19 +363,38 @@ async function listedTrack(
     client: new FakeCaptionClient([tracksData()]),
   }),
 ): Promise<{ harness: ReturnType<typeof createHarness>; track: YouTubeCaptionTrack }> {
-  const tracks = await harness.provider.listTracks(VIDEO_ID, undefined, CONTEXT);
-  return { harness, track: tracks[0] };
+  const operation = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+    await harness.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+    PAID_EVIDENCE,
+  );
+  return { harness, track: operation.value[0] };
 }
 
 function expectCode(
   pending: Promise<unknown>,
   code: YouTubeTranscriptErrorCode,
+  operationEvidence: TranscriptProviderOperationEvidence = FREE_EVIDENCE,
 ): Promise<void> {
   return expect(pending).rejects.toMatchObject({
     name: "YouTubeTranscriptError",
     code,
     message: code,
+    operationEvidence,
   });
+}
+
+function expectOperationEnvelope<T>(
+  value: unknown,
+  expectedEvidence: TranscriptProviderOperationEvidence,
+): TranscriptProviderOperationResult<T> {
+  expect(isTranscriptProviderOperationResult(value)).toBe(true);
+  expect(Object.isFrozen(value)).toBe(true);
+  if (!isTranscriptProviderOperationResult(value)) {
+    throw new Error("Expected a strict transcript provider operation result.");
+  }
+  expect(value.evidence).toEqual(expectedEvidence);
+  expect(Object.isFrozen(value.evidence)).toBe(true);
+  return value as TranscriptProviderOperationResult<T>;
 }
 
 describe("TikHubTranscriptProvider", () => {
@@ -361,7 +454,10 @@ describe("TikHubTranscriptProvider", () => {
     ]);
     const test = createHarness({ client });
 
-    const tracks = await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT);
+    const tracks = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+      await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+      PAID_EVIDENCE,
+    ).value;
 
     expect(tracks).toHaveLength(2);
     expect(tracks.map(({ languageCode, languageName, isGenerated, source, format }) => ({
@@ -419,11 +515,16 @@ describe("TikHubTranscriptProvider", () => {
       }),
     ]);
     const test = createHarness({ client });
-    const [track] = await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT);
+    const [track] = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+      await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+      PAID_EVIDENCE,
+    ).value;
 
-    await expect(
-      test.provider.fetchTrack(track, undefined, CONTEXT),
-    ).resolves.toEqual({
+    const transcript = expectOperationEnvelope<YouTubeTranscript>(
+      await test.provider.fetchTrack(track, undefined, CONTEXT),
+      PAID_EVIDENCE,
+    ).value;
+    expect(transcript).toEqual({
       videoId: VIDEO_ID,
       languageCode: "a.zh-Hans",
       languageName: "Chinese (auto)",
@@ -449,6 +550,7 @@ describe("TikHubTranscriptProvider", () => {
       await expectCode(
         test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
         "tikhub-malformed-response",
+        ATTEMPTED_EVIDENCE,
       );
     },
   );
@@ -457,9 +559,11 @@ describe("TikHubTranscriptProvider", () => {
     const client = new FakeCaptionClient([tracksData([])]);
     const test = createHarness({ client });
 
-    await expect(
-      test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
-    ).resolves.toEqual([]);
+    const result = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+      await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+      PAID_EVIDENCE,
+    );
+    expect(result.value).toEqual([]);
     expect(client.paidInputs).toHaveLength(1);
     expect(client.resultInputs).toHaveLength(0);
   });
@@ -470,13 +574,15 @@ describe("TikHubTranscriptProvider", () => {
       contentData(),
     ]);
     const test = createHarness({ client });
-    const [track] = await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT);
+    const [track] = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+      await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+      PAID_EVIDENCE,
+    ).value;
 
-    const transcript = await test.provider.fetchTrack(
-      track,
-      undefined,
-      CONTEXT,
-    );
+    const transcript = expectOperationEnvelope<YouTubeTranscript>(
+      await test.provider.fetchTrack(track, undefined, CONTEXT),
+      PAID_EVIDENCE,
+    ).value;
 
     expect(transcript).toEqual({
       videoId: VIDEO_ID,
@@ -512,9 +618,14 @@ describe("TikHubTranscriptProvider", () => {
     listed.harness.createClient.mockClear();
 
     listed.harness.client.paid.push(contentData());
-    await expect(
-      listed.harness.provider.fetchTrack(clone, undefined, CONTEXT),
-    ).resolves.toMatchObject({ provider: "tikhub", videoId: VIDEO_ID });
+    const clonedFetch = expectOperationEnvelope<YouTubeTranscript>(
+      await listed.harness.provider.fetchTrack(clone, undefined, CONTEXT),
+      PAID_EVIDENCE,
+    );
+    expect(clonedFetch.value).toMatchObject({
+      provider: "tikhub",
+      videoId: VIDEO_ID,
+    });
     listed.harness.getApiKey.mockClear();
     listed.harness.createClient.mockClear();
 
@@ -576,17 +687,20 @@ describe("TikHubTranscriptProvider", () => {
       },
     });
 
-    const tracks = await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT);
+    const tracks = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+      await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+      PAID_EVIDENCE,
+    ).value;
 
     expect(tracks).toHaveLength(1);
     expect(events).toEqual([
       "read-job",
       "paid",
-      "write-job",
+      "create-job",
       "delay:3000",
       "result",
     ]);
-    expect(jobs.writes[0]).toEqual({
+    expect(jobs.creates[0]).toEqual({
       schemaVersion: 1,
       itemId: ITEM_ID,
       videoId: VIDEO_ID,
@@ -617,25 +731,27 @@ describe("TikHubTranscriptProvider", () => {
         events.push(`delay:${milliseconds}`);
       },
     });
-    const [track] = await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT);
+    const [track] = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+      await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+      PAID_EVIDENCE,
+    ).value;
     events.length = 0;
 
-    const transcript = await test.provider.fetchTrack(
-      track,
-      undefined,
-      CONTEXT,
-    );
+    const transcript = expectOperationEnvelope<YouTubeTranscript>(
+      await test.provider.fetchTrack(track, undefined, CONTEXT),
+      PAID_EVIDENCE,
+    ).value;
 
     expect(transcript.videoId).toBe(VIDEO_ID);
     expect(transcript.text).toBe("Completed from the free result endpoint.");
     expect(events).toEqual([
       "read-job",
       "paid",
-      "write-job",
+      "create-job",
       "delay:3000",
       "result",
     ]);
-    expect(jobs.writes.at(-1)).toMatchObject({
+    expect(jobs.creates.at(-1)).toMatchObject({
       itemId: ITEM_ID,
       videoId: VIDEO_ID,
       stage: "content",
@@ -651,7 +767,10 @@ describe("TikHubTranscriptProvider", () => {
     putJob(jobs, jobRecord("tracks"));
     const test = createHarness({ client, jobs });
 
-    const tracks = await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT);
+    const tracks = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+      await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+      FREE_EVIDENCE,
+    ).value;
 
     expect(tracks).toHaveLength(1);
     expect(client.paidInputs).toHaveLength(0);
@@ -670,11 +789,10 @@ describe("TikHubTranscriptProvider", () => {
     putJob(jobs, jobRecord("content"));
     const test = createHarness({ client, jobs });
 
-    const transcript = await test.provider.fetchTrack(
-      listed.track,
-      undefined,
-      CONTEXT,
-    );
+    const transcript = expectOperationEnvelope<YouTubeTranscript>(
+      await test.provider.fetchTrack(listed.track, undefined, CONTEXT),
+      FREE_EVIDENCE,
+    ).value;
 
     expect(transcript).toMatchObject({
       videoId: VIDEO_ID,
@@ -699,6 +817,7 @@ describe("TikHubTranscriptProvider", () => {
     await expectCode(
       test.provider.fetchTrack(listed.track, undefined, CONTEXT),
       "tikhub-processing",
+      FREE_EVIDENCE,
     );
 
     expect(client.paidInputs).toHaveLength(0);
@@ -711,7 +830,7 @@ describe("TikHubTranscriptProvider", () => {
       jobId: JOB_ID,
       status: "processing",
     });
-    expect(jobs.removes).toEqual([]);
+    expect(jobs.conditionalRemoves).toEqual([]);
   });
 
   it("retains the atomically saved job when polling is aborted", async () => {
@@ -725,17 +844,21 @@ describe("TikHubTranscriptProvider", () => {
         controller.abort();
       },
     });
-    const [track] = await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT);
+    const [track] = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+      await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+      PAID_EVIDENCE,
+    ).value;
 
     await expectCode(
       test.provider.fetchTrack(track, controller.signal, CONTEXT),
       "aborted",
+      PAID_EVIDENCE,
     );
 
     expect(jobs.records.has(
       captionJobKey(ITEM_ID, VIDEO_ID, "content", "en"),
     )).toBe(true);
-    expect(jobs.removes).toEqual([]);
+    expect(jobs.conditionalRemoves).toEqual([]);
     expect(client.resultInputs).toHaveLength(0);
   });
 
@@ -752,7 +875,8 @@ describe("TikHubTranscriptProvider", () => {
 
     expect(client.paidInputs).toHaveLength(0);
     expect(client.resultInputs).toHaveLength(0);
-    expect(jobs.removes).toEqual([]);
+    expect(jobs.conditionalRemoves).toHaveLength(1);
+    expect(jobs.records.size).toBe(0);
   });
 
   it.each([
@@ -770,10 +894,14 @@ describe("TikHubTranscriptProvider", () => {
     } catch (error) {
       caught = error;
     }
-    expect(caught).toEqual(new YouTubeTranscriptError("tikhub-job-expired"));
+    expect(caught).toEqual(new YouTubeTranscriptError(
+      "tikhub-job-expired",
+      FREE_EVIDENCE,
+    ));
     expect(JSON.stringify(caught)).not.toContain("private expired detail");
     expect(client.paidInputs).toHaveLength(0);
-    expect(jobs.removes).toEqual([]);
+    expect(jobs.conditionalRemoves).toHaveLength(1);
+    expect(jobs.records.size).toBe(0);
   });
 
   it("maps malformed paid and free data without retaining either provider payload", async () => {
@@ -785,6 +913,7 @@ describe("TikHubTranscriptProvider", () => {
     await expectCode(
       paid.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
       "tikhub-malformed-response",
+      ATTEMPTED_EVIDENCE,
     );
 
     const jobs = new FakeJobs();
@@ -801,7 +930,10 @@ describe("TikHubTranscriptProvider", () => {
     } catch (error) {
       caught = error;
     }
-    expect(caught).toEqual(new YouTubeTranscriptError("tikhub-malformed-response"));
+    expect(caught).toEqual(new YouTubeTranscriptError(
+      "tikhub-malformed-response",
+      FREE_EVIDENCE,
+    ));
     expect(JSON.stringify(caught)).not.toContain("payload");
   });
 
@@ -858,7 +990,7 @@ describe("TikHubTranscriptProvider", () => {
       caught = error;
     }
 
-    expect(caught).toEqual(new YouTubeTranscriptError(code));
+    expect(caught).toEqual(new YouTubeTranscriptError(code, FREE_EVIDENCE));
     expect(JSON.stringify(caught)).not.toContain("private");
   });
 
@@ -876,7 +1008,7 @@ describe("TikHubTranscriptProvider", () => {
     expect(readTest.client.paidInputs).toHaveLength(0);
 
     const unwritable = new FakeJobs();
-    unwritable.writeFailure = new Error("private job bytes");
+    unwritable.createFailure = new Error("private job bytes");
     const writeTest = createHarness({
       jobs: unwritable,
       client: new FakeCaptionClient([processingData()]),
@@ -884,6 +1016,7 @@ describe("TikHubTranscriptProvider", () => {
     await expectCode(
       writeTest.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
       "tikhub-budget-unavailable",
+      PAID_EVIDENCE,
     );
     expect(writeTest.client.resultInputs).toHaveLength(0);
   });
@@ -928,13 +1061,459 @@ describe("TikHubTranscriptProvider", () => {
       text: "Durably cached caption.",
     };
 
-    await test.provider.onPersisted(listed.track, transcript, CONTEXT);
+    await test.provider.onPersisted(
+      listed.track,
+      transcript,
+      CONTEXT,
+      identityFor(contentJob),
+    );
 
     const contentKey = captionJobKey(ITEM_ID, VIDEO_ID, "content", "en");
     const tracksKey = captionJobKey(ITEM_ID, VIDEO_ID, "tracks");
-    expect(jobs.removes).toEqual([contentKey]);
+    expect(jobs.conditionalRemoves).toEqual([identityFor(contentJob)]);
     expect(jobs.records.has(contentKey)).toBe(false);
     expect(jobs.records.has(tracksKey)).toBe(true);
     expect(test.getApiKey).not.toHaveBeenCalled();
+  });
+
+  describe("operation-bound paid request evidence", () => {
+    it("attaches zero evidence to a stable validation error before any provider work", async () => {
+      const test = createHarness();
+
+      const error = await test.provider
+        .listTracks("../invalid", undefined, {
+          itemId: ITEM_ID,
+          videoId: "../invalid",
+        })
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "invalid-video-id",
+        operationEvidence: FREE_EVIDENCE,
+      });
+      expect(test.getApiKey).not.toHaveBeenCalled();
+      expect(test.jobs.readKeys).toEqual([]);
+    });
+
+    it("returns strict paid and free list envelopes without persistence tokens", async () => {
+      const paid = createHarness({
+        client: new FakeCaptionClient([tracksData()]),
+      });
+      const paidResult = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+        await paid.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+        { tikhubPaidRequests: 1, paidRequestAttempted: true },
+      );
+      expect(paidResult.value).toHaveLength(1);
+      expect(Object.prototype.hasOwnProperty.call(
+        paidResult,
+        "persistenceToken",
+      )).toBe(false);
+
+      const jobs = new FakeJobs();
+      putJob(jobs, jobRecord("tracks"));
+      const resumed = createHarness({
+        jobs,
+        client: new FakeCaptionClient([], [completedTracksData()]),
+      });
+      const freeResult = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+        await resumed.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+        { tikhubPaidRequests: 0, paidRequestAttempted: false },
+      );
+      expect(freeResult.value).toHaveLength(1);
+      expect(Object.prototype.hasOwnProperty.call(
+        freeResult,
+        "persistenceToken",
+      )).toBe(false);
+    });
+
+    it("preserves one confirmed paid response when processing remains pending", async () => {
+      const test = createHarness({
+        client: new FakeCaptionClient(
+          [processingData()],
+          Array.from({ length: 10 }, () => pendingData()),
+        ),
+      });
+
+      const error = await test.provider
+        .listTracks(VIDEO_ID, undefined, CONTEXT)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "tikhub-processing",
+        operationEvidence: {
+          tikhubPaidRequests: 1,
+          paidRequestAttempted: true,
+        },
+      });
+    });
+
+    it("preserves confirmed paid evidence when local job timestamping fails after processing", async () => {
+      const test = createHarness({
+        client: new FakeCaptionClient([processingData()]),
+        clock: () => new Date(Number.NaN),
+      });
+
+      const error = await test.provider
+        .listTracks(VIDEO_ID, undefined, CONTEXT)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "tikhub-malformed-response",
+        operationEvidence: PAID_EVIDENCE,
+      });
+      expect(test.jobs.creates).toEqual([]);
+    });
+
+    it("maps an ambiguous paid client failure to attempted but unconfirmed evidence", async () => {
+      const test = createHarness({
+        client: new FakeCaptionClient([
+          new TikHubClientError(
+            "network-failure",
+            "private transport detail",
+            undefined,
+            undefined,
+            true,
+          ),
+        ]),
+      });
+
+      const error = await test.provider
+        .listTracks(VIDEO_ID, undefined, CONTEXT)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "temporarily-unavailable",
+        operationEvidence: {
+          tikhubPaidRequests: 0,
+          paidRequestAttempted: true,
+        },
+      });
+      expect(JSON.stringify(error)).not.toContain("private transport detail");
+    });
+  });
+
+  describe("expired job recovery", () => {
+    it("clears a changed-connection job, ends the current call, and allows only the next explicit call to pay", async () => {
+      const jobs = new FakeJobs();
+      const expired = jobRecord("tracks", {
+        connectionId: OTHER_CONNECTION_ID,
+      });
+      putJob(jobs, expired);
+      const client = new FakeCaptionClient([tracksData()]);
+      const test = createHarness({ client, jobs });
+
+      const firstError = await test.provider
+        .listTracks(VIDEO_ID, undefined, CONTEXT)
+        .catch((caught: unknown) => caught);
+
+      expect(firstError).toMatchObject({
+        code: "tikhub-job-expired",
+        operationEvidence: {
+          tikhubPaidRequests: 0,
+          paidRequestAttempted: false,
+        },
+      });
+      expect(client.paidInputs).toHaveLength(0);
+      expect(jobs.conditionalRemoves).toEqual([identityFor(expired)]);
+      expect(jobs.records.has(keyFor(expired))).toBe(false);
+
+      const second = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+        await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+        { tikhubPaidRequests: 1, paidRequestAttempted: true },
+      );
+      expect(second.value).toHaveLength(1);
+      expect(client.paidInputs).toHaveLength(1);
+    });
+
+    it.each([
+      new TikHubClientError("invalid-query", "private expired detail", 422),
+      new TikHubClientError("provider-rejected", "private expired detail", 404),
+    ])("conditionally clears an expired free-result job without paying", async (failure) => {
+      const jobs = new FakeJobs();
+      const expired = jobRecord("tracks");
+      putJob(jobs, expired);
+      const client = new FakeCaptionClient([], [failure]);
+      const test = createHarness({ client, jobs });
+
+      const error = await test.provider
+        .listTracks(VIDEO_ID, undefined, CONTEXT)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "tikhub-job-expired",
+        operationEvidence: {
+          tikhubPaidRequests: 0,
+          paidRequestAttempted: false,
+        },
+      });
+      expect(client.paidInputs).toHaveLength(0);
+      expect(jobs.conditionalRemoves).toEqual([identityFor(expired)]);
+      expect(jobs.records.has(keyFor(expired))).toBe(false);
+    });
+
+    it("preserves paid evidence while clearing a job rejected by the first free poll", async () => {
+      const jobs = new FakeJobs();
+      const client = new FakeCaptionClient(
+        [processingData()],
+        [new TikHubClientError("provider-rejected", "private expired detail", 404)],
+      );
+      const test = createHarness({ client, jobs });
+
+      const error = await test.provider
+        .listTracks(VIDEO_ID, undefined, CONTEXT)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "tikhub-job-expired",
+        operationEvidence: PAID_EVIDENCE,
+      });
+      expect(client.paidInputs).toHaveLength(1);
+      expect(client.resultInputs).toHaveLength(1);
+      expect(jobs.conditionalRemoves).toEqual([
+        identityFor(jobs.creates[0]),
+      ]);
+      expect(jobs.records.size).toBe(0);
+    });
+
+    it("fails closed without paying when expired cleanup cannot become durable", async () => {
+      const jobs = new FakeJobs();
+      const expired = jobRecord("tracks", {
+        connectionId: OTHER_CONNECTION_ID,
+      });
+      putJob(jobs, expired);
+      jobs.conditionalRemoveFailure = new Error("private storage failure");
+      const client = new FakeCaptionClient([tracksData()]);
+      const test = createHarness({ client, jobs });
+
+      const error = await test.provider
+        .listTracks(VIDEO_ID, undefined, CONTEXT)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "tikhub-budget-unavailable",
+        operationEvidence: {
+          tikhubPaidRequests: 0,
+          paidRequestAttempted: false,
+        },
+      });
+      expect(client.paidInputs).toHaveLength(0);
+      expect(jobs.records.get(keyFor(expired))).toEqual(expired);
+    });
+
+    it("preserves a newer winner when expired cleanup loses the CAS", async () => {
+      const jobs = new FakeJobs();
+      const expired = jobRecord("tracks", {
+        connectionId: OTHER_CONNECTION_ID,
+      });
+      const winner = jobRecord("tracks", {
+        jobId: OTHER_JOB_ID,
+        lastCheckedAt: NOW,
+      });
+      putJob(jobs, expired);
+      jobs.beforeConditionalRemove = () => putJob(jobs, winner);
+      const client = new FakeCaptionClient([tracksData()]);
+      const test = createHarness({ client, jobs });
+
+      const error = await test.provider
+        .listTracks(VIDEO_ID, undefined, CONTEXT)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ code: "tikhub-job-expired" });
+      expect(client.paidInputs).toHaveLength(0);
+      expect(jobs.records.get(keyFor(winner))).toEqual(winner);
+    });
+  });
+
+  describe("job CAS and durable cleanup tokens", () => {
+    it("preserves the create-if-absent winner and returns paid processing without polling", async () => {
+      const jobs = new FakeJobs();
+      const winner = jobRecord("tracks", {
+        jobId: OTHER_JOB_ID,
+        lastCheckedAt: NOW,
+      });
+      jobs.beforeCreate = () => putJob(jobs, winner);
+      const client = new FakeCaptionClient([processingData()]);
+      const test = createHarness({ client, jobs });
+
+      const error = await test.provider
+        .listTracks(VIDEO_ID, undefined, CONTEXT)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "tikhub-processing",
+        operationEvidence: {
+          tikhubPaidRequests: 1,
+          paidRequestAttempted: true,
+        },
+      });
+      expect(jobs.creates).toHaveLength(1);
+      expect(client.resultInputs).toHaveLength(0);
+      expect(test.delay).not.toHaveBeenCalled();
+      expect(jobs.records.get(keyFor(winner))).toEqual(winner);
+    });
+
+    it("stops a stale poll when replace-if-current loses without overwriting the winner", async () => {
+      const jobs = new FakeJobs();
+      const stale = jobRecord("tracks");
+      const winner = jobRecord("tracks", {
+        jobId: OTHER_JOB_ID,
+        lastCheckedAt: NOW,
+      });
+      putJob(jobs, stale);
+      jobs.beforeReplace = () => putJob(jobs, winner);
+      const client = new FakeCaptionClient([], [pendingData()]);
+      const test = createHarness({ client, jobs });
+
+      const error = await test.provider
+        .listTracks(VIDEO_ID, undefined, CONTEXT)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "tikhub-job-expired",
+        operationEvidence: {
+          tikhubPaidRequests: 0,
+          paidRequestAttempted: false,
+        },
+      });
+      expect(client.paidInputs).toHaveLength(0);
+      expect(client.resultInputs).toHaveLength(1);
+      expect(jobs.replacements).toHaveLength(1);
+      expect(jobs.records.get(keyFor(winner))).toEqual(winner);
+    });
+
+    it("carries the exact completed content job token and removes only that identity after persistence", async () => {
+      const listHarness = createHarness({
+        client: new FakeCaptionClient([tracksData()]),
+      });
+      const listed = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+        await listHarness.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+        { tikhubPaidRequests: 1, paidRequestAttempted: true },
+      );
+      const jobs = new FakeJobs();
+      const contentJob = jobRecord("content");
+      putJob(jobs, contentJob);
+      const test = createHarness({
+        jobs,
+        client: new FakeCaptionClient([], [completedContentData()]),
+      });
+
+      const fetched = expectOperationEnvelope<YouTubeTranscript>(
+        await test.provider.fetchTrack(listed.value[0], undefined, CONTEXT),
+        { tikhubPaidRequests: 0, paidRequestAttempted: false },
+      );
+      expect(fetched.persistenceToken).toEqual(identityFor(contentJob));
+      expect(Object.keys(fetched.persistenceToken as object).sort()).toEqual([
+        "connectionId",
+        "jobId",
+        "key",
+      ]);
+
+      await test.provider.onPersisted(
+        listed.value[0],
+        fetched.value,
+        CONTEXT,
+        fetched.persistenceToken,
+      );
+
+      expect(jobs.conditionalRemoves).toEqual([identityFor(contentJob)]);
+      expect(jobs.records.has(keyFor(contentJob))).toBe(false);
+    });
+
+    it("keeps a newer content replacement when an old persistence token loses the CAS", async () => {
+      const listHarness = createHarness({
+        client: new FakeCaptionClient([tracksData()]),
+      });
+      const listed = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+        await listHarness.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+        { tikhubPaidRequests: 1, paidRequestAttempted: true },
+      );
+      const jobs = new FakeJobs();
+      const completed = jobRecord("content");
+      const winner = jobRecord("content", {
+        jobId: OTHER_JOB_ID,
+        lastCheckedAt: NOW,
+      });
+      putJob(jobs, completed);
+      const test = createHarness({
+        jobs,
+        client: new FakeCaptionClient([], [completedContentData()]),
+      });
+      const fetched = expectOperationEnvelope<YouTubeTranscript>(
+        await test.provider.fetchTrack(listed.value[0], undefined, CONTEXT),
+        { tikhubPaidRequests: 0, paidRequestAttempted: false },
+      );
+      jobs.beforeConditionalRemove = () => putJob(jobs, winner);
+
+      await test.provider.onPersisted(
+        listed.value[0],
+        fetched.value,
+        CONTEXT,
+        fetched.persistenceToken,
+      );
+
+      expect(jobs.records.get(keyFor(winner))).toEqual(winner);
+    });
+
+    it("does not delete a later content job after synchronous content without a token", async () => {
+      const client = new FakeCaptionClient([tracksData(), contentData()]);
+      const jobs = new FakeJobs();
+      const test = createHarness({ client, jobs });
+      const listed = expectOperationEnvelope<YouTubeCaptionTrack[]>(
+        await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+        { tikhubPaidRequests: 1, paidRequestAttempted: true },
+      );
+      const fetched = expectOperationEnvelope<YouTubeTranscript>(
+        await test.provider.fetchTrack(listed.value[0], undefined, CONTEXT),
+        { tikhubPaidRequests: 1, paidRequestAttempted: true },
+      );
+      expect(Object.prototype.hasOwnProperty.call(
+        fetched,
+        "persistenceToken",
+      )).toBe(false);
+      const later = jobRecord("content", {
+        jobId: OTHER_JOB_ID,
+        lastCheckedAt: NOW,
+      });
+      putJob(jobs, later);
+
+      await test.provider.onPersisted(
+        listed.value[0],
+        fetched.value,
+        CONTEXT,
+        undefined,
+      );
+
+      expect(jobs.conditionalRemoves).toEqual([]);
+      expect(jobs.records.get(keyFor(later))).toEqual(later);
+    });
+
+    it("rejects an expanded persistence token without touching the stored content job", async () => {
+      const listed = await listedTrack();
+      const jobs = new FakeJobs();
+      const contentJob = jobRecord("content");
+      putJob(jobs, contentJob);
+      const test = createHarness({ jobs });
+      const transcript: YouTubeTranscript = {
+        videoId: VIDEO_ID,
+        languageCode: "en",
+        languageName: "English",
+        isGenerated: false,
+        provider: "tikhub",
+        text: "Durably cached caption.",
+      };
+
+      await expectCode(
+        test.provider.onPersisted(
+          listed.track,
+          transcript,
+          CONTEXT,
+          { ...identityFor(contentJob), unexpected: "not-allowed" },
+        ),
+        "tikhub-malformed-response",
+      );
+
+      expect(jobs.conditionalRemoves).toEqual([]);
+      expect(jobs.records.get(keyFor(contentJob))).toEqual(contentJob);
+    });
   });
 });

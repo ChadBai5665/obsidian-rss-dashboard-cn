@@ -20,13 +20,17 @@ import type { TikHubSettings } from "../types/types";
 import type { OptionalTranscriptProvider } from "./youtube-transcript-service";
 import {
   captionJobKey,
+  type TikHubCaptionJobIdentity,
   type TikHubCaptionJobRecord,
 } from "./tikhub-caption-job-repository";
 import { isValidYouTubeCaptionLanguageCode } from "./youtube-caption-language-code";
 import {
   assertYouTubeVideoId,
+  createTranscriptProviderOperationResult,
   YouTubeTranscriptError,
+  type TranscriptProviderOperationEvidence,
   type TranscriptProviderOperationContext,
+  type TranscriptProviderOperationResult,
   type YouTubeCaptionTrack,
   type YouTubeTranscript,
   type YouTubeTranscriptErrorCode,
@@ -43,8 +47,12 @@ export interface TikHubCaptionClient {
 
 export interface TikHubCaptionJobStore {
   read(key: string): Promise<TikHubCaptionJobRecord | null>;
-  write(record: TikHubCaptionJobRecord): Promise<void>;
-  remove(key: string): Promise<void>;
+  createIfAbsent(record: TikHubCaptionJobRecord): Promise<boolean>;
+  replaceIfCurrent(
+    identity: TikHubCaptionJobIdentity,
+    replacement: TikHubCaptionJobRecord,
+  ): Promise<boolean>;
+  removeIfCurrent(identity: TikHubCaptionJobIdentity): Promise<boolean>;
 }
 
 export interface TikHubTranscriptProviderOptions {
@@ -79,6 +87,12 @@ interface LocatorProjection {
   format: "txt";
 }
 
+interface StageOperationResult {
+  response: TikHubCaptionResponse;
+  evidence: TranscriptProviderOperationEvidence;
+  completedJob?: TikHubCaptionJobRecord;
+}
+
 const ITEM_ID = /^[a-f0-9]{64}$/u;
 const JOB_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -87,6 +101,21 @@ const LOCATOR_PREFIX = "tikhub:";
 const MAX_LANGUAGE_NAME_LENGTH = 200;
 const DEFAULT_POLL_INTERVAL_MS = 3_000;
 const DEFAULT_MAX_POLLS = 10;
+const FREE_OPERATION_EVIDENCE: TranscriptProviderOperationEvidence =
+  Object.freeze({
+    tikhubPaidRequests: 0,
+    paidRequestAttempted: false,
+  });
+const PAID_OPERATION_EVIDENCE: TranscriptProviderOperationEvidence =
+  Object.freeze({
+    tikhubPaidRequests: 1,
+    paidRequestAttempted: true,
+  });
+const ATTEMPTED_OPERATION_EVIDENCE: TranscriptProviderOperationEvidence =
+  Object.freeze({
+    tikhubPaidRequests: 0,
+    paidRequestAttempted: true,
+  });
 const TRACK_JOB_FIELDS = [
   "schemaVersion",
   "itemId",
@@ -150,48 +179,57 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
     requestedVideoId: string,
     signal: AbortSignal | undefined,
     context: TranscriptProviderOperationContext,
-  ): Promise<YouTubeCaptionTrack[]> {
+  ): Promise<TranscriptProviderOperationResult<YouTubeCaptionTrack[]>> {
     const identity = operationIdentity(requestedVideoId, context);
     assertNotAborted(signal);
     const session = await this.currentSession(signal);
-    const response = await this.runStage(
+    const operation = await this.runStage(
       "tracks",
       identity,
       undefined,
       session,
       signal,
     );
-    if (response.kind === "no-captions") return [];
-    if (response.kind !== "tracks") throw stableError("tikhub-malformed-response");
-    return response.tracks.map((track) => createTrack(identity.videoId, track));
+    const { response, evidence } = operation;
+    if (response.kind === "no-captions") {
+      return createTranscriptProviderOperationResult([], evidence);
+    }
+    if (response.kind !== "tracks") {
+      throw stableError("tikhub-malformed-response", evidence);
+    }
+    return createTranscriptProviderOperationResult(
+      response.tracks.map((track) => createTrack(identity.videoId, track, evidence)),
+      evidence,
+    );
   }
 
   async fetchTrack(
     track: YouTubeCaptionTrack,
     signal: AbortSignal | undefined,
     context: TranscriptProviderOperationContext,
-  ): Promise<YouTubeTranscript> {
+  ): Promise<TranscriptProviderOperationResult<YouTubeTranscript>> {
     const locator = parseLocator(track);
     const identity = operationIdentity(locator.videoId, context);
     assertNotAborted(signal);
     const session = await this.currentSession(signal);
-    const response = await this.runStage(
+    const operation = await this.runStage(
       "content",
       identity,
       locator.languageCode,
       session,
       signal,
     );
-    if (response.kind === "no-captions") throw stableError("no-captions");
+    const { response, evidence } = operation;
+    if (response.kind === "no-captions") throw stableError("no-captions", evidence);
     if (
       response.kind !== "content" ||
       response.languageCode !== locator.languageCode ||
       response.languageName !== locator.languageName ||
       response.isGenerated !== locator.isGenerated
     ) {
-      throw stableError("tikhub-malformed-response");
+      throw stableError("tikhub-malformed-response", evidence);
     }
-    return {
+    const transcript: YouTubeTranscript = {
       videoId: identity.videoId,
       languageCode: response.languageCode,
       languageName: response.languageName,
@@ -199,25 +237,40 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
       provider: "tikhub",
       text: response.text,
     };
+    if (!operation.completedJob) {
+      return createTranscriptProviderOperationResult(transcript, evidence);
+    }
+    const key = safeJobKey(identity, "content", locator.languageCode);
+    return createTranscriptProviderOperationResult(
+      transcript,
+      evidence,
+      persistenceToken(key, operation.completedJob),
+    );
   }
 
   async onPersisted(
     track: YouTubeCaptionTrack,
     transcript: YouTubeTranscript,
     context: TranscriptProviderOperationContext,
+    persistenceTokenValue?: unknown,
   ): Promise<void> {
+    if (persistenceTokenValue === undefined) return;
     const locator = parseLocator(track);
     const identity = operationIdentity(locator.videoId, context);
     if (!isMatchingTranscript(transcript, identity, locator)) {
       throw stableError("tikhub-malformed-response");
     }
-    const key = safeJobKey(
+    const expectedKey = safeJobKey(
       identity,
       "content",
       locator.languageCode,
     );
+    const cleanupIdentity = parsePersistenceToken(
+      persistenceTokenValue,
+      expectedKey,
+    );
     try {
-      await this.options.jobs.remove(key);
+      await this.options.jobs.removeIfCurrent(cleanupIdentity);
     } catch {
       throw stableError("tikhub-budget-unavailable");
     }
@@ -229,7 +282,7 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
     languageCode: string | undefined,
     session: CurrentSession,
     signal: AbortSignal | undefined,
-  ): Promise<TikHubCaptionResponse> {
+  ): Promise<StageOperationResult> {
     const key = safeJobKey(identity, stage, languageCode);
     let currentJob: TikHubCaptionJobRecord | null;
     try {
@@ -247,9 +300,20 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
         languageCode,
         session.connectionId,
       )) {
-        throw stableError("tikhub-job-expired");
+        return await this.expireJob(
+          key,
+          currentJob,
+          FREE_OPERATION_EVIDENCE,
+        );
       }
-      return await this.pollJob(currentJob, stage, session, signal);
+      return await this.pollJob(
+        key,
+        currentJob,
+        stage,
+        session,
+        signal,
+        FREE_OPERATION_EVIDENCE,
+      );
     }
 
     let result: TikHubResult<unknown>;
@@ -268,19 +332,32 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
             signal,
           });
     } catch (error) {
-      throw normalizeFailure(error, false, signal);
+      throw normalizeFailure(
+        error,
+        false,
+        signal,
+        FREE_OPERATION_EVIDENCE,
+        true,
+      );
     }
-    assertNotAborted(signal);
-    const response = parseResponse(resultData(result), identity.videoId);
+    assertNotAborted(signal, ATTEMPTED_OPERATION_EVIDENCE);
+    const response = parseResponse(
+      resultData(result, ATTEMPTED_OPERATION_EVIDENCE),
+      identity.videoId,
+      ATTEMPTED_OPERATION_EVIDENCE,
+    );
     if (response.kind !== "processing") {
       if (response.kind === "pending") {
-        throw stableError("tikhub-malformed-response");
+        throw stableError("tikhub-malformed-response", PAID_OPERATION_EVIDENCE);
       }
-      assertTerminalStage(response, stage);
-      return response;
+      assertTerminalStage(response, stage, PAID_OPERATION_EVIDENCE);
+      return { response, evidence: PAID_OPERATION_EVIDENCE };
     }
 
-    const timestamp = safeTimestamp(this.options.clock);
+    const timestamp = safeTimestamp(
+      this.options.clock,
+      PAID_OPERATION_EVIDENCE,
+    );
     const record: TikHubCaptionJobRecord = {
       schemaVersion: 1,
       itemId: identity.itemId,
@@ -294,30 +371,43 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
       lastCheckedAt: timestamp,
       status: "processing",
     };
+    let created: boolean;
     try {
-      await this.options.jobs.write(record);
+      created = await this.options.jobs.createIfAbsent(record);
     } catch {
-      throw stableError("tikhub-budget-unavailable");
+      throw stableError("tikhub-budget-unavailable", PAID_OPERATION_EVIDENCE);
     }
-    assertNotAborted(signal);
-    return await this.pollJob(record, stage, session, signal);
+    if (!created) {
+      throw stableError("tikhub-processing", PAID_OPERATION_EVIDENCE);
+    }
+    assertNotAborted(signal, PAID_OPERATION_EVIDENCE);
+    return await this.pollJob(
+      key,
+      record,
+      stage,
+      session,
+      signal,
+      PAID_OPERATION_EVIDENCE,
+    );
   }
 
   private async pollJob(
+    key: string,
     initialJob: TikHubCaptionJobRecord,
     stage: CaptionStage,
     session: CurrentSession,
     signal: AbortSignal | undefined,
-  ): Promise<TikHubCaptionResponse> {
+    evidence: TranscriptProviderOperationEvidence,
+  ): Promise<StageOperationResult> {
     let job = { ...initialJob };
     for (let attempt = 0; attempt < this.maxPolls; attempt += 1) {
-      assertNotAborted(signal);
+      assertNotAborted(signal, evidence);
       try {
         await this.options.delay(this.pollIntervalMs, signal);
       } catch (error) {
-        throw normalizeFailure(error, false, signal);
+        throw normalizeFailure(error, false, signal, evidence);
       }
-      assertNotAborted(signal);
+      assertNotAborted(signal, evidence);
 
       let result: TikHubResult<unknown>;
       try {
@@ -328,31 +418,55 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
           signal,
         });
       } catch (error) {
-        throw normalizeFailure(error, true, signal);
+        if (!signal?.aborted && isExpiredJobFailure(error)) {
+          return await this.expireJob(key, job, evidence);
+        }
+        throw normalizeFailure(error, true, signal, evidence);
       }
-      assertNotAborted(signal);
-      const data = resultData(result);
-      assertResultJobId(data, job.jobId);
-      const response = parseResponse(data, job.videoId);
+      assertNotAborted(signal, evidence);
+      const data = resultData(result, evidence);
+      assertResultJobId(data, job.jobId, evidence);
+      const response = parseResponse(data, job.videoId, evidence);
       if (response.kind === "pending" || response.kind === "processing") {
         if (response.jobId !== job.jobId) {
-          throw stableError("tikhub-malformed-response");
+          throw stableError("tikhub-malformed-response", evidence);
         }
-        job = {
+        const replacement = {
           ...job,
-          lastCheckedAt: safeTimestamp(this.options.clock),
+          lastCheckedAt: safeTimestamp(this.options.clock, evidence),
         };
+        let replaced: boolean;
         try {
-          await this.options.jobs.write(job);
+          replaced = await this.options.jobs.replaceIfCurrent(
+            jobIdentity(key, job),
+            replacement,
+          );
         } catch {
-          throw stableError("tikhub-budget-unavailable");
+          throw stableError("tikhub-budget-unavailable", evidence);
         }
+        if (!replaced) {
+          throw stableError("tikhub-job-expired", evidence);
+        }
+        job = replacement;
         continue;
       }
-      assertTerminalStage(response, stage);
-      return response;
+      assertTerminalStage(response, stage, evidence);
+      return { response, evidence, completedJob: job };
     }
-    throw stableError("tikhub-processing");
+    throw stableError("tikhub-processing", evidence);
+  }
+
+  private async expireJob(
+    key: string,
+    job: TikHubCaptionJobRecord,
+    evidence: TranscriptProviderOperationEvidence,
+  ): Promise<never> {
+    try {
+      await this.options.jobs.removeIfCurrent(jobIdentity(key, job));
+    } catch {
+      throw stableError("tikhub-budget-unavailable", evidence);
+    }
+    throw stableError("tikhub-job-expired", evidence);
   }
 
   private async currentSession(
@@ -439,7 +553,15 @@ function operationIdentity(
   requestedVideoId: string,
   context: TranscriptProviderOperationContext,
 ): OperationIdentity {
-  const videoId = assertYouTubeVideoId(requestedVideoId);
+  let videoId: string;
+  try {
+    videoId = assertYouTubeVideoId(requestedVideoId);
+  } catch (error) {
+    if (error instanceof YouTubeTranscriptError) {
+      throw stableError(error.code);
+    }
+    throw stableError("invalid-video-id");
+  }
   try {
     if (!plainRecord(context)) throw new Error("invalid operation context");
     const contextVideoId = ownData(context, "videoId");
@@ -463,13 +585,14 @@ function operationIdentity(
 function createTrack(
   videoId: string,
   track: TikHubCaptionTrack,
+  evidence: TranscriptProviderOperationEvidence,
 ): YouTubeCaptionTrack {
   if (
     !isValidYouTubeCaptionLanguageCode(track.languageCode) ||
     !safeLanguageName(track.languageName) ||
     typeof track.isGenerated !== "boolean"
   ) {
-    throw stableError("tikhub-malformed-response");
+    throw stableError("tikhub-malformed-response", evidence);
   }
   const locator: LocatorProjection = {
     videoId,
@@ -568,6 +691,59 @@ function safeJobKey(
   }
 }
 
+function jobIdentity(
+  key: string,
+  job: Pick<TikHubCaptionJobRecord, "jobId" | "connectionId">,
+): TikHubCaptionJobIdentity {
+  return {
+    key,
+    jobId: job.jobId,
+    connectionId: job.connectionId,
+  };
+}
+
+function persistenceToken(
+  key: string,
+  job: Pick<TikHubCaptionJobRecord, "jobId" | "connectionId">,
+): TikHubCaptionJobIdentity {
+  return Object.freeze(jobIdentity(key, job));
+}
+
+function parsePersistenceToken(
+  value: unknown,
+  expectedKey: string,
+): TikHubCaptionJobIdentity {
+  try {
+    if (
+      !plainRecord(value) ||
+      Object.getPrototypeOf(value) !== Object.prototype ||
+      !hasExactKeys(value, ["key", "jobId", "connectionId"])
+    ) {
+      throw new Error("invalid persistence token");
+    }
+    const key = ownData(value, "key");
+    const jobId = ownData(value, "jobId");
+    const connectionId = ownData(value, "connectionId");
+    if (
+      key !== expectedKey ||
+      typeof jobId !== "string" ||
+      !JOB_ID.test(jobId) ||
+      typeof connectionId !== "string" ||
+      !isCanonicalConnectionId(connectionId)
+    ) {
+      throw new Error("invalid persistence token");
+    }
+    return { key, jobId, connectionId };
+  } catch {
+    throw stableError("tikhub-malformed-response");
+  }
+}
+
+function isExpiredJobFailure(error: unknown): boolean {
+  return error instanceof TikHubClientError &&
+    (error.code === "invalid-query" || error.code === "provider-rejected");
+}
+
 function isExpectedJob(
   value: unknown,
   identity: OperationIdentity,
@@ -606,41 +782,53 @@ function isExpectedJob(
   }
 }
 
-function parseResponse(data: unknown, videoId: string): TikHubCaptionResponse {
+function parseResponse(
+  data: unknown,
+  videoId: string,
+  evidence: TranscriptProviderOperationEvidence,
+): TikHubCaptionResponse {
   try {
     return parseTikHubCaptionResponse(data, videoId);
   } catch {
-    throw stableError("tikhub-malformed-response");
+    throw stableError("tikhub-malformed-response", evidence);
   }
 }
 
-function resultData(value: unknown): unknown {
+function resultData(
+  value: unknown,
+  evidence: TranscriptProviderOperationEvidence,
+): unknown {
   try {
     if (!plainRecord(value)) throw new Error("invalid client result");
     return ownData(value, "data");
   } catch {
-    throw stableError("tikhub-malformed-response");
+    throw stableError("tikhub-malformed-response", evidence);
   }
 }
 
-function assertResultJobId(data: unknown, expectedJobId: string): void {
+function assertResultJobId(
+  data: unknown,
+  expectedJobId: string,
+  evidence: TranscriptProviderOperationEvidence,
+): void {
   try {
     if (!plainRecord(data) || ownData(data, "job_id") !== expectedJobId) {
       throw new Error("mismatched job");
     }
   } catch {
-    throw stableError("tikhub-malformed-response");
+    throw stableError("tikhub-malformed-response", evidence);
   }
 }
 
 function assertTerminalStage(
   response: TikHubCaptionResponse,
   stage: CaptionStage,
+  evidence: TranscriptProviderOperationEvidence,
 ): void {
   const valid = stage === "tracks"
     ? response.kind === "tracks" || response.kind === "no-captions"
     : response.kind === "content" || response.kind === "no-captions";
-  if (!valid) throw stableError("tikhub-malformed-response");
+  if (!valid) throw stableError("tikhub-malformed-response", evidence);
 }
 
 function isMatchingTranscript(
@@ -664,24 +852,33 @@ function normalizeFailure(
   error: unknown,
   resuming: boolean,
   signal: AbortSignal | undefined,
+  evidence: TranscriptProviderOperationEvidence = FREE_OPERATION_EVIDENCE,
+  useClientAttemptEvidence = false,
 ): YouTubeTranscriptError {
-  if (signal?.aborted) return stableError("aborted");
-  if (error instanceof YouTubeTranscriptError) return stableError(error.code);
+  if (signal?.aborted) return stableError("aborted", evidence);
+  if (error instanceof YouTubeTranscriptError) {
+    return stableError(error.code, evidence);
+  }
   if (
     error instanceof TikHubRequestBudgetError ||
     error instanceof TikHubRequestLedgerError
   ) {
-    return stableError("tikhub-budget-unavailable");
+    return stableError("tikhub-budget-unavailable", evidence);
   }
   if (error instanceof InvalidTikHubCaptionResponseError) {
-    return stableError("tikhub-malformed-response");
+    return stableError("tikhub-malformed-response", evidence);
   }
   if (error instanceof TikHubClientError) {
+    const clientEvidence = useClientAttemptEvidence
+      ? error.paidRequestAttempted
+        ? ATTEMPTED_OPERATION_EVIDENCE
+        : FREE_OPERATION_EVIDENCE
+      : evidence;
     if (
       resuming &&
       (error.code === "invalid-query" || error.code === "provider-rejected")
     ) {
-      return stableError("tikhub-job-expired");
+      return stableError("tikhub-job-expired", clientEvidence);
     }
     const code: Record<TikHubClientError["code"], YouTubeTranscriptErrorCode> = {
       "missing-key": "tikhub-missing-key",
@@ -697,20 +894,32 @@ function normalizeFailure(
       aborted: "aborted",
       "invalid-batch": "tikhub-budget-unavailable",
     };
-    return stableError(code[error.code] ?? "temporarily-unavailable");
+    return stableError(
+      code[error.code] ?? "temporarily-unavailable",
+      clientEvidence,
+    );
   }
-  return stableError("temporarily-unavailable");
+  return stableError("temporarily-unavailable", evidence);
 }
 
-function assertNotAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw stableError("aborted");
+function assertNotAborted(
+  signal: AbortSignal | undefined,
+  evidence: TranscriptProviderOperationEvidence = FREE_OPERATION_EVIDENCE,
+): void {
+  if (signal?.aborted) throw stableError("aborted", evidence);
 }
 
-function stableError(code: YouTubeTranscriptErrorCode): YouTubeTranscriptError {
-  return new YouTubeTranscriptError(code);
+function stableError(
+  code: YouTubeTranscriptErrorCode,
+  evidence: TranscriptProviderOperationEvidence = FREE_OPERATION_EVIDENCE,
+): YouTubeTranscriptError {
+  return new YouTubeTranscriptError(code, evidence);
 }
 
-function safeTimestamp(clock: () => Date): string {
+function safeTimestamp(
+  clock: () => Date,
+  evidence: TranscriptProviderOperationEvidence = FREE_OPERATION_EVIDENCE,
+): string {
   try {
     const value = clock();
     if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
@@ -718,7 +927,7 @@ function safeTimestamp(clock: () => Date): string {
     }
     return value.toISOString();
   } catch {
-    throw stableError("tikhub-malformed-response");
+    throw stableError("tikhub-malformed-response", evidence);
   }
 }
 
