@@ -490,7 +490,13 @@ function invalidStore(): Error {
 }
 
 function nextTransactionId(): string {
-  const random = globalThis.crypto?.randomUUID?.().replace(/-/gu, "") ??
-    Math.random().toString(36).slice(2);
+  const uuid = window.crypto?.randomUUID?.();
+  const random = uuid?.replace(/-/gu, "") ?? secureRandomSuffix();
   return `${Date.now()}-${transactionSequence++}-${random}`;
+}
+
+function secureRandomSuffix(): string {
+  const words = new Uint32Array(4);
+  window.crypto.getRandomValues(words);
+  return Array.from(words, (word) => word.toString(16).padStart(8, "0")).join("");
 }
