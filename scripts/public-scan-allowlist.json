@@ -247,7 +247,7 @@
   {
     "path": "test_files/unit/ai/connection-validation.test.ts",
     "rule": "credential-value",
-    "line": 177,
+    "line": 194,
     "fingerprint": "sha256:38b0d02a59bc0b91d6b92c362ea19b1d9f401a5636257c543b17c3f5be501680",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
@@ -1766,14 +1766,14 @@
   {
     "path": "test_files/unit/youtube-transcript/yt-dlp-transcript-provider.test.ts",
     "rule": "home-path",
-    "line": 120,
+    "line": 123,
     "fingerprint": "sha256:6ea0573378c99047996fc724c02c8b20bfc0ddde8f3f301e1fa7d5bf7c1f36f6",
     "reason": "Executable-discovery test uses a synthetic user-local yt-dlp path; it is not a real user path."
   },
   {
     "path": "test_files/unit/youtube-transcript/yt-dlp-transcript-provider.test.ts",
     "rule": "credential-url",
-    "line": 325,
+    "line": 377,
     "fingerprint": "sha256:340a421166ea2894a0338beea6bdbe4b9670137bc86851cd09b889f25600f9a1",
     "reason": "Negative security test uses a synthetic credential-bearing caption URL that must be rejected."
   },
