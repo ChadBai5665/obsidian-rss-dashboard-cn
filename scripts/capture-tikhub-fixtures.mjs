@@ -15,6 +15,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
   assertTikHubRawFixtureSafe,
+  assertTikHubFixtureShapeSafe,
   assertTikHubFixtureSanitized,
   sanitizeTikHubFixture,
 } from "./sanitize-tikhub-fixture.mjs";
@@ -374,7 +375,10 @@ export async function writeTikHubFixtureSet(
   if (!Array.isArray(fixtures) || fixtures.length !== FIXTURE_NAMES.length) {
     throw new Error("TikHub fixture activation failed.");
   }
-  for (const fixture of fixtures) assertTikHubFixtureSanitized(fixture);
+  for (const fixture of fixtures) {
+    assertTikHubFixtureShapeSafe(fixture);
+    assertTikHubFixtureSanitized(fixture);
+  }
   const statistics = fixtureStatistics(fixtures);
   if (
     Object.values(statistics).some(

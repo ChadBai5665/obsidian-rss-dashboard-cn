@@ -1,3 +1,5 @@
+import { types } from "node:util";
+
 const ISO_FIXTURE_TIME = "2024-01-01T00:00:00.000Z";
 const TWITTER_FIXTURE_TIME = "Mon Jan 01 00:00:00 +0000 2024";
 const MAX_DEPTH = 64;
@@ -115,6 +117,18 @@ export function sanitizeTikHubFixture(value, aliases = {}) {
  * serialized, or exposed through an accessor.
  */
 export function assertTikHubRawFixtureSafe(value) {
+  assertTikHubFixtureShape(value, true);
+}
+
+/**
+ * Rejects opaque or non-JSON fixture input without changing sanitization
+ * behavior. Proxy detection deliberately precedes all reflective traversal.
+ */
+export function assertTikHubFixtureShapeSafe(value) {
+  assertTikHubFixtureShape(value, false);
+}
+
+function assertTikHubFixtureShape(value, rejectRawCaptureFields) {
   const seen = new WeakSet();
   const stack = [{ value, depth: 0 }];
   let nodes = 0;
@@ -133,10 +147,12 @@ export function assertTikHubRawFixtureSafe(value) {
       continue;
     }
     if (typeof candidate !== "object") unsafeShape();
+    if (types.isProxy(candidate)) unsafeShape();
 
     nodes += 1;
     if (nodes > MAX_NODES || seen.has(candidate)) traversalLimit();
     seen.add(candidate);
+    if (safeOwnPropertySymbols(candidate).length > 0) unsafeShape();
 
     if (Array.isArray(candidate)) {
       requirePrototype(candidate, Array.prototype);
@@ -158,7 +174,10 @@ export function assertTikHubRawFixtureSafe(value) {
     if (properties.length > MAX_OBJECT_PROPERTIES) traversalLimit();
     for (const property of properties) {
       if (isUnsafeProperty(property)) unsafeShape();
-      if (isSensitiveCredentialKey(property) || isRawCapturePayloadKey(property)) {
+      if (
+        rejectRawCaptureFields &&
+        (isSensitiveCredentialKey(property) || isRawCapturePayloadKey(property))
+      ) {
         rawCaptureProhibited();
       }
       const descriptor = safeDescriptor(candidate, property);
@@ -383,6 +402,14 @@ function safeDescriptor(value, key) {
 function safeOwnPropertyNames(value) {
   try {
     return Object.getOwnPropertyNames(value);
+  } catch {
+    unsafeShape();
+  }
+}
+
+function safeOwnPropertySymbols(value) {
+  try {
+    return Object.getOwnPropertySymbols(value);
   } catch {
     unsafeShape();
   }

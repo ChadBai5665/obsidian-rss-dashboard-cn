@@ -730,3 +730,66 @@ describe("TikHub fixture copy-on-write activation", () => {
     expect(await readdir(join(destinationDir, "captures"))).toEqual(["old-capture"]);
   });
 });
+
+describe("TikHub fixture opaque-input safety", () => {
+  const opaqueFixtureCases = [
+    ["transparent Proxy", () => {
+      const fixture = candidateFixture("proxy");
+      fixture.data.timeline = new Proxy(fixture.data.timeline, {});
+      return fixture;
+    }],
+    ["nested symbol key", () => {
+      const fixture = candidateFixture("symbol");
+      Object.defineProperty(fixture.data, Symbol("fixture"), {
+        value: "synthetic",
+        enumerable: true,
+      });
+      return fixture;
+    }],
+  ] as const;
+
+  for (const [kind, createFixture] of opaqueFixtureCases) {
+    it(`rejects ${kind} before direct fixture activation`, async () => {
+      const root = await temporaryDirectory();
+      const destinationDir = join(root, "live");
+
+      await expect(
+        writeTikHubFixtureSet(destinationDir, [
+          createFixture(),
+          candidateFixture("direct-2"),
+          candidateFixture("direct-3"),
+        ]),
+      ).rejects.toThrow("TikHub fixture contains an unsafe object shape.");
+      await expect(readdir(destinationDir)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it(`rejects ${kind} before captured fixture activation`, async () => {
+      const root = await temporaryDirectory();
+      const destinationDir = join(root, "fixtures", "tikhub");
+      const logs: string[] = [];
+      const raw = createFixture();
+      const fetchImpl = vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => raw,
+      }));
+      const captureInput = {
+        apiKey: ["fixture", "key"].join("-"),
+        handle: "fixture_ai",
+        query: "fixture topic",
+        cwd: root,
+        destinationDir,
+        fetchImpl,
+        isDestinationDirty: async () => false,
+        log: (message: string) => logs.push(message),
+      };
+
+      await expect(captureTikHubFixtures(captureInput)).rejects.toThrow(
+        "TikHub fixture contains an unsafe object shape.",
+      );
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(logs).toEqual([]);
+      await expect(readdir(destinationDir)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+  }
+});
