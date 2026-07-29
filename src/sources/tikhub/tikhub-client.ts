@@ -101,9 +101,16 @@ export class TikHubClientError extends Error {
     message: string,
     readonly status?: number,
     readonly requestId?: string,
+    readonly paidRequestAttempted = false,
   ) {
     super(message);
     this.name = "TikHubClientError";
+    Object.defineProperty(this, "paidRequestAttempted", {
+      value: paidRequestAttempted,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
   }
 }
 
@@ -298,10 +305,18 @@ export class TikHubClient {
       : this.requireBatchState(batch);
     const ownsReservation = batchState === undefined;
     const reservation = batchState?.reservation ?? await this.budget.reserve(1);
+    let paidRequestAttempted = false;
     try {
       if (input.signal?.aborted) throw abortedError();
       if (batchState) this.assertActiveBatch(batch as TikHubBatchHandle, batchState);
       else if (reservation.remaining <= 0) throw invalidBatchError();
+
+      if (batchState) {
+        this.commitBatchAttempt(batch as TikHubBatchHandle, batchState);
+      } else {
+        reservation.markAttempted();
+      }
+      paidRequestAttempted = true;
 
       let pendingRequest: Promise<TikHubTransportResponse>;
       try {
@@ -312,11 +327,6 @@ export class TikHubClient {
         });
       } catch (error) {
         throw errorForTransportFailure(error);
-      }
-      if (batchState) {
-        this.commitBatchAttempt(batch as TikHubBatchHandle, batchState);
-      } else {
-        reservation.markAttempted();
       }
 
       let response: TikHubTransportResponse;
@@ -331,6 +341,8 @@ export class TikHubClient {
         throw errorForTransportFailure(error);
       }
       return this.projectResponse<T>(response, apiKey, requireData);
+    } catch (error) {
+      throw withPaidRequestAttempted(error, paidRequestAttempted);
     } finally {
       if (ownsReservation) await reservation.releaseUnused();
     }
@@ -789,6 +801,20 @@ function isTikHubClientError(error: unknown): error is TikHubClientError {
   } catch {
     return false;
   }
+}
+
+function withPaidRequestAttempted(
+  error: unknown,
+  paidRequestAttempted: boolean,
+): unknown {
+  if (!paidRequestAttempted || !isTikHubClientError(error)) return error;
+  return new TikHubClientError(
+    error.code,
+    error.message,
+    error.status,
+    error.requestId,
+    true,
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

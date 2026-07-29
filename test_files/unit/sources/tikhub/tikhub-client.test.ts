@@ -282,7 +282,10 @@ describe("TikHubClient exact request contract", () => {
     await expect(test.client.fetchYouTubeCaptions({
       apiKey: API_KEY,
       videoId: "../private",
-    })).rejects.toMatchObject({ code: "invalid-query" });
+    })).rejects.toMatchObject({
+      code: "invalid-query",
+      paidRequestAttempted: false,
+    });
     await expect(test.client.fetchYouTubeCaptions({
       apiKey: API_KEY,
       videoId: "dQw4w9WgXcQ",
@@ -322,11 +325,15 @@ describe("TikHubClient exact request contract", () => {
     });
     const test = createHarness({ status: 200, text, headers: {} });
 
-    await expect(test.client.fetchYouTubeCaptionResult({
+    const error = await test.client.fetchYouTubeCaptionResult({
       apiKey: API_KEY,
       jobId: "123e4567-e89b-12d3-a456-426614174000",
       format: "txt",
-    })).rejects.toMatchObject({ code: "malformed-response" });
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: "malformed-response",
+      paidRequestAttempted: false,
+    });
     expect(test.reserve).not.toHaveBeenCalled();
   });
 
@@ -345,6 +352,7 @@ describe("TikHubClient exact request contract", () => {
       code: "invalid-key",
       status: 401,
       requestId: "req-safe-poll",
+      paidRequestAttempted: false,
     });
     expect(String(error)).not.toContain(API_KEY);
     expect(rejected.reserve).not.toHaveBeenCalled();
@@ -359,7 +367,10 @@ describe("TikHubClient exact request contract", () => {
       signal: controller.signal,
     });
     controller.abort();
-    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    await expect(pending).rejects.toMatchObject({
+      code: "aborted",
+      paidRequestAttempted: false,
+    });
     expect(aborted.reserve).not.toHaveBeenCalled();
   });
 
@@ -660,7 +671,10 @@ describe("TikHubClient exact request contract", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(TikHubClientError);
-    expect(error).toMatchObject({ code: "network-failure" });
+    expect(error).toMatchObject({
+      code: "network-failure",
+      paidRequestAttempted: true,
+    });
     expect(String(error)).not.toContain(API_KEY);
     expect(String(error)).not.toContain("private-handle");
     expect(String(error)).not.toContain("keyword=private");
@@ -680,7 +694,15 @@ describe("TikHubClient exact request contract", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(TikHubClientError);
-    expect(error).toMatchObject({ code: "network-failure" });
+    expect(error).toMatchObject({
+      code: "network-failure",
+      paidRequestAttempted: true,
+    });
+    expect(Object.getOwnPropertyDescriptor(error, "paidRequestAttempted")).toMatchObject({
+      value: true,
+      writable: false,
+      configurable: false,
+    });
     expect(String(error)).not.toContain(API_KEY);
     expect(String(error)).not.toContain("private-handle");
   });
@@ -766,12 +788,15 @@ describe("TikHubClient exact request contract", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(TikHubClientError);
-    expect(error).toMatchObject({ code: "network-failure" });
+    expect(error).toMatchObject({
+      code: "network-failure",
+      paidRequestAttempted: true,
+    });
     expect(String(error)).not.toContain(API_KEY);
     expect(JSON.stringify(error)).not.toContain(API_KEY);
   });
 
-  it("releases the reservation when transport throws before a network attempt", async () => {
+  it("counts an entered paid transport even when it throws synchronously", async () => {
     const test = createHarness();
     test.transport.mockImplementationOnce(() => {
       throw new TikHubClientError(
@@ -785,9 +810,12 @@ describe("TikHubClient exact request contract", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(TikHubClientError);
-    expect(error).toMatchObject({ code: "network-failure" });
+    expect(error).toMatchObject({
+      code: "network-failure",
+      paidRequestAttempted: true,
+    });
     expect(String(error)).not.toContain(API_KEY);
-    expect(test.markAttempted).not.toHaveBeenCalled();
+    expect(test.markAttempted).toHaveBeenCalledTimes(1);
     expect(test.releaseUnused).toHaveBeenCalledTimes(1);
   });
 
@@ -812,7 +840,11 @@ describe("TikHubClient exact request contract", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(TikHubClientError);
-    expect(error).toMatchObject({ code, status });
+    expect(error).toMatchObject({
+      code,
+      status,
+      paidRequestAttempted: true,
+    });
     expect(String(error)).not.toContain(API_KEY);
     expect(String(error)).not.toContain("private-handle");
     expect(String(error)).not.toContain("keyword=private");
@@ -825,7 +857,11 @@ describe("TikHubClient exact request contract", () => {
 
     await expect(
       test.client.fetchUserPosts({ apiKey: API_KEY, handle: "openai" }),
-    ).rejects.toMatchObject({ code: "malformed-response", status: 200 });
+    ).rejects.toMatchObject({
+      code: "malformed-response",
+      status: 200,
+      paidRequestAttempted: true,
+    });
   });
 
   it("maps a non-200 provider envelope without exposing the provider body", async () => {
@@ -846,6 +882,7 @@ describe("TikHubClient exact request contract", () => {
       code: "rate-limited",
       status: 429,
       requestId: "req-safe",
+      paidRequestAttempted: true,
     });
     expect(String(error)).not.toContain(API_KEY);
   });
@@ -914,7 +951,10 @@ describe("TikHubClient exact request contract", () => {
     const test = createHarness();
     test.transport.mockImplementationOnce(() => new Promise(() => undefined));
     const promise = test.client.fetchUserPosts({ apiKey: API_KEY, handle: "openai" });
-    const assertion = expect(promise).rejects.toMatchObject({ code: "timeout" });
+    const assertion = expect(promise).rejects.toMatchObject({
+      code: "timeout",
+      paidRequestAttempted: true,
+    });
 
     await vi.advanceTimersByTimeAsync(20_000);
 
@@ -935,7 +975,10 @@ describe("TikHubClient exact request contract", () => {
     await vi.waitFor(() => expect(test.markAttempted).toHaveBeenCalledTimes(1));
     controller.abort();
 
-    await expect(promise).rejects.toMatchObject({ code: "aborted" });
+    await expect(promise).rejects.toMatchObject({
+      code: "aborted",
+      paidRequestAttempted: true,
+    });
     expect(test.markAttempted).toHaveBeenCalledTimes(1);
     expect(test.releaseUnused).toHaveBeenCalledTimes(1);
   });
@@ -959,7 +1002,10 @@ describe("TikHubClient exact request contract", () => {
         handle: "openai",
         signal: controller.signal,
       }),
-    ).rejects.toMatchObject({ code: "aborted" });
+    ).rejects.toMatchObject({
+      code: "aborted",
+      paidRequestAttempted: false,
+    });
     expect(test.transport).not.toHaveBeenCalled();
     expect(test.markAttempted).not.toHaveBeenCalled();
     expect(test.releaseUnused).toHaveBeenCalledTimes(1);
@@ -970,7 +1016,10 @@ describe("TikHubClient exact request contract", () => {
 
     await expect(
       test.client.fetchUserPosts({ apiKey: "   ", handle: "openai" }),
-    ).rejects.toMatchObject({ code: "missing-key" });
+    ).rejects.toMatchObject({
+      code: "missing-key",
+      paidRequestAttempted: false,
+    });
     expect(test.reserve).not.toHaveBeenCalled();
     expect(test.transport).not.toHaveBeenCalled();
   });
