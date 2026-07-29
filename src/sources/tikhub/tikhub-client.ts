@@ -40,12 +40,12 @@ export interface TikHubClientOptions {
 
 interface CommonRequestInput {
   apiKey: string;
-  cursor?: string;
   signal?: AbortSignal;
 }
 
 export interface TikHubUserRequest extends CommonRequestInput {
   handle: string;
+  cursor?: string;
 }
 
 export interface TikHubAccountRequest {
@@ -56,6 +56,7 @@ export interface TikHubAccountRequest {
 export interface TikHubSearchRequest extends CommonRequestInput {
   query: string;
   searchType: TikHubSearchType;
+  cursor?: string;
   /** Opaque client-owned topic-search capability. */
   batch?: TikHubBatchHandle;
 }
@@ -178,10 +179,7 @@ export class TikHubClient {
         "TikHub YouTube caption format is invalid.",
       );
     }
-    const result = await this.requestYouTubeCaptionResult<T>(
-      { job_id: jobId, format: "txt" },
-      input,
-    );
+    const result = await this.requestYouTubeCaptionResult<T>(jobId, input);
     requireMatchingCaptionJobId(result.data, jobId);
     return result;
   }
@@ -191,7 +189,10 @@ export class TikHubClient {
   ): Promise<TikHubResult<T>> {
     return await this.request<T>(
       "/api/v1/twitter/web/fetch_user_post_tweet",
-      { screen_name: requireNonBlank(input.handle, "account handle") },
+      withCursor(
+        { screen_name: requireNonBlank(input.handle, "account handle") },
+        input.cursor,
+      ),
       input,
     );
   }
@@ -201,7 +202,10 @@ export class TikHubClient {
   ): Promise<TikHubResult<T>> {
     return await this.request<T>(
       "/api/v1/twitter/web/fetch_user_profile",
-      { screen_name: requireNonBlank(input.handle, "account handle") },
+      withCursor(
+        { screen_name: requireNonBlank(input.handle, "account handle") },
+        input.cursor,
+      ),
       input,
     );
   }
@@ -211,7 +215,10 @@ export class TikHubClient {
   ): Promise<TikHubResult<T>> {
     return await this.request<T>(
       "/api/v1/twitter/web/fetch_user_tweet_replies",
-      { screen_name: requireNonBlank(input.handle, "account handle") },
+      withCursor(
+        { screen_name: requireNonBlank(input.handle, "account handle") },
+        input.cursor,
+      ),
       input,
     );
   }
@@ -225,7 +232,10 @@ export class TikHubClient {
     }
     return await this.request<T>(
       "/api/v1/twitter/web/fetch_search_timeline",
-      { keyword: query, search_type: input.searchType },
+      withCursor(
+        { keyword: query, search_type: input.searchType },
+        input.cursor,
+      ),
       input,
       input.batch,
     );
@@ -286,7 +296,6 @@ export class TikHubClient {
 
     const url = new URL(endpoint, `${this.baseUrl}/`);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
-    if (input.cursor?.trim()) url.searchParams.set("cursor", input.cursor.trim());
 
     const batchState = batch === undefined
       ? undefined
@@ -298,19 +307,34 @@ export class TikHubClient {
       if (batchState) this.assertActiveBatch(batch as TikHubBatchHandle, batchState);
       else if (reservation.remaining <= 0) throw invalidBatchError();
 
-      return await this.performRequest<T>(
-        url,
-        apiKey,
-        input.signal,
-        () => {
-          if (batchState) {
-            this.commitBatchAttempt(batch as TikHubBatchHandle, batchState);
-          } else {
-            reservation.markAttempted();
-          }
-        },
-        requireData,
-      );
+      let pendingRequest: Promise<TikHubTransportResponse>;
+      try {
+        pendingRequest = this.transport({
+          url: url.toString(),
+          method: "GET",
+          headers: { Authorization: `Bearer ${apiKey}` },
+        });
+      } catch (error) {
+        throw errorForTransportFailure(error);
+      }
+      if (batchState) {
+        this.commitBatchAttempt(batch as TikHubBatchHandle, batchState);
+      } else {
+        reservation.markAttempted();
+      }
+
+      let response: TikHubTransportResponse;
+      try {
+        response = await raceRequest(
+          pendingRequest,
+          this.timeoutMs,
+          input.signal,
+        );
+      } catch (error) {
+        if (isTikHubClientError(error)) throw error;
+        throw errorForTransportFailure(error);
+      }
+      return this.projectResponse<T>(response, apiKey, requireData);
     } finally {
       if (ownsReservation) await reservation.releaseUnused();
     }
@@ -318,7 +342,7 @@ export class TikHubClient {
 
   /** The only budget-free request capability: fixed YouTube result polling. */
   private async requestYouTubeCaptionResult<T>(
-    query: { job_id: string; format: "txt" },
+    jobId: string,
     input: TikHubYouTubeCaptionResultRequest,
   ): Promise<TikHubResult<T>> {
     const apiKey = input.apiKey.trim();
@@ -329,19 +353,9 @@ export class TikHubClient {
       "/api/v1/youtube/web_v2/get_video_captions_result",
       `${this.baseUrl}/`,
     );
-    url.searchParams.set("job_id", query.job_id);
-    url.searchParams.set("format", query.format);
-    return await this.performRequest<T>(url, apiKey, input.signal, () => undefined);
-  }
-
-  private async performRequest<T>(
-    url: URL,
-    apiKey: string,
-    signal: AbortSignal | undefined,
-    markAttempted: () => void,
-    requireData = true,
-  ): Promise<TikHubResult<T>> {
-    if (signal?.aborted) throw abortedError();
+    url.searchParams.set("job_id", jobId);
+    url.searchParams.set("format", "txt");
+    if (input.signal?.aborted) throw abortedError();
     let pendingRequest: Promise<TikHubTransportResponse>;
     try {
       pendingRequest = this.transport({
@@ -352,16 +366,27 @@ export class TikHubClient {
     } catch (error) {
       throw errorForTransportFailure(error);
     }
-    markAttempted();
 
     let response: TikHubTransportResponse;
     try {
-      response = await raceRequest(pendingRequest, this.timeoutMs, signal);
+      response = await raceRequest(
+        pendingRequest,
+        this.timeoutMs,
+        input.signal,
+      );
     } catch (error) {
       if (isTikHubClientError(error)) throw error;
       throw errorForTransportFailure(error);
     }
 
+    return this.projectResponse<T>(response, apiKey);
+  }
+
+  private projectResponse<T>(
+    response: TikHubTransportResponse,
+    apiKey: string,
+    requireData = true,
+  ): TikHubResult<T> {
     const extractedResponse = extractTransportResponse(response, apiKey);
     if (extractedResponse.status < 200 || extractedResponse.status >= 300) {
       throw errorForStatus(
@@ -780,6 +805,14 @@ function requireNonBlank(value: string, label: string): string {
     throw new TikHubClientError("invalid-query", `TikHub ${label} is required.`);
   }
   return normalized;
+}
+
+function withCursor(
+  query: Record<string, string>,
+  cursor: string | undefined,
+): Record<string, string> {
+  const normalized = cursor?.trim();
+  return normalized ? { ...query, cursor: normalized } : query;
 }
 
 function requirePattern(

@@ -5,6 +5,7 @@ import {
   type TikHubBatchHandle,
   type TikHubTransport,
   type TikHubTransportRequest,
+  type TikHubYouTubeCaptionRequest,
 } from "../../../../src/sources/tikhub/tikhub-client";
 import type { TikHubRequestBudgetLike } from "../../../../src/sources/tikhub/request-budget";
 import { DEFAULT_SETTINGS } from "../../../../src/types/types";
@@ -115,6 +116,26 @@ describe("TikHubClient exact request contract", () => {
     expect(content.markAttempted).toHaveBeenCalledOnce();
   });
 
+  it("ignores a runtime cursor instead of contaminating a caption request", async () => {
+    const test = createHarness(success({
+      video_id: "dQw4w9WgXcQ",
+      captions: [{ language_code: "en", language_name: "English" }],
+    }));
+    const input = {
+      apiKey: API_KEY,
+      videoId: "dQw4w9WgXcQ",
+      cursor: "private-cursor",
+    } as TikHubYouTubeCaptionRequest & { cursor: string };
+
+    await test.client.fetchYouTubeCaptions(input);
+
+    expect(test.requests[0]?.url).toBe(
+      "https://api.tikhub.dev/api/v1/youtube/web_v2/get_video_captions?video_id=dQw4w9WgXcQ",
+    );
+    expect(test.requests[0]?.url).not.toContain("cursor");
+    expect(test.reserve).toHaveBeenCalledWith(1);
+  });
+
   it("polls only the fixed free caption-result endpoint without reserving budget", async () => {
     const test = createHarness(success({ status: "active", job_id: "123e4567-e89b-12d3-a456-426614174000" }));
 
@@ -138,6 +159,56 @@ describe("TikHubClient exact request contract", () => {
     expect(test.reserve).not.toHaveBeenCalled();
     expect(test.markAttempted).not.toHaveBeenCalled();
     expect(test.releaseUnused).not.toHaveBeenCalled();
+  });
+
+  it("cannot use an internal generic executor to send an arbitrary free request", async () => {
+    const test = createHarness();
+    const internal = test.client as unknown as {
+      performRequest?: (
+        url: URL,
+        apiKey: string,
+        signal: AbortSignal | undefined,
+        markAttempted: () => void,
+      ) => Promise<unknown>;
+    };
+
+    const invoke = async () => {
+      if (typeof internal.performRequest !== "function") {
+        throw new Error("Generic free executor is unavailable.");
+      }
+      return await internal.performRequest(
+        new URL("https://untrusted.invalid/private"),
+        API_KEY,
+        undefined,
+        () => undefined,
+      );
+    };
+
+    await expect(invoke()).rejects.toThrow("Generic free executor is unavailable.");
+    expect(test.requests).toEqual([]);
+    expect(test.reserve).not.toHaveBeenCalled();
+  });
+
+  it("ignores arbitrary runtime fields on the free caption-result request", async () => {
+    const test = createHarness(success({
+      status: "queued",
+      job_id: "123e4567-e89b-12d3-a456-426614174000",
+    }));
+    const input = {
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt" as const,
+      endpoint: "https://untrusted.invalid/private",
+      cursor: "private-cursor",
+      query: "private-query",
+    };
+
+    await test.client.fetchYouTubeCaptionResult(input);
+
+    expect(test.requests[0]?.url).toBe(
+      "https://api.tikhub.dev/api/v1/youtube/web_v2/get_video_captions_result?job_id=123e4567-e89b-12d3-a456-426614174000&format=txt",
+    );
+    expect(test.reserve).not.toHaveBeenCalled();
   });
 
   it("keeps the YouTube request contract identical on the international base", async () => {
