@@ -350,12 +350,13 @@ describe("AiContentSelector", () => {
     expect(fullTextFetcher).not.toHaveBeenCalled();
   });
 
-  it("accepts a safe automatic-caption language from schemaVersion 2 cache", async () => {
+  it("uses a safe TikHub automatic-caption cache for AI content", async () => {
     const contentRepository = repository(cachedTranscript({
       languageCode: "a.zh-Hans",
       languageName: "Chinese (auto)",
       isGenerated: true,
-      text: "Automatic Chinese transcript.",
+      provider: "tikhub",
+      text: "TikHub automatic Chinese transcript.",
     }));
     const selector = new AiContentSelector({ contentRepository });
 
@@ -371,7 +372,7 @@ describe("AiContentSelector", () => {
 
     expect(result).toMatchObject({
       basis: "youtube-transcript",
-      content: "Automatic Chinese transcript.",
+      content: "TikHub automatic Chinese transcript.",
     });
   });
 

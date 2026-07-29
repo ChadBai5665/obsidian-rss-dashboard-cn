@@ -855,7 +855,7 @@ function snapshotCachedYouTubeTranscript(
     languageName.length <= 200 &&
     !hasUnsafeTranscriptControl(languageName) &&
     typeof isGenerated === "boolean" &&
-    (provider === "innertube" || provider === "yt-dlp") &&
+    (provider === "innertube" || provider === "tikhub" || provider === "yt-dlp") &&
     typeof text === "string" &&
     Boolean(text.trim())
     ? text
