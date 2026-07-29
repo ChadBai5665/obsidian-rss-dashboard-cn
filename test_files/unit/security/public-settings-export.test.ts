@@ -71,6 +71,7 @@ function settingsFixture(): RssDashboardSettings {
   };
   settings.tikhub = {
     enabled: true,
+    youtubeTranscriptFallbackEnabled: true,
     connectionId: CONNECTION_ID,
     baseUrl: "https://api.tikhub.dev",
     timeoutMs: 20_000,
@@ -130,6 +131,7 @@ describe("buildPublicSettingsExport", () => {
     });
     expect(exported.tikhub).toEqual({
       enabled: true,
+      youtubeTranscriptFallbackEnabled: true,
       connectionId: CONNECTION_ID,
       baseUrl: "https://api.tikhub.dev",
       timeoutMs: 20_000,
@@ -192,6 +194,9 @@ describe("buildPublicSettingsExport", () => {
     expect(exported).not.toHaveProperty("folders");
     expect(exported).not.toHaveProperty("availableTags");
     expect(exported.refreshInterval).toBe(60);
+    expect(exported.tikhub).toMatchObject({
+      youtubeTranscriptFallbackEnabled: true,
+    });
   });
 
   it("does not invoke unknown getters, accessors, inherited fields, or toJSON", () => {
@@ -274,7 +279,11 @@ describe("buildPublicSettingsExport", () => {
       createConnectionId: () => nextId,
     });
     expect(imported.tikhub).toEqual(
-      expect.objectContaining({ enabled: false, connectionId: "" }),
+      expect.objectContaining({
+        enabled: false,
+        connectionId: "",
+        youtubeTranscriptFallbackEnabled: true,
+      }),
     );
     expect(imported.ai).toEqual({
       connections: [

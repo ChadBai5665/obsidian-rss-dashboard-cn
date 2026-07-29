@@ -154,6 +154,37 @@ export function renderTikHubSettingsTab(
       });
   });
 
+  const youtubeTranscriptFallbackSetting = new Setting(containerEl)
+    .setName(t("settings.tikhub.youtubeTranscriptFallbackEnabled"))
+    .setDesc(t("settings.tikhub.youtubeTranscriptFallbackEnabledDesc"));
+  youtubeTranscriptFallbackSetting.addToggle((toggle) => {
+    registerControl(toggle.toggleEl, (disabled) => {
+      const setDisabled = (toggle as unknown as {
+        setDisabled?: (value: boolean) => void;
+      }).setDisabled;
+      if (setDisabled) setDisabled.call(toggle, disabled);
+      else (toggle.toggleEl as unknown as { disabled: boolean }).disabled = disabled;
+    });
+    toggle
+      .setValue(plugin.settings.tikhub.youtubeTranscriptFallbackEnabled)
+      .onChange((value) => {
+        const operation = beginOperation();
+        if (operation === undefined) return;
+        const original = plugin.settings.tikhub.youtubeTranscriptFallbackEnabled;
+        plugin.settings.tikhub.youtubeTranscriptFallbackEnabled = value;
+        void (async () => {
+          try {
+            await plugin.saveSettings();
+          } catch {
+            plugin.settings.tikhub.youtubeTranscriptFallbackEnabled = original;
+            if (isOperationCurrent(operation)) toggle.setValue(original);
+          } finally {
+            finishOperation(operation);
+          }
+        })();
+      });
+  });
+
   let customBaseUrl = isPresetBaseUrl(plugin.settings.tikhub.baseUrl)
     ? ""
     : plugin.settings.tikhub.baseUrl;

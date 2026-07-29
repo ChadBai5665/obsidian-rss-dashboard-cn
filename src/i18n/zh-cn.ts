@@ -755,6 +755,8 @@ export const zhCN = {
     "TikHub 是可选能力。关闭或未配置密钥时，RSS、网站和 YouTube 仍可正常使用。",
   "settings.tikhub.enabled": "启用 TikHub",
   "settings.tikhub.enabledDesc": "允许产生费用的 X 刷新；关闭后保留全部来源定义。",
+  "settings.tikhub.youtubeTranscriptFallbackEnabled": "允许 TikHub 字幕回退",
+  "settings.tikhub.youtubeTranscriptFallbackEnabledDesc": "仅在你主动获取 YouTube 字幕时使用；首次获取通常会产生 2 次请求，预计费用 $0.016。",
   "settings.tikhub.baseUrl": "接口地址",
   "settings.tikhub.baseUrlDesc": "默认使用 TikHub 官方 API 主站；中国大陆不使用代理时可切换直连加速地址。",
   "settings.tikhub.presetMainland": "中国大陆直连加速（api.tikhub.dev）",

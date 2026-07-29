@@ -127,6 +127,41 @@ describe("settings-loader", () => {
       });
     });
 
+    it("defaults the YouTube caption fallback opt-in to false and preserves only an explicit true", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+
+      expect(loadAndNormalizeSettings({
+        tikhub: { ...DEFAULT_SETTINGS.tikhub },
+      }).tikhub.youtubeTranscriptFallbackEnabled).toBe(false);
+
+      expect(loadAndNormalizeSettings({
+        tikhub: {
+          ...DEFAULT_SETTINGS.tikhub,
+          youtubeTranscriptFallbackEnabled: true,
+        },
+      } as unknown as Partial<RssDashboardSettings>).tikhub.youtubeTranscriptFallbackEnabled).toBe(true);
+    });
+
+    it("ignores inherited and getter-backed YouTube caption fallback opt-ins", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const getter = vi.fn(() => true);
+      const tikhub = Object.create({ youtubeTranscriptFallbackEnabled: true });
+      Object.assign(tikhub, DEFAULT_SETTINGS.tikhub);
+      Object.defineProperty(tikhub, "youtubeTranscriptFallbackEnabled", {
+        enumerable: true,
+        get: getter,
+      });
+
+      const result = loadAndNormalizeSettings({
+        tikhub,
+      } as unknown as Partial<RssDashboardSettings>);
+
+      expect(result.tikhub.youtubeTranscriptFallbackEnabled).toBe(false);
+      expect(getter).not.toHaveBeenCalled();
+    });
+
     it("migrates AI metadata additively without inventing a connection or key", async () => {
       const { loadAndNormalizeSettings } =
         await import("../../../src/utils/settings-loader");

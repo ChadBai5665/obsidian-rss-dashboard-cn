@@ -386,6 +386,7 @@ function copyTikHubSettings(value: unknown): Record<string, unknown> {
   const settings = objectRecord(value);
   const output = createRecord();
   copyBoolean(settings, output, "enabled");
+  copyBoolean(settings, output, "youtubeTranscriptFallbackEnabled");
   if (hasOwnData(settings, "connectionId")) {
     const raw = requiredData(settings, "connectionId");
     if (raw === "") output.connectionId = "";

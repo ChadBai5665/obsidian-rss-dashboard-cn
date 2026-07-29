@@ -511,6 +511,8 @@ function normalizeTikHubSettings(
 
   return {
     enabled: sanitized.enabled === true,
+    youtubeTranscriptFallbackEnabled:
+      sanitized.youtubeTranscriptFallbackEnabled === true,
     connectionId,
     baseUrl,
     timeoutMs: positiveIntegerOrDefault(

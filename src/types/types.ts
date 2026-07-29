@@ -458,6 +458,7 @@ export interface CollectionSettings {
 
 export interface TikHubSettings {
   enabled: boolean;
+  youtubeTranscriptFallbackEnabled: boolean;
   connectionId: string;
   // The explicit official origins document supported defaults; custom HTTPS origins remain allowed.
   // eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
@@ -641,6 +642,7 @@ export const DEFAULT_SETTINGS: RssDashboardSettings = {
   },
   tikhub: {
     enabled: false,
+    youtubeTranscriptFallbackEnabled: false,
     connectionId: "",
     baseUrl: "https://api.tikhub.io",
     timeoutMs: 20_000,

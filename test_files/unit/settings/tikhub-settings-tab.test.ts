@@ -116,6 +116,45 @@ describe("renderTikHubSettingsTab", () => {
     expect(test.plugin.saveSettings).toHaveBeenCalledTimes(1);
   });
 
+  it("persists the explicit YouTube caption fallback opt-in without reading a key or testing a connection", async () => {
+    const test = harness();
+    const mainToggle = getSetting(test.containerEl, "启用 TikHub");
+    const fallbackSetting = getSetting(test.containerEl, "允许 TikHub 字幕回退");
+    const toggle = fallbackSetting.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+
+    expect(mainToggle.compareDocumentPosition(fallbackSetting)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(fallbackSetting.textContent).toContain("仅在你主动获取 YouTube 字幕时使用");
+    expect(fallbackSetting.textContent).toContain("预计费用 $0.016");
+    expect(toggle.checked).toBe(false);
+    expect(test.secretStore.get).not.toHaveBeenCalled();
+    expect(test.testConnection).not.toHaveBeenCalled();
+
+    toggle.click();
+    await flushPromises();
+
+    expect(test.plugin.settings.tikhub.youtubeTranscriptFallbackEnabled).toBe(true);
+    expect(test.plugin.saveSettings).toHaveBeenCalledTimes(1);
+    expect(test.secretStore.get).not.toHaveBeenCalled();
+    expect(test.testConnection).not.toHaveBeenCalled();
+  });
+
+  it("rolls back the YouTube caption fallback opt-in when saving fails", async () => {
+    const saveSettings = vi.fn(async () => { throw new Error("save failed"); });
+    const test = harness({ saveSettings });
+    const toggle = getSetting(test.containerEl, "允许 TikHub 字幕回退")
+      .querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+
+    toggle.click();
+    expect(test.plugin.settings.tikhub.youtubeTranscriptFallbackEnabled).toBe(true);
+    await flushPromises();
+
+    expect(test.plugin.settings.tikhub.youtubeTranscriptFallbackEnabled).toBe(false);
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(false);
+  });
+
   it("offers the official primary API first, keeps the mainland accelerator, and saves only validated custom HTTPS origins", async () => {
     const test = harness();
     const preset = getSetting(test.containerEl, "接口地址")

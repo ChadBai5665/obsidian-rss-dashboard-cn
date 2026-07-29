@@ -771,6 +771,8 @@ export const en = {
   "settings.tikhub.enabled": "Enable TikHub",
   "settings.tikhub.enabledDesc":
     "Allow paid X refreshes. Turning this off keeps all source definitions.",
+  "settings.tikhub.youtubeTranscriptFallbackEnabled": "Allow TikHub caption fallback",
+  "settings.tikhub.youtubeTranscriptFallbackEnabledDesc": "Only explicit YouTube caption actions can use this. Initial retrieval usually takes two requests, estimated $0.016.",
   "settings.tikhub.baseUrl": "API base address",
   "settings.tikhub.baseUrlDesc": "The TikHub primary API is the default. Use the Mainland direct accelerator when connecting without a proxy.",
   "settings.tikhub.presetMainland": "Mainland direct accelerator (api.tikhub.dev)",
