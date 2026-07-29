@@ -925,80 +925,80 @@
   },
   {
     "path": "test_files/unit/security/public-settings-export.test.ts",
-    "rule": "home-path",
     "line": 43,
+    "rule": "home-path",
     "fingerprint": "sha256:6da86232203b2a5ac56776fd6ae31e80977d794edadd06421f99388eb922cc43",
     "reason": "Security test fixture intentionally exercises private path detection."
   },
   {
     "path": "test_files/unit/security/public-settings-export.test.ts",
-    "rule": "credential-url",
     "line": 48,
+    "rule": "credential-url",
     "fingerprint": "sha256:677912a636d697e51fddb1c20e2f076754682be73582e8016d2b9e7ba7521201",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/security/public-settings-export.test.ts",
+    "line": 88,
     "rule": "credential-value",
-    "line": 87,
     "fingerprint": "sha256:f5a2130d67f60626fdbaa57333ffe8eebae2a179e20da08badd4adb3d4bd9a18",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credential verifies public export redaction and import safety."
   },
   {
     "path": "test_files/unit/security/public-settings-export.test.ts",
+    "line": 92,
     "rule": "credential-value",
-    "line": 91,
     "fingerprint": "sha256:9201874c6936f403078a69ee172710c63e44e66e9d78dbb01b0522c8f1a2b269",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credential verifies public export redaction and import safety."
   },
   {
     "path": "test_files/unit/security/public-settings-export.test.ts",
+    "line": 204,
     "rule": "credential-value",
-    "line": 199,
     "fingerprint": "sha256:a9ee95c7eb315c67b2c34750c05162cd34224616241d4d9161414b6f3f16a947",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credential verifies public export redaction and import safety."
   },
   {
     "path": "test_files/unit/security/public-settings-export.test.ts",
+    "line": 205,
     "rule": "credential-value",
-    "line": 200,
     "fingerprint": "sha256:37f3f60ba53d9420c4f6975d0431b18e44b67faa217264a12c2fbb3176db34a8",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credential verifies public export redaction and import safety."
   },
   {
     "path": "test_files/unit/security/public-settings-export.test.ts",
+    "line": 302,
     "rule": "credential-url",
-    "line": 293,
     "fingerprint": "sha256:39ddcb54851f4efb8608ff6430eb720a49352d3c0d851ad0f53fd37973d11b9b",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic credential-bearing URL verifies public export rejection and redaction."
   },
   {
     "path": "test_files/unit/security/public-settings-export.test.ts",
+    "line": 303,
     "rule": "credential-url",
-    "line": 294,
     "fingerprint": "sha256:f211a2fc8e78aa1dc98fe66cb753a2cd6464b73827e8a8bd7d49a0bfae11ad16",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic credential-bearing URL verifies public export rejection and redaction."
   },
   {
     "path": "test_files/unit/security/public-settings-export.test.ts",
+    "line": 304,
     "rule": "credential-url",
-    "line": 295,
     "fingerprint": "sha256:3585278164560014ae3a240b6d1d6649e7c3ec254551aa2a3457c5e35d84c4eb",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic credential-bearing URL verifies public export rejection and redaction."
   },
   {
     "path": "test_files/unit/security/public-settings-export.test.ts",
+    "line": 344,
     "rule": "credential-value",
-    "line": 335,
     "fingerprint": "sha256:c41b03de75ecdfa13697cfd0cbd58c47fc2f71cac09ae1187bdad9c697a0cd46",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credential verifies public export redaction and import safety."
   },
   {
     "path": "test_files/unit/security/public-settings-export.test.ts",
+    "line": 345,
     "rule": "credential-url",
-    "line": 336,
     "fingerprint": "sha256:30e5e774545def484d81b075c0770fede0ad5e6870bb22619bfff4ba3084378b",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic credential-bearing URL verifies public export rejection and redaction."
   },
   {
     "path": "test_files/unit/security/redaction.test.ts",
@@ -1241,296 +1241,408 @@
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 13,
+    "line": 14,
     "fingerprint": "sha256:3b7c3411cd47ce0b73e5e3a27fc0fba7a82661507c723584ea55ce0747fb09db",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic TikHub credential literal drives client redaction and boundary tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 99,
-    "fingerprint": "sha256:ad1c439a875a999d5a244fc0c221de2dbf0345a899ef833a11be22b6192eb94a",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "line": 82,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 120,
-    "fingerprint": "sha256:d44f46b283deeb292bf6593fe682d357506bf6893690c7e66d29bd5c840613ab",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "line": 107,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 126,
-    "fingerprint": "sha256:d7a862744b82fa9cbcdd8f312d0e8cd91c46de6b82c2af4fc965e834d928fe89",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 133,
-    "fingerprint": "sha256:62735f91c434debf3337f192c97c76f934ac9670df92a46abc902460668c1cc3",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "line": 125,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
     "line": 143,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 198,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 222,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 234,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 248,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 252,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 258,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 275,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 289,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 305,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 322,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic caption credential reference verifies exact paid and free request boundaries."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 357,
+    "fingerprint": "sha256:ad1c439a875a999d5a244fc0c221de2dbf0345a899ef833a11be22b6192eb94a",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 372,
+    "fingerprint": "sha256:cd2c903819591bdba48c6924a1bb213f24dead0a3157eda1af9b0e39bb8be8d7",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 378,
+    "fingerprint": "sha256:d44f46b283deeb292bf6593fe682d357506bf6893690c7e66d29bd5c840613ab",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 384,
+    "fingerprint": "sha256:d7a862744b82fa9cbcdd8f312d0e8cd91c46de6b82c2af4fc965e834d928fe89",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 391,
     "fingerprint": "sha256:62735f91c434debf3337f192c97c76f934ac9670df92a46abc902460668c1cc3",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 183,
-    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 193,
-    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 205,
-    "fingerprint": "sha256:39fcbb83aae114f0f0f241b3d7783fba12add51e2c995fa3f64fb2de8ea991bf",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 218,
-    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 224,
-    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 244,
-    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 255,
-    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 266,
-    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 274,
-    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 288,
-    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 328,
-    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 350,
-    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 370,
-    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
     "line": 401,
-    "fingerprint": "sha256:b98024cb13335f0b8a1ce892d3cfc8b2d336efd34048817c1c5222d183dcae7d",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "fingerprint": "sha256:62735f91c434debf3337f192c97c76f934ac9670df92a46abc902460668c1cc3",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 430,
-    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "line": 431,
+    "fingerprint": "sha256:1dc05a21cdaea20c21d59c6e1c455d968eced5e9e87b7259b18fbebaa8128e10",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 456,
-    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "line": 441,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 475,
-    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "line": 451,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 463,
+    "fingerprint": "sha256:39fcbb83aae114f0f0f241b3d7783fba12add51e2c995fa3f64fb2de8ea991bf",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 476,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 482,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
     "line": 502,
-    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 518,
-    "fingerprint": "sha256:de5d425225c2f1aba5f76e26edb8f763774a3cf70de39a6d64a191e27b32d895",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 534,
-    "fingerprint": "sha256:329cc5c28bcc1ffa76f95ba9509074af25fb8e3490c046ba5cc41389700704a5",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 548,
-    "fingerprint": "sha256:de5d425225c2f1aba5f76e26edb8f763774a3cf70de39a6d64a191e27b32d895",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 595,
-    "fingerprint": "sha256:329cc5c28bcc1ffa76f95ba9509074af25fb8e3490c046ba5cc41389700704a5",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 607,
-    "fingerprint": "sha256:03cdcc2d0bd9db88ab33f22083b878f64f010d93846cf81f8e3a901d9d97e766",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 622,
-    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 649,
     "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 513,
+    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 524,
+    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 532,
+    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 546,
+    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 586,
+    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 608,
+    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 628,
+    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 659,
+    "fingerprint": "sha256:b98024cb13335f0b8a1ce892d3cfc8b2d336efd34048817c1c5222d183dcae7d",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 688,
+    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 714,
+    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 733,
+    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 760,
+    "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 776,
+    "fingerprint": "sha256:de5d425225c2f1aba5f76e26edb8f763774a3cf70de39a6d64a191e27b32d895",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 792,
+    "fingerprint": "sha256:329cc5c28bcc1ffa76f95ba9509074af25fb8e3490c046ba5cc41389700704a5",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 806,
+    "fingerprint": "sha256:de5d425225c2f1aba5f76e26edb8f763774a3cf70de39a6d64a191e27b32d895",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 853,
+    "fingerprint": "sha256:329cc5c28bcc1ffa76f95ba9509074af25fb8e3490c046ba5cc41389700704a5",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 865,
+    "fingerprint": "sha256:03cdcc2d0bd9db88ab33f22083b878f64f010d93846cf81f8e3a901d9d97e766",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 880,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 907,
+    "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
+    "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-url",
-    "line": 677,
+    "line": 935,
     "fingerprint": "sha256:4747f5106c0cdc05c4cc0078805aaa7240179dd21f760e9de8da4811c3285689",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic user-password URL verifies HTTPS-origin credential rejection."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 762,
+    "line": 1022,
     "fingerprint": "sha256:1dcbaa8921d05c0f34bdee077d01a53946cfc7608c2ab57d913a2d551d185db8",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 763,
+    "line": 1023,
     "fingerprint": "sha256:b47f7ef9902d75c500194fcf931016504a29a8cb7e5bec68636d7a6d714b4fdf",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 765,
+    "line": 1025,
     "fingerprint": "sha256:4a2a9fd38c5716c447eda6a7892b05521c99afce56bdbbb093d173f06d9ac3fc",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 766,
+    "line": 1026,
     "fingerprint": "sha256:a4b02675d617d0a0e246d52512d4b2ea1cf9bd3bb16f1e4b8a6e78ddb892bba1",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 770,
+    "line": 1030,
     "fingerprint": "sha256:bec35926b016a76c2f00ef82d7102771ca33219af8ab74c3a40dbfbf9d868074",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 771,
+    "line": 1031,
     "fingerprint": "sha256:03ff3846073d59e4e8b4d6535c3e28a3179e0e59ed74c8cee7e680fb99f8f292",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 772,
+    "line": 1032,
     "fingerprint": "sha256:8f7ec7e8f35ec44fee49c24176ac7698d1c100fb5b4e579d8ad4cf5a90c29458",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 774,
+    "line": 1034,
     "fingerprint": "sha256:3a31b549e456a8e548795ce3f5b4fea5fd1cf07ea1ca8712c66cc12a0f2901f7",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 802,
+    "line": 1062,
     "fingerprint": "sha256:4079dd42f93b6f0a5d0a12263fb327ec1bf266bbca8c2b717ba901d37b7f9101",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 835,
+    "line": 1096,
     "fingerprint": "sha256:4079dd42f93b6f0a5d0a12263fb327ec1bf266bbca8c2b717ba901d37b7f9101",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/x-account-adapter.test.ts",
@@ -1562,38 +1674,38 @@
   },
   {
     "path": "test_files/unit/utils/settings-loader.test.ts",
+    "line": 175,
     "rule": "credential-value",
-    "line": 140,
     "fingerprint": "sha256:5dd84215756fbac25647ad32ae7e914ade73af7beec88b6a84da22afac1afab8",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credential verifies loader normalization without retaining secrets."
   },
   {
     "path": "test_files/unit/utils/settings-loader.test.ts",
+    "line": 176,
     "rule": "credential-value",
-    "line": 141,
     "fingerprint": "sha256:5698c1d6591286dc0f05f5998c981a1af627746b6e2077acdfaa254fb3689157",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credential verifies loader normalization without retaining secrets."
   },
   {
     "path": "test_files/unit/utils/settings-loader.test.ts",
+    "line": 219,
     "rule": "credential-value",
-    "line": 184,
     "fingerprint": "sha256:9a909f48d7a8170e05f66975c86376d5dd6f666eba11186d4d0e1a260d4d0d3b",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credential verifies loader normalization without retaining secrets."
   },
   {
     "path": "test_files/unit/utils/settings-loader.test.ts",
+    "line": 220,
     "rule": "credential-value",
-    "line": 185,
     "fingerprint": "sha256:74111fa0fa90c685e88fc7f76660127f9960a307f70643fbc8a5da106ce7636a",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credential verifies loader normalization without retaining secrets."
   },
   {
     "path": "test_files/unit/utils/settings-loader.test.ts",
+    "line": 296,
     "rule": "credential-value",
-    "line": 261,
     "fingerprint": "sha256:7dbf987940c2ca522a7d9c4a21a364c3c86cb278f83f44455b4eb866623c662b",
-    "reason": "Security test fixture intentionally exercises credential redaction behavior."
+    "reason": "Synthetic settings credential verifies loader normalization without retaining secrets."
   },
   {
     "path": "docs/superpowers/plans/2026-07-27-source-subscription-onboarding-implementation.md",
@@ -1678,20 +1790,6 @@
     "line": 86,
     "fingerprint": "sha256:a860a0b851e71be3ae2c751f8257891b081c0e046964d384208b10e97318251a",
     "reason": "Security test fixture verifies unsafe runtime failure codes are discarded."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 114,
-    "fingerprint": "sha256:cd2c903819591bdba48c6924a1bb213f24dead0a3157eda1af9b0e39bb8be8d7",
-    "reason": "Security test fixture passes a synthetic credential constant to the profile request."
-  },
-  {
-    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
-    "rule": "credential-value",
-    "line": 173,
-    "fingerprint": "sha256:1dc05a21cdaea20c21d59c6e1c455d968eced5e9e87b7259b18fbebaa8128e10",
-    "reason": "Security test fixture passes a synthetic credential constant to an international endpoint request."
   },
   {
     "path": "test_files/unit/sources/tikhub/x-profile-resolver.test.ts",
