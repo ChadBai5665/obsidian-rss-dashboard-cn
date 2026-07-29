@@ -340,11 +340,11 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
         true,
       );
     }
-    assertNotAborted(signal, ATTEMPTED_OPERATION_EVIDENCE);
+    assertNotAborted(signal, PAID_OPERATION_EVIDENCE);
     const response = parseResponse(
-      resultData(result, ATTEMPTED_OPERATION_EVIDENCE),
+      resultData(result, PAID_OPERATION_EVIDENCE),
       identity.videoId,
-      ATTEMPTED_OPERATION_EVIDENCE,
+      PAID_OPERATION_EVIDENCE,
     );
     if (response.kind !== "processing") {
       if (response.kind === "pending") {

@@ -734,11 +734,11 @@ describe("YouTubeTranscriptService", () => {
     },
   );
 
-  it("reports paid processing as one confirmed request without ambiguity", async () => {
+  it("reports confirmed malformed paid work as one request without ambiguity", async () => {
     const provider: TranscriptProvider = {
       async listTracks() {
         throw new YouTubeTranscriptError(
-          "tikhub-processing",
+          "tikhub-malformed-response",
           PAID_OPERATION_EVIDENCE,
         );
       },
@@ -753,7 +753,7 @@ describe("YouTubeTranscriptService", () => {
     await expect(
       service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
     ).rejects.toMatchObject({
-      code: "tikhub-processing",
+      code: "tikhub-malformed-response",
       usage: { tikhubPaidRequests: 1 },
       tikhubPaidRequestPossiblySent: false,
     });

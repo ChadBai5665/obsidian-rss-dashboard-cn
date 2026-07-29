@@ -59,11 +59,6 @@ const PAID_EVIDENCE: TranscriptProviderOperationEvidence = Object.freeze({
   tikhubPaidRequests: 1,
   paidRequestAttempted: true,
 });
-const ATTEMPTED_EVIDENCE: TranscriptProviderOperationEvidence = Object.freeze({
-  tikhubPaidRequests: 0,
-  paidRequestAttempted: true,
-});
-
 type ClientOutcome = TikHubResult<unknown> | Error;
 
 class FakeCaptionClient implements TikHubCaptionClient {
@@ -86,6 +81,20 @@ class FakeCaptionClient implements TikHubCaptionClient {
     this.events?.push("result");
     this.resultInputs.push(input);
     return takeOutcome(this.results, "free TikHub caption result");
+  }
+}
+
+class AbortAfterPaidResponseClient extends FakeCaptionClient {
+  constructor(private readonly controller: AbortController) {
+    super([tracksData()]);
+  }
+
+  override fetchYouTubeCaptions(
+    input: unknown,
+  ): Promise<TikHubResult<unknown>> {
+    const response = super.fetchYouTubeCaptions(input);
+    void response.then(() => this.controller.abort());
+    return response;
   }
 }
 
@@ -550,7 +559,7 @@ describe("TikHubTranscriptProvider", () => {
       await expectCode(
         test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
         "tikhub-malformed-response",
-        ATTEMPTED_EVIDENCE,
+        PAID_EVIDENCE,
       );
     },
   );
@@ -913,7 +922,7 @@ describe("TikHubTranscriptProvider", () => {
     await expectCode(
       paid.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
       "tikhub-malformed-response",
-      ATTEMPTED_EVIDENCE,
+      PAID_EVIDENCE,
     );
 
     const jobs = new FakeJobs();
@@ -1164,32 +1173,51 @@ describe("TikHubTranscriptProvider", () => {
       expect(test.jobs.creates).toEqual([]);
     });
 
-    it("maps an ambiguous paid client failure to attempted but unconfirmed evidence", async () => {
+    it("counts a successful paid client response even when the caller aborts before domain parsing", async () => {
+      const controller = new AbortController();
       const test = createHarness({
-        client: new FakeCaptionClient([
-          new TikHubClientError(
-            "network-failure",
-            "private transport detail",
-            undefined,
-            undefined,
-            true,
-          ),
-        ]),
+        client: new AbortAfterPaidResponseClient(controller),
       });
 
       const error = await test.provider
-        .listTracks(VIDEO_ID, undefined, CONTEXT)
+        .listTracks(VIDEO_ID, controller.signal, CONTEXT)
         .catch((caught: unknown) => caught);
 
       expect(error).toMatchObject({
-        code: "temporarily-unavailable",
-        operationEvidence: {
-          tikhubPaidRequests: 0,
-          paidRequestAttempted: true,
-        },
+        code: "aborted",
+        operationEvidence: PAID_EVIDENCE,
       });
-      expect(JSON.stringify(error)).not.toContain("private transport detail");
     });
+
+    it.each([false, true])(
+      "keeps a paid client failure before successful resolution unconfirmed when attempted=%s",
+      async (paidRequestAttempted) => {
+        const test = createHarness({
+          client: new FakeCaptionClient([
+            new TikHubClientError(
+              "network-failure",
+              "private transport detail",
+              undefined,
+              undefined,
+              paidRequestAttempted,
+            ),
+          ]),
+        });
+
+        const error = await test.provider
+          .listTracks(VIDEO_ID, undefined, CONTEXT)
+          .catch((caught: unknown) => caught);
+
+        expect(error).toMatchObject({
+          code: "temporarily-unavailable",
+          operationEvidence: {
+            tikhubPaidRequests: 0,
+            paidRequestAttempted,
+          },
+        });
+        expect(JSON.stringify(error)).not.toContain("private transport detail");
+      },
+    );
   });
 
   describe("expired job recovery", () => {
