@@ -198,6 +198,42 @@ describe("YouTubeTranscriptPanel", () => {
       usage: { tikhubPaidRequests: 1 },
     });
     await fetching;
+
+    expect(container.textContent).toContain("预计1次 TikHub 请求（约 $0.008）");
+  });
+
+  it("keeps repeated fetch button clicks inline while the service dedupes work", async () => {
+    const pending = deferred<YouTubeTranscriptServiceResult>();
+    const providerWork = vi.fn();
+    let sharedWork: Promise<YouTubeTranscriptServiceResult> | undefined;
+    const { container, get } = createPanel({
+      get: async () => {
+        if (!sharedWork) {
+          providerWork();
+          sharedWork = pending.promise;
+        }
+        return await sharedWork;
+      },
+    });
+    const fetch = container.querySelector<HTMLButtonElement>(
+      ".rss-youtube-transcript-fetch",
+    );
+
+    fetch?.click();
+    fetch?.click();
+
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(providerWork).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".modal")).toBeNull();
+
+    pending.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript(),
+      usage: { tikhubPaidRequests: 0 },
+    });
+    await vi.waitFor(() => expect(state(container)).toBe("complete-manual"));
+    expect(container.querySelector(".modal")).toBeNull();
   });
 
   it("drops stale provider progress after a newer request starts", async () => {
