@@ -12,6 +12,20 @@ import { DEFAULT_SETTINGS } from "../../../../src/types/types";
 import { loadAndNormalizeSettings } from "../../../../src/utils/settings-loader";
 
 const API_KEY = "external-secret";
+const INVALID_CAPTION_LANGUAGE_CODES = [
+  ["empty", ""],
+  ["control", "en\u0000"],
+  ["whitespace", "a.zh Hans"],
+  ["slash", "a.zh/Hans"],
+  ["query", "a.zh?format=txt"],
+  ["leading separator", ".zh-Hans"],
+  ["trailing separator", "zh-Hans."],
+  ["consecutive separators", "a..zh-Hans"],
+  ["mixed empty segment", "a.-zh-Hans"],
+  ["trailing hyphen", "en-"],
+  ["repeated hyphen", "en--US"],
+  ["overlong", "a".repeat(65)],
+] as const;
 
 function success(data: unknown = { items: [1] }, requestId = "req-safe-123") {
   return {
@@ -114,6 +128,27 @@ describe("TikHubClient exact request contract", () => {
     );
     expect(content.reserve).toHaveBeenCalledWith(1);
     expect(content.markAttempted).toHaveBeenCalledOnce();
+  });
+
+  it("sends an automatic-caption language using the exact safe query value", async () => {
+    const test = createHarness(success({
+      video_id: "dQw4w9WgXcQ",
+      language_code: "a.zh-Hans",
+      language_name: "Chinese (auto)",
+      format: "txt",
+      content: "Caption text",
+    }));
+
+    await test.client.fetchYouTubeCaptions({
+      apiKey: API_KEY,
+      videoId: "dQw4w9WgXcQ",
+      languageCode: "a.zh-Hans",
+      format: "txt",
+    });
+
+    expect(test.requests[0]?.url).toBe(
+      "https://api.tikhub.dev/api/v1/youtube/web_v2/get_video_captions?video_id=dQw4w9WgXcQ&language_code=a.zh-Hans&format=txt",
+    );
   });
 
   it("ignores a runtime cursor instead of contaminating a caption request", async () => {
@@ -263,6 +298,22 @@ describe("TikHubClient exact request contract", () => {
     expect(test.reserve).not.toHaveBeenCalled();
     expect(test.transport).not.toHaveBeenCalled();
   });
+
+  it.each(INVALID_CAPTION_LANGUAGE_CODES)(
+    "rejects an unsafe caption language before budget or transport: %s",
+    async (_label, languageCode) => {
+      const test = createHarness();
+
+      await expect(test.client.fetchYouTubeCaptions({
+        apiKey: API_KEY,
+        videoId: "dQw4w9WgXcQ",
+        languageCode,
+        format: "txt",
+      })).rejects.toMatchObject({ code: "invalid-query" });
+      expect(test.reserve).not.toHaveBeenCalled();
+      expect(test.transport).not.toHaveBeenCalled();
+    },
+  );
 
   it("applies the shared response-size limit to free caption-result polling", async () => {
     const text = JSON.stringify({

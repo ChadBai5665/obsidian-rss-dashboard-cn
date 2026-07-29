@@ -10,6 +10,20 @@ import {
 
 const DATA_ROOT = ".rss-dashboard-data";
 const ITEM_ID = "a".repeat(64);
+const INVALID_LANGUAGE_CODES = [
+  ["empty", ""],
+  ["control", "en\u0000"],
+  ["whitespace", "a.zh Hans"],
+  ["slash", "a.zh/Hans"],
+  ["query", "a.zh?format=txt"],
+  ["leading separator", ".zh-Hans"],
+  ["trailing separator", "zh-Hans."],
+  ["consecutive separators", "a..zh-Hans"],
+  ["mixed empty segment", "a.-zh-Hans"],
+  ["trailing hyphen", "en-"],
+  ["repeated hyphen", "en--US"],
+  ["overlong", "a".repeat(65)],
+] as const;
 
 class InMemoryAdapter {
   readonly files = new Map<string, string>();
@@ -275,7 +289,12 @@ describe("ContentRepository", () => {
   it("round-trips a TikHub schemaVersion 2 transcript without migrating it", async () => {
     const adapter = new InMemoryAdapter();
     const repository = createRepository(adapter);
-    const transcript = createTranscriptContent({ provider: "tikhub" });
+    const transcript = createTranscriptContent({
+      provider: "tikhub",
+      languageCode: "a.zh-Hans",
+      languageName: "Chinese (auto)",
+      isGenerated: true,
+    });
 
     await repository.write(transcript);
 
@@ -283,7 +302,23 @@ describe("ContentRepository", () => {
     expect(adapter.files.get(`${DATA_ROOT}/content/${ITEM_ID}.md`)).toContain(
       'provider: "tikhub"',
     );
+    expect(adapter.files.get(`${DATA_ROOT}/content/${ITEM_ID}.md`)).toContain(
+      'languageCode: "a.zh-Hans"',
+    );
   });
+
+  it.each(INVALID_LANGUAGE_CODES)(
+    "rejects an invalid schemaVersion 2 language code without writing: %s",
+    async (_label, languageCode) => {
+      const adapter = new InMemoryAdapter();
+      const repository = createRepository(adapter);
+
+      await expect(
+        repository.write(createTranscriptContent({ languageCode })),
+      ).rejects.toThrow("Invalid cached transcript language code");
+      expect(adapter.files.has(`${DATA_ROOT}/content/${ITEM_ID}.md`)).toBe(false);
+    },
+  );
 
   it("rejects invalid or undocumented schemaVersion 2 metadata", async () => {
     const repository = createRepository(new InMemoryAdapter());

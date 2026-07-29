@@ -24,6 +24,20 @@ const ITEM_ID = "a".repeat(64);
 const OTHER_ITEM_ID = "b".repeat(64);
 const VIDEO_ID = "dQw4w9WgXcQ";
 const CONTENT_PATH = `.rss-dashboard-data/content/${ITEM_ID}.md`;
+const INVALID_LANGUAGE_CODES = [
+  ["empty", ""],
+  ["control", "en\u0000"],
+  ["whitespace", "a.zh Hans"],
+  ["slash", "a.zh/Hans"],
+  ["query", "a.zh?format=txt"],
+  ["leading separator", ".zh-Hans"],
+  ["trailing separator", "zh-Hans."],
+  ["consecutive separators", "a..zh-Hans"],
+  ["mixed empty segment", "a.-zh-Hans"],
+  ["trailing hyphen", "en-"],
+  ["repeated hyphen", "en--US"],
+  ["overlong", "a".repeat(65)],
+] as const;
 
 function track(
   overrides: Partial<YouTubeCaptionTrack> = {},
@@ -609,6 +623,135 @@ describe("YouTubeTranscriptService", () => {
     },
   );
 
+  it("accepts an automatic TikHub language through fresh fetch and cache write", async () => {
+    const automatic = runtimeTrack("tikhub", "txt", {
+      languageCode: "a.zh-Hans",
+      languageName: "Chinese (auto)",
+      isGenerated: true,
+      url: "tikhub:caption/a.zh-Hans",
+    });
+    const provider = new FakeProvider([automatic], transcript(automatic));
+    const content = new FakeContentRepository();
+    const { service } = createService({
+      content,
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      source: "fresh",
+      content: {
+        languageCode: "a.zh-Hans",
+        isGenerated: true,
+        provider: "tikhub",
+      },
+    });
+    expect(provider.fetchCalls).toBe(1);
+    expect(content.writes).toHaveLength(1);
+  });
+
+  it("retains an automatic TikHub language through a provider-bound choice", async () => {
+    const tracks = [
+      runtimeTrack("tikhub", "txt", {
+        languageCode: "a.en",
+        languageName: "English (auto)",
+        isGenerated: true,
+        url: "tikhub:caption/a.en",
+      }),
+      runtimeTrack("tikhub", "txt", {
+        languageCode: "a.zh-Hans",
+        languageName: "Chinese (auto)",
+        isGenerated: true,
+        url: "tikhub:caption/a.zh-Hans",
+      }),
+    ];
+    const provider = new FakeProvider(tracks, transcript(tracks[0]));
+    const content = new FakeContentRepository();
+    const { service } = createService({
+      content,
+      providers: [{ source: "tikhub", provider }],
+    });
+    const choices = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choices.status !== "selection-required") {
+      throw new Error("expected automatic TikHub choices");
+    }
+    const chinese = choices.tracks.find(
+      ({ languageCode }) => languageCode === "a.zh-Hans",
+    );
+    if (!chinese) throw new Error("expected automatic Chinese choice");
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        trackId: chinese.id,
+      }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: {
+        languageCode: "a.zh-Hans",
+        isGenerated: true,
+        provider: "tikhub",
+      },
+    });
+    expect(provider.fetchCalls).toBe(1);
+    expect(content.writes).toHaveLength(1);
+  });
+
+  it.each(INVALID_LANGUAGE_CODES)(
+    "rejects an invalid provider track language code: %s",
+    async (_label, languageCode) => {
+      const candidate = runtimeTrack("tikhub", "txt", { languageCode });
+      const provider = new FakeProvider([candidate], transcript(candidate));
+      const content = new FakeContentRepository();
+      const { service } = createService({
+        content,
+        providers: [{ source: "tikhub", provider }],
+      });
+
+      await expect(
+        service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+      ).rejects.toBeInstanceOf(YouTubeTranscriptServiceError);
+      expect(provider.fetchCalls).toBe(0);
+      expect(content.writes).toEqual([]);
+    },
+  );
+
+  it.each(INVALID_LANGUAGE_CODES)(
+    "rejects an invalid fetched transcript language code: %s",
+    async (_label, languageCode) => {
+      const selected = runtimeTrack("tikhub", "txt");
+      let fetchCalls = 0;
+      const provider: TranscriptProvider = {
+        async listTracks() {
+          return [selected];
+        },
+        async fetchTrack() {
+          fetchCalls += 1;
+          return transcript(selected, { languageCode });
+        },
+      };
+      const content = new FakeContentRepository();
+      const { service } = createService({
+        content,
+        providers: [{ source: "tikhub", provider }],
+      });
+
+      await expect(
+        service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+      ).rejects.toBeInstanceOf(YouTubeTranscriptServiceError);
+      expect(fetchCalls).toBe(1);
+      expect(content.writes).toEqual([]);
+    },
+  );
+
   it("persists a selected TikHub txt choice without exposing its locator", async () => {
     const tracks = [
       runtimeTrack("tikhub", "txt", {
@@ -1161,6 +1304,29 @@ describe("YouTubeTranscriptService", () => {
     ]);
     expect(innerTube.listCalls).toBe(0);
     expect(ytDlp.listCalls).toBe(0);
+  });
+
+  it("accepts an automatic-caption language from a matching cache", async () => {
+    const automaticCache = cached({
+      languageCode: "a.zh-Hans",
+      languageName: "Chinese (auto)",
+      isGenerated: true,
+      provider: "tikhub",
+    });
+    const content = new FakeContentRepository(automaticCache);
+    const innerTube = new FakeProvider();
+    const { service } = createService({ content, innerTube });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+    ).resolves.toEqual({
+      status: "ready",
+      source: "cache",
+      content: automaticCache,
+      usage: { tikhubPaidRequests: 0 },
+    });
+    expect(innerTube.listCalls).toBe(0);
+    expect(content.writes).toEqual([]);
   });
 
   it("reads a matching cache through the cache-only API and repairs metadata without providers", async () => {

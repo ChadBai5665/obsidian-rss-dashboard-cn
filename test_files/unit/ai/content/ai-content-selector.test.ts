@@ -350,6 +350,31 @@ describe("AiContentSelector", () => {
     expect(fullTextFetcher).not.toHaveBeenCalled();
   });
 
+  it("accepts a safe automatic-caption language from schemaVersion 2 cache", async () => {
+    const contentRepository = repository(cachedTranscript({
+      languageCode: "a.zh-Hans",
+      languageName: "Chinese (auto)",
+      isGenerated: true,
+      text: "Automatic Chinese transcript.",
+    }));
+    const selector = new AiContentSelector({ contentRepository });
+
+    const result = await selector.select({
+      item: item({
+        sourceType: "youtube",
+        contentBasis: "title-description",
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      }),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+
+    expect(result).toMatchObject({
+      basis: "youtube-transcript",
+      content: "Automatic Chinese transcript.",
+    });
+  });
+
   it.each([
     ["missing cache", null],
     ["schemaVersion 1 full text", cached("不应用于 YouTube 的旧正文")],
@@ -363,6 +388,14 @@ describe("AiContentSelector", () => {
         ...cachedTranscript(),
         provider: "unknown-provider",
       } as unknown as CachedItemContent,
+    ],
+    [
+      "trailing language separator",
+      cachedTranscript({ languageCode: "en-" }),
+    ],
+    [
+      "consecutive language separators",
+      cachedTranscript({ languageCode: "en--US" }),
     ],
     [
       "other content basis",

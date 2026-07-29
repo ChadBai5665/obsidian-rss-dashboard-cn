@@ -14,6 +14,20 @@ const OTHER_ITEM_ID = "b".repeat(64);
 const VIDEO_ID = "dQw4w9WgXcQ";
 const CONNECTION_ID = "d4eb3f58-b672-4f73-b9f3-9cd2f0e57a8d";
 const JOB_ID = "123e4567-e89b-12d3-a456-426614174000";
+const INVALID_LANGUAGE_CODES = [
+  ["empty", ""],
+  ["control", "en\u0000"],
+  ["whitespace", "a.zh Hans"],
+  ["slash", "a.zh/Hans"],
+  ["query", "a.zh?format=txt"],
+  ["leading separator", ".zh-Hans"],
+  ["trailing separator", "zh-Hans."],
+  ["consecutive separators", "a..zh-Hans"],
+  ["mixed empty segment", "a.-zh-Hans"],
+  ["trailing hyphen", "en-"],
+  ["repeated hyphen", "en--US"],
+  ["overlong", "a".repeat(65)],
+] as const;
 
 class InMemoryAdapter {
   readonly files = new Map<string, string>();
@@ -185,6 +199,21 @@ describe("TikHubCaptionJobRepository", () => {
     expect(() => captionJobKey(ITEM_ID, VIDEO_ID, "tracks", "en")).toThrow();
     expect(() => captionJobKey(ITEM_ID, VIDEO_ID, "content")).toThrow();
   });
+
+  it.each(INVALID_LANGUAGE_CODES)(
+    "rejects an unsafe content-job language without creating state: %s",
+    async (_label, languageCode) => {
+      const test = createRepository();
+
+      expect(() =>
+        captionJobKey(ITEM_ID, VIDEO_ID, "content", languageCode)
+      ).toThrow();
+      await expect(
+        test.repository.write(createRecord({ languageCode })),
+      ).rejects.toThrow();
+      expect(test.adapter.files.has(JOBS_PATH)).toBe(false);
+    },
+  );
 
   it("persists the exact record map at the configured data-root state path", async () => {
     const test = createRepository();

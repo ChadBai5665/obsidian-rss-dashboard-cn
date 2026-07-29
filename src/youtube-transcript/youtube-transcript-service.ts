@@ -16,6 +16,7 @@ import {
   type YouTubeTranscriptProvider,
   type YouTubeTranscriptUsage,
 } from "./transcript-types";
+import { isValidYouTubeCaptionLanguageCode } from "./youtube-caption-language-code";
 
 export type {
   TranscriptProvider,
@@ -181,7 +182,6 @@ interface ProviderChainState {
 }
 
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/u;
-const LANGUAGE_CODE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u;
 const FALLBACK_ELIGIBLE = new Set<YouTubeTranscriptErrorCode>([
   "no-captions",
   "temporarily-unavailable",
@@ -996,7 +996,7 @@ function assertProviderTranscript(
 ): void {
   if (
     transcript.videoId !== request.videoId ||
-    !LANGUAGE_CODE.test(transcript.languageCode) ||
+    !isValidYouTubeCaptionLanguageCode(transcript.languageCode) ||
     typeof transcript.languageName !== "string" ||
     !transcript.languageName.trim() ||
     transcript.languageName.length > 200 ||
@@ -1019,7 +1019,7 @@ function isMatchingTranscriptCache(
     content.contentBasis === "youtube-transcript" &&
     content.itemId === request.itemId &&
     content.videoId === request.videoId &&
-    LANGUAGE_CODE.test(content.languageCode) &&
+    isValidYouTubeCaptionLanguageCode(content.languageCode) &&
     typeof content.languageName === "string" &&
     Boolean(content.languageName.trim()) &&
     (content.provider === "innertube" ||
@@ -1096,8 +1096,7 @@ function isValidProviderTrack(
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
   return (
-    typeof candidate.languageCode === "string" &&
-    LANGUAGE_CODE.test(candidate.languageCode) &&
+    isValidYouTubeCaptionLanguageCode(candidate.languageCode) &&
     typeof candidate.languageName === "string" &&
     Boolean(candidate.languageName.trim()) &&
     candidate.languageName.length <= 200 &&

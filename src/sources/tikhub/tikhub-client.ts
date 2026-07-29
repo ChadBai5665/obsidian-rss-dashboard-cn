@@ -14,6 +14,7 @@ import type {
   TikHubBudgetReservation,
   TikHubRequestBudgetLike,
 } from "./request-budget";
+import { isValidYouTubeCaptionLanguageCode } from "../../youtube-transcript/youtube-caption-language-code";
 
 export interface TikHubTransportRequest {
   url: string;
@@ -92,7 +93,6 @@ interface TikHubBatchState {
 const BATCH_BRAND = Symbol("tikhub-client-batch");
 const MAX_TIKHUB_RESPONSE_TEXT_LENGTH = 5_000_000;
 const YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{11}$/u;
-const YOUTUBE_LANGUAGE_CODE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const TIKHUB_JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export class TikHubClientError extends Error {
@@ -148,11 +148,7 @@ export class TikHubClient {
     );
     const query: Record<string, string> = { video_id: videoId };
     if (input.languageCode !== undefined || input.format !== undefined) {
-      const languageCode = requirePattern(
-        input.languageCode,
-        YOUTUBE_LANGUAGE_CODE,
-        "YouTube caption language code",
-      );
+      const languageCode = requireYouTubeCaptionLanguageCode(input.languageCode);
       if (input.format !== "txt") {
         throw new TikHubClientError(
           "invalid-query",
@@ -822,6 +818,16 @@ function requirePattern(
 ): string {
   if (typeof value !== "string" || !pattern.test(value)) {
     throw new TikHubClientError("invalid-query", `TikHub ${label} is invalid.`);
+  }
+  return value;
+}
+
+function requireYouTubeCaptionLanguageCode(value: unknown): string {
+  if (!isValidYouTubeCaptionLanguageCode(value)) {
+    throw new TikHubClientError(
+      "invalid-query",
+      "TikHub YouTube caption language code is invalid.",
+    );
   }
   return value;
 }

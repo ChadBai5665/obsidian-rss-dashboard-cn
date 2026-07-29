@@ -2,10 +2,10 @@ import type {
   TikHubCaptionResponse,
   TikHubCaptionTrack,
 } from "./tikhub-types";
+import { isValidYouTubeCaptionLanguageCode } from "../../youtube-transcript/youtube-caption-language-code";
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/u;
 const JOB_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const LANGUAGE_CODE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const MAX_TRACKS = 256;
 const MAX_LANGUAGE_NAME_LENGTH = 256;
 const MAX_CAPTION_TEXT_LENGTH = 1_000_000;
@@ -247,7 +247,7 @@ function parseAvailableLanguages(value: unknown): string[] {
   for (const entry of entries) {
     if (
       typeof entry !== "string" ||
-      !LANGUAGE_CODE.test(entry) ||
+      !isValidYouTubeCaptionLanguageCode(entry) ||
       seen.has(entry)
     ) {
       throw invalidResponse();
@@ -275,7 +275,7 @@ function parseLanguage(record: Record<string, unknown>): TikHubCaptionTrack {
   const languageName = ownData(record, "language_name");
   if (
     typeof languageCode !== "string" ||
-    !LANGUAGE_CODE.test(languageCode) ||
+    !isValidYouTubeCaptionLanguageCode(languageCode) ||
     typeof languageName !== "string" ||
     languageName.length === 0 ||
     languageName.length > MAX_LANGUAGE_NAME_LENGTH ||

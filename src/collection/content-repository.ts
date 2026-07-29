@@ -4,6 +4,7 @@ import {
   isValidYouTubeVideoId,
   type YouTubeTranscriptProvider,
 } from "../youtube-transcript/transcript-types";
+import { isValidYouTubeCaptionLanguageCode } from "../youtube-transcript/youtube-caption-language-code";
 
 export interface FullTextCachedItemContent {
   schemaVersion: 1;
@@ -45,7 +46,6 @@ interface ActiveContentTransaction {
 }
 
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/;
-const LANGUAGE_CODE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u;
 const TRANSCRIPT_FIELDS = new Set([
   "schemaVersion",
   "itemId",
@@ -460,8 +460,7 @@ function assertCachedItemContent(content: CachedItemContent): void {
     throw new Error("Invalid cached transcript video id");
   }
   if (
-    typeof content.languageCode !== "string" ||
-    !LANGUAGE_CODE.test(content.languageCode)
+    !isValidYouTubeCaptionLanguageCode(content.languageCode)
   ) {
     throw new Error("Invalid cached transcript language code");
   }

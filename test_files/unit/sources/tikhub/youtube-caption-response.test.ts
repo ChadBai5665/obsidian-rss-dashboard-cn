@@ -3,6 +3,20 @@ import { parseTikHubCaptionResponse } from "../../../../src/sources/tikhub/youtu
 
 const VIDEO_ID = "dQw4w9WgXcQ";
 const JOB_ID = "123e4567-e89b-12d3-a456-426614174000";
+const INVALID_LANGUAGE_CODES = [
+  ["empty", ""],
+  ["control", "en\u0000"],
+  ["whitespace", "a.zh Hans"],
+  ["slash", "a.zh/Hans"],
+  ["query", "a.zh?format=txt"],
+  ["leading separator", ".zh-Hans"],
+  ["trailing separator", "zh-Hans."],
+  ["consecutive separators", "a..zh-Hans"],
+  ["mixed empty segment", "a.-zh-Hans"],
+  ["trailing hyphen", "en-"],
+  ["repeated hyphen", "en--US"],
+  ["overlong", "a".repeat(65)],
+] as const;
 
 describe("parseTikHubCaptionResponse", () => {
   it("projects a documented caption list and infers generated tracks", () => {
@@ -181,6 +195,16 @@ describe("parseTikHubCaptionResponse", () => {
   ])("rejects %s", (_label, value) => {
     expect(() => parseTikHubCaptionResponse(value, VIDEO_ID)).toThrow();
   });
+
+  it.each(INVALID_LANGUAGE_CODES)(
+    "rejects an unsafe caption language code: %s",
+    (_label, languageCode) => {
+      expect(() => parseTikHubCaptionResponse({
+        video_id: VIDEO_ID,
+        captions: [{ language_code: languageCode, language_name: "Language" }],
+      }, VIDEO_ID)).toThrow();
+    },
+  );
 
   it("rejects more than 256 tracks and caption text over one million characters", () => {
     const tracks = Array.from({ length: 257 }, (_, index) => ({

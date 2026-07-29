@@ -1,6 +1,7 @@
 import { normalizePath, type DataAdapter, type Vault } from "obsidian";
 import { isCanonicalConnectionId } from "../security/connection-id";
 import { isValidYouTubeVideoId } from "./transcript-types";
+import { isValidYouTubeCaptionLanguageCode } from "./youtube-caption-language-code";
 
 export interface TikHubCaptionJobRecord {
   schemaVersion: 1;
@@ -17,7 +18,6 @@ export interface TikHubCaptionJobRecord {
 }
 
 const ITEM_ID = /^[a-f0-9]{64}$/u;
-const LANGUAGE_CODE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const JOB_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
@@ -72,8 +72,7 @@ export function captionJobKey(
   }
   if (
     stage !== "content" ||
-    typeof languageCode !== "string" ||
-    !LANGUAGE_CODE.test(languageCode)
+    !isValidYouTubeCaptionLanguageCode(languageCode)
   ) {
     throw new Error("Content caption jobs require a valid language code.");
   }
@@ -393,15 +392,14 @@ function keyForRecord(record: TikHubCaptionJobRecord): string {
 
 function assertCaptionJobKey(key: unknown): asserts key is string {
   if (typeof key !== "string") throw new Error("Invalid TikHub caption job key.");
-  const match = /^([a-f0-9]{64}):([A-Za-z0-9_-]{11}):(tracks|content)(?::([A-Za-z0-9][A-Za-z0-9._-]{0,63}))?$/u
-    .exec(key);
-  if (!match) throw new Error("Invalid TikHub caption job key.");
+  const [itemId, videoId, stage, languageCode, ...extra] = key.split(":");
+  if (extra.length > 0) throw new Error("Invalid TikHub caption job key.");
   try {
     if (captionJobKey(
-      match[1],
-      match[2],
-      match[3] as TikHubCaptionJobRecord["stage"],
-      match[4],
+      itemId,
+      videoId,
+      stage as TikHubCaptionJobRecord["stage"],
+      languageCode,
     ) !== key) {
       throw new Error("Invalid TikHub caption job key.");
     }

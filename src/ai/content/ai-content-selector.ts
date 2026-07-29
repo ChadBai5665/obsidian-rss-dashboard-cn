@@ -2,6 +2,7 @@ import type { CollectedItem, ContentBasis, SourceType } from "../../collection/c
 import type { CachedItemContent } from "../../collection/content-repository";
 import type { FullArticleFetchResult } from "../../utils/fetch-helpers";
 import { isValidYouTubeVideoId } from "../../youtube-transcript/transcript-types";
+import { isValidYouTubeCaptionLanguageCode } from "../../youtube-transcript/youtube-caption-language-code";
 import {
   MAX_AI_SELECTED_CONTENT_CHARACTERS,
   MIN_AI_INPUT_CHARACTERS,
@@ -21,7 +22,6 @@ const BASIC_HTML_ENTITY_TOKEN = /^(?:#x[0-9a-f]{1,6}|#[0-9]{1,7}|amp|lt|gt|quot|
 const MAX_TITLE_CHARACTERS = 20_000;
 const MAX_SOURCE_NAME_CHARACTERS = 20_000;
 const MAX_SOURCE_URL_CHARACTERS = 8_192;
-const TRANSCRIPT_LANGUAGE_CODE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/u;
 const TRANSCRIPT_FIELDS = new Set([
   "schemaVersion",
   "itemId",
@@ -849,8 +849,7 @@ function snapshotCachedYouTubeTranscript(
     contentBasis === "youtube-transcript" &&
     typeof videoId === "string" &&
     isValidYouTubeVideoId(videoId) &&
-    typeof languageCode === "string" &&
-    TRANSCRIPT_LANGUAGE_CODE.test(languageCode) &&
+    isValidYouTubeCaptionLanguageCode(languageCode) &&
     typeof languageName === "string" &&
     Boolean(languageName.trim()) &&
     languageName.length <= 200 &&
