@@ -119,9 +119,11 @@ function prepareOnload(plugin: RssDashboardPlugin): void {
 
 function watchTikHubClient(): Array<ReturnType<typeof vi.spyOn>> {
   return [
+    vi.spyOn(TikHubClient.prototype, "verifyAccount"),
     vi.spyOn(TikHubClient.prototype, "fetchYouTubeCaptions"),
     vi.spyOn(TikHubClient.prototype, "fetchYouTubeCaptionResult"),
     vi.spyOn(TikHubClient.prototype, "fetchUserPosts"),
+    vi.spyOn(TikHubClient.prototype, "fetchUserProfile"),
     vi.spyOn(TikHubClient.prototype, "fetchUserReplies"),
     vi.spyOn(TikHubClient.prototype, "fetchSearchTimeline"),
   ];
@@ -312,6 +314,7 @@ describe("TikHub transcript runtime wiring", () => {
 
     await plugin.onload();
 
+    expect(clientMethods).toHaveLength(7);
     expect(secretState.constructed).toBeGreaterThan(0);
     expectPassiveTikHubIsolation(clientMethods);
     plugin.onunload();
@@ -397,14 +400,18 @@ describe("TikHub transcript runtime wiring", () => {
     vi.spyOn(obsidian, "requestUrl").mockImplementation(rssRequest);
 
     await plugin.onload();
-    await (plugin as unknown as {
-      refreshOnOpenIfNeeded(): Promise<void>;
-    }).refreshOnOpenIfNeeded();
+    (
+      plugin.app.workspace as typeof plugin.app.workspace & {
+        triggerLayoutReady(): void;
+      }
+    ).triggerLayoutReady();
+    await vi.waitFor(() => {
+      expect(rssRequest).toHaveBeenCalledWith(expect.objectContaining({
+        url: feed.url,
+        method: "GET",
+      }));
+    });
 
-    expect(rssRequest).toHaveBeenCalledWith(expect.objectContaining({
-      url: feed.url,
-      method: "GET",
-    }));
     expect(plugin.settings.feeds[0].items).toEqual(expect.arrayContaining([
       expect.objectContaining({
         title: "Refreshed article",
