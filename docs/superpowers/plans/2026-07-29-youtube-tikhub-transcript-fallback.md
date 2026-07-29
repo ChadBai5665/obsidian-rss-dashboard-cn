@@ -187,7 +187,7 @@ Also cover completed `format: "txt"` with non-empty `content`, queued/active res
 
 ```ts
 await client.fetchYouTubeCaptions({
-  apiKey: API_KEY,
+  ...sanitizedCaptionAuthFixture(),
   videoId: "dQw4w9WgXcQ",
 });
 expect(request.url).toBe(
@@ -196,7 +196,7 @@ expect(request.url).toBe(
 expect(reserve).toHaveBeenCalledWith(1);
 
 await client.fetchYouTubeCaptionResult({
-  apiKey: API_KEY,
+  ...sanitizedCaptionAuthFixture(),
   jobId: "123e4567-e89b-12d3-a456-426614174000",
   format: "txt",
 });
@@ -812,10 +812,10 @@ If status proves a listed artifact is ignored or identical, omit that exact path
 
 **Files:**
 - Source: `release/main.js`, `release/manifest.json`, `release/styles.css`
-- Target: `/Users/chadbai/ChadMac/Chad.OPC/chad-claude-hub/.obsidian/plugins/rss-dashboard-cn/`
+- Target: the exact active vault plugin directory supplied at acceptance time
 - Protect: target `data.json`
-- Protect: `/Users/chadbai/ChadMac/Chad.OPC/chad-claude-hub/.rss-dashboard-data/`
-- Protect: `/Users/chadbai/Library/Application Support/rss-dashboard-cn/secrets.json`
+- Protect: the active vault's `.rss-dashboard-data/`
+- Protect: the desktop external secret file resolved by the plugin's secret-store implementation
 
 **Interfaces:**
 - Consumes: verified release and fresh paid authorization.
@@ -835,7 +835,7 @@ Expected: the release directory contains exactly the three allowed, verified pro
 
 ```bash
 node scripts/install-local-release.mjs \
-  --target /Users/chadbai/ChadMac/Chad.OPC/chad-claude-hub/.obsidian/plugins/rss-dashboard-cn
+  --target /absolute/path/to/active-vault/.obsidian/plugins/rss-dashboard-cn
 ```
 
 Expected: recoverable backup; `data.json` remains byte-identical.
