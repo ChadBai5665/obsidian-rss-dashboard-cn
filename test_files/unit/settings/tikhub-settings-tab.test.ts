@@ -128,6 +128,7 @@ describe("renderTikHubSettingsTab", () => {
     expect(fallbackSetting.textContent).toContain("仅在你主动获取 YouTube 字幕时使用");
     expect(fallbackSetting.textContent).toContain("预计费用 $0.016");
     expect(toggle.checked).toBe(false);
+    expect(test.secretStore.getStatus).not.toHaveBeenCalled();
     expect(test.secretStore.get).not.toHaveBeenCalled();
     expect(test.testConnection).not.toHaveBeenCalled();
 
@@ -136,6 +137,7 @@ describe("renderTikHubSettingsTab", () => {
 
     expect(test.plugin.settings.tikhub.youtubeTranscriptFallbackEnabled).toBe(true);
     expect(test.plugin.saveSettings).toHaveBeenCalledTimes(1);
+    expect(test.secretStore.getStatus).not.toHaveBeenCalled();
     expect(test.secretStore.get).not.toHaveBeenCalled();
     expect(test.testConnection).not.toHaveBeenCalled();
   });
@@ -219,9 +221,8 @@ describe("renderTikHubSettingsTab", () => {
     expect(test.containerEl.textContent).not.toContain(credential);
   });
 
-  it("keeps a valid initial key status alive when an empty key save is rejected", async () => {
-    const status = deferred<{ hasSecret: boolean }>();
-    const test = harness({ getStatus: () => status.promise });
+  it("rejects an empty key save without querying desktop secrets", async () => {
+    const test = harness();
     const keySetting = getSetting(test.containerEl, "API 密钥");
     const input = keySetting.querySelector<HTMLInputElement>("input")!;
     const save = getButton(keySetting, "保存密钥");
@@ -232,9 +233,8 @@ describe("renderTikHubSettingsTab", () => {
     expect(input.value).toBe("");
     expect(save.disabled).toBe(false);
     expect(test.containerEl.textContent).toContain("请输入非空 API 密钥");
-    status.resolve({ hasSecret: true });
-    await flushPromises();
-    expect(test.containerEl.textContent).toContain("状态：已配置");
+    expect(test.secretStore.getStatus).not.toHaveBeenCalled();
+    expect(test.secretStore.get).not.toHaveBeenCalled();
   });
 
   it("requires deletion confirmation, removes only the external key, and disables paid refresh", async () => {

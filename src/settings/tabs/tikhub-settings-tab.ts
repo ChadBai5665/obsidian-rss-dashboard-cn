@@ -573,8 +573,6 @@ export function renderTikHubSettingsTab(
         })();
       });
   });
-
-  refreshSecretStatus();
 }
 
 export function getTikHubConnectionMessage(
