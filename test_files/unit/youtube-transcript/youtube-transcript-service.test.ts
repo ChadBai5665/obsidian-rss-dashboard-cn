@@ -122,6 +122,20 @@ class FakeOptionalProvider extends FakeProvider {
   }
 }
 
+class PersistTrackingOptionalProvider extends FakeOptionalProvider {
+  readonly persisted: Array<{
+    track: YouTubeCaptionTrack;
+    transcript: YouTubeTranscript;
+  }> = [];
+
+  async onPersisted(
+    savedTrack: YouTubeCaptionTrack,
+    savedTranscript: YouTubeTranscript,
+  ): Promise<void> {
+    this.persisted.push({ track: savedTrack, transcript: savedTranscript });
+  }
+}
+
 class FakeContentRepository implements TranscriptCacheRepository {
   value: CachedItemContent | null;
   readonly writes: YouTubeTranscriptCachedItemContent[] = [];
@@ -571,6 +585,115 @@ describe("YouTubeTranscriptService", () => {
     await expect(
       success.service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
     ).resolves.toMatchObject({ usage: { tikhubPaidRequests: 2 } });
+  });
+
+  it("preserves one paid TikHub request when choice registration fails locally", async () => {
+    const tikHub = new PersistTrackingOptionalProvider(true, [
+      track({
+        source: "tikhub",
+        languageName: "English",
+        url: "tikhub:caption/en",
+      }),
+      track({
+        source: "tikhub",
+        languageName: "English (United States)",
+        url: "tikhub:caption/en-us",
+      }),
+    ]);
+    const ytDlp = new FakeOptionalProvider(true, [track({ source: "yt-dlp" })]);
+    let clockCalls = 0;
+    const { service } = createService({
+      innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+      tikHub,
+      ytDlp,
+      clock: () => {
+        clockCalls += 1;
+        if (clockCalls === 2) throw new Error("local choice clock failed");
+        return new Date("2026-07-28T06:00:00.000Z");
+      },
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({
+      code: "temporarily-unavailable",
+      usage: { tikhubPaidRequests: 1 },
+    });
+    expect(tikHub.fetchCalls).toBe(0);
+    expect(tikHub.persisted).toEqual([]);
+    expect(ytDlp.availabilityChecks).toBe(0);
+    expect(ytDlp.listCalls).toBe(0);
+  });
+
+  it("preserves two paid TikHub requests when a fresh write fails locally", async () => {
+    const tikHub = new PersistTrackingOptionalProvider(true, [
+      track({ source: "tikhub", url: "tikhub:caption/en" }),
+    ]);
+    const ytDlp = new FakeOptionalProvider(true, [track({ source: "yt-dlp" })]);
+    const { service } = createService({
+      innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+      tikHub,
+      ytDlp,
+      content: new FailingWriteContentRepository(),
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({
+      code: "temporarily-unavailable",
+      usage: { tikhubPaidRequests: 2 },
+    });
+    expect(tikHub.fetchCalls).toBe(1);
+    expect(tikHub.persisted).toEqual([]);
+    expect(ytDlp.availabilityChecks).toBe(0);
+    expect(ytDlp.listCalls).toBe(0);
+  });
+
+  it("preserves leased TikHub usage when a selected choice cannot be persisted", async () => {
+    const tikHub = new PersistTrackingOptionalProvider(true, [
+      track({
+        source: "tikhub",
+        languageName: "English",
+        url: "tikhub:caption/en",
+      }),
+      track({
+        source: "tikhub",
+        languageName: "English (United States)",
+        url: "tikhub:caption/en-us",
+      }),
+    ]);
+    const ytDlp = new FakeOptionalProvider(true, [track({ source: "yt-dlp" })]);
+    const { service } = createService({
+      innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+      tikHub,
+      ytDlp,
+      content: new FailingWriteContentRepository(),
+    });
+    const choices = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choices.status !== "selection-required") {
+      throw new Error("expected TikHub choices");
+    }
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        trackId: choices.tracks[0].id,
+      }),
+    ).rejects.toMatchObject({
+      code: "temporarily-unavailable",
+      usage: { tikhubPaidRequests: 2 },
+    });
+    expect(tikHub.listCalls).toBe(1);
+    expect(tikHub.fetchCalls).toBe(1);
+    expect(tikHub.persisted).toEqual([]);
+    expect(ytDlp.availabilityChecks).toBe(0);
+    expect(ytDlp.listCalls).toBe(0);
   });
 
   it("guards progress callbacks and invokes cleanup only after a durable write", async () => {

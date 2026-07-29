@@ -442,7 +442,7 @@ export class YouTubeTranscriptService {
             throw new YouTubeTranscriptServiceError("temporarily-unavailable");
           }
           if (!(error instanceof TranscriptProviderStageError)) {
-            throw normalizeProviderError(error);
+            throw normalizeLocalError(error, state);
           }
           const failure = error.failure;
           addFailure(state, registration.source, failure.code);
@@ -539,7 +539,7 @@ export class YouTubeTranscriptService {
           throw new YouTubeTranscriptServiceError("temporarily-unavailable");
         }
         if (!(error instanceof TranscriptProviderStageError)) {
-          throw normalizeProviderError(error);
+          throw normalizeLocalError(error, state);
         }
         const failure = error.failure;
         addFailure(state, registration.source, failure.code);
@@ -1010,6 +1010,19 @@ function normalizeProviderError(error: unknown): YouTubeTranscriptServiceError {
     return new YouTubeTranscriptServiceError(error.code);
   }
   return new YouTubeTranscriptServiceError("temporarily-unavailable");
+}
+
+function normalizeLocalError(
+  error: unknown,
+  state: ProviderChainState,
+): YouTubeTranscriptServiceError {
+  const normalized = normalizeProviderError(error);
+  return new YouTubeTranscriptServiceError(
+    normalized.code,
+    normalized.primaryCode,
+    normalized.failures.length > 0 ? normalized.failures : state.failures,
+    freezeUsage(state.tikhubPaidRequests),
+  );
 }
 
 function providerStageError(error: unknown): TranscriptProviderStageError {
