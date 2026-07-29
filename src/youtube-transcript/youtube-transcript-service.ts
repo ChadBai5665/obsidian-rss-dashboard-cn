@@ -6,6 +6,7 @@ import {
   assertYouTubeVideoId,
   YouTubeTranscriptError,
   type TranscriptProvider,
+  type TranscriptProviderOperationContext,
   type TranscriptProviderRegistration,
   type YouTubeCaptionTrack,
   type YouTubeTranscript,
@@ -18,6 +19,7 @@ import {
 
 export type {
   TranscriptProvider,
+  TranscriptProviderOperationContext,
   TranscriptProviderRegistration,
 } from "./transcript-types";
 
@@ -141,6 +143,7 @@ interface RegisteredChoice {
   registration: TranscriptProviderRegistration;
   providerIndex: number;
   track: YouTubeCaptionTrack;
+  context: TranscriptProviderOperationContext;
   failures: readonly YouTubeTranscriptProviderFailure[];
   usage: YouTubeTranscriptUsage;
 }
@@ -380,6 +383,9 @@ export class YouTubeTranscriptService {
     operationGeneration: symbol,
     selectionAtStart: SelectionAtStart | undefined,
   ): Promise<YouTubeTranscriptServiceResult> {
+    const context = providerOperationContext(
+      selectionAtStart?.registered.context ?? request,
+    );
     const state: ProviderChainState = selectionAtStart === undefined
       ? { failures: [], tikhubPaidRequests: 0 }
       : {
@@ -430,6 +436,7 @@ export class YouTubeTranscriptService {
             registration,
             selectedTrack,
             state,
+            context,
           );
           this.deletePendingChoiceSet(key, selectionAtStart.pendingGeneration);
           this.clearGeneration(key, operationGeneration);
@@ -459,6 +466,7 @@ export class YouTubeTranscriptService {
             operationGeneration,
             providerIndex + 1,
             state,
+            context,
           );
           if (result.status === "ready") {
             this.deletePendingChoiceSet(
@@ -478,6 +486,7 @@ export class YouTubeTranscriptService {
         operationGeneration,
         0,
         state,
+        context,
       );
       if (result.status === "ready") {
         this.clearGeneration(key, operationGeneration);
@@ -498,6 +507,7 @@ export class YouTubeTranscriptService {
     operationGeneration: symbol,
     startIndex: number,
     state: ProviderChainState,
+    context: TranscriptProviderOperationContext,
   ): Promise<YouTubeTranscriptServiceResult> {
     for (let index = startIndex; index < this.providers.length; index += 1) {
       const registration = this.providers[index];
@@ -530,6 +540,7 @@ export class YouTubeTranscriptService {
           registration,
           index,
           state,
+          context,
         );
       } catch (error) {
         if (request.signal?.aborted || this.disposed) {
@@ -562,6 +573,7 @@ export class YouTubeTranscriptService {
     registration: TranscriptProviderRegistration,
     providerIndex: number,
     state: ProviderChainState,
+    context: TranscriptProviderOperationContext,
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
@@ -569,8 +581,9 @@ export class YouTubeTranscriptService {
     let tracks: YouTubeCaptionTrack[];
     try {
       tracks = await registration.provider.listTracks(
-        request.videoId,
+        context.videoId,
         request.signal,
+        context,
       );
     } catch (error) {
       throw providerStageError(error);
@@ -603,6 +616,7 @@ export class YouTubeTranscriptService {
         providerIndex,
         selected,
         state,
+        context,
       );
     }
     return await this.fetchAndPersist(
@@ -612,6 +626,7 @@ export class YouTubeTranscriptService {
       registration,
       selected[0],
       state,
+      context,
     );
   }
 
@@ -622,6 +637,7 @@ export class YouTubeTranscriptService {
     registration: TranscriptProviderRegistration,
     selectedTrack: YouTubeCaptionTrack,
     state: ProviderChainState,
+    context: TranscriptProviderOperationContext,
   ): Promise<YouTubeTranscriptServiceResult> {
     this.assertCurrentGeneration(key, operationGeneration);
     let transcript: YouTubeTranscript;
@@ -629,6 +645,7 @@ export class YouTubeTranscriptService {
       transcript = await registration.provider.fetchTrack(
         selectedTrack,
         request.signal,
+        context,
       );
     } catch (error) {
       throw providerStageError(error);
@@ -636,7 +653,11 @@ export class YouTubeTranscriptService {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
     try {
-      assertProviderTranscript(request, transcript, registration.source);
+      assertProviderTranscript(
+        { ...request, itemId: context.itemId, videoId: context.videoId },
+        transcript,
+        registration.source,
+      );
       if (registration.source === "tikhub") {
         incrementTikHubUsage(state);
         emitProgress(request, "trying-tikhub", state);
@@ -646,27 +667,31 @@ export class YouTubeTranscriptService {
     }
     emitProgress(request, "saving", state);
     const content = createCachedTranscript(
-      request,
+      { ...request, itemId: context.itemId, videoId: context.videoId },
       transcript,
       this.options.clock,
     );
     let durable = false;
     try {
       await this.options.contentRepository.transaction(
-        request.itemId,
+        context.itemId,
         async (transaction) => {
           assertNotAborted(request.signal);
           this.assertCurrentGeneration(key, operationGeneration);
           const path = await transaction.write(content);
           durable = true;
-          await this.repairMetadata(request.itemId, path);
+          await this.repairMetadata(context.itemId, path);
           this.assertCurrentGeneration(key, operationGeneration);
         },
       );
     } finally {
       if (durable && registration.provider.onPersisted) {
         try {
-          await registration.provider.onPersisted(selectedTrack, transcript);
+          await registration.provider.onPersisted(
+            selectedTrack,
+            transcript,
+            context,
+          );
         } catch {
           // Durable content is authoritative; cleanup can be retried separately.
         }
@@ -687,15 +712,18 @@ export class YouTubeTranscriptService {
     providerIndex: number,
     tracks: readonly YouTubeCaptionTrack[],
     state: ProviderChainState,
+    context: TranscriptProviderOperationContext,
   ): YouTubeTranscriptServiceResult {
     this.assertCurrentGeneration(key, operationGeneration);
     const registered = new Map<string, RegisteredChoice>();
+    const choiceContext = providerOperationContext(context);
     const choices = tracks.map((candidate) => {
       const id = `track-${++this.choiceSequence}`;
       registered.set(id, {
         registration,
         providerIndex,
         track: candidate,
+        context: choiceContext,
         failures: freezeFailures(state.failures),
         usage: freezeUsage(state.tikhubPaidRequests),
       });
@@ -1250,6 +1278,15 @@ function freezeUsage(
   tikhubPaidRequests: 0 | 1 | 2,
 ): YouTubeTranscriptUsage {
   return Object.freeze({ tikhubPaidRequests });
+}
+
+function providerOperationContext(
+  identity: Pick<TranscriptProviderOperationContext, "itemId" | "videoId">,
+): TranscriptProviderOperationContext {
+  return Object.freeze({
+    itemId: identity.itemId,
+    videoId: identity.videoId,
+  });
 }
 
 function assertRequest(request: YouTubeTranscriptRequest): void {

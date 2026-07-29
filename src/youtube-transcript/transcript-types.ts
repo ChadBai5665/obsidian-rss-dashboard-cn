@@ -59,18 +59,26 @@ export interface TranscriptProviderRegistration {
   isAvailable?: () => Promise<boolean>;
 }
 
+export interface TranscriptProviderOperationContext {
+  readonly itemId: string;
+  readonly videoId: string;
+}
+
 export interface TranscriptProvider {
   listTracks(
     videoId: string,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    context: TranscriptProviderOperationContext,
   ): Promise<YouTubeCaptionTrack[]>;
   fetchTrack(
     track: YouTubeCaptionTrack,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    context: TranscriptProviderOperationContext,
   ): Promise<YouTubeTranscript>;
   onPersisted?(
     track: YouTubeCaptionTrack,
     transcript: YouTubeTranscript,
+    context: TranscriptProviderOperationContext,
   ): Promise<void>;
 }
 

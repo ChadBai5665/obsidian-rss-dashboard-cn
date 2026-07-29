@@ -12,6 +12,7 @@ import {
 import {
   YouTubeTranscriptError,
   type TranscriptProvider,
+  type TranscriptProviderOperationContext,
   type TranscriptProviderRegistration,
   type YouTubeCaptionTrack,
   type YouTubeTranscript,
@@ -19,6 +20,7 @@ import {
 } from "../../../src/youtube-transcript/transcript-types";
 
 const ITEM_ID = "a".repeat(64);
+const OTHER_ITEM_ID = "b".repeat(64);
 const VIDEO_ID = "dQw4w9WgXcQ";
 const CONTENT_PATH = `.rss-dashboard-data/content/${ITEM_ID}.md`;
 
@@ -363,6 +365,169 @@ describe("YouTubeTranscriptService", () => {
       "yt-dlp:list",
       "yt-dlp:fetch",
     ]);
+  });
+
+  it("passes one frozen operation context through a fresh provider lifecycle", async () => {
+    const observed: Array<{
+      phase: "list" | "fetch" | "persist";
+      context: TranscriptProviderOperationContext;
+    }> = [];
+    const selected = track();
+    const innerTube: TranscriptProvider = {
+      async listTracks(_videoId, _signal, context) {
+        observed.push({ phase: "list", context });
+        return [selected];
+      },
+      async fetchTrack(selectedTrack, _signal, context) {
+        observed.push({ phase: "fetch", context });
+        return transcript(selectedTrack);
+      },
+      async onPersisted(_savedTrack, _savedTranscript, context) {
+        observed.push({ phase: "persist", context });
+      },
+    };
+    const { service } = createService({ innerTube });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).resolves.toMatchObject({ status: "ready" });
+
+    expect(observed.map(({ phase }) => phase)).toEqual([
+      "list",
+      "fetch",
+      "persist",
+    ]);
+    expect(observed[0].context).toEqual({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+    });
+    expect(observed[1].context).toBe(observed[0].context);
+    expect(observed[2].context).toBe(observed[0].context);
+    expect(Object.isFrozen(observed[0].context)).toBe(true);
+  });
+
+  it("keeps persistence and later hooks isolated from provider context mutation", async () => {
+    const mutations: boolean[] = [];
+    const observed: TranscriptProviderOperationContext[] = [];
+    const content = new FakeContentRepository();
+    const selected = track();
+    const innerTube: TranscriptProvider = {
+      async listTracks(_videoId, _signal, context) {
+        observed.push(context);
+        mutations.push(Reflect.set(context, "itemId", OTHER_ITEM_ID));
+        return [selected];
+      },
+      async fetchTrack(selectedTrack, _signal, context) {
+        observed.push(context);
+        mutations.push(Reflect.set(context, "videoId", "abcdefghijk"));
+        return transcript(selectedTrack);
+      },
+      async onPersisted(_savedTrack, _savedTranscript, context) {
+        observed.push(context);
+      },
+    };
+    const { service } = createService({ innerTube, content });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { itemId: ITEM_ID, videoId: VIDEO_ID },
+    });
+
+    expect(mutations).toEqual([false, false]);
+    expect(observed).toEqual([
+      { itemId: ITEM_ID, videoId: VIDEO_ID },
+      { itemId: ITEM_ID, videoId: VIDEO_ID },
+      { itemId: ITEM_ID, videoId: VIDEO_ID },
+    ]);
+    expect(content.value).toMatchObject({ itemId: ITEM_ID, videoId: VIDEO_ID });
+  });
+
+  it("restores the original operation context for a selected choice", async () => {
+    const listContexts: TranscriptProviderOperationContext[] = [];
+    const fetchContexts: TranscriptProviderOperationContext[] = [];
+    const persistContexts: TranscriptProviderOperationContext[] = [];
+    const tracks = [
+      track({ languageName: "English", url: "innertube:caption/en" }),
+      track({
+        languageName: "English (United States)",
+        url: "innertube:caption/en-us",
+      }),
+    ];
+    const innerTube: TranscriptProvider = {
+      async listTracks(_videoId, _signal, context) {
+        listContexts.push(context);
+        return tracks;
+      },
+      async fetchTrack(selectedTrack, _signal, context) {
+        fetchContexts.push(context);
+        return transcript(selectedTrack);
+      },
+      async onPersisted(_savedTrack, _savedTranscript, context) {
+        persistContexts.push(context);
+      },
+    };
+    const { service } = createService({ innerTube });
+    const choices = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choices.status !== "selection-required") {
+      throw new Error("expected choices");
+    }
+
+    await expect(
+      service.get({
+        itemId: OTHER_ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        trackId: choices.tracks[0].id,
+      }),
+    ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+    expect(fetchContexts).toEqual([]);
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        trackId: choices.tracks[0].id,
+      }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { itemId: ITEM_ID, videoId: VIDEO_ID },
+    });
+    expect(listContexts).toEqual([{ itemId: ITEM_ID, videoId: VIDEO_ID }]);
+    expect(fetchContexts).toEqual([{ itemId: ITEM_ID, videoId: VIDEO_ID }]);
+    expect(persistContexts).toEqual([{ itemId: ITEM_ID, videoId: VIDEO_ID }]);
+    expect(fetchContexts[0]).toBe(persistContexts[0]);
+    expect(Object.isFrozen(fetchContexts[0])).toBe(true);
+  });
+
+  it("keeps providers with legacy method arity usable through the legacy constructor", async () => {
+    const content = new FakeContentRepository();
+    const metadata = new FakeMetadataRepository();
+    const innerTube = new FakeProvider([track()]);
+    const ytDlp = new FakeOptionalProvider(true);
+    const service = new YouTubeTranscriptService({
+      innerTube,
+      ytDlp,
+      contentRepository: content,
+      metadataRepository: metadata,
+      clock: () => new Date("2026-07-28T06:00:00.000Z"),
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { provider: "innertube" },
+    });
+    expect(innerTube.listCalls).toBe(1);
+    expect(innerTube.fetchCalls).toBe(1);
+    expect(ytDlp.availabilityChecks).toBe(0);
   });
 
   it("continues from a failed TikHub provider to local yt-dlp", async () => {
