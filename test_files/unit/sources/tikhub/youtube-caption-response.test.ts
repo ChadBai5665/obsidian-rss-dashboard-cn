@@ -262,3 +262,210 @@ describe("parseTikHubCaptionResponse", () => {
     expect(JSON.stringify(error)).not.toContain("private");
   });
 });
+
+describe("strict async track completion compatibility", () => {
+  it("projects completed tracks only when the trusted video ID matches", () => {
+    expect(parseTikHubCaptionResponse({
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: [
+        { language_code: "en", language_name: "English" },
+        {
+          language_code: "a.zh-Hans",
+          language_name: "Chinese (auto)",
+          is_generated: true,
+        },
+      ],
+    }, VIDEO_ID)).toEqual({
+      kind: "tracks",
+      videoId: VIDEO_ID,
+      tracks: [
+        { languageCode: "en", languageName: "English", isGenerated: false },
+        {
+          languageCode: "a.zh-Hans",
+          languageName: "Chinese (auto)",
+          isGenerated: true,
+        },
+      ],
+    });
+
+    expect(() => parseTikHubCaptionResponse({
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: "9bZkp7q19f0",
+      captions: [],
+    }, VIDEO_ID)).toThrow();
+  });
+
+  it("projects completed empty tracks without retaining bounded provider messages", () => {
+    expect(parseTikHubCaptionResponse({
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: [],
+      message: "No captions found",
+      message_zh: "未找到字幕",
+    }, VIDEO_ID)).toEqual({ kind: "no-captions", videoId: VIDEO_ID });
+
+    expect(parseTikHubCaptionResponse({
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: [],
+    }, VIDEO_ID)).toEqual({ kind: "no-captions", videoId: VIDEO_ID });
+  });
+
+  it("keeps duplicate-language and generated-flag rules for completed tracks", () => {
+    expect(parseTikHubCaptionResponse({
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: [
+        { language_code: "en", language_name: "English" },
+        {
+          language_code: "en",
+          language_name: "English",
+          is_generated: false,
+        },
+      ],
+    }, VIDEO_ID)).toEqual({
+      kind: "tracks",
+      videoId: VIDEO_ID,
+      tracks: [
+        { languageCode: "en", languageName: "English", isGenerated: false },
+      ],
+    });
+
+    for (const captions of [
+      [
+        { language_code: "en", language_name: "English" },
+        { language_code: "en", language_name: "Private English" },
+      ],
+      [{
+        language_code: "a.en",
+        language_name: "English (auto)",
+        is_generated: false,
+      }],
+    ]) {
+      expect(() => parseTikHubCaptionResponse({
+        job_id: JOB_ID,
+        status: "completed",
+        video_id: VIDEO_ID,
+        captions,
+      }, VIDEO_ID)).toThrow();
+    }
+  });
+
+  it("does not execute accessors in a completed track result", () => {
+    let getterReads = 0;
+    const accessor = {
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+    } as Record<string, unknown>;
+    Object.defineProperty(accessor, "captions", {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        return [];
+      },
+    });
+    const track = { language_code: "en" } as Record<string, unknown>;
+    Object.defineProperty(track, "language_name", {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        return "English";
+      },
+    });
+
+    expect(() => parseTikHubCaptionResponse(accessor, VIDEO_ID)).toThrow();
+    expect(() => parseTikHubCaptionResponse({
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: [track],
+    }, VIDEO_ID)).toThrow();
+    expect(getterReads).toBe(0);
+  });
+
+  it.each([
+    ["invalid job ID", {
+      job_id: "../private-job",
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: [],
+    }],
+    ["unknown top-level field", {
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: [],
+      raw: { private: true },
+    }],
+    ["unknown track field", {
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: [{
+        language_code: "en",
+        language_name: "English",
+        raw: "private",
+      }],
+    }],
+    ["message on non-empty tracks", {
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: [{ language_code: "en", language_name: "English" }],
+      message: "No captions found",
+      message_zh: "未找到字幕",
+    }],
+    ["unsafe empty message", {
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: [],
+      message: "No captions\u0001private",
+      message_zh: "未找到字幕",
+    }],
+    ["track control", {
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: [{ language_code: "en", language_name: "English\u0001" }],
+    }],
+  ])("rejects %s", (_label, value) => {
+    let error: unknown;
+    try {
+      parseTikHubCaptionResponse(value, VIDEO_ID);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).not.toContain("private");
+    expect(JSON.stringify(error)).not.toContain("private");
+  });
+
+  it("rejects oversized or augmented completed caption arrays", () => {
+    expect(() => parseTikHubCaptionResponse({
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions: Array.from({ length: 257 }, (_, index) => ({
+        language_code: `x-${index}`,
+        language_name: `Language ${index}`,
+      })),
+    }, VIDEO_ID)).toThrow();
+
+    const captions = [{ language_code: "en", language_name: "English" }];
+    Object.defineProperty(captions, "private", { value: true });
+    expect(() => parseTikHubCaptionResponse({
+      job_id: JOB_ID,
+      status: "completed",
+      video_id: VIDEO_ID,
+      captions,
+    }, VIDEO_ID)).toThrow();
+  });
+});

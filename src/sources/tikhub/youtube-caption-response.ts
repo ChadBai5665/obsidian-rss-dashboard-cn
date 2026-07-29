@@ -18,6 +18,17 @@ const EMPTY_TRACK_LIST_KEYS = [
   "message",
   "message_zh",
 ] as const;
+const COMPLETED_TRACK_LIST_KEYS = [
+  "job_id",
+  "status",
+  "video_id",
+  "captions",
+] as const;
+const EMPTY_COMPLETED_TRACK_LIST_KEYS = [
+  ...COMPLETED_TRACK_LIST_KEYS,
+  "message",
+  "message_zh",
+] as const;
 const PROCESSING_KEYS = ["video_id", "status", "job_id"] as const;
 const PENDING_KEYS = ["status", "job_id"] as const;
 const CONTENT_KEYS = [
@@ -46,7 +57,11 @@ export class InvalidTikHubCaptionResponseError extends Error {
   }
 }
 
-/** Projects a documented TikHub caption shape without traversing provider data. */
+/**
+ * Projects documented caption shapes plus one strict async track completion
+ * compatibility shape without traversing provider data. The result docs do not
+ * show that track variant, so no wrapper, nesting, or extra field is accepted.
+ */
 export function parseTikHubCaptionResponse(
   value: unknown,
   expectedVideoId: string,
@@ -60,7 +75,14 @@ export function parseTikHubCaptionResponse(
       hasExactKeys(record, TRACK_LIST_KEYS) ||
       hasExactKeys(record, EMPTY_TRACK_LIST_KEYS)
     ) {
-      return parseTrackList(record, expectedVideoId);
+      return parseTrackList(
+        record,
+        expectedVideoId,
+        hasExactKeys(record, EMPTY_TRACK_LIST_KEYS),
+      );
+    }
+    if (isCompletedTrackListShape(record)) {
+      return parseCompletedTrackList(record, expectedVideoId);
     }
     if (hasExactKeys(record, PROCESSING_KEYS)) {
       return parseProcessing(record, expectedVideoId);
@@ -82,19 +104,19 @@ export function parseTikHubCaptionResponse(
 function parseTrackList(
   record: Record<string, unknown>,
   expectedVideoId: string,
+  hasMessages: boolean,
 ): TikHubCaptionResponse {
   requireExpectedVideoId(record, expectedVideoId);
   const captions = denseOwnArray(ownData(record, "captions"), MAX_TRACKS);
   if (!captions) throw invalidResponse();
   if (captions.length === 0) {
-    const hasMessages = hasExactKeys(record, EMPTY_TRACK_LIST_KEYS);
     if (hasMessages) {
       requireDiscardedMessage(ownData(record, "message"));
       requireDiscardedMessage(ownData(record, "message_zh"));
     }
     return { kind: "no-captions", videoId: expectedVideoId };
   }
-  if (hasExactKeys(record, EMPTY_TRACK_LIST_KEYS)) throw invalidResponse();
+  if (hasMessages) throw invalidResponse();
 
   const tracks: TikHubCaptionTrack[] = [];
   const byLanguage = new Map<string, TikHubCaptionTrack>();
@@ -126,6 +148,20 @@ function parseTrackList(
     tracks.push(track);
   }
   return { kind: "tracks", videoId: expectedVideoId, tracks };
+}
+
+/** Strict async track completion compatibility; not an official example shape. */
+function parseCompletedTrackList(
+  record: Record<string, unknown>,
+  expectedVideoId: string,
+): TikHubCaptionResponse {
+  if (ownData(record, "status") !== "completed") throw invalidResponse();
+  requireJobId(ownData(record, "job_id"));
+  return parseTrackList(
+    record,
+    expectedVideoId,
+    hasExactKeys(record, EMPTY_COMPLETED_TRACK_LIST_KEYS),
+  );
 }
 
 function parseProcessing(
@@ -196,6 +232,11 @@ function isSynchronousContentShape(record: Record<string, unknown>): boolean {
 function isCompletedContentShape(record: Record<string, unknown>): boolean {
   return hasExactKeys(record, COMPLETED_CONTENT_KEYS) ||
     hasExactKeys(record, [...COMPLETED_CONTENT_KEYS, "is_generated"]);
+}
+
+function isCompletedTrackListShape(record: Record<string, unknown>): boolean {
+  return hasExactKeys(record, COMPLETED_TRACK_LIST_KEYS) ||
+    hasExactKeys(record, EMPTY_COMPLETED_TRACK_LIST_KEYS);
 }
 
 function parseAvailableLanguages(value: unknown): string[] {

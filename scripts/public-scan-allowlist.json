@@ -1645,6 +1645,20 @@
     "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 1155,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic TikHub credential reference verifies async result job correlation."
+  },
+  {
+    "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
+    "rule": "credential-value",
+    "line": 1177,
+    "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
+    "reason": "Synthetic TikHub credential reference verifies async result job correlation."
+  },
+  {
     "path": "test_files/unit/sources/tikhub/x-account-adapter.test.ts",
     "rule": "credential-value",
     "line": 32,
@@ -1815,7 +1829,7 @@
   {
     "path": "src/youtube-transcript/innertube-transcript-provider.ts",
     "rule": "credential-value",
-    "line": 271,
+    "line": 272,
     "fingerprint": "sha256:296876ebdd6065cedab18a190c2b1eccab7532d0f280cd14985e47d03db96a2b",
     "reason": "Type-only InnerTube session identifier; no credential value is present in source."
   },
@@ -1937,5 +1951,12 @@
     "line": 30,
     "fingerprint": "sha256:509f8b8b24b0367ed3f4a53c702168986e264e1aab22be6f59498edd5140c61e",
     "reason": "Security test fixture defines a synthetic credential canary for coordinator state, listener, and error isolation tests."
+  },
+  {
+    "path": "test_files/unit/youtube-transcript/youtube-transcript-service.test.ts",
+    "rule": "credential-value",
+    "line": 425,
+    "fingerprint": "sha256:84df8bb6416314ff32b77a002429f880273c6e458edc461e1e67bf889f1995f2",
+    "reason": "Synthetic provider secret verifies fallback errors do not retain or leak credential values."
   }
 ]

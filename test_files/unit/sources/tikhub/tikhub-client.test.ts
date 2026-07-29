@@ -1141,3 +1141,46 @@ describe("TikHub settings metadata", () => {
     expect(JSON.stringify(normalized)).not.toContain(TIKHUB_SECRET_SENTINEL);
   });
 });
+
+describe("strict async track completion client compatibility", () => {
+  it("accepts completed tracks only when the result job matches the requested job", async () => {
+    const test = createHarness(success({
+      job_id: "123e4567-e89b-12d3-a456-426614174000",
+      status: "completed",
+      video_id: "dQw4w9WgXcQ",
+      captions: [{ language_code: "en", language_name: "English" }],
+    }));
+
+    await expect(test.client.fetchYouTubeCaptionResult({
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt",
+    })).resolves.toMatchObject({
+      data: {
+        job_id: "123e4567-e89b-12d3-a456-426614174000",
+        status: "completed",
+        video_id: "dQw4w9WgXcQ",
+      },
+    });
+    expect(test.reserve).not.toHaveBeenCalled();
+  });
+
+  it("rejects completed tracks when the result job does not match", async () => {
+    const test = createHarness(success({
+      job_id: "87654321-e89b-12d3-a456-426614174000",
+      status: "completed",
+      video_id: "dQw4w9WgXcQ",
+      captions: [],
+    }));
+
+    const error = await test.client.fetchYouTubeCaptionResult({
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt",
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: "malformed-response" });
+    expect(String(error)).not.toContain("87654321");
+    expect(test.reserve).not.toHaveBeenCalled();
+  });
+});
