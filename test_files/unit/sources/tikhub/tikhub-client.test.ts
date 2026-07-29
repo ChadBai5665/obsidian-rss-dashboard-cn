@@ -819,6 +819,29 @@ describe("TikHubClient exact request contract", () => {
     expect(test.releaseUnused).toHaveBeenCalledTimes(1);
   });
 
+  it("does not count URL serialization failure as an entered paid transport", async () => {
+    const test = createHarness();
+    const serialize = vi.spyOn(URL.prototype, "toString").mockImplementationOnce(() => {
+      throw new Error("URL serialization failed");
+    });
+
+    try {
+      const error = await test.client
+        .fetchUserPosts({ apiKey: "key", handle: "openai" })
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "network-failure",
+        paidRequestAttempted: false,
+      });
+      expect(test.transport).not.toHaveBeenCalled();
+      expect(test.markAttempted).not.toHaveBeenCalled();
+      expect(test.releaseUnused).toHaveBeenCalledTimes(1);
+    } finally {
+      serialize.mockRestore();
+    }
+  });
+
   it.each([
     [401, "invalid-key"],
     [403, "invalid-key"],

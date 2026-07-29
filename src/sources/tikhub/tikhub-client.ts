@@ -311,6 +311,17 @@ export class TikHubClient {
       if (batchState) this.assertActiveBatch(batch as TikHubBatchHandle, batchState);
       else if (reservation.remaining <= 0) throw invalidBatchError();
 
+      let transportRequest: TikHubTransportRequest;
+      try {
+        transportRequest = Object.freeze({
+          url: url.toString(),
+          method: "GET",
+          headers: Object.freeze({ Authorization: `Bearer ${apiKey}` }),
+        });
+      } catch (error) {
+        throw errorForTransportFailure(error);
+      }
+
       if (batchState) {
         this.commitBatchAttempt(batch as TikHubBatchHandle, batchState);
       } else {
@@ -320,11 +331,7 @@ export class TikHubClient {
 
       let pendingRequest: Promise<TikHubTransportResponse>;
       try {
-        pendingRequest = this.transport({
-          url: url.toString(),
-          method: "GET",
-          headers: { Authorization: `Bearer ${apiKey}` },
-        });
+        pendingRequest = this.transport(transportRequest);
       } catch (error) {
         throw errorForTransportFailure(error);
       }

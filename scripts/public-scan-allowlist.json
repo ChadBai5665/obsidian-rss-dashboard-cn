@@ -1528,147 +1528,147 @@
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 839,
+    "line": 862,
     "fingerprint": "sha256:27a4b3b0934bedf5c696c78144cd8440776f01b94f1c0ede2a7d478d77dc6456",
     "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 859,
+    "line": 882,
     "fingerprint": "sha256:de5d425225c2f1aba5f76e26edb8f763774a3cf70de39a6d64a191e27b32d895",
     "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 879,
+    "line": 902,
     "fingerprint": "sha256:329cc5c28bcc1ffa76f95ba9509074af25fb8e3490c046ba5cc41389700704a5",
     "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 894,
+    "line": 917,
     "fingerprint": "sha256:de5d425225c2f1aba5f76e26edb8f763774a3cf70de39a6d64a191e27b32d895",
     "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 941,
+    "line": 964,
     "fingerprint": "sha256:329cc5c28bcc1ffa76f95ba9509074af25fb8e3490c046ba5cc41389700704a5",
     "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 953,
+    "line": 976,
     "fingerprint": "sha256:03cdcc2d0bd9db88ab33f22083b878f64f010d93846cf81f8e3a901d9d97e766",
     "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 971,
+    "line": 994,
     "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
     "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1001,
+    "line": 1024,
     "fingerprint": "sha256:17218b70ca05824afd2b6baaae47e0be481ff9257d24be3b976927706a2e4b7d",
     "reason": "Synthetic TikHub credential reference exercises existing client request and redaction tests."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-url",
-    "line": 1035,
+    "line": 1058,
     "fingerprint": "sha256:4747f5106c0cdc05c4cc0078805aaa7240179dd21f760e9de8da4811c3285689",
     "reason": "Synthetic user-password URL verifies HTTPS-origin credential rejection."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1122,
+    "line": 1145,
     "fingerprint": "sha256:1dcbaa8921d05c0f34bdee077d01a53946cfc7608c2ab57d913a2d551d185db8",
     "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1123,
+    "line": 1146,
     "fingerprint": "sha256:b47f7ef9902d75c500194fcf931016504a29a8cb7e5bec68636d7a6d714b4fdf",
     "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1125,
+    "line": 1148,
     "fingerprint": "sha256:4a2a9fd38c5716c447eda6a7892b05521c99afce56bdbbb093d173f06d9ac3fc",
     "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1126,
+    "line": 1149,
     "fingerprint": "sha256:a4b02675d617d0a0e246d52512d4b2ea1cf9bd3bb16f1e4b8a6e78ddb892bba1",
     "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1130,
+    "line": 1153,
     "fingerprint": "sha256:bec35926b016a76c2f00ef82d7102771ca33219af8ab74c3a40dbfbf9d868074",
     "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1131,
+    "line": 1154,
     "fingerprint": "sha256:03ff3846073d59e4e8b4d6535c3e28a3179e0e59ed74c8cee7e680fb99f8f292",
     "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1132,
+    "line": 1155,
     "fingerprint": "sha256:8f7ec7e8f35ec44fee49c24176ac7698d1c100fb5b4e579d8ad4cf5a90c29458",
     "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1134,
+    "line": 1157,
     "fingerprint": "sha256:3a31b549e456a8e548795ce3f5b4fea5fd1cf07ea1ca8712c66cc12a0f2901f7",
     "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1162,
+    "line": 1185,
     "fingerprint": "sha256:4079dd42f93b6f0a5d0a12263fb327ec1bf266bbca8c2b717ba901d37b7f9101",
     "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1196,
+    "line": 1219,
     "fingerprint": "sha256:4079dd42f93b6f0a5d0a12263fb327ec1bf266bbca8c2b717ba901d37b7f9101",
     "reason": "Synthetic settings credentials verify alias removal and unrelated-field preservation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1255,
+    "line": 1278,
     "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
     "reason": "Synthetic TikHub credential reference verifies async result job correlation."
   },
   {
     "path": "test_files/unit/sources/tikhub/tikhub-client.test.ts",
     "rule": "credential-value",
-    "line": 1277,
+    "line": 1300,
     "fingerprint": "sha256:09ba19aa34416740be6e6bb1bfcc6d74bd9273482ca5b2cdfeefd5d1b7d2b931",
     "reason": "Synthetic TikHub credential reference verifies async result job correlation."
   },
