@@ -35,6 +35,62 @@ export interface YouTubeTranscriptProgress {
   usage: YouTubeTranscriptUsage;
 }
 
+export interface TranscriptProviderOperationEvidence {
+  readonly tikhubPaidRequests: 0 | 1;
+  readonly paidRequestAttempted: boolean;
+}
+
+export interface TranscriptProviderOperationResult<T> {
+  readonly kind: "transcript-provider-operation-result";
+  readonly value: T;
+  readonly evidence: TranscriptProviderOperationEvidence;
+  readonly persistenceToken?: unknown;
+}
+
+export function createTranscriptProviderOperationResult<T>(
+  value: T,
+  evidence: TranscriptProviderOperationEvidence,
+  ...persistenceToken: [] | [unknown]
+): TranscriptProviderOperationResult<T> {
+  const result = {
+    kind: "transcript-provider-operation-result" as const,
+    value,
+    evidence: freezeTranscriptProviderOperationEvidence(evidence),
+    ...(persistenceToken.length === 0
+      ? {}
+      : { persistenceToken: persistenceToken[0] }),
+  };
+  return Object.freeze(result);
+}
+
+export function isTranscriptProviderOperationResult(
+  value: unknown,
+): value is TranscriptProviderOperationResult<unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  const keys = Reflect.ownKeys(candidate);
+  if (
+    !Object.isFrozen(candidate) ||
+    keys.some(
+      (key) =>
+        key !== "kind" &&
+        key !== "value" &&
+        key !== "evidence" &&
+        key !== "persistenceToken",
+    ) ||
+    !keys.includes("kind") ||
+    !keys.includes("value") ||
+    !keys.includes("evidence") ||
+    candidate.kind !== "transcript-provider-operation-result"
+  ) {
+    return false;
+  }
+  return (
+    Object.isFrozen(candidate.evidence) &&
+    isTranscriptProviderOperationEvidence(candidate.evidence)
+  );
+}
+
 interface YouTubeCaptionTrackBase {
   languageCode: string;
   languageName: string;
@@ -78,25 +134,73 @@ export interface TranscriptProvider {
     videoId: string,
     signal: AbortSignal | undefined,
     context: TranscriptProviderOperationContext,
-  ): Promise<YouTubeCaptionTrack[]>;
+  ): Promise<
+    | YouTubeCaptionTrack[]
+    | TranscriptProviderOperationResult<YouTubeCaptionTrack[]>
+  >;
   fetchTrack(
     track: YouTubeCaptionTrack,
     signal: AbortSignal | undefined,
     context: TranscriptProviderOperationContext,
-  ): Promise<YouTubeTranscript>;
+  ): Promise<
+    YouTubeTranscript | TranscriptProviderOperationResult<YouTubeTranscript>
+  >;
   onPersisted?(
     track: YouTubeCaptionTrack,
     transcript: YouTubeTranscript,
     context: TranscriptProviderOperationContext,
+    persistenceToken?: unknown,
   ): Promise<void>;
 }
 
 /** A stable, localization-safe transcript failure without provider payloads. */
 export class YouTubeTranscriptError extends Error {
-  constructor(readonly code: YouTubeTranscriptErrorCode) {
+  readonly operationEvidence?: TranscriptProviderOperationEvidence;
+
+  constructor(
+    readonly code: YouTubeTranscriptErrorCode,
+    operationEvidence?: TranscriptProviderOperationEvidence,
+  ) {
     super(code);
     this.name = "YouTubeTranscriptError";
+    if (operationEvidence !== undefined) {
+      Object.defineProperty(this, "operationEvidence", {
+        value: freezeTranscriptProviderOperationEvidence(operationEvidence),
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
   }
+}
+
+function isTranscriptProviderOperationEvidence(
+  value: unknown,
+): value is TranscriptProviderOperationEvidence {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  const keys = Reflect.ownKeys(candidate);
+  return (
+    keys.length === 2 &&
+    keys.includes("tikhubPaidRequests") &&
+    keys.includes("paidRequestAttempted") &&
+    (candidate.tikhubPaidRequests === 0 ||
+      candidate.tikhubPaidRequests === 1) &&
+    typeof candidate.paidRequestAttempted === "boolean" &&
+    (candidate.tikhubPaidRequests === 0 || candidate.paidRequestAttempted)
+  );
+}
+
+function freezeTranscriptProviderOperationEvidence(
+  value: unknown,
+): TranscriptProviderOperationEvidence {
+  if (!isTranscriptProviderOperationEvidence(value)) {
+    throw new Error("Invalid transcript provider operation evidence");
+  }
+  return Object.freeze({
+    tikhubPaidRequests: value.tikhubPaidRequests,
+    paidRequestAttempted: value.paidRequestAttempted,
+  });
 }
 
 const YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{11}$/u;

@@ -10,6 +10,7 @@ import {
   type TranscriptMetadataRepository,
 } from "../../../src/youtube-transcript/youtube-transcript-service";
 import {
+  createTranscriptProviderOperationResult,
   YouTubeTranscriptError,
   type TranscriptProvider,
   type TranscriptProviderOperationContext,
@@ -38,6 +39,19 @@ const INVALID_LANGUAGE_CODES = [
   ["repeated hyphen", "en--US"],
   ["overlong", "a".repeat(65)],
 ] as const;
+
+const FREE_OPERATION_EVIDENCE = {
+  tikhubPaidRequests: 0,
+  paidRequestAttempted: false,
+} as const;
+const PAID_OPERATION_EVIDENCE = {
+  tikhubPaidRequests: 1,
+  paidRequestAttempted: true,
+} as const;
+const AMBIGUOUS_OPERATION_EVIDENCE = {
+  tikhubPaidRequests: 0,
+  paidRequestAttempted: true,
+} as const;
 
 function track(
   overrides: Partial<YouTubeCaptionTrack> = {},
@@ -106,6 +120,7 @@ function cached(
 class FakeProvider implements TranscriptProvider {
   listCalls = 0;
   fetchCalls = 0;
+  private sourceHint?: YouTubeTranscriptProvider;
 
   constructor(
     private readonly tracks:
@@ -116,24 +131,42 @@ class FakeProvider implements TranscriptProvider {
       | YouTubeTranscriptError = transcript(track()),
   ) {}
 
-  async listTracks(): Promise<YouTubeCaptionTrack[]> {
+  setSourceHint(source: YouTubeTranscriptProvider): void {
+    this.sourceHint = source;
+  }
+
+  async listTracks(): ReturnType<TranscriptProvider["listTracks"]> {
     this.listCalls += 1;
     if (this.tracks instanceof YouTubeTranscriptError) throw this.tracks;
+    if (this.sourceHint === "tikhub" || this.tracks[0]?.source === "tikhub") {
+      return createTranscriptProviderOperationResult(
+        this.tracks,
+        PAID_OPERATION_EVIDENCE,
+      );
+    }
     return this.tracks;
   }
 
-  async fetchTrack(selectedTrack: YouTubeCaptionTrack): Promise<YouTubeTranscript> {
+  async fetchTrack(
+    selectedTrack: YouTubeCaptionTrack,
+  ): ReturnType<TranscriptProvider["fetchTrack"]> {
     this.fetchCalls += 1;
     if (this.fetchResult instanceof YouTubeTranscriptError) {
       throw this.fetchResult;
     }
-    return {
+    const value = {
       ...this.fetchResult,
       languageCode: selectedTrack.languageCode,
       languageName: selectedTrack.languageName,
       isGenerated: selectedTrack.isGenerated,
       provider: selectedTrack.source,
     };
+    return selectedTrack.source === "tikhub"
+      ? createTranscriptProviderOperationResult(
+          value,
+          PAID_OPERATION_EVIDENCE,
+        )
+      : value;
   }
 }
 
@@ -286,21 +319,27 @@ function createService(options: {
   const ytDlp = options.ytDlp ?? new FakeOptionalProvider(true);
   const content = options.content ?? new FakeContentRepository();
   const metadata = options.metadata ?? new FakeMetadataRepository();
+  const providers = options.providers ?? [
+    { source: "innertube" as const, provider: innerTube },
+    {
+      source: "tikhub" as const,
+      provider: tikHub,
+      isAvailable: async () => await tikHub.isAvailable(),
+    },
+    {
+      source: "yt-dlp" as const,
+      provider: ytDlp,
+      isAvailable: async () => await ytDlp.isAvailable(),
+    },
+  ];
+  for (const registration of providers) {
+    if (registration.provider instanceof FakeProvider) {
+      registration.provider.setSourceHint(registration.source);
+    }
+  }
   return {
     service: new YouTubeTranscriptService({
-      providers: options.providers ?? [
-        { source: "innertube", provider: innerTube },
-        {
-          source: "tikhub",
-          provider: tikHub,
-          isAvailable: async () => await tikHub.isAvailable(),
-        },
-        {
-          source: "yt-dlp",
-          provider: ytDlp,
-          isAvailable: async () => await ytDlp.isAvailable(),
-        },
-      ],
+      providers,
       contentRepository: content,
       metadataRepository: metadata,
       clock: options.clock ?? (() => new Date("2026-07-28T06:00:00.000Z")),
@@ -316,6 +355,388 @@ function createService(options: {
 }
 
 describe("YouTubeTranscriptService", () => {
+  it("keeps bare non-TikHub provider returns source-compatible", async () => {
+    const selected = track({ source: "yt-dlp" });
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return [selected];
+      },
+      async fetchTrack(selectedTrack) {
+        return transcript(selectedTrack);
+      },
+    };
+    const { service } = createService({
+      providers: [{ source: "yt-dlp", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).resolves.toMatchObject({
+      status: "ready",
+      content: { provider: "yt-dlp" },
+      usage: { tikhubPaidRequests: 0 },
+    });
+  });
+
+  it.each([
+    {
+      name: "bare list",
+      provider: {
+        async listTracks() {
+          return [track({ source: "tikhub" })];
+        },
+        async fetchTrack(selectedTrack: YouTubeCaptionTrack) {
+          return createTranscriptProviderOperationResult(
+            transcript(selectedTrack),
+            PAID_OPERATION_EVIDENCE,
+          );
+        },
+      },
+    },
+    {
+      name: "malformed envelope",
+      provider: {
+        async listTracks() {
+          return {
+            kind: "transcript-provider-operation-result",
+            value: [track({ source: "tikhub" })],
+            evidence: {
+              tikhubPaidRequests: 1,
+              paidRequestAttempted: false,
+            },
+          } as never;
+        },
+        async fetchTrack(selectedTrack: YouTubeCaptionTrack) {
+          return createTranscriptProviderOperationResult(
+            transcript(selectedTrack),
+            PAID_OPERATION_EVIDENCE,
+          );
+        },
+      },
+    },
+  ])("fails closed for a TikHub $name result", async ({ provider }) => {
+    const { service, content } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({
+      code: "tikhub-malformed-response",
+      usage: { tikhubPaidRequests: 0 },
+      tikhubPaidRequestPossiblySent: false,
+    });
+    expect(content.writes).toEqual([]);
+  });
+
+  it("uses operation evidence for paid list plus paid content", async () => {
+    const selected = track({ source: "tikhub" });
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return createTranscriptProviderOperationResult(
+          [selected],
+          PAID_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack(selectedTrack) {
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack),
+          PAID_OPERATION_EVIDENCE,
+        );
+      },
+    };
+    const { service } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).resolves.toMatchObject({
+      usage: { tikhubPaidRequests: 2 },
+    });
+  });
+
+  it("counts a free resumed list plus paid content as one confirmed request", async () => {
+    const selected = track({ source: "tikhub" });
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return createTranscriptProviderOperationResult(
+          [selected],
+          FREE_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack(selectedTrack) {
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack),
+          PAID_OPERATION_EVIDENCE,
+        );
+      },
+    };
+    const { service } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).resolves.toMatchObject({ usage: { tikhubPaidRequests: 1 } });
+  });
+
+  it.each(["tikhub-processing", "tikhub-job-expired"] as const)(
+    "reports free pending or expired TikHub list work without inferred usage: %s",
+    async (code) => {
+      const provider: TranscriptProvider = {
+        async listTracks() {
+          throw new YouTubeTranscriptError(code, FREE_OPERATION_EVIDENCE);
+        },
+        async fetchTrack() {
+          throw new Error("unreachable");
+        },
+      };
+      const { service } = createService({
+        providers: [{ source: "tikhub", provider }],
+      });
+
+      await expect(
+        service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+      ).rejects.toMatchObject({
+        code,
+        usage: { tikhubPaidRequests: 0 },
+        tikhubPaidRequestPossiblySent: false,
+      });
+    },
+  );
+
+  it("reports paid processing as one confirmed request without ambiguity", async () => {
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        throw new YouTubeTranscriptError(
+          "tikhub-processing",
+          PAID_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack() {
+        throw new Error("unreachable");
+      },
+    };
+    const { service } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({
+      code: "tikhub-processing",
+      usage: { tikhubPaidRequests: 1 },
+      tikhubPaidRequestPossiblySent: false,
+    });
+  });
+
+  it("separates an ambiguous transport attempt from confirmed usage", async () => {
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        throw new YouTubeTranscriptError(
+          "temporarily-unavailable",
+          AMBIGUOUS_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack() {
+        throw new Error("unreachable");
+      },
+    };
+    const { service } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({
+      usage: { tikhubPaidRequests: 0 },
+      tikhubPaidRequestPossiblySent: true,
+    });
+  });
+
+  it("preserves paid list evidence when the content attempt is ambiguous", async () => {
+    const selected = track({ source: "tikhub" });
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return createTranscriptProviderOperationResult(
+          [selected],
+          PAID_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack() {
+        throw new YouTubeTranscriptError(
+          "temporarily-unavailable",
+          AMBIGUOUS_OPERATION_EVIDENCE,
+        );
+      },
+    };
+    const { service } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({
+      usage: { tikhubPaidRequests: 1 },
+      tikhubPaidRequestPossiblySent: true,
+    });
+  });
+
+  it("leases list evidence once and does not double-add it during normalization", async () => {
+    const tracks = [
+      track({ source: "tikhub", url: "tikhub:caption/en" }),
+      track({
+        source: "tikhub",
+        languageName: "English (United States)",
+        url: "tikhub:caption/en-us",
+      }),
+    ];
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return createTranscriptProviderOperationResult(
+          tracks,
+          PAID_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack() {
+        throw new YouTubeTranscriptError(
+          "temporarily-unavailable",
+          AMBIGUOUS_OPERATION_EVIDENCE,
+        );
+      },
+    };
+    const { service } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+    const choices = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+    if (choices.status !== "selection-required") throw new Error("expected choices");
+
+    await expect(
+      service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        trackId: choices.tracks[0].id,
+      }),
+    ).rejects.toMatchObject({
+      usage: { tikhubPaidRequests: 1 },
+      tikhubPaidRequestPossiblySent: true,
+    });
+  });
+
+  it("passes an opaque token to cleanup only after the cache write is durable", async () => {
+    const selected = track({ source: "tikhub" });
+    const persistenceToken = { opaque: Symbol("job") };
+    const observed: Array<{
+      token: unknown;
+      durableValue: CachedItemContent | null;
+    }> = [];
+    const content = new FakeContentRepository();
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return createTranscriptProviderOperationResult(
+          [selected],
+          FREE_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack(selectedTrack) {
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack),
+          PAID_OPERATION_EVIDENCE,
+          persistenceToken,
+        );
+      },
+      async onPersisted(_track, _transcript, _context, token) {
+        observed.push({ token, durableValue: content.value });
+      },
+    };
+    const { service } = createService({
+      content,
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    const result = await service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+    });
+
+    expect(observed).toEqual([
+      {
+        token: persistenceToken,
+        durableValue: expect.objectContaining({ text: transcript(selected).text }),
+      },
+    ]);
+    expect(result).not.toHaveProperty("persistenceToken");
+    expect(content.value).not.toHaveProperty("persistenceToken");
+  });
+
+  it("does not release a token after a failed cache write", async () => {
+    const selected = track({ source: "tikhub" });
+    const persistenceToken = { opaque: "job" };
+    const persisted = vi.fn();
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return createTranscriptProviderOperationResult(
+          [selected],
+          FREE_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack(selectedTrack) {
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack),
+          PAID_OPERATION_EVIDENCE,
+          persistenceToken,
+        );
+      },
+      onPersisted: persisted,
+    };
+    const { service } = createService({
+      content: new FailingWriteContentRepository(),
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({ usage: { tikhubPaidRequests: 1 } });
+    expect(persisted).not.toHaveBeenCalled();
+  });
+
+  it("rejects a persistence token on a TikHub list envelope", async () => {
+    const selected = track({ source: "tikhub" });
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        return createTranscriptProviderOperationResult(
+          [selected],
+          PAID_OPERATION_EVIDENCE,
+          { opaque: "not-allowed-on-list" },
+        );
+      },
+      async fetchTrack(selectedTrack) {
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack),
+          PAID_OPERATION_EVIDENCE,
+        );
+      },
+    };
+    const { service, content } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(
+      service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+    ).rejects.toMatchObject({
+      code: "tikhub-malformed-response",
+      usage: { tikhubPaidRequests: 1 },
+    });
+    expect(content.writes).toEqual([]);
+  });
+
   it("rejects empty and duplicate-source provider chains", () => {
     expect(() => createService({ providers: [] })).toThrow(
       "Invalid transcript provider chain",
@@ -583,11 +1004,22 @@ describe("YouTubeTranscriptService", () => {
       let persistedCalls = 0;
       const provider: TranscriptProvider = {
         async listTracks() {
-          return [candidate];
+          return registrationSource === "tikhub"
+            ? createTranscriptProviderOperationResult(
+                [candidate],
+                PAID_OPERATION_EVIDENCE,
+              )
+            : [candidate];
         },
         async fetchTrack(selectedTrack) {
           fetchCalls += 1;
-          return transcript(selectedTrack);
+          const value = transcript(selectedTrack);
+          return registrationSource === "tikhub"
+            ? createTranscriptProviderOperationResult(
+                value,
+                PAID_OPERATION_EVIDENCE,
+              )
+            : value;
         },
         async onPersisted() {
           persistedCalls += 1;
@@ -731,11 +1163,17 @@ describe("YouTubeTranscriptService", () => {
       let fetchCalls = 0;
       const provider: TranscriptProvider = {
         async listTracks() {
-          return [selected];
+          return createTranscriptProviderOperationResult(
+            [selected],
+            PAID_OPERATION_EVIDENCE,
+          );
         },
         async fetchTrack() {
           fetchCalls += 1;
-          return transcript(selected, { languageCode });
+          return createTranscriptProviderOperationResult(
+            transcript(selected, { languageCode }),
+            PAID_OPERATION_EVIDENCE,
+          );
         },
       };
       const content = new FakeContentRepository();
@@ -766,10 +1204,16 @@ describe("YouTubeTranscriptService", () => {
     let persistedTrack: YouTubeCaptionTrack | undefined;
     const provider: TranscriptProvider = {
       async listTracks() {
-        return tracks;
+        return createTranscriptProviderOperationResult(
+          tracks,
+          PAID_OPERATION_EVIDENCE,
+        );
       },
       async fetchTrack(selectedTrack) {
-        return transcript(selectedTrack);
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack),
+          PAID_OPERATION_EVIDENCE,
+        );
       },
       async onPersisted(selectedTrack) {
         persistedTrack = selectedTrack;
@@ -824,11 +1268,17 @@ describe("YouTubeTranscriptService", () => {
       let persistedCalls = 0;
       const provider: TranscriptProvider = {
         async listTracks() {
-          return tracks;
+          return createTranscriptProviderOperationResult(
+            tracks,
+            PAID_OPERATION_EVIDENCE,
+          );
         },
         async fetchTrack(selectedTrack) {
           fetchCalls += 1;
-          return transcript(selectedTrack, { provider: "tikhub" });
+          return createTranscriptProviderOperationResult(
+            transcript(selectedTrack, { provider: "tikhub" }),
+            PAID_OPERATION_EVIDENCE,
+          );
         },
         async onPersisted() {
           persistedCalls += 1;
@@ -869,12 +1319,18 @@ describe("YouTubeTranscriptService", () => {
     let persistedCalls = 0;
     const provider: TranscriptProvider = {
       async listTracks() {
-        return [selected];
+        return createTranscriptProviderOperationResult(
+          [selected],
+          PAID_OPERATION_EVIDENCE,
+        );
       },
       async fetchTrack(selectedTrack) {
         fetchCalls += 1;
         Reflect.set(selectedTrack, "format", "json3");
-        return transcript(selectedTrack, { provider: "tikhub" });
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack, { provider: "tikhub" }),
+          PAID_OPERATION_EVIDENCE,
+        );
       },
       async onPersisted() {
         persistedCalls += 1;
@@ -900,7 +1356,10 @@ describe("YouTubeTranscriptService", () => {
     );
     const tikHub = new FakeOptionalProvider(
       true,
-      new YouTubeTranscriptError("tikhub-rate-limited"),
+      new YouTubeTranscriptError(
+        "tikhub-rate-limited",
+        FREE_OPERATION_EVIDENCE,
+      ),
     );
     const ytDlp = new FakeOptionalProvider(true, [track({ source: "yt-dlp" })]);
     const { service } = createService({ innerTube, tikHub, ytDlp });
@@ -919,7 +1378,10 @@ describe("YouTubeTranscriptService", () => {
   it("stops the chain while TikHub processing is resumable", async () => {
     const tikHub = new FakeOptionalProvider(
       true,
-      new YouTubeTranscriptError("tikhub-processing"),
+      new YouTubeTranscriptError(
+        "tikhub-processing",
+        FREE_OPERATION_EVIDENCE,
+      ),
     );
     const ytDlp = new FakeOptionalProvider(true, [track({ source: "yt-dlp" })]);
     const progress: YouTubeTranscriptProgress[] = [];
@@ -954,7 +1416,10 @@ describe("YouTubeTranscriptService", () => {
     const secret = "provider-secret-that-must-not-survive";
     const tikHub = new FakeOptionalProvider(
       true,
-      new YouTubeTranscriptError("tikhub-missing-key"),
+      new YouTubeTranscriptError(
+        "tikhub-missing-key",
+        FREE_OPERATION_EVIDENCE,
+      ),
     );
     const ytDlp = new FakeOptionalProvider(false);
     const { service } = createService({
@@ -1048,12 +1513,18 @@ describe("YouTubeTranscriptService", () => {
     let fetchCalls = 0;
     const tikHub: TranscriptProvider = {
       async listTracks() {
-        return tracks;
+        return createTranscriptProviderOperationResult(
+          tracks,
+          PAID_OPERATION_EVIDENCE,
+        );
       },
       async fetchTrack(selectedTrack) {
         fetchCalls += 1;
         await fetchGate;
-        return transcript(selectedTrack);
+        return createTranscriptProviderOperationResult(
+          transcript(selectedTrack),
+          PAID_OPERATION_EVIDENCE,
+        );
       },
     };
     const { service } = createService({

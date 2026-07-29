@@ -4,9 +4,12 @@ import type {
 } from "../collection/content-repository";
 import {
   assertYouTubeVideoId,
+  isTranscriptProviderOperationResult,
   YouTubeTranscriptError,
   type TranscriptProvider,
   type TranscriptProviderOperationContext,
+  type TranscriptProviderOperationEvidence,
+  type TranscriptProviderOperationResult,
   type TranscriptProviderRegistration,
   type YouTubeCaptionTrack,
   type YouTubeTranscript,
@@ -122,14 +125,22 @@ export class YouTubeTranscriptServiceError extends Error {
     readonly primaryCode?: YouTubeTranscriptErrorCode,
     failures: readonly YouTubeTranscriptProviderFailure[] = [],
     usage: YouTubeTranscriptUsage = ZERO_USAGE,
+    tikhubPaidRequestPossiblySent = false,
   ) {
     super(code);
     this.name = "YouTubeTranscriptServiceError";
     this.failures = freezeFailures(failures);
     this.usage = freezeUsage(usage.tikhubPaidRequests);
+    Object.defineProperty(this, "tikhubPaidRequestPossiblySent", {
+      value: tikhubPaidRequestPossiblySent === true,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
   }
   readonly failures: readonly YouTubeTranscriptProviderFailure[];
   readonly usage: YouTubeTranscriptUsage;
+  readonly tikhubPaidRequestPossiblySent!: boolean;
 }
 
 /** Internal marker that distinguishes provider/tool failures from local state. */
@@ -147,6 +158,7 @@ interface RegisteredChoice {
   context: TranscriptProviderOperationContext;
   failures: readonly YouTubeTranscriptProviderFailure[];
   usage: YouTubeTranscriptUsage;
+  tikhubPaidRequestPossiblySent: boolean;
 }
 
 interface PendingChoiceSet {
@@ -179,6 +191,7 @@ interface RankedTrack {
 interface ProviderChainState {
   failures: YouTubeTranscriptProviderFailure[];
   tikhubPaidRequests: 0 | 1 | 2;
+  tikhubPaidRequestPossiblySent: boolean;
 }
 
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/u;
@@ -387,11 +400,17 @@ export class YouTubeTranscriptService {
       selectionAtStart?.registered.context ?? request,
     );
     const state: ProviderChainState = selectionAtStart === undefined
-      ? { failures: [], tikhubPaidRequests: 0 }
+      ? {
+          failures: [],
+          tikhubPaidRequests: 0,
+          tikhubPaidRequestPossiblySent: false,
+        }
       : {
           failures: [...selectionAtStart.registered.failures],
           tikhubPaidRequests:
             selectionAtStart.registered.usage.tikhubPaidRequests,
+          tikhubPaidRequestPossiblySent:
+            selectionAtStart.registered.tikhubPaidRequestPossiblySent,
         };
     try {
       assertNotAborted(request.signal);
@@ -497,7 +516,7 @@ export class YouTubeTranscriptService {
         this.deletePendingChoiceSet(key, selectionAtStart.pendingGeneration);
       }
       this.clearGeneration(key, operationGeneration);
-      throw error;
+      throw normalizeLocalError(error, state);
     }
   }
 
@@ -578,23 +597,30 @@ export class YouTubeTranscriptService {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
     emitProgress(request, stageForSource(registration.source), state);
-    let tracks: YouTubeCaptionTrack[];
+    let settledList: { value: YouTubeCaptionTrack[] };
     try {
-      tracks = await registration.provider.listTracks(
+      const listResult = await registration.provider.listTracks(
         context.videoId,
         request.signal,
         context,
       );
+      settledList = settleProviderOperation<YouTubeCaptionTrack[]>(
+        listResult,
+        registration.source,
+        false,
+        state,
+      );
     } catch (error) {
-      throw providerStageError(error);
+      if (error instanceof TranscriptProviderStageError) throw error;
+      throw providerOperationStageError(error, registration.source, state);
     }
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
     let selected: YouTubeCaptionTrack[];
     try {
+      const tracks = settledList.value;
       assertProviderTracks(tracks, registration.source);
       if (registration.source === "tikhub") {
-        incrementTikHubUsage(state);
         emitProgress(request, "trying-tikhub", state);
       }
       if (tracks.length === 0) {
@@ -637,20 +663,34 @@ export class YouTubeTranscriptService {
     context: TranscriptProviderOperationContext,
   ): Promise<YouTubeTranscriptServiceResult> {
     this.assertCurrentGeneration(key, operationGeneration);
-    let transcript: YouTubeTranscript;
+    let settledFetch: {
+      value: YouTubeTranscript;
+      persistenceToken?: unknown;
+    };
     try {
       assertProviderTrack(selectedTrack, registration.source);
-      transcript = await registration.provider.fetchTrack(
+      const fetchResult = await registration.provider.fetchTrack(
         selectedTrack,
         request.signal,
         context,
       );
+      settledFetch = settleProviderOperation<YouTubeTranscript>(
+        fetchResult,
+        registration.source,
+        true,
+        state,
+      );
     } catch (error) {
-      throw providerStageError(error);
+      if (error instanceof TranscriptProviderStageError) throw error;
+      throw providerOperationStageError(error, registration.source, state);
     }
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
+    let transcript: YouTubeTranscript;
+    let persistenceToken: unknown;
     try {
+      transcript = settledFetch.value;
+      persistenceToken = settledFetch.persistenceToken;
       assertProviderTrack(selectedTrack, registration.source);
       assertProviderTranscript(
         { ...request, itemId: context.itemId, videoId: context.videoId },
@@ -658,7 +698,6 @@ export class YouTubeTranscriptService {
         registration.source,
       );
       if (registration.source === "tikhub") {
-        incrementTikHubUsage(state);
         emitProgress(request, "trying-tikhub", state);
       }
     } catch (error) {
@@ -690,6 +729,7 @@ export class YouTubeTranscriptService {
             selectedTrack,
             transcript,
             context,
+            persistenceToken,
           );
         } catch {
           // Durable content is authoritative; cleanup can be retried separately.
@@ -725,6 +765,8 @@ export class YouTubeTranscriptService {
         context: choiceContext,
         failures: freezeFailures(state.failures),
         usage: freezeUsage(state.tikhubPaidRequests),
+        tikhubPaidRequestPossiblySent:
+          state.tikhubPaidRequestPossiblySent,
       });
       return Object.freeze({
         id,
@@ -1049,12 +1091,59 @@ function normalizeLocalError(
     normalized.primaryCode,
     normalized.failures.length > 0 ? normalized.failures : state.failures,
     freezeUsage(state.tikhubPaidRequests),
+    normalized.tikhubPaidRequestPossiblySent ||
+      state.tikhubPaidRequestPossiblySent,
   );
 }
 
 function providerStageError(error: unknown): TranscriptProviderStageError {
   if (error instanceof TranscriptProviderStageError) return error;
   return new TranscriptProviderStageError(normalizeProviderError(error));
+}
+
+function providerOperationStageError(
+  error: unknown,
+  source: YouTubeTranscriptProvider,
+  state: ProviderChainState,
+): TranscriptProviderStageError {
+  if (source !== "tikhub") return providerStageError(error);
+  if (
+    error instanceof YouTubeTranscriptError &&
+    error.operationEvidence !== undefined
+  ) {
+    applyOperationEvidence(state, error.operationEvidence, true);
+    return providerStageError(error);
+  }
+  return new TranscriptProviderStageError(malformedProviderResponse(source));
+}
+
+function settleProviderOperation<T>(
+  result: T | TranscriptProviderOperationResult<T>,
+  source: YouTubeTranscriptProvider,
+  allowPersistenceToken: boolean,
+  state: ProviderChainState,
+): { value: T; persistenceToken?: unknown } {
+  if (!isTranscriptProviderOperationResult(result)) {
+    if (source === "tikhub") {
+      throw new TranscriptProviderStageError(malformedProviderResponse(source));
+    }
+    return { value: result };
+  }
+
+  applyOperationEvidence(state, result.evidence, false);
+  const hasPersistenceToken = Object.prototype.hasOwnProperty.call(
+    result,
+    "persistenceToken",
+  );
+  if (!allowPersistenceToken && hasPersistenceToken) {
+    throw new TranscriptProviderStageError(malformedProviderResponse(source));
+  }
+  return {
+    value: result.value,
+    ...(hasPersistenceToken
+      ? { persistenceToken: result.persistenceToken }
+      : {}),
+  };
 }
 
 function isProviderFallbackEligible(
@@ -1190,11 +1279,22 @@ function emitProgress(
   }
 }
 
-function incrementTikHubUsage(state: ProviderChainState): void {
+function applyOperationEvidence(
+  state: ProviderChainState,
+  evidence: TranscriptProviderOperationEvidence,
+  failed: boolean,
+): void {
   state.tikhubPaidRequests = Math.min(
     2,
-    state.tikhubPaidRequests + 1,
+    state.tikhubPaidRequests + evidence.tikhubPaidRequests,
   ) as 0 | 1 | 2;
+  if (
+    failed &&
+    evidence.paidRequestAttempted &&
+    evidence.tikhubPaidRequests === 0
+  ) {
+    state.tikhubPaidRequestPossiblySent = true;
+  }
 }
 
 function addFailure(
@@ -1254,6 +1354,7 @@ function chainFailure(
     primaryCode,
     failures,
     freezeUsage(state.tikhubPaidRequests),
+    state.tikhubPaidRequestPossiblySent,
   );
 }
 

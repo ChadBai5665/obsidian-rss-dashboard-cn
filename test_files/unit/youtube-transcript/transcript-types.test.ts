@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertYouTubeVideoId,
+  createTranscriptProviderOperationResult,
   isValidYouTubeVideoId,
   YouTubeTranscriptError,
   type TranscriptProviderRegistration,
@@ -39,6 +40,70 @@ const registrations: TranscriptProviderRegistration[] = ALL_PROVIDERS.map(
 );
 
 describe("YouTube transcript video IDs", () => {
+  it("creates frozen operation envelopes with copied, frozen billing evidence", () => {
+    const evidence = {
+      tikhubPaidRequests: 1 as const,
+      paidRequestAttempted: true,
+    };
+    const persistenceToken = { job: "memory-only" };
+
+    const result = createTranscriptProviderOperationResult(
+      [TIKHUB_TEXT_TRACK],
+      evidence,
+      persistenceToken,
+    );
+
+    expect(result).toEqual({
+      kind: "transcript-provider-operation-result",
+      value: [TIKHUB_TEXT_TRACK],
+      evidence,
+      persistenceToken,
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.evidence)).toBe(true);
+    expect(result.evidence).not.toBe(evidence);
+    expect(Reflect.set(result.evidence, "tikhubPaidRequests", 0)).toBe(false);
+  });
+
+  it.each([
+    { tikhubPaidRequests: 1, paidRequestAttempted: false },
+    { tikhubPaidRequests: 2, paidRequestAttempted: true },
+    { tikhubPaidRequests: 0, paidRequestAttempted: "yes" },
+    {
+      tikhubPaidRequests: 0,
+      paidRequestAttempted: false,
+      endpoint: "/api/private",
+    },
+  ])("rejects invalid or non-sanitized operation evidence %#", (evidence) => {
+    expect(() =>
+      createTranscriptProviderOperationResult(
+        [],
+        evidence as never,
+      ),
+    ).toThrow("Invalid transcript provider operation evidence");
+    expect(() =>
+      new YouTubeTranscriptError("temporarily-unavailable", evidence as never),
+    ).toThrow("Invalid transcript provider operation evidence");
+  });
+
+  it("stores only frozen sanitized operation evidence on provider errors", () => {
+    const evidence = {
+      tikhubPaidRequests: 0 as const,
+      paidRequestAttempted: true,
+    };
+
+    const error = new YouTubeTranscriptError(
+      "temporarily-unavailable",
+      evidence,
+    );
+
+    expect(error.operationEvidence).toEqual(evidence);
+    expect(error.operationEvidence).not.toBe(evidence);
+    expect(Object.isFrozen(error.operationEvidence)).toBe(true);
+    expect(Reflect.set(error.operationEvidence!, "paidRequestAttempted", false))
+      .toBe(false);
+  });
+
   it("exposes TikHub as a stable provider registration source", () => {
     expect(registrations.map(({ source }) => source)).toEqual([
       "innertube",
