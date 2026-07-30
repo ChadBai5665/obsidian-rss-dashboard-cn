@@ -902,6 +902,57 @@ git commit -m "build: stage TikHub transcript fallback"
 
 If status proves a listed artifact is ignored or identical, omit that exact path rather than force it.
 
+### Task 91: Hydrate TikHub Secret Status Before Live Acceptance
+
+**Why this bridge task exists:** Task 10 found that saving the current TikHub key changed the external secret file, but reopening the TikHub settings tab still displayed “未配置”. The renderer initializes `hasSecret` to false and calls `updateStatus()`, yet never invokes its existing `refreshSecretStatus()` on initial render. This makes the UI claim “missing” before checking secure storage and also collapses a storage-read error into the same copy.
+
+**Files:**
+- Modify: `src/settings/tabs/tikhub-settings-tab.ts`
+- Modify: `src/i18n/zh-cn.ts`
+- Modify: `src/i18n/en.ts`
+- Modify: `test_files/unit/settings/tikhub-settings-tab.test.ts`
+
+**Interfaces:**
+- Consumes: the existing `SecretStore.getStatus(connectionId)` safe projection.
+- Produces: truthful initial checking/configured/missing/unavailable status; no key value enters settings, logs, tests, or Git.
+
+- [ ] **Step 1: Write failing settings tests**
+
+Prove initial render calls `getStatus()` exactly once for a canonical current connection, displays a neutral checking state while pending, then displays configured or missing from the resolved projection. Prove a rejected status read displays a distinct safe “无法读取密钥状态” recovery message rather than falsely claiming no key. Prove invalid/blank connection IDs remain missing without a secret read, and stale async completion from a disposed/re-rendered tab cannot overwrite the current status.
+
+- [ ] **Step 2: Run and verify RED**
+
+```bash
+npx vitest run --config vitest.config.mjs \
+  test_files/unit/settings/tikhub-settings-tab.test.ts
+```
+
+Expected: initial render never calls `getStatus()` and cannot represent checking/unavailable.
+
+- [ ] **Step 3: Implement the minimal status state machine**
+
+Use only `checking`, `configured`, `missing`, and `unavailable`. Invoke the existing async refresh during initial render after the status element exists. Keep the current epoch/render guards. Saving a key sets configured; deleting sets missing; read/security/corruption failure sets unavailable. Never render exception text, paths, connection IDs, or secret values.
+
+- [ ] **Step 4: Verify and commit**
+
+```bash
+npx vitest run --config vitest.config.mjs \
+  test_files/unit/settings/tikhub-settings-tab.test.ts
+npm run audit:i18n
+npm run check:public
+npm run lint
+npx tsc --noEmit --skipLibCheck
+```
+
+```bash
+git add src/settings/tabs/tikhub-settings-tab.ts \
+  src/i18n/zh-cn.ts src/i18n/en.ts \
+  test_files/unit/settings/tikhub-settings-tab.test.ts
+git commit -m "fix: refresh TikHub key status"
+```
+
+After review, rebuild/re-stage/reinstall the three program files with Obsidian fully exited, then resume Task 10 without resetting its zero paid-attempt ledger.
+
 ### Task 10: Install Safely and Run One Explicitly Authorized Live Acceptance
 
 **Files:**
