@@ -1577,6 +1577,7 @@ export default class RssDashboardPlugin extends Plugin {
       abortInitialImport: (feedId) => {
         this.activeInitialImportControllers.get(feedId)?.abort();
       },
+      operationJournal: this.getOperationJournalPort(),
     });
   }
 

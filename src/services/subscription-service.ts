@@ -38,6 +38,15 @@ import {
   type FolderOperationResult,
   type OperationResult,
 } from "./sidebar-ordering-controller";
+import {
+  projectSafeOperationSubject,
+  type OperationErrorCode,
+  type SubscriptionOperationDetails,
+} from "../operation-journal/operation-event";
+import type {
+  OperationJournalPort,
+  OperationJournalScope,
+} from "../operation-journal/operation-journal-service";
 
 export interface SubscriptionPreferences {
   displayName?: string;
@@ -253,6 +262,33 @@ export interface SubscriptionServiceDependencies {
   createFeedId?: () => string;
   prepareFeed?: (feed: Feed) => Feed;
   abortInitialImport?: (feedId: string) => void;
+  operationJournal?: OperationJournalPort;
+}
+
+type SubscriptionJournalErrorCode = Extract<
+  OperationErrorCode,
+  | SubscriptionServiceErrorCode
+  | "source-validation-failed"
+  | "subscription-operation-failed"
+  | "settings-save-failed"
+  | "collection-cleanup-failed"
+>;
+
+const SUBSCRIPTION_SERVICE_ERROR_CODES = new Set<SubscriptionServiceErrorCode>([
+  "duplicate-subscription",
+  "invalid-subscription-request",
+  "subscription-not-found",
+  "purge-confirmation-required",
+]);
+
+interface SubscriptionJournalState {
+  readonly action: "add" | "update" | "pause" | "resume" | "remove";
+  beginAttempted: boolean;
+  scope?: OperationJournalScope;
+  stage: "validating" | "saving" | "cleaning";
+  subject: Readonly<{ sourceId?: string; label?: string }>;
+  details: Readonly<SubscriptionOperationDetails>;
+  failureCode?: SubscriptionJournalErrorCode;
 }
 
 const lifecycleMutationQueues = new WeakMap<object, Promise<void>>();
@@ -324,24 +360,64 @@ export class SubscriptionService {
   }
 
   private async addUnlocked(request: VerifiedSubscriptionRequest): Promise<Feed> {
-    const key = requestKey(request);
-    if (this.hasDuplicate(key)) {
-      throw new SubscriptionServiceError("duplicate-subscription");
-    }
-    const feedId = this.uniqueFeedId();
-    if (request.kind === "x-account") {
-      return await this.withReservedXVerification(request, async () => {
+    const journal = createSubscriptionJournalState("add");
+    let reservation: XProfileVerificationReservation | undefined;
+    try {
+      const key = requestKey(request);
+      if (this.hasDuplicate(key)) {
+        throw new SubscriptionServiceError("duplicate-subscription");
+      }
+      const feedId = this.uniqueFeedId();
+      if (request.kind === "x-account") {
+        reservation = this.reserveXVerification(request);
         const feed = this.buildXFeed(request, feedId);
+        this.beginSubscriptionJournal(
+          journal,
+          subscriptionSubjectForFeed(feed),
+          { sourceKind: "x-account" },
+          "saving",
+        );
         if (feed.folder) await this.dependencies.ensureFolder(feed.folder);
         this.assertPublicationAvailable(request, feedId);
         await this.commitFeeds([
           ...cloneFeeds(this.settings.feeds),
           feed,
-        ]);
+        ], journal);
+        commitXProfileVerificationReservation(reservation);
+        reservation = undefined;
+        succeedSubscriptionJournal(journal);
         return feed;
-      });
+      }
+      const validated = validatedFeedSubscription(request);
+      this.beginSubscriptionJournal(
+        journal,
+        projectSafeOperationSubject({
+          sourceId: feedId,
+          label: normalizedTitle(request.displayName) ?? validated.verified.title,
+        }),
+        subscriptionDetailsForVerifiedFeed(request, validated.verified),
+        "saving",
+      );
+      const feed = await this.addFeedSubscription(
+        request,
+        feedId,
+        undefined,
+        validated,
+        journal,
+      );
+      succeedSubscriptionJournal(journal);
+      return feed;
+    } catch (error) {
+      if (reservation) {
+        releaseXProfileVerificationReservation(reservation, this.now());
+      }
+      if (!journal.beginAttempted) {
+        this.beginSubscriptionJournal(journal, {}, {}, "validating");
+        journal.failureCode = addValidationJournalErrorCode(error);
+      }
+      failSubscriptionJournal(journal, error);
+      throw error;
     }
-    return await this.addFeedSubscription(request, feedId);
   }
 
   async update(
@@ -349,21 +425,27 @@ export class SubscriptionService {
     request: SubscriptionUpdateRequest,
   ): Promise<Feed> {
     return await this.enqueueMutation(
-      async () => await this.updateUnlocked(feedId, request),
+      async () => await this.runExistingSubscriptionMutation(
+        "update",
+        feedId,
+        async (journal) => await this.updateUnlocked(feedId, request, journal),
+        (feed) => subscriptionDetailsForUpdateRequest(feed, request),
+      ),
     );
   }
 
   private async updateUnlocked(
     feedId: string,
     request: SubscriptionUpdateRequest,
+    journal?: SubscriptionJournalState,
   ): Promise<Feed> {
     const index = this.feedIndex(feedId);
     const previous = this.settings.feeds[index];
     if (request.kind === "x-account-options") {
-      return await this.updateXOptions(index, previous, request);
+      return await this.updateXOptions(index, previous, request, journal);
     }
     if (request.kind === "feed-options") {
-      return await this.updateFeedOptions(index, previous, request);
+      return await this.updateFeedOptions(index, previous, request, journal);
     }
     const key = requestKey(request);
     if (this.hasDuplicate(key, feedId)) {
@@ -375,7 +457,13 @@ export class SubscriptionService {
       xRestIdChanged(previous, request);
 
     if (identityChanged && request.kind !== "x-account") {
-      return await this.addFeedSubscription(request, feedId, previous);
+      return await this.addFeedSubscription(
+        request,
+        feedId,
+        previous,
+        validatedFeedSubscription(request),
+        journal,
+      );
     }
 
     if (request.kind === "x-account") {
@@ -399,7 +487,7 @@ export class SubscriptionService {
         if (folder) await this.dependencies.ensureFolder(folder);
         const candidate = cloneFeeds(this.settings.feeds);
         candidate[index] = updated;
-        await this.commitFeeds(candidate);
+        await this.commitFeeds(candidate, journal);
         return updated;
       });
     }
@@ -413,7 +501,7 @@ export class SubscriptionService {
     if (folder) await this.dependencies.ensureFolder(folder);
     const candidate = cloneFeeds(this.settings.feeds);
     candidate[index] = updated;
-    await this.commitFeeds(candidate);
+    await this.commitFeeds(candidate, journal);
     return updated;
   }
 
@@ -421,6 +509,7 @@ export class SubscriptionService {
     index: number,
     previous: Feed,
     request: XSubscriptionOptionsUpdateRequest,
+    journal?: SubscriptionJournalState,
   ): Promise<Feed> {
     const account = previous.sourceKind === "x-account"
       ? normalizeXAccountSourceConfig(previous.sourceConfig)
@@ -484,7 +573,7 @@ export class SubscriptionService {
     if (folder) await this.dependencies.ensureFolder(folder);
     const candidate = cloneFeeds(this.settings.feeds);
     candidate[index] = updated;
-    await this.commitFeeds(candidate);
+    await this.commitFeeds(candidate, journal);
     return updated;
   }
 
@@ -492,6 +581,7 @@ export class SubscriptionService {
     index: number,
     previous: Feed,
     request: FeedSubscriptionOptionsUpdateRequest,
+    journal?: SubscriptionJournalState,
   ): Promise<Feed> {
     if (previous.sourceKind === "x-account" || previous.sourceKind === "x-topic") {
       throw new SubscriptionServiceError("invalid-subscription-request");
@@ -550,16 +640,20 @@ export class SubscriptionService {
     if (folder) await this.dependencies.ensureFolder(folder);
     const candidate = cloneFeeds(this.settings.feeds);
     candidate[index] = updated;
-    await this.commitFeeds(candidate);
+    await this.commitFeeds(candidate, journal);
     return updated;
   }
 
   async setPaused(feedId: string, paused: boolean): Promise<Feed> {
     return await this.enqueueMutation(async () =>
-      await this.updateFeed(feedId, (feed) => ({
-        ...feed,
-        subscriptionStatus: paused ? "paused" : "active",
-      }))
+      await this.runExistingSubscriptionMutation(
+        paused ? "pause" : "resume",
+        feedId,
+        async (journal) => await this.updateFeed(feedId, (feed) => ({
+          ...feed,
+          subscriptionStatus: paused ? "paused" : "active",
+        }), journal),
+      )
     );
   }
 
@@ -663,50 +757,93 @@ export class SubscriptionService {
     feedId: string,
     options: RemoveSubscriptionOptions,
   ): Promise<void> {
-    this.removalIndex(feedId, options);
-    const intents: Array<{ owner: SubscriptionSettingsPort; token: symbol }> = [];
-    const registerCurrentRemovalIntent = (): void => {
-      const owner = this.settings;
-      if (intents.some((intent) => intent.owner === owner)) return;
-      intents.push({ owner, token: registerRemovalIntent(owner, feedId) });
-    };
+    const journal = createSubscriptionJournalState("remove");
     try {
-      registerCurrentRemovalIntent();
-      this.dependencies.abortInitialImport?.(feedId);
-      return await this.enqueueMutation(async () => {
+      const index = this.removalIndex(feedId, options);
+      const feed = this.settings.feeds[index];
+      const details = {
+        ...subscriptionDetailsForFeed(feed),
+        preserveHistory: !options.purgeCollection,
+      } satisfies SubscriptionOperationDetails;
+      this.beginSubscriptionJournal(
+        journal,
+        subscriptionSubjectForFeed(feed),
+        details,
+        options.purgeCollection ? "cleaning" : "saving",
+      );
+      const intents: Array<{ owner: SubscriptionSettingsPort; token: symbol }> = [];
+      const registerCurrentRemovalIntent = (): void => {
+        const owner = this.settings;
+        if (intents.some((intent) => intent.owner === owner)) return;
+        intents.push({ owner, token: registerRemovalIntent(owner, feedId) });
+      };
+      try {
         registerCurrentRemovalIntent();
         this.dependencies.abortInitialImport?.(feedId);
-        await this.removeUnlocked(feedId, options);
-      });
-    } finally {
-      for (const { owner, token } of intents) {
-        clearRemovalIntent(owner, feedId, token);
+        await this.enqueueMutation(async () => {
+          registerCurrentRemovalIntent();
+          this.dependencies.abortInitialImport?.(feedId);
+          await this.removeUnlocked(feedId, options, journal);
+        });
+      } finally {
+        for (const { owner, token } of intents) {
+          clearRemovalIntent(owner, feedId, token);
+        }
       }
+      succeedSubscriptionJournal(journal);
+    } catch (error) {
+      if (!journal.beginAttempted) {
+        this.beginSubscriptionJournal(journal, {}, {}, "validating");
+      }
+      failSubscriptionJournal(journal, error);
+      throw error;
     }
   }
 
   private async removeUnlocked(
     feedId: string,
     options: RemoveSubscriptionOptions,
+    journal?: SubscriptionJournalState,
   ): Promise<void> {
     const index = this.removalIndex(feedId, options);
 
     const candidate = cloneFeeds(this.settings.feeds);
     candidate.splice(index, 1);
     if (!options.purgeCollection) {
-      await this.commitFeeds(candidate);
+      await this.commitFeeds(candidate, journal);
       return;
     }
 
+    markSubscriptionJournalBoundary(
+      journal,
+      "cleaning",
+      "collection-cleanup-failed",
+    );
     const removal = await this.collectionService.removeSource(feedId);
     try {
-      await this.commitFeeds(candidate);
+      await this.commitFeeds(candidate, journal);
+      markSubscriptionJournalBoundary(
+        journal,
+        "cleaning",
+        "collection-cleanup-failed",
+      );
       await removal.commit();
     } catch (saveError) {
+      const primaryStage = journal?.stage;
+      const primaryFailureCode = journal?.failureCode;
       try {
         await removal.rollback();
       } catch {
+        markSubscriptionJournalBoundary(
+          journal,
+          "cleaning",
+          "collection-cleanup-failed",
+        );
         throw new Error("Subscription purge failed and rollback was incomplete");
+      }
+      if (journal && primaryStage && primaryFailureCode) {
+        journal.stage = primaryStage;
+        journal.failureCode = primaryFailureCode;
       }
       throw saveError;
     }
@@ -738,15 +875,10 @@ export class SubscriptionService {
     request: VerifiedFeedSubscriptionRequest,
     feedId: string,
     previous?: Feed,
+    validated: ValidatedFeedSubscription = validatedFeedSubscription(request),
+    journal?: SubscriptionJournalState,
   ): Promise<Feed> {
-    const verified = verifiedFeedDetails(request);
-    if (request.kind === "youtube" && !verified.hasEntries) {
-      throw new SubscriptionServiceError("invalid-subscription-request");
-    }
-    if (!verified.hasEntries && request.acceptedEmptyFeedWarning !== true) {
-      throw new SubscriptionServiceError("invalid-subscription-request");
-    }
-    const policy = validPolicy(request.initialImportPolicy);
+    const { verified, policy } = validated;
     const now = this.now();
     const folder = normalizedFolder(request.folder);
     const autoDeleteDuration = numberOrDefault(
@@ -819,13 +951,13 @@ export class SubscriptionService {
 
     if (folder) await this.dependencies.ensureFolder(folder);
     if (previous) {
-      await this.replacePublishedFeed(feedId, pending);
+      await this.replacePublishedFeed(feedId, pending, journal);
     } else {
       this.assertPublicationAvailable(request, feedId);
       await this.commitFeeds([
         ...cloneFeeds(this.settings.feeds),
         pending,
-      ]);
+      ], journal);
     }
 
     try {
@@ -840,7 +972,7 @@ export class SubscriptionService {
         ...pending,
         initialImportProgress: initialProgress("failed"),
       };
-      await this.replacePublishedFeed(feedId, failed);
+      await this.replacePublishedFeed(feedId, failed, journal);
       throw error;
     }
 
@@ -856,7 +988,7 @@ export class SubscriptionService {
       { ...pending, initialImportProgress: progress },
       { nowMs: now.getTime() },
     );
-    await this.replacePublishedFeed(feedId, completed);
+    await this.replacePublishedFeed(feedId, completed, journal);
     return completed;
   }
 
@@ -961,6 +1093,7 @@ export class SubscriptionService {
   private async updateFeed(
     feedId: string,
     update: (feed: Feed) => Feed,
+    journal?: SubscriptionJournalState,
   ): Promise<Feed> {
     const candidate = cloneFeeds(this.settings.feeds);
     const index = candidate.findIndex(
@@ -971,7 +1104,7 @@ export class SubscriptionService {
     }
     const updated = update(candidate[index]);
     candidate[index] = updated;
-    await this.commitFeeds(candidate);
+    await this.commitFeeds(candidate, journal);
     return updated;
   }
 
@@ -1048,7 +1181,11 @@ export class SubscriptionService {
     return completed;
   }
 
-  private async replacePublishedFeed(feedId: string, feed: Feed): Promise<void> {
+  private async replacePublishedFeed(
+    feedId: string,
+    feed: Feed,
+    journal?: SubscriptionJournalState,
+  ): Promise<void> {
     const candidate = cloneFeeds(this.settings.feeds);
     const index = candidate.findIndex(
       (entry) => (entry.feedId ?? entry.url) === feedId,
@@ -1057,14 +1194,17 @@ export class SubscriptionService {
       throw new SubscriptionServiceError("subscription-not-found");
     }
     candidate[index] = feed;
-    await this.commitFeeds(candidate);
+    await this.commitFeeds(candidate, journal);
   }
 
-  private async commitFeeds(candidate: Feed[]): Promise<void> {
+  private async commitFeeds(
+    candidate: Feed[],
+    journal?: SubscriptionJournalState,
+  ): Promise<void> {
     await this.commitSettingsReferences({
       ...cloneSubscriptionSettings(this.settings),
       feeds: candidate,
-    });
+    }, journal);
   }
 
   private async commitSidebarOrdering(
@@ -1081,17 +1221,21 @@ export class SubscriptionService {
 
   private async commitSettingsReferences(
     candidate: SubscriptionSettingsPort,
+    journal?: SubscriptionJournalState,
   ): Promise<void> {
+    markSubscriptionJournalBoundary(journal, "saving", "settings-save-failed");
     const settings = this.settings;
     const original = snapshotSettingsReferences(settings);
     const publish = (): void => publishSettingsReferences(settings, candidate);
     if (this.dependencies.saveSettingsCandidate) {
       await this.dependencies.saveSettingsCandidate(candidate, publish);
+      clearSubscriptionJournalFailure(journal);
       return;
     }
     publish();
     try {
       await this.dependencies.saveSettings();
+      clearSubscriptionJournalFailure(journal);
     } catch (error) {
       publishSettingsReferences(settings, original);
       throw error;
@@ -1198,6 +1342,70 @@ export class SubscriptionService {
     return result;
   }
 
+  private async runExistingSubscriptionMutation<T>(
+    action: "update" | "pause" | "resume",
+    feedId: string,
+    operation: (journal: SubscriptionJournalState) => Promise<T>,
+    projectDetails: (
+      feed: Feed,
+    ) => Readonly<SubscriptionOperationDetails> = subscriptionDetailsForFeed,
+  ): Promise<T> {
+    const journal = createSubscriptionJournalState(action);
+    try {
+      const feed = this.settings.feeds[this.feedIndex(feedId)];
+      journal.subject = subscriptionSubjectForFeed(feed);
+      journal.details = projectDetails(feed);
+      this.beginSubscriptionJournal(
+        journal,
+        journal.subject,
+        journal.details,
+        "saving",
+      );
+      const result = await operation(journal);
+      succeedSubscriptionJournal(journal);
+      return result;
+    } catch (error) {
+      if (!journal.beginAttempted) {
+        this.beginSubscriptionJournal(
+          journal,
+          journal.subject,
+          journal.details,
+          "validating",
+        );
+      }
+      failSubscriptionJournal(journal, error);
+      throw error;
+    }
+  }
+
+  private beginSubscriptionJournal(
+    journal: SubscriptionJournalState,
+    subject: SubscriptionJournalState["subject"],
+    details: SubscriptionJournalState["details"],
+    stage: SubscriptionJournalState["stage"],
+  ): void {
+    if (journal.beginAttempted) return;
+    journal.beginAttempted = true;
+    journal.subject = subject;
+    journal.details = details;
+    journal.stage = stage;
+    try {
+      const port = this.dependencies.operationJournal;
+      if (!port || typeof port.begin !== "function") return;
+      const scope = port.begin({
+        category: "subscription",
+        action: journal.action,
+        trigger: "manual",
+        stage,
+        subject,
+        details,
+      });
+      if (scope && typeof scope === "object") journal.scope = scope;
+    } catch {
+      // Journal failures never change subscription transactions.
+    }
+  }
+
   private async enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
     if (this.dependencies.enqueueMutation) {
       return await this.dependencies.enqueueMutation(operation);
@@ -1214,6 +1422,162 @@ export class SubscriptionService {
         lifecycleMutationQueues.delete(owner);
       }
     }
+  }
+}
+
+function createSubscriptionJournalState(
+  action: SubscriptionJournalState["action"],
+): SubscriptionJournalState {
+  return {
+    action,
+    beginAttempted: false,
+    stage: "validating",
+    subject: {},
+    details: {},
+  };
+}
+
+function subscriptionSubjectForFeed(
+  feed: Feed,
+): SubscriptionJournalState["subject"] {
+  const subject: Record<string, unknown> = {};
+  const feedId = ownDataValue(feed, "feedId");
+  const title = ownDataValue(feed, "title");
+  if (feedId !== undefined) subject.sourceId = feedId;
+  if (title !== undefined) subject.label = title;
+  return projectSafeOperationSubject(subject);
+}
+
+function subscriptionDetailsForVerifiedFeed(
+  request: VerifiedFeedSubscriptionRequest,
+  verified: VerifiedFeedDetails,
+): Readonly<SubscriptionOperationDetails> {
+  if (request.kind === "youtube") return Object.freeze({ sourceKind: "youtube" });
+  if (request.mediaType === "podcast") return Object.freeze({ sourceKind: "podcast" });
+  return verified.format === undefined
+    ? Object.freeze({})
+    : Object.freeze({ sourceKind: verified.format });
+}
+
+function subscriptionDetailsForFeed(
+  feed: Feed,
+): Readonly<SubscriptionOperationDetails> {
+  const sourceKind = ownDataValue(feed, "sourceKind");
+  if (sourceKind === "x-account" || sourceKind === "x-topic") {
+    return Object.freeze({ sourceKind });
+  }
+  if (ownDataValue(feed, "mediaType") === "podcast") {
+    return Object.freeze({ sourceKind: "podcast" });
+  }
+  if (ownDataValue(feed, "autoDetect") === true) {
+    return Object.freeze({ sourceKind: "website" });
+  }
+  const url = ownDataValue(feed, "url");
+  if (typeof url === "string" && youtubeChannelId(url)) {
+    return Object.freeze({ sourceKind: "youtube" });
+  }
+  return Object.freeze({});
+}
+
+function subscriptionDetailsForUpdateRequest(
+  feed: Feed,
+  request: SubscriptionUpdateRequest,
+): Readonly<SubscriptionOperationDetails> {
+  if (request.kind === "x-account" || request.kind === "x-account-options") {
+    return Object.freeze({ sourceKind: "x-account" });
+  }
+  if (request.kind === "feed-options") return subscriptionDetailsForFeed(feed);
+  const validated = validatedFeedSubscription(request);
+  return subscriptionDetailsForVerifiedFeed(request, validated.verified);
+}
+
+function ownDataValue(value: object, key: PropertyKey): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable === true &&
+        Object.prototype.hasOwnProperty.call(descriptor, "value")
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function markSubscriptionJournalBoundary(
+  journal: SubscriptionJournalState | undefined,
+  stage: SubscriptionJournalState["stage"],
+  failureCode: SubscriptionJournalErrorCode,
+): void {
+  if (!journal) return;
+  journal.stage = stage;
+  journal.failureCode = failureCode;
+}
+
+function clearSubscriptionJournalFailure(
+  journal: SubscriptionJournalState | undefined,
+): void {
+  if (journal) journal.failureCode = undefined;
+}
+
+function subscriptionJournalErrorCode(
+  error: unknown,
+): SubscriptionJournalErrorCode {
+  const code = error instanceof SubscriptionServiceError
+    ? ownDataValue(error, "code")
+    : undefined;
+  if (
+    typeof code === "string" &&
+    SUBSCRIPTION_SERVICE_ERROR_CODES.has(code as SubscriptionServiceErrorCode)
+  ) {
+    return code as SubscriptionServiceErrorCode;
+  }
+  return "subscription-operation-failed";
+}
+
+function addValidationJournalErrorCode(
+  error: unknown,
+): SubscriptionJournalErrorCode {
+  return subscriptionJournalErrorCode(error) === "duplicate-subscription"
+    ? "duplicate-subscription"
+    : "source-validation-failed";
+}
+
+function succeedSubscriptionJournal(journal: SubscriptionJournalState): void {
+  callSubscriptionJournalScope(
+    journal.scope,
+    "succeed",
+    "completed",
+    journal.details,
+  );
+}
+
+function failSubscriptionJournal(
+  journal: SubscriptionJournalState,
+  error: unknown,
+): void {
+  callSubscriptionJournalScope(
+    journal.scope,
+    "fail",
+    journal.stage,
+    journal.failureCode ?? subscriptionJournalErrorCode(error),
+    journal.details,
+  );
+}
+
+function callSubscriptionJournalScope(
+  scope: OperationJournalScope | undefined,
+  method: "succeed" | "fail",
+  ...args: unknown[]
+): void {
+  if (!scope) return;
+  try {
+    const callback = scope[method] as unknown;
+    if (typeof callback !== "function") return;
+    const invoke = callback as (...values: unknown[]) => unknown;
+    const result = invoke.call(scope, ...args);
+    void Promise.resolve(result).catch(() => undefined);
+  } catch {
+    // Journal failures never change subscription transactions.
   }
 }
 
@@ -1362,12 +1726,22 @@ function filterDeletedFolderSortKeys(
   );
 }
 
-function verifiedFeedDetails(request: VerifiedFeedSubscriptionRequest): {
+interface VerifiedFeedDetails {
   feedUrl: string;
   siteUrl: string;
   title: string;
   hasEntries: boolean;
-} {
+  format?: "rss" | "atom" | "json";
+}
+
+interface ValidatedFeedSubscription {
+  verified: VerifiedFeedDetails;
+  policy: InitialImportPolicy;
+}
+
+function verifiedFeedDetails(
+  request: VerifiedFeedSubscriptionRequest,
+): VerifiedFeedDetails {
   if (request.kind === "youtube") {
     const channelId = request.verification.channelId;
     const expectedFeedUrl =
@@ -1400,7 +1774,21 @@ function verifiedFeedDetails(request: VerifiedFeedSubscriptionRequest): {
     siteUrl: canonicalHttpUrl(request.verification.siteUrl),
     title: selected.title,
     hasEntries: request.verification.hasEntries,
+    format: selected.format,
   };
+}
+
+function validatedFeedSubscription(
+  request: VerifiedFeedSubscriptionRequest,
+): ValidatedFeedSubscription {
+  const verified = verifiedFeedDetails(request);
+  if (request.kind === "youtube" && !verified.hasEntries) {
+    throw new SubscriptionServiceError("invalid-subscription-request");
+  }
+  if (!verified.hasEntries && request.acceptedEmptyFeedWarning !== true) {
+    throw new SubscriptionServiceError("invalid-subscription-request");
+  }
+  return { verified, policy: validPolicy(request.initialImportPolicy) };
 }
 
 function requestKey(request: VerifiedSubscriptionRequest): string {

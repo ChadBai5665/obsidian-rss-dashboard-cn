@@ -18,6 +18,16 @@ import {
   createXTopicSourceConfig,
 } from "../../../src/sources/source-config";
 import type { Feed, FeedItem } from "../../../src/types/types";
+import type {
+  OperationBeginInput,
+  OperationJournalPort,
+  OperationJournalScope,
+} from "../../../src/operation-journal/operation-journal-service";
+import type {
+  OperationDetails,
+  OperationErrorCode,
+  OperationStage,
+} from "../../../src/operation-journal/operation-event";
 
 const NOW = new Date("2026-07-28T12:00:00.000Z");
 const CHANNEL_ID = "UCabcdefghijklmnopqrstuv";
@@ -150,9 +160,63 @@ function existingFeed(overrides: Partial<Feed> = {}): Feed {
   };
 }
 
+type RecordedSubscriptionJournalEvent =
+  | { status: "started"; input: OperationBeginInput }
+  | {
+      status: "progress" | "succeeded";
+      stage: OperationStage;
+      details: OperationDetails;
+    }
+  | {
+      status: "failed";
+      stage: OperationStage;
+      errorCode: OperationErrorCode;
+      details?: OperationDetails;
+    }
+  | { status: "aborted"; stage: OperationStage };
+
+function recordingJournal(): {
+  port: OperationJournalPort;
+  events: RecordedSubscriptionJournalEvent[];
+} {
+  const events: RecordedSubscriptionJournalEvent[] = [];
+  let nextId = 0;
+  const begin = (input: OperationBeginInput): OperationJournalScope => {
+    events.push({ status: "started", input });
+    nextId += 1;
+    return {
+      operationId: `subscription-operation-${nextId}`,
+      progress: async (stage, details) => {
+        events.push({ status: "progress", stage, details });
+      },
+      succeed: async (stage, details) => {
+        events.push({ status: "succeeded", stage, details });
+      },
+      fail: async (stage, errorCode, details) => {
+        events.push({ status: "failed", stage, errorCode, details });
+      },
+      abort: async (stage) => {
+        events.push({ status: "aborted", stage });
+      },
+    };
+  };
+  return {
+    events,
+    port: {
+      begin,
+      attach: () => {
+        throw new Error("subscription mutations never attach journal scopes");
+      },
+    },
+  };
+}
+
 function harness(
   initialFeeds: Feed[] = [],
-  options: { abortInitialImport?: (feedId: string) => void } = {},
+  options: {
+    abortInitialImport?: (feedId: string) => void;
+    operationJournal?: OperationJournalPort;
+  } = {},
 ) {
   const settings = {
     feeds: initialFeeds,
@@ -203,6 +267,7 @@ function harness(
     now: () => NOW,
     createFeedId: () => "new-feed-id",
     abortInitialImport: options.abortInitialImport,
+    operationJournal: options.operationJournal,
   });
   return {
     service,
@@ -1866,6 +1931,379 @@ describe("SubscriptionService", () => {
       "target",
     ]);
     expect(test.settings.feeds[0].folder).toBe("Old");
+  });
+
+  describe("operation journal", () => {
+    it("starts a successful add only after verified identity exists and closes after durable persistence", async () => {
+      const journal = recordingJournal();
+      const test = harness([], { operationJournal: journal.port });
+
+      const added = await test.service.add(rssRequest());
+
+      expect(added.feedId).toBe("new-feed-id");
+      expect(journal.events).toEqual([
+        {
+          status: "started",
+          input: {
+            category: "subscription",
+            action: "add",
+            trigger: "manual",
+            stage: "saving",
+            subject: { sourceId: "new-feed-id", label: "Example custom" },
+            details: { sourceKind: "rss" },
+          },
+        },
+        {
+          status: "succeeded",
+          stage: "completed",
+          details: { sourceKind: "rss" },
+        },
+      ]);
+    });
+
+    it("records one empty-subject validation failure without copying the rejected input URL", async () => {
+      const journal = recordingJournal();
+      const test = harness([], { operationJournal: journal.port });
+      const unsafeUrl = "https://user:secret@example.com/private-feed.xml?token=raw";
+
+      await expect(test.service.add(rssRequest({
+        selectedCandidateUrl: unsafeUrl,
+      }))).rejects.toMatchObject({ code: "invalid-subscription-request" });
+
+      expect(journal.events).toEqual([
+        {
+          status: "started",
+          input: {
+            category: "subscription",
+            action: "add",
+            trigger: "manual",
+            stage: "validating",
+            subject: {},
+            details: {},
+          },
+        },
+        {
+          status: "failed",
+          stage: "validating",
+          errorCode: "source-validation-failed",
+          details: {},
+        },
+      ]);
+      expect(JSON.stringify(journal.events)).not.toContain(unsafeUrl);
+      expect(JSON.stringify(journal.events)).not.toContain("token=raw");
+    });
+
+    it.each([
+      {
+        label: "Atom",
+        request: rssRequest({
+          verification: {
+            ...rssRequest().verification,
+            candidates: [{
+              url: "https://example.com/feed.xml",
+              title: "Example",
+              format: "atom",
+            }],
+            selected: {
+              url: "https://example.com/feed.xml",
+              title: "Example",
+              format: "atom",
+            },
+          },
+        }),
+        sourceKind: "atom",
+      },
+      {
+        label: "JSON Feed",
+        request: rssRequest({
+          verification: {
+            ...rssRequest().verification,
+            candidates: [{
+              url: "https://example.com/feed.xml",
+              title: "Example",
+              format: "json",
+            }],
+            selected: {
+              url: "https://example.com/feed.xml",
+              title: "Example",
+              format: "json",
+            },
+          },
+        }),
+        sourceKind: "json",
+      },
+      {
+        label: "podcast",
+        request: rssRequest({ mediaType: "podcast" }),
+        sourceKind: "podcast",
+      },
+      {
+        label: "YouTube",
+        request: youtubeRequest(),
+        sourceKind: "youtube",
+      },
+    ])("projects only the verified $label source kind", async ({ request, sourceKind }) => {
+      const journal = recordingJournal();
+      const test = harness([], { operationJournal: journal.port });
+
+      await test.service.add(request);
+
+      expect(journal.events[0]).toMatchObject({
+        status: "started",
+        input: { details: { sourceKind } },
+      });
+      expect(JSON.stringify(journal.events)).not.toMatch(/https?:/u);
+    });
+
+    it("projects X account and topic kinds but does not guess a generic persisted feed format", async () => {
+      const xJournal = recordingJournal();
+      const xTest = harness([], { operationJournal: xJournal.port });
+      await xTest.service.add(xRequest());
+      expect(xJournal.events[0]).toMatchObject({
+        status: "started",
+        input: { details: { sourceKind: "x-account" } },
+      });
+
+      const topicJournal = recordingJournal();
+      const topic = existingFeed({
+        feedId: "topic-ai",
+        sourceKind: "x-topic",
+        sourceConfig: createXTopicSourceConfig({
+          id: "topic-ai",
+          name: "AI",
+          folder: "Topics",
+        }),
+        title: "AI topic",
+        url: "tikhub://x-topic/topic-ai",
+      });
+      const topicTest = harness([topic], { operationJournal: topicJournal.port });
+      await topicTest.service.setPaused("topic-ai", true);
+      expect(topicJournal.events[0]).toMatchObject({
+        status: "started",
+        input: {
+          action: "pause",
+          subject: { sourceId: "topic-ai", label: "AI topic" },
+          details: { sourceKind: "x-topic" },
+        },
+      });
+
+      const websiteJournal = recordingJournal();
+      const websiteTest = harness([
+        existingFeed({ autoDetect: true }),
+      ], { operationJournal: websiteJournal.port });
+      await websiteTest.service.setPaused("legacy-feed", true);
+      expect(websiteJournal.events[0]).toMatchObject({
+        status: "started",
+        input: { details: { sourceKind: "website" } },
+      });
+
+      const feedJournal = recordingJournal();
+      const feedTest = harness([existingFeed()], { operationJournal: feedJournal.port });
+      await feedTest.service.setPaused("legacy-feed", true);
+      expect(feedJournal.events[0]).toMatchObject({
+        status: "started",
+        input: { details: {} },
+      });
+    });
+
+    it("records update against the persisted identity with the newly verified source kind", async () => {
+      const journal = recordingJournal();
+      const source = existingFeed();
+      const test = harness([source], { operationJournal: journal.port });
+      const request = rssRequest({
+        verification: {
+          inputUrl: source.url,
+          siteUrl: "https://legacy.example/",
+          candidates: [{ url: source.url, title: "Legacy", format: "atom" }],
+          selected: { url: source.url, title: "Legacy", format: "atom" },
+          hasEntries: true,
+        },
+        selectedCandidateUrl: source.url,
+        displayName: "Edited title",
+      });
+
+      await test.service.update("legacy-feed", request);
+
+      expect(journal.events).toEqual([
+        {
+          status: "started",
+          input: {
+            category: "subscription",
+            action: "update",
+            trigger: "manual",
+            stage: "saving",
+            subject: { sourceId: "legacy-feed", label: "Legacy" },
+            details: { sourceKind: "atom" },
+          },
+        },
+        {
+          status: "succeeded",
+          stage: "completed",
+          details: { sourceKind: "atom" },
+        },
+      ]);
+    });
+
+    it("uses separate pause and resume actions and classifies settings save failure safely", async () => {
+      const journal = recordingJournal();
+      const test = harness([existingFeed()], { operationJournal: journal.port });
+
+      await test.service.setPaused("legacy-feed", true);
+      test.saveSettings.mockRejectedValueOnce(
+        new Error("https://private.example/save?token=unsafe"),
+      );
+      await expect(test.service.setPaused("legacy-feed", false)).rejects.toThrow();
+
+      expect(journal.events.filter((event) => event.status === "started").map(
+        (event) => event.status === "started" ? event.input.action : undefined,
+      )).toEqual(["pause", "resume"]);
+      expect(journal.events.at(-1)).toEqual({
+        status: "failed",
+        stage: "saving",
+        errorCode: "settings-save-failed",
+        details: {},
+      });
+      expect(JSON.stringify(journal.events)).not.toContain("private.example");
+      expect(test.settings.feeds[0].subscriptionStatus).toBe("paused");
+    });
+
+    it("closes remove only after retained or purged history commits and records preserveHistory", async () => {
+      const retainedJournal = recordingJournal();
+      const retained = harness([existingFeed()], {
+        operationJournal: retainedJournal.port,
+      });
+      await retained.service.remove("legacy-feed", { purgeCollection: false });
+      expect(retainedJournal.events).toEqual([
+        expect.objectContaining({
+          status: "started",
+          input: expect.objectContaining({
+            action: "remove",
+            details: { preserveHistory: true },
+          }),
+        }),
+        {
+          status: "succeeded",
+          stage: "completed",
+          details: { preserveHistory: true },
+        },
+      ]);
+
+      const purgedJournal = recordingJournal();
+      const purged = harness([existingFeed()], {
+        operationJournal: purgedJournal.port,
+      });
+      let releaseCommit!: () => void;
+      const commit = vi.fn(async () => await new Promise<void>((resolve) => {
+        releaseCommit = resolve;
+      }));
+      purged.collectionService.removeSource.mockResolvedValueOnce({
+        days: [],
+        commit,
+        rollback: vi.fn(async () => undefined),
+      });
+
+      const removal = purged.service.remove("legacy-feed", {
+        purgeCollection: true,
+        confirmation: createConfirmedCollectionPurge("legacy-feed"),
+      });
+      await vi.waitFor(() => expect(commit).toHaveBeenCalledOnce());
+      expect(purgedJournal.events.some((event) => event.status === "succeeded"))
+        .toBe(false);
+      releaseCommit();
+      await removal;
+
+      expect(purgedJournal.events.at(-1)).toEqual({
+        status: "succeeded",
+        stage: "completed",
+        details: { preserveHistory: false },
+      });
+    });
+
+    it("classifies collection cleanup failure without exposing its raw error", async () => {
+      const journal = recordingJournal();
+      const test = harness([existingFeed()], { operationJournal: journal.port });
+      test.collectionService.removeSource.mockRejectedValueOnce(
+        new Error("https://private.example/collection?token=unsafe"),
+      );
+
+      await expect(test.service.remove("legacy-feed", {
+        purgeCollection: true,
+        confirmation: createConfirmedCollectionPurge("legacy-feed"),
+      })).rejects.toThrow();
+
+      expect(journal.events.at(-1)).toEqual({
+        status: "failed",
+        stage: "cleaning",
+        errorCode: "collection-cleanup-failed",
+        details: { preserveHistory: false },
+      });
+      expect(JSON.stringify(journal.events)).not.toContain("private.example");
+      expect(test.settings.feeds).toHaveLength(1);
+    });
+
+    it("gives concurrent duplicate adds one closed operation for each actual outcome", async () => {
+      const journal = recordingJournal();
+      const test = harness([], { operationJournal: journal.port });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      test.parseFeed.mockImplementation(async (_url: string, seed: Feed) => {
+        await gate;
+        return { ...seed, items: test.selectedItems, lastUpdated: NOW.getTime() };
+      });
+
+      const first = test.service.add(rssRequest());
+      const second = test.service.add(rssRequest());
+      await Promise.resolve();
+      release();
+      const results = await Promise.allSettled([first, second]);
+
+      expect(results.map((result) => result.status)).toEqual([
+        "fulfilled",
+        "rejected",
+      ]);
+      expect(journal.events.filter((event) => event.status === "started"))
+        .toHaveLength(2);
+      expect(journal.events.filter((event) =>
+        event.status === "succeeded" || event.status === "failed"
+      )).toEqual([
+        expect.objectContaining({ status: "succeeded" }),
+        expect.objectContaining({
+          status: "failed",
+          errorCode: "duplicate-subscription",
+        }),
+      ]);
+    });
+
+    it.each([
+      {
+        label: "begin throws synchronously",
+        port: {
+          begin: () => { throw new Error("journal begin failed"); },
+          attach: () => { throw new Error("unused"); },
+        } satisfies OperationJournalPort,
+      },
+      {
+        label: "scope methods reject or throw",
+        port: {
+          begin: () => ({
+            operationId: "hostile",
+            progress: async () => { throw new Error("progress rejected"); },
+            succeed: async () => { throw new Error("succeed rejected"); },
+            fail: async () => { throw new Error("fail rejected"); },
+            abort: async () => { throw new Error("abort rejected"); },
+          }),
+          attach: () => { throw new Error("unused"); },
+        } satisfies OperationJournalPort,
+      },
+    ])("does not alter the transaction when journal $label", async ({ port }) => {
+      const test = harness([existingFeed()], { operationJournal: port });
+
+      await expect(test.service.setPaused("legacy-feed", true)).resolves
+        .toMatchObject({ subscriptionStatus: "paused" });
+
+      expect(test.settings.feeds[0].subscriptionStatus).toBe("paused");
+      expect(test.saveSettings).toHaveBeenCalledOnce();
+    });
   });
 
   it("uses stable service error codes", () => {
