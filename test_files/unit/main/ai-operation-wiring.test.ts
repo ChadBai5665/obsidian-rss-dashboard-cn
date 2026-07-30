@@ -253,6 +253,150 @@ describe("production inline AI composition", () => {
     expect(shutdownOldAi).toHaveBeenCalledTimes(1);
   });
 
+  it("revokes failed-window B runtimes and rebuilds business authority at A", async () => {
+    const test = harness();
+    const pendingPersist = deferred<void>();
+    const repository = (test.plugin as unknown as {
+      feedStorageRepository: { persistSettings(): Promise<unknown> };
+    }).feedStorageRepository;
+    const persist = vi.spyOn(repository, "persistSettings")
+      .mockImplementation(async () => {
+        await pendingPersist.promise;
+        throw new Error("settings-save-failed");
+      });
+    const api = test.plugin as unknown as {
+      getOperationJournalPort(): unknown;
+      getYouTubeTranscriptRuntime(): {
+        identity: string;
+        service: {
+          dispose(): void;
+          readCached(request: unknown): Promise<unknown>;
+          options: { operationJournal?: unknown };
+        };
+      };
+      aiRuntime: {
+        dataRoot: string;
+        operationJournal?: unknown;
+      };
+    };
+    const journalA = api.getOperationJournalPort();
+    test.settings.collection.dataFolder = ".rejected-business-root";
+    const saving = test.plugin.saveSettings();
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1));
+    const transcriptB = api.getYouTubeTranscriptRuntime();
+    const disposeB = vi.spyOn(transcriptB.service, "dispose");
+    const aiB = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const shutdownB = vi.spyOn(
+      aiB.coordinator as { shutdown(): Promise<void> },
+      "shutdown",
+    );
+    expect(transcriptB.identity).toBe(".rejected-business-root");
+    expect(api.aiRuntime.dataRoot).toBe(".rejected-business-root");
+    expect(api.aiRuntime.operationJournal).toBe(journalA);
+
+    pendingPersist.resolve();
+    await expect(saving).rejects.toThrow("settings-save-failed");
+
+    expect(test.plugin.settings.collection.dataFolder).toBe(".rss-dashboard-data");
+    expect(disposeB).toHaveBeenCalledTimes(1);
+    expect(shutdownB).toHaveBeenCalledTimes(1);
+    await expect(transcriptB.service.readCached({} as never)).rejects
+      .toMatchObject({ code: "aborted" });
+    await expect(aiB.coordinator.start(
+      aiB.createStartInput("summary", CONNECTION_ID),
+    )).rejects.toMatchObject({ code: "invalid-request" });
+    const transcriptA = api.getYouTubeTranscriptRuntime();
+    const aiA = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    expect(transcriptA.identity).toBe(".rss-dashboard-data");
+    expect(transcriptA.service.options.operationJournal).toBe(journalA);
+    expect(aiA.coordinator).not.toBe(aiB.coordinator);
+    expect(api.aiRuntime).toMatchObject({
+      dataRoot: ".rss-dashboard-data",
+      operationJournal: journalA,
+    });
+  });
+
+  it("keeps AI and transcript business construction available on the B no-op journal", async () => {
+    const test = harness();
+    const api = test.plugin as unknown as {
+      getOperationJournalPort(): unknown;
+      getOperationJournalRuntime(): { dataRoot: string; service: unknown };
+      getYouTubeTranscriptRuntime(): {
+        identity: string;
+        service: {
+          dispose(): void;
+          options: { operationJournal?: unknown };
+        };
+      };
+      feedStorageRepository: { persistSettings(): Promise<unknown> };
+      committedOperationJournalDataRoot: string;
+      aiRuntime: { dataRoot: string; operationJournal?: unknown };
+    };
+    const journalA = api.getOperationJournalPort();
+    const pendingPersist = deferred<void>();
+    const persist = vi.spyOn(api.feedStorageRepository, "persistSettings")
+      .mockImplementation(async () => {
+        await pendingPersist.promise;
+        return {
+        metadataSaved: true,
+        shardWriteCount: 0,
+        shardDeleteCount: 0,
+        };
+      });
+    const realGetRuntime = api.getOperationJournalRuntime.bind(api);
+    let failB = true;
+    vi.spyOn(api, "getOperationJournalRuntime").mockImplementation(() => {
+      if (
+        api.committedOperationJournalDataRoot === ".unavailable-business-root" &&
+        failB
+      ) {
+        throw new Error("private activation failure");
+      }
+      return realGetRuntime();
+    });
+    test.settings.collection.dataFolder = ".unavailable-business-root";
+    const saving = test.plugin.saveSettings();
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1));
+    const pendingTranscript = api.getYouTubeTranscriptRuntime();
+    const disposePendingTranscript = vi.spyOn(
+      pendingTranscript.service as { dispose(): void },
+      "dispose",
+    );
+    const pendingAi = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const shutdownPendingAi = vi.spyOn(
+      pendingAi.coordinator as { shutdown(): Promise<void> },
+      "shutdown",
+    );
+    expect(pendingTranscript.service.options.operationJournal).toBe(journalA);
+    expect(api.aiRuntime.operationJournal).toBe(journalA);
+    pendingPersist.resolve();
+
+    await expect(saving).resolves.toBeUndefined();
+    expect(disposePendingTranscript).toHaveBeenCalledTimes(1);
+    expect(shutdownPendingAi).toHaveBeenCalledTimes(1);
+    const unavailable = api.getOperationJournalPort();
+    expect(unavailable).not.toBe(journalA);
+    expect(() => api.getYouTubeTranscriptRuntime()).not.toThrow();
+    const transcriptB = api.getYouTubeTranscriptRuntime();
+    expect(transcriptB.identity).toBe(".unavailable-business-root");
+    expect(transcriptB.service.options.operationJournal).toBe(unavailable);
+    expect(() => test.plugin.createAiPanelOptionsForItem(test.selected))
+      .not.toThrow();
+    expect(api.aiRuntime).toMatchObject({
+      dataRoot: ".unavailable-business-root",
+      operationJournal: unavailable,
+    });
+
+    failB = false;
+    const journalB = api.getOperationJournalPort();
+    expect(journalB).not.toBe(journalA);
+    expect(journalB).not.toBe(unavailable);
+    const recoveredTranscript = api.getYouTubeTranscriptRuntime();
+    test.plugin.createAiPanelOptionsForItem(test.selected);
+    expect(recoveredTranscript.service.options.operationJournal).toBe(journalB);
+    expect(api.aiRuntime.operationJournal).toBe(journalB);
+  });
+
 
   it("reuses one runtime per data root and reads no secret before a provider run", () => {
     const test = harness();

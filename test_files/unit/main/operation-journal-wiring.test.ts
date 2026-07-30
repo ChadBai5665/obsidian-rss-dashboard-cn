@@ -3,6 +3,7 @@ import { App, type PluginManifest } from "obsidian";
 import RssDashboardPlugin from "../../../main";
 import { OperationJournalClearModal } from "../../../src/modals/operation-journal-clear-modal";
 import { OperationJournalService } from "../../../src/operation-journal/operation-journal-service";
+import type { OperationJournalPort } from "../../../src/operation-journal/operation-journal-service";
 import { OperationJournalRepository } from "../../../src/operation-journal/operation-journal-repository";
 import { DEFAULT_SETTINGS } from "../../../src/types/types";
 import type { OperationJournalUiPort } from "../../../src/components/operation-journal-panel";
@@ -21,7 +22,11 @@ function manifest(): PluginManifest {
 }
 
 interface JournalWiringApi {
-  getOperationJournalPort(): OperationJournalService;
+  getOperationJournalPort(): OperationJournalPort;
+  getOperationJournalRuntime(): {
+    dataRoot: string;
+    service: OperationJournalService;
+  };
   getOperationJournalUi(): OperationJournalUiPort;
   getOperationJournalSettings(): OperationJournalSettingsPort;
   getYouTubeTranscriptRuntime(): {
@@ -30,9 +35,13 @@ interface JournalWiringApi {
       providers: ReadonlyArray<{
         provider: { options?: { operationJournal?: unknown } };
       }>;
+      dispose(): void;
+      readCached(request: unknown): Promise<unknown>;
     };
   };
   getSubscriptionService(): { dependencies: { operationJournal?: unknown } };
+  getSourceRefreshLedger(): unknown;
+  getCollectionService(): unknown;
   initializeSettingsBackedServices(): void;
   commitSettingsCandidateUnlocked(
     build: (previous: typeof DEFAULT_SETTINGS) => typeof DEFAULT_SETTINGS,
@@ -74,10 +83,12 @@ function transcriptBegin() {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function emptyList() {
@@ -366,8 +377,14 @@ describe("operation journal runtime composition", () => {
     vi.spyOn(test.api.feedStorageRepository, "persistSettingsTransaction")
       .mockImplementation(async (_previous, _candidate, _plan, afterPersist) =>
         await afterPersist());
+    let candidateTranscript: ReturnType<JournalWiringApi["getYouTubeTranscriptRuntime"]>["service"] | undefined;
     vi.spyOn(test.plugin, "refreshDashboardViews")
-      .mockRejectedValueOnce(new Error("candidate-view-failed"))
+      .mockImplementationOnce(async () => {
+        candidateTranscript = test.api.getYouTubeTranscriptRuntime().service;
+        test.api.getSourceRefreshLedger();
+        test.api.getCollectionService();
+        throw new Error("candidate-view-failed");
+      })
       .mockResolvedValueOnce(undefined);
 
     await expect(test.api.commitSettingsCandidateUnlocked((previous) => {
@@ -378,6 +395,18 @@ describe("operation journal runtime composition", () => {
 
     expect(test.plugin.settings).toBe(previousSettings);
     expect(test.api.getOperationJournalPort()).toBe(previousService);
+    await expect(candidateTranscript!.readCached({} as never)).rejects
+      .toMatchObject({ code: "aborted" });
+    const authority = test.plugin as unknown as {
+      sourceRefreshLedger: { dataRoot: string } | null;
+      collectionService: { dataRoot: string } | null;
+    };
+    expect(authority.sourceRefreshLedger).toBeNull();
+    expect(authority.collectionService).toBeNull();
+    test.api.getSourceRefreshLedger();
+    test.api.getCollectionService();
+    expect(authority.sourceRefreshLedger?.dataRoot).toBe(".rss-dashboard-data");
+    expect(authority.collectionService?.dataRoot).toBe(".rss-dashboard-data");
     listener.mockClear();
     const scope = previousService.begin(transcriptBegin());
     await scope.succeed("completed", { contentBasis: "youtube-transcript" });
@@ -402,36 +431,172 @@ describe("operation journal runtime composition", () => {
     }).operationJournalRuntime.dataRoot).toBe(".saved-journal-root");
   });
 
-  it("keeps the committed root when ordinary settings save rejects", async () => {
+  it("restores all data-root authorities when an ordinary settings save rejects", async () => {
     const test = harness();
     const previousService = test.api.getOperationJournalPort();
-    vi.spyOn(test.api.feedStorageRepository, "persistSettings")
-      .mockRejectedValue(new Error("settings-save-failed"));
+    const pendingPersist = deferred<ReturnType<typeof persistedResult>>();
+    const persist = vi.spyOn(test.api.feedStorageRepository, "persistSettings")
+      .mockReturnValue(pendingPersist.promise);
     test.plugin.settings.collection.dataFolder = ".rejected-journal-root";
+    const saving = test.plugin.saveSettings();
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1));
+    const rejectedTranscript = test.api.getYouTubeTranscriptRuntime().service;
+    const disposeRejectedTranscript = vi.spyOn(
+      rejectedTranscript as { dispose(): void },
+      "dispose",
+    );
+    test.api.getSourceRefreshLedger();
+    test.api.getCollectionService();
+    pendingPersist.reject(new Error("settings-save-failed"));
 
-    await expect(test.plugin.saveSettings()).rejects
-      .toThrow("settings-save-failed");
+    await expect(saving).rejects.toThrow("settings-save-failed");
 
+    expect(test.plugin.settings.collection.dataFolder)
+      .toBe(".rss-dashboard-data");
+    expect(disposeRejectedTranscript).toHaveBeenCalledTimes(1);
     expect(test.api.getOperationJournalPort()).toBe(previousService);
-    expect((test.plugin as unknown as {
-      operationJournalRuntime: { dataRoot: string };
-    }).operationJournalRuntime.dataRoot).toBe(".rss-dashboard-data");
+    const authority = test.plugin as unknown as {
+      sourceRefreshLedger: { dataRoot: string } | null;
+      collectionService: { dataRoot: string } | null;
+    };
+    expect(authority.sourceRefreshLedger).toBeNull();
+    expect(authority.collectionService).toBeNull();
+    test.api.getSourceRefreshLedger();
+    test.api.getCollectionService();
+    expect(authority.sourceRefreshLedger?.dataRoot).toBe(".rss-dashboard-data");
+    expect(authority.collectionService?.dataRoot).toBe(".rss-dashboard-data");
+    expect(test.api.getSubscriptionService().dependencies.operationJournal)
+      .toBe(previousService);
+    const begin = vi.spyOn(previousService, "begin");
+    test.api.beginRefreshJournalSafely({ trigger: "manual", action: "all" });
+    expect(begin).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the committed root when factory reset persistence fails", async () => {
+  it("rolls back factory reset state and leaves local storage untouched on persistence failure", async () => {
     const test = harness();
     test.plugin.settings.collection.dataFolder = ".pre-reset-journal-root";
     const previousService = test.api.getOperationJournalPort();
+    test.api.initializeSettingsBackedServices();
+    const previousSettings = test.plugin.settings;
+    const previousFeedParser = test.plugin.feedParser;
+    const refreshMarker = { status: "refreshing" };
+    test.plugin.activeRefreshState.set("source-a", refreshMarker as never);
+    (test.plugin as unknown as { isMultiFeedRefreshRunning: boolean })
+      .isMultiFeedRefreshRunning = true;
+    test.app.saveLocalStorage("rss-discover-filters", { folder: "kept" });
+    test.app.saveLocalStorage("rss-podcast-progress", { seconds: 42 });
+    test.app.saveLocalStorage("rss-first-launch-coachmark-shown", "true");
+    let resetTranscript: ReturnType<JournalWiringApi["getYouTubeTranscriptRuntime"]>["service"] | undefined;
     vi.spyOn(test.api.feedStorageRepository, "persistSettings")
-      .mockRejectedValue(new Error("factory-reset-save-failed"));
+      .mockImplementation(async () => {
+        resetTranscript = test.api.getYouTubeTranscriptRuntime().service;
+        throw new Error("factory-reset-save-failed");
+      });
 
     await expect(test.plugin.performFactoryReset()).rejects
       .toThrow("factory-reset-save-failed");
 
+    expect(test.plugin.settings).toBe(previousSettings);
+    expect(test.plugin.settings.collection.dataFolder)
+      .toBe(".pre-reset-journal-root");
+    expect(test.plugin.feedParser).toBe(previousFeedParser);
+    expect(test.plugin.activeRefreshState.get("source-a"))
+      .toBe(refreshMarker);
+    expect((test.plugin as unknown as { isMultiFeedRefreshRunning: boolean })
+      .isMultiFeedRefreshRunning).toBe(true);
+    expect(test.app.loadLocalStorage("rss-discover-filters"))
+      .toEqual({ folder: "kept" });
+    expect(test.app.loadLocalStorage("rss-podcast-progress"))
+      .toEqual({ seconds: 42 });
+    expect(test.app.loadLocalStorage("rss-first-launch-coachmark-shown"))
+      .toBe("true");
+    await expect(resetTranscript!.readCached({} as never)).rejects
+      .toMatchObject({ code: "aborted" });
     expect(test.api.getOperationJournalPort()).toBe(previousService);
+    const nextTranscript = test.api.getYouTubeTranscriptRuntime();
+    expect(nextTranscript.service).not.toBe(resetTranscript);
+    expect((test.plugin as unknown as {
+      youtubeTranscriptRuntime: { dataRoot: string };
+    }).youtubeTranscriptRuntime.dataRoot).toBe(".pre-reset-journal-root");
+  });
+
+  it("uses a stable unavailable port after committed-root activation fails and retries only B", async () => {
+    const test = harness();
+    const serviceA = test.api.getOperationJournalPort();
+    const listener = vi.fn();
+    test.api.getOperationJournalUi().subscribe(listener);
+    listener.mockClear();
+    vi.spyOn(test.api.feedStorageRepository, "persistSettings")
+      .mockResolvedValue(persistedResult());
+    const realGetRuntime = test.api.getOperationJournalRuntime.bind(test.api);
+    let failB = true;
+    vi.spyOn(test.api, "getOperationJournalRuntime")
+      .mockImplementation(() => {
+        const root = (test.plugin as unknown as {
+          committedOperationJournalDataRoot: string;
+        }).committedOperationJournalDataRoot;
+        if (root === ".failed-activation-root" && failB) {
+          throw new Error("private /vault/path activation failure");
+        }
+        return realGetRuntime();
+      });
+    test.plugin.settings.collection.dataFolder = ".failed-activation-root";
+
+    await expect(test.plugin.saveSettings()).resolves.toBeUndefined();
+
+    expect((test.plugin as unknown as {
+      committedOperationJournalDataRoot: string;
+      operationJournalRuntime: unknown;
+    }).committedOperationJournalDataRoot).toBe(".failed-activation-root");
+    expect((test.plugin as unknown as { operationJournalRuntime: unknown })
+      .operationJournalRuntime).toBeNull();
+    expect(listener).toHaveBeenCalledTimes(1);
+    listener.mockClear();
+    const unavailable = test.api.getOperationJournalPort();
+    expect(unavailable).not.toBe(serviceA);
+    expect(test.api.getOperationJournalPort()).toBe(unavailable);
+    expect(Object.isFrozen(unavailable)).toBe(true);
+    const hostileInput = new Proxy({}, {
+      get() { throw new Error("hostile input"); },
+    });
+    expect(() => unavailable.begin(hostileInput as never)).not.toThrow();
+    const firstUnavailable = unavailable.begin(hostileInput as never);
+    const secondUnavailable = unavailable.begin(hostileInput as never);
+    expect(firstUnavailable.operationId)
+      .toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu);
+    expect(secondUnavailable.operationId)
+      .not.toBe(firstUnavailable.operationId);
+    const attached = unavailable.attach(
+      "123e4567-e89b-42d3-a456-426614174000",
+      hostileInput as never,
+    );
+    expect(attached.operationId)
+      .toBe("123e4567-e89b-42d3-a456-426614174000");
+    await expect(attached.succeed("completed", {})).resolves.toBeUndefined();
+    expect(test.api.getYouTubeTranscriptRuntime().service.options.operationJournal)
+      .toBe(unavailable);
+    expect(test.api.getSubscriptionService().dependencies.operationJournal)
+      .toBe(unavailable);
+    expect(test.api.beginRefreshJournalSafely({
+      trigger: "manual",
+      action: "all",
+    })?.operationId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(listener).not.toHaveBeenCalled();
+    await expect(test.app.vault.adapter.exists(".failed-activation-root"))
+      .resolves.toBe(false);
+    await expect(test.api.getOperationJournalUi().load(7)).rejects
+      .toMatchObject({ code: "operation-journal-unavailable" });
+    await expect(test.api.getOperationJournalSettings().stats()).rejects
+      .toMatchObject({ code: "operation-journal-unavailable" });
+
+    failB = false;
+    const serviceB = test.api.getOperationJournalPort();
+    expect(serviceB).toBeInstanceOf(OperationJournalService);
+    expect(serviceB).not.toBe(serviceA);
     expect((test.plugin as unknown as {
       operationJournalRuntime: { dataRoot: string };
-    }).operationJournalRuntime.dataRoot).toBe(".pre-reset-journal-root");
+    }).operationJournalRuntime.dataRoot).toBe(".failed-activation-root");
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 
   it("reloads journal health once when repository append fails", async () => {

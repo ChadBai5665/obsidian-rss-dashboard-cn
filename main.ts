@@ -285,6 +285,49 @@ interface OperationJournalUiSubscription {
 
 const MAX_CURRENT_AI_INSERTION_RESULTS = 256;
 const MAX_OPERATION_JOURNAL_RUNTIME_READ_ATTEMPTS = 3;
+const UNAVAILABLE_OPERATION_JOURNAL_ID =
+  "00000000-0000-4000-8000-000000000000";
+const SAFE_OPERATION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+function createUnavailableOperationJournalId(): string {
+  try {
+    const operationId = activeWindow.crypto.randomUUID();
+    if (SAFE_OPERATION_ID.test(operationId)) return operationId;
+  } catch {
+    // A fixed valid fallback keeps unavailable journaling non-blocking.
+  }
+  return UNAVAILABLE_OPERATION_JOURNAL_ID;
+}
+
+function createUnavailableOperationJournalScope(
+  requestedOperationId?: unknown,
+): OperationJournalScope {
+  const operationId =
+    typeof requestedOperationId === "string" &&
+      SAFE_OPERATION_ID.test(requestedOperationId)
+      ? requestedOperationId
+      : UNAVAILABLE_OPERATION_JOURNAL_ID;
+  const resolved = async (): Promise<void> => undefined;
+  return Object.freeze({
+    operationId,
+    progress: resolved,
+    succeed: resolved,
+    fail: resolved,
+    abort: resolved,
+  });
+}
+
+function createUnavailableOperationJournalPort(): OperationJournalPort {
+  return Object.freeze({
+    begin: () =>
+      createUnavailableOperationJournalScope(
+        createUnavailableOperationJournalId(),
+      ),
+    attach: (operationId: string) =>
+      createUnavailableOperationJournalScope(operationId),
+  });
+}
 
 function canWriteOwnDataValues(target: object, keys: string[]): boolean {
   try {
@@ -1004,6 +1047,8 @@ export default class RssDashboardPlugin extends Plugin {
   private aiRuntime: AiRuntime | null = null;
   private committedOperationJournalDataRoot: string | null = null;
   private operationJournalRuntime: OperationJournalRuntime | null = null;
+  private readonly unavailableOperationJournalPort =
+    createUnavailableOperationJournalPort();
   private readonly operationJournalUiSubscriptions =
     new Set<OperationJournalUiSubscription>();
   private readonly operationJournalUiFacade: OperationJournalUiPort =
@@ -1018,7 +1063,7 @@ export default class RssDashboardPlugin extends Plugin {
   private readonly operationJournalSettingsFacade: OperationJournalSettingsPort =
     Object.freeze({
       stats: async () =>
-        await this.getOperationJournalRuntime().service.stats(new Date()),
+        await this.requireOperationJournalRuntime().service.stats(new Date()),
       createPreview: async (days: 7 | 30) =>
         await this.importExportService.createOperationJournalPreview(days),
       copyPreview: async (token: string, exactText: string) =>
@@ -1179,7 +1224,7 @@ export default class RssDashboardPlugin extends Plugin {
         this.applyPublicSettingsImport(settings),
       getLocale: () => this.settings.locale,
       getSafeOperationJournalExport: async (days) =>
-        await this.getOperationJournalRuntime().service.createSafeExport({
+        await this.requireOperationJournalRuntime().service.createSafeExport({
           days,
           now: new Date(),
         }),
@@ -1962,12 +2007,28 @@ export default class RssDashboardPlugin extends Plugin {
 
   public async performFactoryReset(): Promise<void> {
     await this.enqueueSettingsOperation(async () => {
-      this.settings = this.buildFactoryResetSettings();
-      this.activeRefreshState.clear();
-      this.isMultiFeedRefreshRunning = false;
-      this.initializeSettingsBackedServices();
+      const previousSettings = this.settings;
+      const previousRuntime = this.captureSettingsBackedRuntime();
+      const previousRefreshState = new Map(this.activeRefreshState);
+      const previousRefreshRunning = this.isMultiFeedRefreshRunning;
+      try {
+        this.settings = this.buildFactoryResetSettings();
+        this.activeRefreshState.clear();
+        this.isMultiFeedRefreshRunning = false;
+        this.initializeSettingsBackedServices();
+        await this.saveSettingsUnlocked();
+      } catch (error) {
+        this.settings = previousSettings;
+        this.restoreSettingsBackedRuntime(previousRuntime);
+        this.activeRefreshState.clear();
+        for (const [sourceId, state] of previousRefreshState) {
+          this.activeRefreshState.set(sourceId, state);
+        }
+        this.isMultiFeedRefreshRunning = previousRefreshRunning;
+        this.restoreCommittedDataRootAuthorityAfterFailure();
+        throw error;
+      }
       this.clearFactoryResetLocalStorage();
-      await this.saveSettingsUnlocked();
     });
 
     const dashboardView = await this.getActiveDashboardView();
@@ -3239,6 +3300,42 @@ export default class RssDashboardPlugin extends Plugin {
     return dataRoot;
   }
 
+  private restoreCommittedDataRootAuthorityAfterFailure(): void {
+    try {
+      const dataRoot = this.getCommittedOperationJournalDataRoot();
+      this.settings.collection.dataFolder = dataRoot;
+
+      const aiRuntime = this.aiRuntime;
+      if (
+        aiRuntime !== null &&
+        normalizePath(aiRuntime.dataRoot.replace(/[\\/]+$/u, "")) !== dataRoot
+      ) {
+        this.aiRuntime = null;
+        this.revokeAiRuntime(aiRuntime);
+      }
+
+      const transcriptRuntime = this.youtubeTranscriptRuntime;
+      if (
+        transcriptRuntime !== null &&
+        normalizePath(transcriptRuntime.dataRoot.replace(/[\\/]+$/u, "")) !==
+          dataRoot
+      ) {
+        this.youtubeTranscriptRuntime = null;
+        try {
+          transcriptRuntime.service.dispose();
+        } catch {
+          // Failed-root transcript authority remains detached even if cleanup fails.
+        }
+      }
+
+      this.collectionService = null;
+      this.sourceRefreshLedger = null;
+      this.sourceRegistry = null;
+    } catch {
+      // Persistence failures remain authoritative even if cleanup is hostile.
+    }
+  }
+
   private activateCommittedOperationJournalDataRoot(
     settings: RssDashboardSettings,
   ): void {
@@ -3248,13 +3345,58 @@ export default class RssDashboardPlugin extends Plugin {
     } catch {
       return;
     }
-    if (this.committedOperationJournalDataRoot === dataRoot) return;
-    const previous = this.committedOperationJournalDataRoot;
+    const rootChanged = this.committedOperationJournalDataRoot !== dataRoot;
     this.committedOperationJournalDataRoot = dataRoot;
+    if (rootChanged) {
+      const previousRuntime = this.operationJournalRuntime;
+      this.operationJournalRuntime = null;
+      if (previousRuntime) this.revokeOperationJournalRuntime(previousRuntime);
+    }
     try {
-      this.getOperationJournalRuntime();
+      const runtime = this.getOperationJournalRuntime();
+      this.revokeBusinessRuntimesOutsideJournalAuthority(runtime.service);
     } catch {
-      this.committedOperationJournalDataRoot = previous;
+      const failedRuntime = this.operationJournalRuntime;
+      this.operationJournalRuntime = null;
+      if (failedRuntime) this.revokeOperationJournalRuntime(failedRuntime);
+      this.revokeBusinessRuntimesOutsideJournalAuthority(
+        this.unavailableOperationJournalPort,
+      );
+      if (rootChanged) this.notifyUnavailableOperationJournalUi();
+    }
+  }
+
+  private revokeBusinessRuntimesOutsideJournalAuthority(
+    operationJournal: OperationJournalPort,
+  ): void {
+    const aiRuntime = this.aiRuntime;
+    if (
+      aiRuntime !== null &&
+      aiRuntime.operationJournal !== operationJournal
+    ) {
+      this.aiRuntime = null;
+      this.revokeAiRuntime(aiRuntime);
+    }
+
+    const transcriptRuntime = this.youtubeTranscriptRuntime;
+    if (
+      transcriptRuntime !== null &&
+      transcriptRuntime.operationJournal !== operationJournal
+    ) {
+      this.youtubeTranscriptRuntime = null;
+      try {
+        transcriptRuntime.service.dispose();
+      } catch {
+        // Stale journal authority remains detached if disposal is hostile.
+      }
+    }
+  }
+
+  private requireOperationJournalRuntime(): OperationJournalRuntime {
+    try {
+      return this.getOperationJournalRuntime();
+    } catch {
+      throw new OperationJournalServiceError();
     }
   }
 
@@ -3287,6 +3429,14 @@ export default class RssDashboardPlugin extends Plugin {
     }
     for (const subscription of this.operationJournalUiSubscriptions) {
       if (subscription.active && subscription.runtime === runtime) {
+        this.invokeOperationJournalUiListener(subscription.listener);
+      }
+    }
+  }
+
+  private notifyUnavailableOperationJournalUi(): void {
+    for (const subscription of this.operationJournalUiSubscriptions) {
+      if (subscription.active) {
         this.invokeOperationJournalUiListener(subscription.listener);
       }
     }
@@ -3376,7 +3526,7 @@ export default class RssDashboardPlugin extends Plugin {
       attempt < MAX_OPERATION_JOURNAL_RUNTIME_READ_ATTEMPTS;
       attempt += 1
     ) {
-      const runtime = this.getOperationJournalRuntime();
+      const runtime = this.requireOperationJournalRuntime();
       const result = await runtime.service.list({ days, now: new Date() });
       if (
         !runtime.lifecycle.revoked &&
@@ -3406,7 +3556,7 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private clearOperationJournal(): Promise<void> {
-    const runtime = this.getOperationJournalRuntime();
+    const runtime = this.requireOperationJournalRuntime();
     if (runtime.clearFlight !== null) return runtime.clearFlight;
     const started = Promise.resolve().then(async () => {
       if (
@@ -3444,7 +3594,11 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private getOperationJournalPort(): OperationJournalPort {
-    return this.getOperationJournalRuntime().service;
+    try {
+      return this.getOperationJournalRuntime().service;
+    } catch {
+      return this.unavailableOperationJournalPort;
+    }
   }
 
   public getOperationJournalUi(): OperationJournalUiPort {
@@ -4453,6 +4607,7 @@ export default class RssDashboardPlugin extends Plugin {
     } catch (error) {
       this.settings = previousSettings;
       this.restoreSettingsBackedRuntime(previousRuntime);
+      this.restoreCommittedDataRootAuthorityAfterFailure();
       if (this.isUnloading) {
         this.importExportService?.revokeAllSafeDiagnosticsPreviews();
       } else if (candidatePublished) {
@@ -5729,6 +5884,7 @@ export default class RssDashboardPlugin extends Plugin {
       this.activateCommittedOperationJournalDataRoot(settings);
       storageLog("saveSettings completed", result);
     } catch (error) {
+      this.restoreCommittedDataRootAuthorityAfterFailure();
       storageError("saveSettings failed", error, {
         mode: settings.storageMode,
         folder: settings.storageFolder,
