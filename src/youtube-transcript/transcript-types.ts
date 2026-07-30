@@ -122,6 +122,11 @@ export interface TranscriptProviderOperationContext {
   readonly operationId: string;
 }
 
+export interface TranscriptProviderContinuationIdentity {
+  readonly itemId: string;
+  readonly videoId: string;
+}
+
 export interface TranscriptProviderContinuation {
   readonly track: YouTubeCaptionTrack;
   readonly transcript: YouTubeTranscript;
@@ -152,6 +157,9 @@ export interface TranscriptProvider {
   hasPendingContinuation?(
     context: TranscriptProviderOperationContext,
   ): Promise<boolean>;
+  pendingContinuationOperationId?(
+    identity: TranscriptProviderContinuationIdentity,
+  ): Promise<string | undefined>;
   continuePending?(
     signal: AbortSignal | undefined,
     context: TranscriptProviderOperationContext,

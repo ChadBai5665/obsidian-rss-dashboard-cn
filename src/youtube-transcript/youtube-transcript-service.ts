@@ -3,6 +3,7 @@ import type {
   YouTubeTranscriptCachedItemContent,
 } from "../collection/content-repository";
 import type {
+  OperationIdentityInput,
   OperationJournalPort,
   OperationJournalScope,
 } from "../operation-journal/operation-journal-service";
@@ -17,6 +18,7 @@ import {
   YouTubeTranscriptError,
   type TranscriptProvider,
   type TranscriptProviderContinuation,
+  type TranscriptProviderContinuationIdentity,
   type TranscriptProviderOperationContext,
   type TranscriptProviderOperationEvidence,
   type TranscriptProviderOperationResult,
@@ -197,7 +199,7 @@ interface SelectionAtStart {
 interface SharedWork {
   controller: AbortController;
   promise: Promise<YouTubeTranscriptServiceResult>;
-  operationId: string;
+  generation: symbol;
   timeline: TranscriptOperationTimeline;
   subscribers: number;
   settled: boolean;
@@ -209,6 +211,7 @@ interface TranscriptOperationTimeline {
   readonly scope: OperationJournalScope;
   stage: OperationStage;
   terminal: boolean;
+  terminalOwner?: symbol;
 }
 
 interface RankedTrack {
@@ -341,6 +344,7 @@ export class YouTubeTranscriptService {
           );
         }
       },
+      operationGeneration,
       selectionAtStart?.registered.timeline,
     );
   }
@@ -435,7 +439,41 @@ export class YouTubeTranscriptService {
         ),
       () => this.clearGeneration(resourceKey, operationGeneration),
       () => this.beginGeneration(resourceKey, operationGeneration, true),
+      operationGeneration,
+      undefined,
+      async () => await this.pendingContinuationTimeline(request),
     ) as YouTubeTranscriptServiceResult & { status: "ready" };
+  }
+
+  private async pendingContinuationTimeline(
+    request: YouTubeTranscriptContinuationRequest,
+  ): Promise<TranscriptOperationTimeline> {
+    const provider = this.providers.find(
+      ({ source, provider }) =>
+        source === "tikhub" &&
+        typeof provider.continuePending === "function",
+    )?.provider;
+    if (provider?.pendingContinuationOperationId) {
+      try {
+        const identity: TranscriptProviderContinuationIdentity = Object.freeze({
+          itemId: request.itemId,
+          videoId: request.videoId,
+        });
+        const operationId = await provider.pendingContinuationOperationId(
+          identity,
+        );
+        if (typeof operationId === "string" && OPERATION_ID.test(operationId)) {
+          return attachTranscriptTimeline(
+            this.options.operationJournal,
+            request,
+            operationId,
+          );
+        }
+      } catch {
+        // Durable continuation identity is optional and best effort.
+      }
+    }
+    return beginTranscriptTimeline(this.options.operationJournal, request);
   }
 
   private async continuePendingInternal(
@@ -462,7 +500,7 @@ export class YouTubeTranscriptService {
       assertNotAborted(request.signal);
       this.assertCurrentGeneration(key, operationGeneration);
       emitProgress(request, "trying-tikhub", state);
-      recordTimelineProgress(timeline, "trying-provider", {
+      recordTimelineProgress(timeline, operationGeneration, "trying-provider", {
         provider: "tikhub",
       });
       let settled: {
@@ -496,7 +534,9 @@ export class YouTubeTranscriptService {
       assertProviderTrack(continuation.track, "tikhub");
       assertProviderTranscript(request, continuation.transcript, "tikhub");
       emitProgress(request, "saving", state);
-      recordTimelineProgress(timeline, "saving", { provider: "tikhub" });
+      recordTimelineProgress(timeline, operationGeneration, "saving", {
+        provider: "tikhub",
+      });
       const content = createCachedTranscript(
         request,
         continuation.transcript,
@@ -517,7 +557,7 @@ export class YouTubeTranscriptService {
       assertNotAborted(request.signal);
       this.assertCurrentGeneration(key, operationGeneration);
       if (!metadataRepaired) {
-        recordTimelineProgress(timeline, "saving", {
+        recordTimelineProgress(timeline, operationGeneration, "saving", {
           provider: "tikhub",
           errorCode: "cache-save-failed",
         });
@@ -555,7 +595,7 @@ export class YouTubeTranscriptService {
     this.disposed = true;
     for (const [key, work] of this.inFlight) {
       this.inFlight.delete(key);
-      recordTimelineAbort(work.timeline);
+      recordTimelineAbort(work.timeline, work.generation);
       work.onAllCancelled();
       work.controller.abort();
     }
@@ -614,7 +654,7 @@ export class YouTubeTranscriptService {
 
       if (!request.refresh && request.trackId === undefined) {
         emitProgress(request, "checking-cache", state);
-        recordTimelineProgress(timeline, "checking-cache", {
+        recordTimelineProgress(timeline, operationGeneration, "checking-cache", {
           provider: "cache",
         });
         const cachedResult = await this.options.contentRepository.transaction(
@@ -629,7 +669,7 @@ export class YouTubeTranscriptService {
               transaction.pathFor(),
             );
             if (!metadataRepaired) {
-              recordTimelineProgress(timeline, "saving", {
+              recordTimelineProgress(timeline, operationGeneration, "saving", {
                 provider: "cache",
                 errorCode: "cache-save-failed",
               });
@@ -656,7 +696,7 @@ export class YouTubeTranscriptService {
         const { registration, providerIndex, track: selectedTrack } =
           selectionAtStart.registered;
         emitProgress(request, stageForSource(registration.source), state);
-        recordTimelineProgress(timeline, "trying-provider", {
+        recordTimelineProgress(timeline, operationGeneration, "trying-provider", {
           provider: registration.source,
         });
         try {
@@ -685,7 +725,12 @@ export class YouTubeTranscriptService {
           }
           const failure = error.failure;
           addFailure(state, registration.source, failure.code);
-          recordProviderFailure(timeline, registration.source, failure.code);
+          recordProviderFailure(
+            timeline,
+            operationGeneration,
+            registration.source,
+            failure.code,
+          );
           if (failure.code === "aborted") {
             throw chainFailure(state, failure.code);
           }
@@ -761,11 +806,12 @@ export class YouTubeTranscriptService {
           assertNotAborted(request.signal);
           this.assertCurrentGeneration(key, operationGeneration);
           addFailure(state, registration.source, "temporarily-unavailable");
-          recordTimelineProgress(timeline, "trying-provider", {
+          recordTimelineProgress(timeline, operationGeneration, "trying-provider", {
             provider: registration.source,
           });
           recordProviderFailure(
             timeline,
+            operationGeneration,
             registration.source,
             "temporarily-unavailable",
           );
@@ -775,11 +821,12 @@ export class YouTubeTranscriptService {
         this.assertCurrentGeneration(key, operationGeneration);
         if (!available) {
           addFailure(state, registration.source, "fallback-unavailable");
-          recordTimelineProgress(timeline, "trying-provider", {
+          recordTimelineProgress(timeline, operationGeneration, "trying-provider", {
             provider: registration.source,
           });
           recordProviderFailure(
             timeline,
+            operationGeneration,
             registration.source,
             "fallback-unavailable",
           );
@@ -810,7 +857,12 @@ export class YouTubeTranscriptService {
         }
         const failure = error.failure;
         addFailure(state, registration.source, failure.code);
-        recordProviderFailure(timeline, registration.source, failure.code);
+        recordProviderFailure(
+          timeline,
+          operationGeneration,
+          registration.source,
+          failure.code,
+        );
         if (failure.code === "aborted") {
           throw chainFailure(state, failure.code);
         }
@@ -839,7 +891,7 @@ export class YouTubeTranscriptService {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
     emitProgress(request, stageForSource(registration.source), state);
-    recordTimelineProgress(timeline, "trying-provider", {
+    recordTimelineProgress(timeline, operationGeneration, "trying-provider", {
       provider: registration.source,
     });
     let settledList: { value: YouTubeCaptionTrack[] };
@@ -952,7 +1004,7 @@ export class YouTubeTranscriptService {
       throw providerStageError(error);
     }
     emitProgress(request, "saving", state);
-    recordTimelineProgress(timeline, "saving", {
+    recordTimelineProgress(timeline, operationGeneration, "saving", {
       provider: registration.source,
     });
     const content = createCachedTranscript(
@@ -975,7 +1027,7 @@ export class YouTubeTranscriptService {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
     if (!metadataRepaired) {
-      recordTimelineProgress(timeline, "saving", {
+      recordTimelineProgress(timeline, operationGeneration, "saving", {
         provider: registration.source,
         errorCode: "cache-save-failed",
       });
@@ -1088,15 +1140,22 @@ export class YouTubeTranscriptService {
     ) => Promise<YouTubeTranscriptServiceResult>,
     onAllCancelled: () => void,
     onStart: () => void,
+    generation: symbol,
     existingTimeline?: TranscriptOperationTimeline,
+    timelineFactory?: () => Promise<TranscriptOperationTimeline>,
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(callerSignal);
     let work = this.inFlight.get(key);
     if (!work) {
       onStart();
-      const timeline =
-        existingTimeline ??
-        beginTranscriptTimeline(this.options.operationJournal, request);
+      const timeline = existingTimeline ?? (
+        timelineFactory === undefined
+          ? beginTranscriptTimeline(this.options.operationJournal, request)
+          : createNoopTranscriptTimeline()
+      );
+      if (timelineFactory === undefined) {
+        claimTimelineTerminal(timeline, generation);
+      }
       const controller = new AbortController();
       let resolveWork!: (value: YouTubeTranscriptServiceResult) => void;
       let rejectWork!: (reason: unknown) => void;
@@ -1109,29 +1168,37 @@ export class YouTubeTranscriptService {
       work = {
         controller,
         promise,
-        operationId: timeline.operationId,
+        generation,
         timeline,
         subscribers: 0,
         settled: false,
         onAllCancelled,
       };
       this.inFlight.set(key, work);
-      void operation(controller.signal, timeline).then(
+      const created = work;
+      const operationPromise = timelineFactory === undefined
+        ? operation(controller.signal, timeline)
+        : timelineFactory().then(async (resolvedTimeline) => {
+            created.timeline = resolvedTimeline;
+            claimTimelineTerminal(resolvedTimeline, generation);
+            return await operation(controller.signal, resolvedTimeline);
+          });
+      void operationPromise.then(
         (result) => {
           if (result.status === "ready") {
             recordTimelineSuccess(
-              timeline,
+              created.timeline,
+              generation,
               result.source === "cache" ? "cache" : result.content.provider,
             );
           }
           resolveWork(result);
         },
         (error: unknown) => {
-          recordTimelineFailure(timeline, error);
+          recordTimelineFailure(created.timeline, generation, error);
           rejectWork(error);
         },
       );
-      const created = work;
       void created.promise.then(
         () => this.settleWork(key, created),
         () => this.settleWork(key, created),
@@ -1155,7 +1222,7 @@ export class YouTubeTranscriptService {
         work.subscribers = Math.max(0, work.subscribers - 1);
         if (cancelled && work.subscribers === 0 && !work.settled) {
           if (this.inFlight.get(key) === work) this.inFlight.delete(key);
-          recordTimelineAbort(work.timeline);
+          recordTimelineAbort(work.timeline, work.generation);
           work.onAllCancelled();
           work.controller.abort();
           return true;
@@ -1711,15 +1778,7 @@ function beginTranscriptTimeline(
   if (journal) {
     try {
       scope = journal.begin({
-        category: "transcript",
-        action: "retrieve",
-        trigger: "manual",
-        subject: {
-          itemId: request.itemId,
-          ...(request.subjectLabel === undefined
-            ? {}
-            : { label: request.subjectLabel }),
-        },
+        ...transcriptOperationIdentity(request),
         stage: "requested",
         details: { contentBasis: "youtube-transcript" },
       });
@@ -1736,6 +1795,65 @@ function beginTranscriptTimeline(
     stage: "requested",
     terminal: false,
   };
+}
+
+function attachTranscriptTimeline(
+  journal: OperationJournalPort | undefined,
+  request: { readonly itemId: string; readonly subjectLabel?: string },
+  operationId: string,
+): TranscriptOperationTimeline {
+  if (journal) {
+    try {
+      const scope = journal.attach(
+        operationId,
+        transcriptOperationIdentity(request),
+      );
+      if (isUsableJournalScope(scope) && scope.operationId === operationId) {
+        return {
+          operationId,
+          scope,
+          stage: "requested",
+          terminal: false,
+        };
+      }
+    } catch {
+      // Fall back to a new operation timeline below.
+    }
+  }
+  return beginTranscriptTimeline(journal, request);
+}
+
+function transcriptOperationIdentity(
+  request: { readonly itemId: string; readonly subjectLabel?: string },
+): OperationIdentityInput {
+  return {
+    category: "transcript",
+    action: "retrieve",
+    trigger: "manual",
+    subject: {
+      itemId: request.itemId,
+      ...(request.subjectLabel === undefined
+        ? {}
+        : { label: request.subjectLabel }),
+    },
+  };
+}
+
+function createNoopTranscriptTimeline(): TranscriptOperationTimeline {
+  const operationId = createLocalOperationId();
+  return {
+    operationId,
+    scope: createNoopJournalScope(operationId),
+    stage: "requested",
+    terminal: false,
+  };
+}
+
+function claimTimelineTerminal(
+  timeline: TranscriptOperationTimeline,
+  generation: symbol,
+): void {
+  if (!timeline.terminal) timeline.terminalOwner = generation;
 }
 
 function isUsableJournalScope(
@@ -1781,19 +1899,21 @@ function createLocalOperationId(): string {
 
 function recordTimelineProgress(
   timeline: TranscriptOperationTimeline,
+  generation: symbol,
   stage: OperationStage,
   details: OperationDetails,
 ): void {
-  if (timeline.terminal) return;
+  if (timeline.terminal || timeline.terminalOwner !== generation) return;
   timeline.stage = stage;
   safelyRecord(() => timeline.scope.progress(stage, details));
 }
 
 function recordTimelineSuccess(
   timeline: TranscriptOperationTimeline,
+  generation: symbol,
   provider: "cache" | YouTubeTranscriptProvider,
 ): void {
-  if (timeline.terminal) return;
+  if (timeline.terminal || timeline.terminalOwner !== generation) return;
   timeline.terminal = true;
   timeline.stage = "completed";
   safelyRecord(() =>
@@ -1806,10 +1926,11 @@ function recordTimelineSuccess(
 
 function recordProviderFailure(
   timeline: TranscriptOperationTimeline,
+  generation: symbol,
   provider: YouTubeTranscriptProvider,
   code: YouTubeTranscriptServiceErrorCode,
 ): void {
-  recordTimelineProgress(timeline, "trying-provider", {
+  recordTimelineProgress(timeline, generation, "trying-provider", {
     provider,
     errorCode: operationErrorCode(code),
   });
@@ -1817,12 +1938,13 @@ function recordProviderFailure(
 
 function recordTimelineFailure(
   timeline: TranscriptOperationTimeline,
+  generation: symbol,
   error: unknown,
 ): void {
-  if (timeline.terminal) return;
+  if (timeline.terminal || timeline.terminalOwner !== generation) return;
   const serviceError = normalizeProviderError(error);
   if (serviceError.code === "aborted") {
-    recordTimelineAbort(timeline);
+    recordTimelineAbort(timeline, generation);
     return;
   }
   timeline.terminal = true;
@@ -1833,8 +1955,11 @@ function recordTimelineFailure(
   safelyRecord(() => timeline.scope.fail(timeline.stage, errorCode));
 }
 
-function recordTimelineAbort(timeline: TranscriptOperationTimeline): void {
-  if (timeline.terminal) return;
+function recordTimelineAbort(
+  timeline: TranscriptOperationTimeline,
+  generation: symbol,
+): void {
+  if (timeline.terminal || timeline.terminalOwner !== generation) return;
   timeline.terminal = true;
   safelyRecord(() => timeline.scope.abort(timeline.stage));
 }

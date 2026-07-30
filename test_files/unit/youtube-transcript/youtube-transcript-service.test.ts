@@ -362,6 +362,10 @@ interface RecordedJournalEvent {
 
 class RecordingOperationJournal implements OperationJournalPort {
   readonly begins: OperationBeginInput[] = [];
+  readonly attaches: Array<{
+    operationId: string;
+    input: OperationIdentityInput;
+  }> = [];
   readonly events: RecordedJournalEvent[] = [];
   private sequence = 0;
 
@@ -379,8 +383,9 @@ class RecordingOperationJournal implements OperationJournalPort {
 
   attach(
     operationId: string,
-    _input: OperationIdentityInput,
+    input: OperationIdentityInput,
   ): OperationJournalScope {
+    this.attaches.push({ operationId, input });
     return this.scope(operationId);
   }
 
@@ -4424,6 +4429,213 @@ describe("YouTubeTranscriptService", () => {
         stage: "completed",
         details: { provider: "innertube" },
       });
+    });
+
+    it("lets only the winning track selection terminate the shared timeline", async () => {
+      const journal = new RecordingOperationJournal();
+      const first = track({ languageName: "English A" });
+      const second = track({
+        languageName: "English B",
+        url: "https://www.youtube.com/api/timedtext?lang=en-B",
+      });
+      const { service } = createService({
+        innerTube: new FakeProvider([first, second]),
+        operationJournal: journal,
+      });
+      const choice = await service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+      });
+      if (choice.status !== "selection-required") {
+        throw new Error("expected choices");
+      }
+
+      const stale = service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: choice.tracks[0].id,
+      });
+      const winning = service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        trackId: choice.tracks[1].id,
+      });
+
+      await expect(stale).rejects.toMatchObject({
+        code: "temporarily-unavailable",
+      });
+      await expect(winning).resolves.toMatchObject({
+        status: "ready",
+        content: { languageName: "English B" },
+      });
+      const terminalEvents = journal.events.filter(({ status }) =>
+        ["succeeded", "failed", "aborted"].includes(status),
+      );
+      expect(terminalEvents).toEqual([
+        expect.objectContaining({
+          status: "succeeded",
+          stage: "completed",
+          details: expect.objectContaining({ provider: "innertube" }),
+        }),
+      ]);
+      expect(journal.events.at(-1)).toMatchObject({
+        status: "succeeded",
+        stage: "completed",
+      });
+    });
+
+    it("attaches a pending continuation to the provider-owned operation ID", async () => {
+      const operationId = "00000000-0000-4000-8000-000000000088";
+      const journal = new RecordingOperationJournal();
+      const contexts: TranscriptProviderOperationContext[] = [];
+      const selected = track({ source: "tikhub" });
+      const pendingContinuationOperationId = vi.fn(async () => operationId);
+      const provider = {
+        async listTracks() {
+          throw new Error("unreachable");
+        },
+        async fetchTrack() {
+          throw new Error("unreachable");
+        },
+        pendingContinuationOperationId,
+        async continuePending(
+          _signal: AbortSignal | undefined,
+          context: TranscriptProviderOperationContext,
+        ) {
+          contexts.push(context);
+          return createTranscriptProviderOperationResult(
+            { track: selected, transcript: transcript(selected) },
+            FREE_OPERATION_EVIDENCE,
+          );
+        },
+      } as TranscriptProvider & {
+        pendingContinuationOperationId(identity: {
+          readonly itemId: string;
+          readonly videoId: string;
+        }): Promise<string | undefined>;
+      };
+      const { service } = createService({
+        providers: [{ source: "tikhub", provider }],
+        operationJournal: journal,
+      });
+
+      await expect(service.continuePending({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+      })).resolves.toMatchObject({ status: "ready", source: "fresh" });
+
+      expect(pendingContinuationOperationId).toHaveBeenCalledOnce();
+      expect(pendingContinuationOperationId).toHaveBeenCalledWith({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+      });
+      expect(journal.begins).toHaveLength(0);
+      expect(journal.attaches).toEqual([
+        {
+          operationId,
+          input: {
+            category: "transcript",
+            action: "retrieve",
+            trigger: "manual",
+            subject: { itemId: ITEM_ID },
+          },
+        },
+      ]);
+      expect(contexts).toEqual([
+        expect.objectContaining({ operationId, itemId: ITEM_ID, videoId: VIDEO_ID }),
+      ]);
+      expect(journal.events).toEqual([
+        expect.objectContaining({
+          operationId,
+          status: "progress",
+          stage: "trying-provider",
+        }),
+        expect.objectContaining({
+          operationId,
+          status: "progress",
+          stage: "saving",
+        }),
+        expect.objectContaining({
+          operationId,
+          status: "succeeded",
+          stage: "completed",
+        }),
+      ]);
+    });
+
+    it.each([
+      ["missing", undefined],
+      ["invalid", async () => "not-a-valid-operation-id"],
+      ["throwing", async () => {
+        throw new Error("PRIVATE_PENDING_IDENTITY_ERROR");
+      }],
+    ] as const)(
+      "falls back to a new timeline for a %s pending continuation identity",
+      async (_caseName, pendingContinuationOperationId) => {
+        const journal = new RecordingOperationJournal();
+        const selected = track({ source: "tikhub" });
+        const provider = {
+          async listTracks() {
+            throw new Error("unreachable");
+          },
+          async fetchTrack() {
+            throw new Error("unreachable");
+          },
+          ...(pendingContinuationOperationId === undefined
+            ? {}
+            : { pendingContinuationOperationId }),
+          async continuePending() {
+            return createTranscriptProviderOperationResult(
+              { track: selected, transcript: transcript(selected) },
+              FREE_OPERATION_EVIDENCE,
+            );
+          },
+        } as TranscriptProvider;
+        const { service } = createService({
+          providers: [{ source: "tikhub", provider }],
+          operationJournal: journal,
+        });
+
+        await expect(service.continuePending({
+          itemId: ITEM_ID,
+          videoId: VIDEO_ID,
+        })).resolves.toMatchObject({ status: "ready", source: "fresh" });
+
+        expect(journal.attaches).toHaveLength(0);
+        expect(journal.begins).toHaveLength(1);
+        expect(JSON.stringify(journal.events)).not.toContain(
+          "PRIVATE_PENDING_IDENTITY_ERROR",
+        );
+      },
+    );
+
+    it("does not journal the read-only pending continuation probe", async () => {
+      const journal = new RecordingOperationJournal();
+      const provider = {
+        async listTracks() {
+          throw new Error("unreachable");
+        },
+        async fetchTrack() {
+          throw new Error("unreachable");
+        },
+        async hasPendingContinuation() {
+          return true;
+        },
+      } as TranscriptProvider;
+      const { service } = createService({
+        providers: [{ source: "tikhub", provider }],
+        operationJournal: journal,
+      });
+
+      await expect(service.hasPendingContinuation({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+      })).resolves.toBe(true);
+
+      expect(journal.begins).toHaveLength(0);
+      expect(journal.attaches).toHaveLength(0);
+      expect(journal.events).toHaveLength(0);
     });
 
     it("creates one timeline for two subscribers to the same SharedWork", async () => {
