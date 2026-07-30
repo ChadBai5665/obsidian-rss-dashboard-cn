@@ -71,6 +71,7 @@ export type OperationErrorCode =
   | "budget-exhausted"
   | "cache-save-failed"
   | "refresh-failed"
+  | "refresh-state-failed"
   | "source-refresh-failed"
   | "source-validation-failed"
   | "subscription-operation-failed"
@@ -321,6 +322,7 @@ const ERROR_CODES = new Set<OperationErrorCode>([
   "budget-exhausted",
   "cache-save-failed",
   "refresh-failed",
+  "refresh-state-failed",
   "source-refresh-failed",
   "source-validation-failed",
   "subscription-operation-failed",
@@ -369,6 +371,50 @@ export function snapshotOperationEvent(value: unknown): OperationEvent {
     details: snapshotDetails(category, event.details),
   };
   return Object.freeze(snapshot);
+}
+
+export function projectSafeOperationSubject(
+  value: unknown,
+): Readonly<OperationSubject> {
+  const projected: {
+    itemId?: string;
+    sourceId?: string;
+    label?: string;
+  } = {};
+  try {
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      Object.getPrototypeOf(value) !== Object.prototype
+    ) {
+      return Object.freeze(projected);
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const project = (
+      key: keyof OperationSubject,
+      validate: (field: unknown) => string,
+    ): void => {
+      const descriptor = descriptors[key];
+      if (
+        descriptor === undefined ||
+        descriptor.enumerable !== true ||
+        !Object.prototype.hasOwnProperty.call(descriptor, "value")
+      ) {
+        return;
+      }
+      try {
+        projected[key] = validate(descriptor.value);
+      } catch {
+        // Unsafe fields are discarded independently.
+      }
+    };
+    project("itemId", localId);
+    project("sourceId", localId);
+    project("label", safeText);
+  } catch {
+    // Hostile objects fail closed without preventing the operation itself.
+  }
+  return Object.freeze(projected);
 }
 
 function snapshotSubject(value: unknown): Readonly<OperationSubject> {

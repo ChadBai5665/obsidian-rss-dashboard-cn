@@ -18,14 +18,16 @@ import {
   SubscriptionService,
   createConfirmedCollectionPurge,
 } from "../../../src/services/subscription-service";
-import type {
-  OperationBeginInput,
-  OperationJournalPort,
-  OperationJournalScope,
+import {
+  OperationJournalService,
+  type OperationBeginInput,
+  type OperationJournalPort,
+  type OperationJournalScope,
 } from "../../../src/operation-journal/operation-journal-service";
 import type {
   OperationDetails,
   OperationErrorCode,
+  OperationEvent,
   OperationStage,
 } from "../../../src/operation-journal/operation-event";
 
@@ -261,6 +263,59 @@ beforeEach(() => {
 });
 
 describe("refreshFeeds() pipeline behavior", () => {
+  it("reconciles a delayed startup snapshot before ledger or provider work", async () => {
+    vi.useFakeTimers();
+    const source = createFeed({ feedId: "deleted-during-startup-delay" });
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.refreshMode = "daily-on-open";
+    plugin.settings.startupRefreshDelaySeconds = 15;
+    const ledger = {
+      getDueSourceIds: vi.fn().mockResolvedValue([source.feedId]),
+      recordAttempt: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+    };
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+
+    await plugin.refreshOnOpenIfNeeded();
+    plugin.settings.feeds = [];
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushMicrotasks();
+
+    expect(ledger.recordAttempt).not.toHaveBeenCalled();
+    expect(plugin.feedParser.refreshFeed).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(
+      getNoticeMessages(consoleLogSpy).some((message) =>
+        message.includes("deleted-during-startup-delay")
+      ),
+    ).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("keeps legacy refreshFeeds singleton selection bulk-classified and excluded", async () => {
+    const excluded = createFeed({
+      feedId: "legacy-selected-excluded",
+      excludeFromRefresh: true,
+    });
+    const plugin = createPluginWithSettings([excluded]);
+    const events = recordRefreshJournal(plugin);
+
+    await plugin.refreshFeeds([excluded]);
+
+    expect(events[0]).toMatchObject({
+      status: "started",
+      input: { trigger: "manual", action: "all", subject: {} },
+    });
+    expect(events.at(-1)).toMatchObject({
+      status: "succeeded",
+      details: { total: 0, succeeded: 0, failed: 0, newItems: 0 },
+    });
+    expect(plugin.feedParser.refreshFeed).not.toHaveBeenCalled();
+  });
+
   it("journals every user refresh entry as an explicit manual action", async () => {
     const sourceA = createFeed({
       feedId: "source-a",
@@ -403,6 +458,89 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(rendered).not.toContain("raw-secret");
     expect(rendered).not.toContain("response-body");
   });
+
+  it("keeps a real journal invocation when an unsafe source title is projected out", async () => {
+    const source = createFeed({
+      feedId: "safe-source-id",
+      title: "www.private.example sk-123456789 ghp_abcdefghijklmnopqrstuvwxyz1234567890 feeds/credentials/token/source",
+    });
+    const plugin = createPluginWithSettings([source]);
+    plugin.feedParser.refreshFeed.mockResolvedValue({ ...source, lastUpdated: 2 });
+    const appended: OperationEvent[] = [];
+    let nextId = 1;
+    const service = new OperationJournalService(
+      {
+        append: async (event) => {
+          appended.push(event);
+          return { maintenanceIncomplete: false };
+        },
+        readRange: async () => ({
+          events: [],
+          incompleteDates: [],
+          corruptDates: [],
+          truncated: false,
+        }),
+        stats: async () => ({ bytes: 0, days: 0, eventCount: 0 }),
+        prune: async () => undefined,
+        clear: async () => undefined,
+      },
+      {
+        createId: () =>
+          `10000000-0000-4000-8000-${String(nextId++).padStart(12, "0")}`,
+        clock: () => new Date("2026-07-30T10:00:00.000Z"),
+      },
+    );
+    plugin.getOperationJournalPort = () => service;
+
+    await plugin.manualRefreshSourceById(source.feedId!);
+    await flushMicrotasks();
+
+    expect(appended[0]).toMatchObject({
+      category: "refresh",
+      action: "source",
+      trigger: "manual",
+      status: "started",
+      subject: { sourceId: "safe-source-id" },
+    });
+    expect(appended[0]?.subject).not.toHaveProperty("label");
+  });
+
+  it.each(["attempt", "success"] as const)(
+    "journals a dedicated refresh-state error when ledger %s persistence fails",
+    async (failure) => {
+      const source = createFeed({ feedId: `ledger-${failure}` });
+      const plugin = createPluginWithSettings([source]);
+      const events = recordRefreshJournal(plugin);
+      plugin.settings.collection = { ...plugin.settings.collection, enabled: false };
+      plugin.feedParser.refreshFeed.mockResolvedValue({ ...source, lastUpdated: 2 });
+      const ledger = {
+        getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+        recordAttempt: failure === "attempt"
+          ? vi.fn().mockRejectedValue(new Error("attempt state failed"))
+          : vi.fn().mockResolvedValue(undefined),
+        recordSuccess: failure === "success"
+          ? vi.fn().mockRejectedValue(new Error("success state failed"))
+          : vi.fn().mockResolvedValue(undefined),
+        recordError: vi.fn().mockResolvedValue(undefined),
+      };
+      plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+
+      await plugin.manualRefreshSourceById(source.feedId!);
+
+      expect(events.at(-1)).toMatchObject({
+        status: "failed",
+        stage: "completed",
+        errorCode: "refresh-state-failed",
+        details: {
+          total: 1,
+          succeeded: 0,
+          failed: 1,
+          newItems: 0,
+          elapsedMs: expect.any(Number),
+        },
+      });
+    },
+  );
 
   it("closes empty, excluded, and occupied invocations without extra refresh work", async () => {
     const emptyPlugin = createPluginWithSettings([]);
@@ -577,12 +715,114 @@ describe("refreshFeeds() pipeline behavior", () => {
       }
       release();
       await refresh;
+      expect(events.at(-2)).toMatchObject({
+        status: "progress",
+        stage: "completed",
+        details: {
+          total: 1,
+          succeeded: 0,
+          failed: 0,
+          newItems: 0,
+          elapsedMs: expect.any(Number),
+        },
+      });
       expect(events.at(-1)).toMatchObject({
         status: "aborted",
         stage: "completed",
       });
     }
   });
+
+  it("records complete batch facts before a mixed success and abort terminal", async () => {
+    const completed = createFeed({ feedId: "completed-source", items: [] });
+    const removed = createFeed({ feedId: "removed-source", items: [] });
+    const plugin = createPluginWithSettings([completed, removed]);
+    const events = recordRefreshJournal(plugin);
+    let releaseRemoved!: () => void;
+    let markRemovedStarted!: () => void;
+    const removedStarted = new Promise<void>((resolve) => {
+      markRemovedStarted = resolve;
+    });
+    const removedBlocked = new Promise<void>((resolve) => {
+      releaseRemoved = resolve;
+    });
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (refresh: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (feed) => {
+      if (feed.feedId === "removed-source") {
+        markRemovedStarted();
+        await removedBlocked;
+      }
+      return {
+        ...feed,
+        items: feed.feedId === "completed-source"
+          ? [createItem({ guid: "new-completed-item", feedUrl: feed.url })]
+          : [],
+        lastUpdated: 2,
+      };
+    });
+
+    const refresh = plugin.manualRefreshAllSources();
+    await removedStarted;
+    plugin.settings.feeds = [completed];
+    releaseRemoved();
+    await refresh;
+
+    expect(events.at(-2)).toMatchObject({
+      status: "progress",
+      stage: "completed",
+      details: {
+        total: 2,
+        succeeded: 1,
+        failed: 0,
+        newItems: 1,
+        elapsedMs: expect.any(Number),
+      },
+    });
+    expect(events.at(-1)).toMatchObject({
+      status: "aborted",
+      stage: "completed",
+    });
+  });
+
+  it.each(["validation", "view"] as const)(
+    "keeps published success counts when post-publication %s fails",
+    async (failure) => {
+      const source = createFeed({ feedId: `post-publish-${failure}`, items: [] });
+      const plugin = createPluginWithSettings([source]);
+      const events = recordRefreshJournal(plugin);
+      plugin.feedParser.refreshFeed.mockResolvedValue({
+        ...source,
+        items: [createItem({ guid: `published-${failure}`, feedUrl: source.url })],
+        lastUpdated: 42,
+      });
+      if (failure === "validation") {
+        plugin.validateSavedArticles.mockRejectedValue(
+          new Error("validation observer failed"),
+        );
+      } else {
+        vi.spyOn(
+          plugin as unknown as RssDashboardPlugin,
+          "refreshDashboardViews",
+        ).mockRejectedValue(new Error("view observer failed"));
+      }
+
+      await plugin.manualRefreshSourceById(source.feedId!);
+
+      expect(plugin.settings.feeds[0].lastUpdated).toBe(42);
+      expect(events.at(-1)).toMatchObject({
+        status: "succeeded",
+        stage: "completed",
+        details: {
+          total: 1,
+          succeeded: 1,
+          failed: 0,
+          newItems: 1,
+          elapsedMs: expect.any(Number),
+        },
+      });
+    },
+  );
 
   it.each(["getter-throws", "begin-throws", "invalid-scope", "terminal-rejects"] as const)(
     "keeps refresh behavior unchanged when the journal %s",

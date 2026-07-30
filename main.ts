@@ -182,10 +182,11 @@ import type {
   OperationJournalPort,
   OperationJournalScope,
 } from "./src/operation-journal/operation-journal-service";
-import type {
-  OperationErrorCode,
-  OperationSubject,
-  RefreshOperationDetails,
+import {
+  projectSafeOperationSubject,
+  type OperationErrorCode,
+  type OperationSubject,
+  type RefreshOperationDetails,
 } from "./src/operation-journal/operation-event";
 
 export interface FeedRefreshResult {
@@ -771,8 +772,9 @@ function toRefreshOperationErrorCode(
     case "tikhub-disabled":
       return "tikhub-disabled";
     case "refresh-failed":
-    case "state-failed":
       return "source-refresh-failed";
+    case "state-failed":
+      return "refresh-state-failed";
   }
 }
 
@@ -2838,12 +2840,10 @@ export default class RssDashboardPlugin extends Plugin {
 
   async refreshFeeds(selectedFeeds?: Feed[]): Promise<void> {
     const selected = selectedFeeds ? [...selectedFeeds] : undefined;
-    const single = selected?.length === 1 ? selected[0] : undefined;
     await this.runRefresh({
       trigger: "manual",
-      action: single ? "source" : "all",
+      action: "all",
       ...(selected ? { feeds: selected } : {}),
-      ...(single ? { subject: this.refreshSubjectForFeed(single) } : {}),
     });
   }
 
@@ -2866,6 +2866,9 @@ export default class RssDashboardPlugin extends Plugin {
         this.cancelPendingStartupRefresh();
       }
 
+      const reconciledFeeds = invocation.feeds && invocation.action !== "source"
+        ? this.reconcileRefreshSnapshot(invocation.feeds)
+        : invocation.feeds;
       let candidateFeeds: readonly Feed[];
       if (invocation.action === "failed") {
         const failedSourceIds = new Set(
@@ -2875,7 +2878,7 @@ export default class RssDashboardPlugin extends Plugin {
           failedSourceIds.has(feed.feedId ?? feed.url)
         );
       } else {
-        candidateFeeds = invocation.feeds ?? this.settings.feeds;
+        candidateFeeds = reconciledFeeds ?? this.settings.feeds;
       }
 
       if (candidateFeeds.length === 0) {
@@ -3063,6 +3066,26 @@ export default class RssDashboardPlugin extends Plugin {
     return true;
   }
 
+  private reconcileRefreshSnapshot(feeds: readonly Feed[]): Feed[] {
+    const reconciled: Feed[] = [];
+    const seen = new Set<Feed>();
+    for (const snapshot of feeds) {
+      const sourceId = snapshot.feedId?.trim();
+      const current = sourceId
+        ? this.settings.feeds.find((feed) => feed.feedId?.trim() === sourceId)
+        : this.settings.feeds.find((feed) =>
+            feed.feedId === undefined &&
+            (feed.sourceKind === undefined || feed.sourceKind === "feed") &&
+            feed.url === snapshot.url
+          );
+      if (current && !seen.has(current)) {
+        seen.add(current);
+        reconciled.push(current);
+      }
+    }
+    return reconciled;
+  }
+
   private endRefreshSession(): void {
     this.activeRefreshState.clear();
     this.isMultiFeedRefreshRunning = false;
@@ -3076,21 +3099,10 @@ export default class RssDashboardPlugin extends Plugin {
   private refreshSubjectForFeed(feed: Feed): OperationSubject {
     const sourceId = feed.feedId?.trim();
     const label = feed.title?.normalize("NFC").trim();
-    const safeSourceId = sourceId &&
-        /^[A-Za-z0-9._:-]{1,200}$/u.test(sourceId) &&
-        !/(?:api[ _-]?key|token|secret|password|cookie)/iu.test(sourceId)
-      ? sourceId
-      : undefined;
-    const safeLabel = label &&
-        !hasControlCharacters(label) &&
-        !/(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|authorization\s*:|bearer\s+|(?:api[ _-]?key|token|secret|password|cookie)\s*[:=])/iu
-          .test(label)
-      ? [...label].slice(0, 200).join("")
-      : undefined;
-    return {
-      ...(safeSourceId ? { sourceId: safeSourceId } : {}),
-      ...(safeLabel ? { label: safeLabel } : {}),
-    };
+    return projectSafeOperationSubject({
+      ...(sourceId ? { sourceId } : {}),
+      ...(label ? { label } : {}),
+    });
   }
 
   private beginRefreshJournalSafely(
@@ -3167,6 +3179,16 @@ export default class RssDashboardPlugin extends Plugin {
     );
   }
 
+  private progressRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+    details: RefreshOperationDetails,
+  ): void {
+    this.invokeRefreshJournalSafely(
+      scope,
+      async (activeScope) => await activeScope.progress("completed", details),
+    );
+  }
+
   private emptyRefreshDetails(elapsedMs: number): RefreshOperationDetails {
     return {
       total: 0,
@@ -3216,6 +3238,7 @@ export default class RssDashboardPlugin extends Plugin {
       return;
     }
     if (batch.outcomes.some((outcome) => outcome.status === "aborted")) {
+      this.progressRefreshJournalSafely(scope, batch.details);
       this.abortRefreshJournalSafely(scope);
       return;
     }
@@ -5531,10 +5554,22 @@ export default class RssDashboardPlugin extends Plugin {
       return { status: "aborted" };
     }
 
-    await this.validateSavedArticles({ suppressCollectionBroadcast: true });
-    await this.refreshDashboardViews();
+    await this.runPostRefreshPublicationSafely();
     this.notify("plugin.refreshed", { source: feedNoticeText });
     return outcome;
+  }
+
+  private async runPostRefreshPublicationSafely(): Promise<void> {
+    try {
+      await this.validateSavedArticles({ suppressCollectionBroadcast: true });
+    } catch {
+      console.error("[RSS dashboard] Post-refresh validation failed.");
+    }
+    try {
+      await this.refreshDashboardViews();
+    } catch {
+      console.error("[RSS dashboard] Post-refresh view update failed.");
+    }
   }
 
   private async refreshFeedBatch(
@@ -5631,9 +5666,8 @@ export default class RssDashboardPlugin extends Plugin {
           : outcome
       );
       if (publishedSourceIds.size === 0) return finalizedOutcomes;
-      await this.validateSavedArticles({ suppressCollectionBroadcast: true });
+      await this.runPostRefreshPublicationSafely();
       this.activeRefreshState.clear();
-      await this.refreshDashboardViews();
 
       const failureSuffix = this.buildRefreshFailureSummary({
         failed: finalizedOutcomes.filter(

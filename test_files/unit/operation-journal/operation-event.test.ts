@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  projectSafeOperationSubject,
   snapshotOperationEvent,
   type OperationEvent,
 } from "../../../src/operation-journal/operation-event";
@@ -40,6 +41,65 @@ function eventWith(
 }
 
 describe("snapshotOperationEvent", () => {
+  it("accepts the dedicated local refresh-state failure code", () => {
+    expect(
+      snapshotOperationEvent(
+        eventWith({
+          category: "refresh",
+          action: "source",
+          stage: "completed",
+          status: "failed",
+          subject: { sourceId: "source-42" },
+          details: { errorCode: "refresh-state-failed" },
+        }),
+      ).details,
+    ).toEqual({ errorCode: "refresh-state-failed" });
+  });
+
+  it("projects safe subject fields independently instead of rejecting the identity", () => {
+    const unsafeLabels = [
+      "www.private.example/source",
+      "sk-1234567890abcdef",
+      "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+      "feeds/credentials/token/source",
+    ];
+
+    expect(
+      projectSafeOperationSubject({
+        sourceId: "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+        label: "Local feed",
+      }),
+    ).toEqual({ label: "Local feed" });
+    for (const label of unsafeLabels) {
+      expect(projectSafeOperationSubject({ sourceId: "source-42", label })).toEqual({
+        sourceId: "source-42",
+      });
+    }
+
+    let getterRuns = 0;
+    const getterSubject = { sourceId: "source-42" };
+    Object.defineProperty(getterSubject, "label", {
+      enumerable: true,
+      get() {
+        getterRuns += 1;
+        throw new Error("must not run");
+      },
+    });
+    expect(projectSafeOperationSubject(getterSubject)).toEqual({
+      sourceId: "source-42",
+    });
+    expect(getterRuns).toBe(0);
+    expect(
+      projectSafeOperationSubject(
+        new Proxy({}, {
+          ownKeys() {
+            throw new Error("hostile object");
+          },
+        }),
+      ),
+    ).toEqual({});
+  });
+
   it("copies and deeply freezes a valid transcript event", () => {
     const snapshot = snapshotOperationEvent(validTranscriptEvent);
 
