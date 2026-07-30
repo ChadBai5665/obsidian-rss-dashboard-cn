@@ -241,7 +241,7 @@ class OpenAiStreamState {
     const delta = plainDataRecord(ownData(choice, "delta"));
     if (!delta) throw malformedProviderResponse();
     const role = ownData(delta, "role");
-    if (role !== undefined && role !== "assistant") {
+    if (role !== undefined && role !== null && role !== "assistant") {
       throw malformedProviderResponse();
     }
     const contentPresent = hasOwnData(delta, "content");

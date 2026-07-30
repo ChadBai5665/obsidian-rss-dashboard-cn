@@ -148,6 +148,43 @@ describe("OpenAI-compatible streaming provider", () => {
     expect(test.transport).toHaveBeenCalledOnce();
   });
 
+  it("accepts DeepSeek's official final chunk with a nullable role", async () => {
+    const payload = event({
+      id: "req-deepseek-v4",
+      choices: [{
+        index: 0,
+        delta: { content: "摘要正文", role: "assistant" },
+        finish_reason: null,
+      }],
+    }) + event({
+      id: "req-deepseek-v4",
+      choices: [{
+        index: 0,
+        delta: { content: "", role: null },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 17, completion_tokens: 9 },
+    }) + event("[DONE]");
+    const deltas: string[] = [];
+
+    const result = await harness(streamTransport([payload]), {
+      providerKind: "deepseek",
+      baseUrl: "https://api.deepseek.com",
+      model: "deepseek-v4-pro",
+    }).provider.generate(
+      { system: "s", user: "u", maxOutputTokens: 100 },
+      (delta) => deltas.push(delta),
+    );
+
+    expect(result).toEqual({
+      text: "摘要正文",
+      providerRequestId: "req-deepseek-v4",
+      inputTokens: 17,
+      outputTokens: 9,
+    });
+    expect(deltas).toEqual(["摘要正文"]);
+  });
+
   it("accepts a provider finish_reason without a trailing DONE sentinel", async () => {
     const transport = streamTransport([
       event({ choices: [{ index: 0, delta: { content: "MiniMax 正常结果" }, finish_reason: null }] }) +
