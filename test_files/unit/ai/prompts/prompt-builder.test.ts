@@ -168,6 +168,26 @@ describe("AI prompt builder", () => {
     expect(prompt.inputTruncated).toBe(true);
   });
 
+  it("accepts the strict YouTube transcript basis without allowing unknown bases", () => {
+    const prompt = buildAiPrompt({
+      operation: "summary",
+      selectedContent: selected({ basis: "youtube-transcript" }),
+      maxContentCharacters: 80_000,
+    });
+
+    expect(prompt.contentBasis).toBe("youtube-transcript");
+    expect((JSON.parse(prompt.user) as SerializedAiPromptData).contentBasis).toBe(
+      "youtube-transcript",
+    );
+    expect(() => buildAiPrompt({
+      operation: "summary",
+      selectedContent: selected({
+        basis: "unknown-basis" as SelectedAiContent["basis"],
+      }),
+      maxContentCharacters: 80_000,
+    })).toThrow("Invalid AI prompt request");
+  });
+
   it("uses the exact final JSON size to fit the shared one-million-character request budget", () => {
     const escapeHeavy = `${"\\\"".repeat(460_000)}TAIL`;
     const prompt = buildAiPrompt({

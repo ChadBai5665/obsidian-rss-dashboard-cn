@@ -15,8 +15,18 @@ import type {
   RssDashboardSettings,
 } from "../../../src/types/types";
 import { DEFAULT_SETTINGS } from "../../../src/types/types";
-import { AddFeedModal } from "../../../src/modals/feed-manager/add-feed-modal";
+import { AddSourceModal } from "../../../src/modals/source-onboarding/add-source-modal";
 import { FeedStorageRollbackIncompleteError } from "../../../src/services/feed-storage-repository";
+import type {
+  SubscriptionUpdateRequest,
+  VerifiedSubscriptionRequest,
+} from "../../../src/services/subscription-service";
+import type {
+  OperationBeginInput,
+  OperationJournalPort,
+  OperationJournalScope,
+} from "../../../src/operation-journal/operation-journal-service";
+import { OperationJournalService } from "../../../src/operation-journal/operation-journal-service";
 
 // Mock functions for FeedParser - must be declared before mocks
 const mockParseFeed = vi.fn<(url: string) => Promise<Feed>>();
@@ -110,6 +120,346 @@ function createMockManifest(): PluginManifest {
   };
 }
 
+describe("subscription settings candidate persistence", () => {
+  it("persists a complete isolated candidate before publishing service references", async () => {
+    const plugin = await createPluginInstance(createMockApp());
+    const settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+    settings.locale = "en";
+    settings.feeds = [
+      {
+        feedId: "first",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "First",
+        url: "https://example.com/first.xml",
+        folder: "Old",
+        items: [{
+          guid: "history-kept",
+          title: "History",
+          link: "https://example.com/history",
+          pubDate: "2026-07-28T00:00:00.000Z",
+          feedUrl: "https://example.com/first.xml",
+          feedTitle: "First",
+        }],
+        lastUpdated: 0,
+      },
+      {
+        feedId: "target",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "Target",
+        url: "https://example.com/target.xml",
+        folder: "New",
+        items: [],
+        lastUpdated: 0,
+      },
+    ];
+    settings.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ];
+    plugin.settings = settings;
+    const liveRefs = {
+      feeds: settings.feeds,
+      folders: settings.folders,
+      collapsedFolders: settings.collapsedFolders,
+      folderFeedSortOrders: settings.folderFeedSortOrders,
+      folderSortOrder: settings.folderSortOrder,
+    };
+    const releasePersist = createDeferred<void>();
+    let persistedCandidate: RssDashboardSettings | undefined;
+    const repository = (
+      plugin as unknown as {
+        feedStorageRepository: {
+          persistSettingsTransaction<T>(
+            previous: RssDashboardSettings,
+            candidate: RssDashboardSettings,
+            metadataPlan: unknown,
+            afterPersist: () => Promise<T>,
+          ): Promise<T>;
+        };
+      }
+    ).feedStorageRepository;
+    vi.spyOn(repository, "persistSettingsTransaction").mockImplementation(
+      async (_previous, candidate, _metadataPlan, afterPersist) => {
+        persistedCandidate = candidate;
+        await releasePersist.promise;
+        return await afterPersist();
+      },
+    );
+
+    const ordering = plugin.applySidebarOrdering({
+      kind: "feed-insert",
+      draggedUrl: "https://example.com/first.xml",
+      targetUrl: "https://example.com/target.xml",
+      placement: "before",
+    });
+    await flushPromises();
+
+    expect(plugin.settings).toBe(settings);
+    expect(settings.feeds).toBe(liveRefs.feeds);
+    expect(settings.folders).toBe(liveRefs.folders);
+    expect(settings.collapsedFolders).toBe(liveRefs.collapsedFolders);
+    expect(settings.folderFeedSortOrders).toBe(liveRefs.folderFeedSortOrders);
+    expect(settings.folderSortOrder).toBe(liveRefs.folderSortOrder);
+    expect(settings.feeds[0].folder).toBe("Old");
+    expect(persistedCandidate).toMatchObject({
+      locale: "en",
+      collection: settings.collection,
+      tikhub: settings.tikhub,
+      ai: settings.ai,
+    });
+    expect(persistedCandidate?.feeds[0]).toMatchObject({
+      feedId: "first",
+      folder: "New",
+      items: [{ guid: "history-kept" }],
+    });
+
+    releasePersist.resolve();
+    await expect(ordering).resolves.toMatchObject({ ok: true });
+    expect(settings.feeds).not.toBe(liveRefs.feeds);
+    expect(settings.feeds[0]).toMatchObject({
+      feedId: "first",
+      folder: "New",
+      items: [{ guid: "history-kept" }],
+    });
+    expect(plugin.settings).toBe(settings);
+  });
+
+  it("builds an ordering candidate after an earlier refresh save and preserves refreshed history", async () => {
+    const plugin = await createPluginInstance(createMockApp());
+    const settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+    settings.feeds = [
+      {
+        feedId: "first",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "First",
+        url: "https://example.com/first.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 1,
+        initialImportProgress: {
+          status: "running",
+          pagesFetched: 1,
+          itemsImported: 0,
+        },
+      },
+      {
+        feedId: "target",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "Target",
+        url: "https://example.com/target.xml",
+        folder: "New",
+        items: [],
+        lastUpdated: 1,
+      },
+    ];
+    settings.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ];
+    plugin.settings = settings;
+
+    const queueEntered = createDeferred<void>();
+    const releaseEarlierSave = createDeferred<void>();
+    const queueBlock = (
+      plugin as unknown as {
+        enqueueSettingsOperation<T>(operation: () => Promise<T>): Promise<T>;
+      }
+    ).enqueueSettingsOperation(async () => {
+      queueEntered.resolve();
+      await releaseEarlierSave.promise;
+    });
+    await queueEntered.promise;
+
+    let persistedCandidate: RssDashboardSettings | undefined;
+    const repository = (
+      plugin as unknown as {
+        feedStorageRepository: {
+          persistSettingsTransaction<T>(
+            previous: RssDashboardSettings,
+            candidate: RssDashboardSettings,
+            metadataPlan: unknown,
+            afterPersist: () => Promise<T>,
+          ): Promise<T>;
+        };
+      }
+    ).feedStorageRepository;
+    vi.spyOn(repository, "persistSettingsTransaction").mockImplementation(
+      async (_previous, candidate, _metadataPlan, afterPersist) => {
+        persistedCandidate = candidate;
+        return await afterPersist();
+      },
+    );
+
+    const ordering = plugin.applySidebarOrdering({
+      kind: "feed-insert",
+      draggedUrl: "https://example.com/first.xml",
+      targetUrl: "https://example.com/target.xml",
+      placement: "before",
+    });
+    await flushPromises();
+
+    const refreshedItem: FeedItem = {
+      guid: "refresh-won",
+      title: "Refresh won",
+      link: "https://example.com/refresh-won",
+      pubDate: "2026-07-28T05:00:00.000Z",
+      feedUrl: "https://example.com/first.xml",
+      feedTitle: "First",
+    };
+    settings.feeds[0] = {
+      ...settings.feeds[0],
+      items: [refreshedItem],
+      lastUpdated: 99,
+      initialImportProgress: {
+        status: "running",
+        pagesFetched: 2,
+        itemsImported: 1,
+        nextCursor: "refresh-cursor",
+      },
+    };
+    settings.locale = "en";
+    settings.tikhub = { ...settings.tikhub, maxRequestsPerDay: 321 };
+    settings.ai = { ...settings.ai, defaultConnectionId: "refresh-ai" };
+
+    releaseEarlierSave.resolve();
+    await queueBlock;
+    await expect(ordering).resolves.toMatchObject({ ok: true });
+
+    const first = plugin.settings.feeds.find((feed) => feed.feedId === "first");
+    expect(first).toMatchObject({
+      folder: "New",
+      items: [{ guid: "refresh-won" }],
+      lastUpdated: 99,
+      initialImportProgress: {
+        pagesFetched: 2,
+        itemsImported: 1,
+        nextCursor: "refresh-cursor",
+      },
+    });
+    expect(persistedCandidate?.feeds.find((feed) => feed.feedId === "first"))
+      .toMatchObject(first as Feed);
+    expect(persistedCandidate).toMatchObject({
+      locale: "en",
+      tikhub: { maxRequestsPerDay: 321 },
+      ai: { defaultConnectionId: "refresh-ai" },
+    });
+  });
+
+  it("applies a queued subscription mutation to the latest replaced settings generation", async () => {
+    const plugin = await createPluginInstance(createMockApp());
+    const original = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+    original.feeds = [
+      {
+        feedId: "first",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "First",
+        url: "https://example.com/first.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 1,
+      },
+      {
+        feedId: "target",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        title: "Target",
+        url: "https://example.com/target.xml",
+        folder: "New",
+        items: [],
+        lastUpdated: 1,
+      },
+    ];
+    original.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ];
+    plugin.settings = original;
+
+    const imported = JSON.parse(JSON.stringify(original)) as RssDashboardSettings;
+    imported.locale = "en";
+    imported.ai = { ...imported.ai, defaultConnectionId: "imported-ai" };
+    imported.tikhub = { ...imported.tikhub, maxRequestsPerRun: 17 };
+    imported.feeds.push({
+      feedId: "imported-only",
+      sourceKind: "feed",
+      sourceConfig: { kind: "feed" },
+      title: "Imported only",
+      url: "https://example.com/imported.xml",
+      folder: "Old",
+      items: [],
+      lastUpdated: 55,
+    });
+
+    const queueEntered = createDeferred<void>();
+    const releaseImport = createDeferred<void>();
+    const queueBlock = (
+      plugin as unknown as {
+        enqueueSettingsOperation<T>(operation: () => Promise<T>): Promise<T>;
+      }
+    ).enqueueSettingsOperation(async () => {
+      queueEntered.resolve();
+      await releaseImport.promise;
+      plugin.settings = imported;
+    });
+    await queueEntered.promise;
+
+    let persistedCandidate: RssDashboardSettings | undefined;
+    const repository = (
+      plugin as unknown as {
+        feedStorageRepository: {
+          persistSettingsTransaction<T>(
+            previous: RssDashboardSettings,
+            candidate: RssDashboardSettings,
+            metadataPlan: unknown,
+            afterPersist: () => Promise<T>,
+          ): Promise<T>;
+        };
+      }
+    ).feedStorageRepository;
+    vi.spyOn(repository, "persistSettingsTransaction").mockImplementation(
+      async (_previous, candidate, _metadataPlan, afterPersist) => {
+        persistedCandidate = candidate;
+        return await afterPersist();
+      },
+    );
+
+    const ordering = plugin.applySidebarOrdering({
+      kind: "feed-insert",
+      draggedUrl: "https://example.com/first.xml",
+      targetUrl: "https://example.com/target.xml",
+      placement: "before",
+    });
+    await flushPromises();
+
+    releaseImport.resolve();
+    await queueBlock;
+    await expect(ordering).resolves.toMatchObject({ ok: true });
+
+    expect(plugin.settings).toBe(imported);
+    expect(plugin.settings.feeds.map((feed) => feed.feedId)).toEqual([
+      "first",
+      "target",
+      "imported-only",
+    ]);
+    expect(plugin.settings.feeds[0].folder).toBe("New");
+    expect(persistedCandidate?.feeds.map((feed) => feed.feedId)).toEqual([
+      "first",
+      "target",
+      "imported-only",
+    ]);
+    expect(persistedCandidate).toMatchObject({
+      locale: "en",
+      ai: { defaultConnectionId: "imported-ai" },
+      tikhub: { maxRequestsPerRun: 17 },
+    });
+  });
+});
+
 // Helper to create a plugin instance with mocks
 /** Typed accessor for private RssDashboardPlugin members accessed from tests. */
 type PluginPrivateAPI = {
@@ -120,13 +470,39 @@ type PluginPrivateAPI = {
   backgroundImportService: { startBackgroundImport: (feeds: Feed[]) => void };
   articleSaver: { fixSavedFilePaths: (...args: unknown[]) => Promise<unknown> };
   validateSavedArticles: () => Promise<void>;
-  refreshFeedsWithinSession: (feeds?: Feed[]) => Promise<void>;
+  runRefresh: (invocation: {
+    trigger: "manual" | "startup" | "schedule";
+    action: "all" | "failed" | "source" | "folder";
+    feeds?: readonly Feed[];
+  }) => Promise<void>;
+  getOperationJournalPort: () => OperationJournalPort | undefined;
   onArticleSaved: (item: FeedItem) => Promise<void>;
   ingestFeedsForBackgroundImport: (
     feeds: Array<{ title: string; url: string; folder: string }>,
     opts?: { mode?: string; folders?: unknown[] },
   ) => Promise<{ addedCount: number; skippedCount: number }>;
 };
+
+function recordRefreshStarts(
+  plugin: RssDashboardPlugin,
+): OperationBeginInput[] {
+  const starts: OperationBeginInput[] = [];
+  const scope: OperationJournalScope = {
+    operationId: "refresh-lifecycle",
+    progress: async () => undefined,
+    succeed: async () => undefined,
+    fail: async () => undefined,
+    abort: async () => undefined,
+  };
+  (plugin as unknown as PluginPrivateAPI).getOperationJournalPort = () => ({
+    begin: (input) => {
+      starts.push(input);
+      return scope;
+    },
+    attach: () => scope,
+  });
+  return starts;
+}
 
 async function createPluginInstance(app: MockApp): Promise<RssDashboardPlugin> {
   const manifest = createMockManifest();
@@ -429,6 +805,15 @@ describe("onload() initialization", () => {
     ).toBeGreaterThanOrEqual(4);
   });
 
+  it("schedules one best-effort journal prune without blocking load", async () => {
+    const prune = vi.spyOn(OperationJournalService.prototype, "prune")
+      .mockRejectedValue(new Error("journal maintenance unavailable"));
+
+    await expect(plugin.onload()).resolves.toBeUndefined();
+
+    expect(prune).toHaveBeenCalledTimes(1);
+  });
+
   it("registers ribbon icon", async () => {
     // When: onload is called
     await plugin.onload();
@@ -509,6 +894,65 @@ describe("onload() initialization", () => {
     expect(plugin.registerInterval).toHaveBeenCalled();
   });
 
+  it("keeps a delayed daily-on-open refresh classified as startup", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 30, 9, 0, 0));
+    const sourceFeed = { ...sampleFeed, feedId: "startup-source" };
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 15,
+      feeds: [sourceFeed],
+    });
+    mockRefreshAllFeeds.mockResolvedValue([{ ...sourceFeed, lastUpdated: 2 }]);
+    const starts = recordRefreshStarts(plugin);
+
+    await plugin.onload();
+    plugin.app.workspace.triggerLayoutReady();
+    await flushPromises();
+    expect(starts).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({
+      category: "refresh",
+      trigger: "startup",
+      action: "all",
+      stage: "preparing",
+    });
+    vi.useRealTimers();
+  });
+
+  it("classifies the existing interval callback as schedule without adding timers", async () => {
+    vi.useFakeTimers();
+    const intervalSpy = vi.spyOn(window, "setInterval");
+    const sourceFeed = { ...sampleFeed, feedId: "scheduled-source" };
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "interval",
+      refreshInterval: 15,
+      feeds: [sourceFeed],
+    });
+    mockRefreshAllFeeds.mockResolvedValue([{ ...sourceFeed, lastUpdated: 2 }]);
+    const starts = recordRefreshStarts(plugin);
+
+    await plugin.onload();
+    expect(intervalSpy).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+    await flushPromises();
+
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({
+      category: "refresh",
+      trigger: "schedule",
+      action: "all",
+      stage: "preparing",
+    });
+    expect(intervalSpy).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
   it("does not register auto refresh when refreshInterval is disabled", async () => {
     plugin.loadData = vi.fn().mockResolvedValue({
       refreshMode: "interval",
@@ -577,7 +1021,7 @@ describe("onload() initialization", () => {
       }),
     );
     const refreshSpy = vi
-      .spyOn(plugin, "refreshFeeds")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -589,7 +1033,11 @@ describe("onload() initialization", () => {
     await flushPromises();
     expect(refreshSpy).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(15_000);
-    expect(refreshSpy).toHaveBeenCalledWith([sourceFeed]);
+    expect(refreshSpy).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [sourceFeed],
+    });
     vi.useRealTimers();
   });
 
@@ -618,7 +1066,7 @@ describe("onload() initialization", () => {
       }),
     );
     const refreshSpy = vi
-      .spyOn(plugin, "refreshFeeds")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -627,7 +1075,13 @@ describe("onload() initialization", () => {
     await flushPromises();
     await vi.advanceTimersByTimeAsync(15_000);
 
-    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(refreshSpy).toHaveBeenCalledOnce();
+    expect(refreshSpy).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [],
+    });
+    expect(mockRefreshAllFeeds).not.toHaveBeenCalled();
     vi.useRealTimers();
   });
 
@@ -647,7 +1101,7 @@ describe("onload() initialization", () => {
       feeds: [{ ...sampleFeed, feedId: "feed-1" }],
     });
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -678,9 +1132,10 @@ describe("onload() initialization", () => {
       startupRefreshDelaySeconds: 15,
       feeds: [{ ...sampleFeed, feedId: "feed-1" }],
     });
-    const refreshSpy = vi
-      .spyOn(plugin, "refreshFeeds")
-      .mockResolvedValue(undefined);
+    const refreshSpy = vi.spyOn(
+      plugin as unknown as PluginPrivateAPI,
+      "runRefresh",
+    );
 
     await plugin.onload();
     await flushPromises();
@@ -716,7 +1171,7 @@ describe("onload() initialization", () => {
       feeds: [{ ...sampleFeed, feedId: "feed-1" }],
     });
     const refreshSpy = vi
-      .spyOn(plugin, "refreshFeeds")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -744,7 +1199,7 @@ describe("onload() initialization", () => {
     const ledgerExists = vi.fn((path: string) => originalExists(path));
     adapter.exists = ledgerExists;
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -762,7 +1217,11 @@ describe("onload() initialization", () => {
     expect(ledgerExists).toHaveBeenCalledWith(
       ".rss-dashboard-data/state/source-refresh.json",
     );
-    expect(refreshSpy).toHaveBeenCalledWith([sourceFeed]);
+    expect(refreshSpy).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [sourceFeed],
+    });
     vi.useRealTimers();
   });
 
@@ -775,7 +1234,7 @@ describe("onload() initialization", () => {
       feeds: [sourceFeed],
     });
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -817,7 +1276,7 @@ describe("onload() initialization", () => {
       }),
     );
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -825,7 +1284,11 @@ describe("onload() initialization", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(refreshSpy).toHaveBeenCalledWith([errored]);
+    expect(refreshSpy).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [errored],
+    });
     vi.useRealTimers();
   });
 
@@ -851,7 +1314,7 @@ describe("onload() initialization", () => {
       }),
     );
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -859,7 +1322,11 @@ describe("onload() initialization", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(refreshSpy).toHaveBeenCalledWith([missing, yesterday]);
+    expect(refreshSpy).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [missing, yesterday],
+    });
     vi.useRealTimers();
   });
 
@@ -884,7 +1351,7 @@ describe("onload() initialization", () => {
       }),
     );
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -893,8 +1360,11 @@ describe("onload() initialization", () => {
     await flushPromises();
     await plugin.manualRefreshAllSources();
 
-    expect(refreshSpy).toHaveBeenCalledTimes(1);
-    expect(refreshSpy).toHaveBeenCalledWith();
+    expect(refreshSpy).toHaveBeenCalledTimes(2);
+    expect(refreshSpy).toHaveBeenNthCalledWith(2, {
+      trigger: "manual",
+      action: "all",
+    });
     vi.useRealTimers();
   });
 
@@ -1220,7 +1690,7 @@ describe("onload() initialization", () => {
       startupRefreshDelaySeconds: 0,
     });
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -1407,7 +1877,7 @@ describe("URI add-feed handling", () => {
 
   it("opens Add Feed modal with prefilled URL for browser URI route", async () => {
     const addFeedSpy = vi.spyOn(plugin, "addFeed");
-    const modalOpenSpy = vi.spyOn(AddFeedModal.prototype, "open");
+    const modalOpenSpy = vi.spyOn(AddSourceModal.prototype, "open");
 
     await plugin.onload();
     const handler = (
@@ -1422,8 +1892,129 @@ describe("URI add-feed handling", () => {
     expect(addFeedSpy).not.toHaveBeenCalled();
 
     const urlInput =
-      document.querySelector<HTMLInputElement>(".feed-url-input");
+      document.querySelector<HTMLInputElement>(".rss-source-identity-input");
     expect(urlInput?.value).toBe("https://example.com/feed.xml");
+  });
+});
+
+describe("addVerifiedSubscription()", () => {
+  it("reports durable success when dashboard refresh fails and retries the view later", async () => {
+    const plugin = await createPluginInstance(createMockApp());
+    const add = vi.fn(async (_request: VerifiedSubscriptionRequest) => undefined);
+    vi.spyOn(
+      plugin as unknown as {
+        getSubscriptionService: () => {
+          add: (request: VerifiedSubscriptionRequest) => Promise<void>;
+        };
+      },
+      "getSubscriptionService",
+    ).mockReturnValue({ add });
+    vi.spyOn(plugin, "refreshDashboardViews")
+      .mockRejectedValueOnce(new Error("secret refresh detail"))
+      .mockResolvedValueOnce(undefined);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request: VerifiedSubscriptionRequest = {
+      kind: "youtube",
+      verification: {
+        channelId: "UC1234567890123456789012",
+        channelName: "OpenAI",
+        channelUrl: "https://www.youtube.com/channel/UC1234567890123456789012",
+        feedUrl: "https://www.youtube.com/feeds/videos.xml?channel_id=UC1234567890123456789012",
+        hasEntries: true,
+      },
+      tags: [],
+      initialImportPolicy: { mode: "lookback-days", days: 7 },
+    };
+
+    await expect(plugin.addVerifiedSubscription(request)).resolves.toBe(true);
+    await flushPromises();
+
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(plugin.refreshDashboardViews).toHaveBeenCalledTimes(2);
+    expect(errorLog.mock.calls.flat().join(" ")).not.toContain("secret refresh detail");
+  });
+});
+
+describe("subscription lifecycle command durability", () => {
+  it("does not consume an X identity update twice when view refresh fails", async () => {
+    const plugin = await createPluginInstance(createMockApp());
+    const update = vi.fn(async () => undefined);
+    vi.spyOn(
+      plugin as unknown as {
+        getSubscriptionService: () => {
+          update: (feedId: string, request: SubscriptionUpdateRequest) => Promise<void>;
+        };
+      },
+      "getSubscriptionService",
+    ).mockReturnValue({ update });
+    vi.spyOn(plugin, "refreshDashboardViews")
+      .mockRejectedValueOnce(new Error("private view failure"))
+      .mockResolvedValueOnce(undefined);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const request = {
+      kind: "x-account",
+      profile: { restId: "44196397", handle: "openai", displayName: "OpenAI" },
+      verificationProof: Object.freeze({}),
+      includeReplies: false,
+      includeReposts: false,
+      tags: [],
+      initialImportPolicy: { mode: "lookback-days", days: 7 },
+    } as unknown as SubscriptionUpdateRequest;
+
+    await expect(plugin.updateSubscription("x-account-openai", request))
+      .resolves.toBe(true);
+    await flushPromises();
+
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith("x-account-openai", request);
+    expect(plugin.refreshDashboardViews).toHaveBeenCalledTimes(2);
+    expect(errorLog.mock.calls.flat().join(" ")).not.toContain(
+      "private view failure",
+    );
+  });
+
+  it.each([
+    "pause",
+    "stop",
+    "resume",
+    "remove",
+  ] as const)("reports durable %s success when only view refresh fails", async (command) => {
+    const plugin = await createPluginInstance(createMockApp());
+    const service = {
+      setPaused: vi.fn(async () => undefined),
+      stopInitialImport: vi.fn(async () => undefined),
+      resumeInitialImport: vi.fn(async () => undefined),
+      remove: vi.fn(async () => undefined),
+    };
+    vi.spyOn(
+      plugin as unknown as { getSubscriptionService: () => typeof service },
+      "getSubscriptionService",
+    ).mockReturnValue(service);
+    vi.spyOn(plugin, "refreshDashboardViews")
+      .mockRejectedValueOnce(new Error("private view failure"))
+      .mockResolvedValueOnce(undefined);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = command === "pause"
+      ? await plugin.setSubscriptionPaused("source-id", true)
+      : command === "stop"
+        ? await plugin.stopSubscriptionInitialImport("source-id")
+        : command === "resume"
+          ? await plugin.resumeSubscriptionInitialImport("source-id")
+          : await plugin.removeSubscription("source-id", {
+              purgeCollection: false,
+            });
+    await flushPromises();
+
+    expect(result).toBe(true);
+    expect(service.setPaused).toHaveBeenCalledTimes(command === "pause" ? 1 : 0);
+    expect(service.stopInitialImport).toHaveBeenCalledTimes(command === "stop" ? 1 : 0);
+    expect(service.resumeInitialImport).toHaveBeenCalledTimes(command === "resume" ? 1 : 0);
+    expect(service.remove).toHaveBeenCalledTimes(command === "remove" ? 1 : 0);
+    expect(plugin.refreshDashboardViews).toHaveBeenCalledTimes(2);
+    expect(errorLog.mock.calls.flat().join(" ")).not.toContain(
+      "private view failure",
+    );
   });
 });
 
@@ -1805,6 +2396,65 @@ describe("addFeed()", () => {
     // Then: Should return true and add feed to settings
     expect(result).toBe(true);
     expect(plugin.settings.feeds).toHaveLength(2);
+  });
+
+  it("reports durable add success when the follow-up dashboard refresh fails", async () => {
+    const newUrl = "https://example.com/durable-feed.xml";
+    mockParseFeed.mockResolvedValue({
+      title: "Durable Feed",
+      url: newUrl,
+      folder: "Research",
+      items: [],
+      lastUpdated: Date.now(),
+      mediaType: "article",
+    });
+    plugin.getActiveDashboardView = vi.fn().mockRejectedValue(
+      new Error("private UI failure"),
+    );
+    const notify = vi.spyOn(
+      plugin as unknown as { notify(key: string, params?: unknown): void },
+      "notify",
+    );
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await plugin.addFeed("Durable Feed", newUrl, "Research");
+
+    expect(result).toBe(true);
+    expect(plugin.settings.feeds.filter((feed) => feed.url === newUrl)).toHaveLength(1);
+    expect(notify.mock.calls.filter(([key]) => key === "plugin.feedAdded"))
+      .toHaveLength(1);
+    expect(notify.mock.calls.some(([key]) => key === "plugin.feedAddFailed"))
+      .toBe(false);
+    expect(consoleError.mock.calls.flat().join(" ")).not.toContain(
+      "private UI failure",
+    );
+  });
+
+  it("contains a rejected dashboard refresh after a durable add", async () => {
+    const newUrl = "https://example.com/rejected-refresh.xml";
+    mockParseFeed.mockResolvedValue({
+      title: "Durable Feed",
+      url: newUrl,
+      folder: "Research",
+      items: [],
+      lastUpdated: Date.now(),
+      mediaType: "article",
+    });
+    const refresh = vi.fn().mockRejectedValue(new Error("private refresh error"));
+    plugin.getActiveDashboardView = vi.fn().mockResolvedValue({ refresh });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(plugin.addFeed("Durable Feed", newUrl, "Research"))
+      .resolves.toBe(true);
+    await flushPromises();
+
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[RSS Dashboard] Feed saved; dashboard refresh deferred.",
+    );
+    expect(consoleError.mock.calls.flat().join(" ")).not.toContain(
+      "private refresh error",
+    );
   });
 
   it("detects media type based on folder (YouTube)", async () => {
@@ -2307,6 +2957,27 @@ describe("onunload()", () => {
 
     // When: onunload is called
     expect(() => plugin.onunload()).not.toThrow();
+  });
+
+  it("disposes the active YouTube transcript runtime on unload", () => {
+    const dispose = vi.fn();
+    (plugin as unknown as {
+      youtubeTranscriptRuntime: {
+        dataRoot: string;
+        service: { dispose(): void };
+        contentRepository: object;
+      };
+    }).youtubeTranscriptRuntime = {
+      dataRoot: ".rss-dashboard-data",
+      service: { dispose },
+      contentRepository: {},
+    };
+
+    plugin.onunload();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect((plugin as unknown as { youtubeTranscriptRuntime: unknown })
+      .youtubeTranscriptRuntime).toBeNull();
   });
 });
 

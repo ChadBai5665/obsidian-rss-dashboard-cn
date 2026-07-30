@@ -1,6 +1,12 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { normalizePath, type DataAdapter, type Vault } from "obsidian";
+import {
+  isValidYouTubeVideoId,
+  type YouTubeTranscriptProvider,
+} from "../youtube-transcript/transcript-types";
+import { isValidYouTubeCaptionLanguageCode } from "../youtube-transcript/youtube-caption-language-code";
 
-export interface CachedItemContent {
+export interface FullTextCachedItemContent {
   schemaVersion: 1;
   itemId: string;
   sourceUrl?: string;
@@ -9,8 +15,54 @@ export interface CachedItemContent {
   text: string;
 }
 
+export interface YouTubeTranscriptCachedItemContent {
+  schemaVersion: 2;
+  contentBasis: "youtube-transcript";
+  itemId: string;
+  sourceUrl?: string;
+  fetchedAt: string;
+  videoId: string;
+  languageCode: string;
+  languageName: string;
+  isGenerated: boolean;
+  provider: YouTubeTranscriptProvider;
+  text: string;
+}
+
+export type CachedItemContent =
+  | FullTextCachedItemContent
+  | YouTubeTranscriptCachedItemContent;
+
+export interface ContentItemTransaction {
+  read(): Promise<CachedItemContent | null>;
+  write(content: CachedItemContent): Promise<string>;
+  pathFor(): string;
+}
+
+interface ActiveContentTransaction {
+  vault: object;
+  key: string;
+  active: boolean;
+}
+
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/;
+const TRANSCRIPT_FIELDS = new Set([
+  "schemaVersion",
+  "itemId",
+  "sourceUrl",
+  "fetchedAt",
+  "contentBasis",
+  "videoId",
+  "languageCode",
+  "languageName",
+  "isGenerated",
+  "provider",
+  "text",
+]);
 const vaultItemQueues = new WeakMap<object, Map<string, Promise<void>>>();
+const activeContentTransactions = new AsyncLocalStorage<
+  readonly ActiveContentTransaction[]
+>();
 let transactionSequence = 0;
 
 /**
@@ -33,36 +85,93 @@ export class ContentRepository {
 
   async read(itemId: string): Promise<CachedItemContent | null> {
     assertStableItemId(itemId);
-    return await this.withItemLock(itemId, async () => {
-      const path = this.contentPath(itemId);
-      await this.recoverAtomicTarget(path);
-      if (!(await this.vault.adapter.exists(path))) return null;
-      const content = parseCachedItemContent(await this.vault.adapter.read(path));
-      return content?.itemId === itemId ? content : null;
-    });
+    return await this.transaction(itemId, async (transaction) =>
+      await transaction.read(),
+    );
   }
 
   async write(content: CachedItemContent): Promise<string> {
     assertCachedItemContent(content);
-    return await this.withItemLock(content.itemId, async () =>
-      await this.writeInternal(content),
+    return await this.transaction(content.itemId, async (transaction) =>
+      await transaction.write(content),
     );
   }
 
   async remove(itemId: string): Promise<void> {
     assertStableItemId(itemId);
-    await this.withItemLock(itemId, async () => {
-      const path = this.contentPath(itemId);
-      await this.recoverAtomicTarget(path);
-      const adapter = this.vault.adapter as Partial<DataAdapter>;
-      if (typeof adapter.remove === "function" && (await this.vault.adapter.exists(path))) {
-        await adapter.remove.call(this.vault.adapter, path);
-      }
-    });
+    this.assertNotReentrant(itemId);
+    await this.withItemLock(itemId, async () => await this.removeInternal(itemId));
   }
 
   pathFor(itemId: string): string {
     return this.contentPath(itemId);
+  }
+
+  /**
+   * Serializes a complete content-and-metadata operation for one stable item.
+   * The transaction methods bypass the outer queue intentionally, preventing
+   * nested-lock deadlocks while the caller coordinates a second repository.
+   */
+  async transaction<T>(
+    itemId: string,
+    operation: (transaction: ContentItemTransaction) => Promise<T>,
+  ): Promise<T> {
+    assertStableItemId(itemId);
+    this.assertNotReentrant(itemId);
+    return await this.withItemLock(itemId, async () => {
+      let active = true;
+      const assertActive = () => {
+        if (!active) throw new Error("Content transaction has ended");
+      };
+      const transaction: ContentItemTransaction = Object.freeze({
+        read: async () => {
+          assertActive();
+          return await this.readInternal(itemId);
+        },
+        write: async (content: CachedItemContent) => {
+          assertActive();
+          assertCachedItemContent(content);
+          if (content.itemId !== itemId) {
+            throw new Error("Content transaction item mismatch");
+          }
+          return await this.writeInternal(content);
+        },
+        pathFor: () => {
+          assertActive();
+          return this.contentPath(itemId);
+        },
+      });
+      const inherited = activeContentTransactions.getStore() ?? [];
+      const context: ActiveContentTransaction = {
+        vault: this.vault,
+        key: this.itemLockKey(itemId),
+        active: true,
+      };
+      try {
+        return await activeContentTransactions.run(
+          [...inherited, context],
+          async () => await operation(transaction),
+        );
+      } finally {
+        active = false;
+        context.active = false;
+      }
+    });
+  }
+
+  private assertNotReentrant(itemId: string): void {
+    const key = this.itemLockKey(itemId);
+    if (
+      (activeContentTransactions.getStore() ?? []).some(
+        (entry) => entry.active && entry.vault === this.vault && entry.key === key,
+      )
+    ) {
+      throw new Error("Reentrant content transaction is not allowed");
+    }
+  }
+
+  private itemLockKey(itemId: string): string {
+    return `${this.dataRoot}\0${itemId}`;
   }
 
   private async withItemLock<T>(
@@ -71,7 +180,7 @@ export class ContentRepository {
   ): Promise<T> {
     const queues = vaultItemQueues.get(this.vault) ?? new Map<string, Promise<void>>();
     vaultItemQueues.set(this.vault, queues);
-    const key = `${this.dataRoot}\0${itemId}`;
+    const key = this.itemLockKey(itemId);
     const prior = queues.get(key) ?? Promise.resolve();
     const running = prior.catch(() => undefined).then(operation);
     const settled = running.then(() => undefined, () => undefined);
@@ -90,6 +199,26 @@ export class ContentRepository {
     const path = this.contentPath(content.itemId);
     await this.atomicWrite(path, serializeCachedItemContent(content));
     return path;
+  }
+
+  private async readInternal(itemId: string): Promise<CachedItemContent | null> {
+    const path = this.contentPath(itemId);
+    await this.recoverAtomicTarget(path);
+    if (!(await this.vault.adapter.exists(path))) return null;
+    const content = parseCachedItemContent(await this.vault.adapter.read(path));
+    return content?.itemId === itemId ? content : null;
+  }
+
+  private async removeInternal(itemId: string): Promise<void> {
+    const path = this.contentPath(itemId);
+    await this.recoverAtomicTarget(path);
+    const adapter = this.vault.adapter as Partial<DataAdapter>;
+    if (
+      typeof adapter.remove === "function" &&
+      (await this.vault.adapter.exists(path))
+    ) {
+      await adapter.remove.call(this.vault.adapter, path);
+    }
   }
 
   private get contentDirectory(): string {
@@ -219,6 +348,21 @@ function serializeCachedItemContent(content: CachedItemContent): string {
       : `sourceUrl: ${JSON.stringify(content.sourceUrl)}`,
     `fetchedAt: ${JSON.stringify(content.fetchedAt)}`,
     `contentBasis: ${JSON.stringify(content.contentBasis)}`,
+    content.schemaVersion === 2
+      ? `videoId: ${JSON.stringify(content.videoId)}`
+      : undefined,
+    content.schemaVersion === 2
+      ? `languageCode: ${JSON.stringify(content.languageCode)}`
+      : undefined,
+    content.schemaVersion === 2
+      ? `languageName: ${JSON.stringify(content.languageName)}`
+      : undefined,
+    content.schemaVersion === 2
+      ? `isGenerated: ${JSON.stringify(content.isGenerated)}`
+      : undefined,
+    content.schemaVersion === 2
+      ? `provider: ${JSON.stringify(content.provider)}`
+      : undefined,
     "---",
     "",
   ].filter((line): line is string => line !== undefined);
@@ -233,25 +377,48 @@ function parseCachedItemContent(raw: string): CachedItemContent | null {
   for (const line of frontmatter[1].split(/\r?\n/)) {
     const match = line.match(/^([A-Za-z][A-Za-z0-9]*):\s(.+)$/);
     if (!match) return null;
+    if (fields.has(match[1])) return null;
     try {
       fields.set(match[1], JSON.parse(match[2]));
     } catch {
-      if (match[1] === "schemaVersion" && match[2] === "1") {
-        fields.set(match[1], 1);
-      } else {
-        return null;
-      }
+      return null;
     }
   }
 
-  const candidate: CachedItemContent = {
-    schemaVersion: fields.get("schemaVersion") as 1,
-    itemId: fields.get("itemId") as string,
-    sourceUrl: fields.get("sourceUrl") as string | undefined,
-    fetchedAt: fields.get("fetchedAt") as string,
-    contentBasis: fields.get("contentBasis") as "full-text",
-    text: frontmatter[2],
-  };
+  const schemaVersion = fields.get("schemaVersion");
+  let candidate: CachedItemContent;
+  if (schemaVersion === 1) {
+    candidate = {
+      schemaVersion: 1,
+      itemId: fields.get("itemId") as string,
+      sourceUrl: fields.get("sourceUrl") as string | undefined,
+      fetchedAt: fields.get("fetchedAt") as string,
+      contentBasis: fields.get("contentBasis") as "full-text",
+      text: frontmatter[2],
+    };
+  } else if (schemaVersion === 2) {
+    const allowedFrontmatter = new Set(
+      [...TRANSCRIPT_FIELDS].filter((field) => field !== "text"),
+    );
+    if ([...fields.keys()].some((field) => !allowedFrontmatter.has(field))) {
+      return null;
+    }
+    candidate = {
+      schemaVersion: 2,
+      itemId: fields.get("itemId") as string,
+      sourceUrl: fields.get("sourceUrl") as string | undefined,
+      fetchedAt: fields.get("fetchedAt") as string,
+      contentBasis: fields.get("contentBasis") as "youtube-transcript",
+      videoId: fields.get("videoId") as string,
+      languageCode: fields.get("languageCode") as string,
+      languageName: fields.get("languageName") as string,
+      isGenerated: fields.get("isGenerated") as boolean,
+      provider: fields.get("provider") as YouTubeTranscriptProvider,
+      text: frontmatter[2],
+    };
+  } else {
+    return null;
+  }
   try {
     assertCachedItemContent(candidate);
     return candidate;
@@ -261,9 +428,7 @@ function parseCachedItemContent(raw: string): CachedItemContent | null {
 }
 
 function assertCachedItemContent(content: CachedItemContent): void {
-  if (content.schemaVersion !== 1 || content.contentBasis !== "full-text") {
-    throw new Error("Invalid cached content schema");
-  }
+  if (!isRecord(content)) throw new Error("Invalid cached content schema");
   assertStableItemId(content.itemId);
   if (typeof content.fetchedAt !== "string" || Number.isNaN(Date.parse(content.fetchedAt))) {
     throw new Error("Invalid cached content timestamp");
@@ -274,6 +439,61 @@ function assertCachedItemContent(content: CachedItemContent): void {
   if (typeof content.text !== "string" || !content.text.trim()) {
     throw new Error("Cached content must not be empty");
   }
+  if (content.schemaVersion === 1) {
+    if (content.contentBasis !== "full-text") {
+      throw new Error("Invalid cached content schema");
+    }
+    return;
+  }
+  if (
+    content.schemaVersion !== 2 ||
+    content.contentBasis !== "youtube-transcript"
+  ) {
+    throw new Error("Invalid cached content schema");
+  }
+  if (
+    Object.keys(content).some((field) => !TRANSCRIPT_FIELDS.has(field))
+  ) {
+    throw new Error("Invalid cached transcript fields");
+  }
+  if (!isValidYouTubeVideoId(content.videoId)) {
+    throw new Error("Invalid cached transcript video id");
+  }
+  if (
+    !isValidYouTubeCaptionLanguageCode(content.languageCode)
+  ) {
+    throw new Error("Invalid cached transcript language code");
+  }
+  if (
+    typeof content.languageName !== "string" ||
+    !content.languageName.trim() ||
+    content.languageName.length > 200 ||
+    hasUnsafeControl(content.languageName)
+  ) {
+    throw new Error("Invalid cached transcript language name");
+  }
+  if (typeof content.isGenerated !== "boolean") {
+    throw new Error("Invalid cached transcript generation flag");
+  }
+  if (
+    content.provider !== "innertube" &&
+    content.provider !== "tikhub" &&
+    content.provider !== "yt-dlp"
+  ) {
+    throw new Error("Invalid cached transcript provider");
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasUnsafeControl(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 32 || code === 127) return true;
+  }
+  return false;
 }
 
 function assertStableItemId(value: string): void {

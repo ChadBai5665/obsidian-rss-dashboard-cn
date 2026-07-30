@@ -13,6 +13,7 @@ export type ObservationType = "new" | "updated" | "rediscovered";
 export type ContentBasis =
   | "feed"
   | "full-text"
+  | "youtube-transcript"
   | "title-description"
   | "x-post"
   | "linked-page";

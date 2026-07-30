@@ -53,12 +53,13 @@ describe("Sidebar folder ordering helpers (TDD)", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(settings.feeds.find((f) => f.url === "f")?.folder).toBe(
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.settings.feeds.find((f) => f.url === "f")?.folder).toBe(
       "Beta/Alpha/Child",
     );
-    expect(settings.collapsedFolders).toEqual(["Beta/Alpha", "Beta/Alpha/Child"]);
-    expect(settings.folderFeedSortOrders?.["Beta/Alpha/Child"]?.by).toBe("name");
-    expect(settings.folderSortOrder?.by).toBe("custom");
+    expect(result.settings.collapsedFolders).toEqual(["Beta/Alpha", "Beta/Alpha/Child"]);
+    expect(result.settings.folderFeedSortOrders?.["Beta/Alpha/Child"]?.by).toBe("name");
+    expect(result.settings.folderSortOrder?.by).toBe("custom");
   });
 
   it("rejects nesting a folder into its own descendant", () => {
@@ -93,8 +94,9 @@ describe("Sidebar feed ordering helpers (TDD)", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(settings.feeds.map((f) => f.url)).toEqual(["c", "a", "b"]);
-    expect(settings.folderFeedSortOrders?.["Work"]?.by).toBe("custom");
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.settings.feeds.map((f) => f.url)).toEqual(["c", "a", "b"]);
+    expect(result.settings.folderFeedSortOrders?.["Work"]?.by).toBe("custom");
   });
 
   it("moves into another folder and appends, switching destination to custom", () => {
@@ -111,7 +113,8 @@ describe("Sidebar feed ordering helpers (TDD)", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(settings.feeds.find((f) => f.url === "a")?.folder).toBe("Home");
-    expect(settings.folderFeedSortOrders?.["Home"]?.by).toBe("custom");
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.settings.feeds.find((f) => f.url === "a")?.folder).toBe("Home");
+    expect(result.settings.folderFeedSortOrders?.["Home"]?.by).toBe("custom");
   });
 });

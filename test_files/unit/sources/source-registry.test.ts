@@ -132,9 +132,14 @@ describe("SourceRegistry", () => {
     ).rejects.toThrow("Invalid source refresh output");
   });
 
-  it("validates the returned feed against the normalized source and clones warnings", async () => {
+  it("gives every adapter an isolated feed snapshot and clones warnings", async () => {
     const controller = new AbortController();
-    const context = { now: new Date("2026-07-22"), signal: controller.signal };
+    const sourceFeed = { ...feed, items: [{ ...item }] };
+    const context = {
+      now: new Date("2026-07-22"),
+      signal: controller.signal,
+      feed: sourceFeed,
+    };
     const warnings = ["first"];
     const refresh = vi.fn().mockResolvedValue({
       feed: { ...feed, sourceConfig: { ...account, topics: [] } },
@@ -148,8 +153,17 @@ describe("SourceRegistry", () => {
     const output = await registry.refresh(account, context);
     warnings.push("mutated after return");
     expect(output.warnings).toEqual(["first"]);
-    expect(refresh).toHaveBeenCalledWith(account, context);
-    expect(refresh.mock.calls[0][1]).toBe(context);
+    expect(refresh).toHaveBeenCalledWith(account, expect.objectContaining({
+      now: context.now,
+      signal: context.signal,
+      feed: sourceFeed,
+    }));
+    const adapterContext = refresh.mock.calls[0][1];
+    expect(adapterContext).not.toBe(context);
+    expect(adapterContext.feed).not.toBe(sourceFeed);
+    expect(adapterContext.feed.items).not.toBe(sourceFeed.items);
+    adapterContext.feed.items[0].title = "Adapter mutation";
+    expect(sourceFeed.items[0].title).toBe("Post");
 
     const mismatched = new SourceRegistry();
     mismatched.register({
@@ -169,6 +183,44 @@ describe("SourceRegistry", () => {
     await expect(mismatched.refresh(account, context)).rejects.toMatchObject({
       code: "invalid-source-output",
     });
+  });
+
+  it("validates and clones the optional complete collection batch", async () => {
+    const collectionItems = [{ ...item }];
+    const registry = new SourceRegistry();
+    registry.register({
+      kind: "x-account",
+      refresh: vi.fn().mockResolvedValue({
+        feed,
+        items: [],
+        collectionItems,
+        providerRequestCount: 1,
+        warnings: [],
+      }),
+    });
+
+    const output = await registry.refresh(account, {
+      now: new Date(),
+      feed,
+    });
+    collectionItems.push({ ...item, guid: "2" });
+
+    expect(output.collectionItems).toEqual([item]);
+    expect(output.collectionItems).not.toBe(collectionItems);
+
+    const invalid = new SourceRegistry();
+    invalid.register({
+      kind: "x-account",
+      refresh: vi.fn().mockResolvedValue({
+        feed,
+        items: [],
+        collectionItems: [{}],
+        providerRequestCount: 1,
+        warnings: [],
+      }),
+    });
+    await expect(invalid.refresh(account, { now: new Date(), feed })).rejects
+      .toMatchObject({ code: "invalid-source-output" });
   });
 
   it("rejects inherited output fields and incomplete FeedItems", async () => {

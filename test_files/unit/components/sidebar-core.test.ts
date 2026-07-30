@@ -23,6 +23,7 @@ import {
 } from "../../../src/types/types";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import type RssDashboardPlugin from "../../../main";
+import { FeedManagerModal } from "../../../src/modals/feed-manager/feed-manager-modal";
 
 installObsidianDomPolyfills();
 
@@ -40,6 +41,11 @@ interface TestPlugin extends Partial<RssDashboardPlugin> {
   >;
   activeRefreshState?: Map<string, FeedRefreshState>;
   backgroundImportQueue?: FeedMetadata[];
+  openAddSourceModal: Mock;
+  updateSubscription: Mock;
+  removeSubscription: Mock;
+  applySidebarOrdering: Mock;
+  applyFolderMutation: Mock;
 }
 
 /** Typed interface for Sidebar private member access */
@@ -68,6 +74,12 @@ type TestSidebar = {
   markAllReadAsUnread: () => Promise<void>;
   markSelectionReadStatus: (read: boolean) => Promise<void>;
   markFeedsReadStatus: (feeds: Feed[], read: boolean) => Promise<number | null>;
+  updateSubscriptionOptions: (
+    feed: Feed,
+    patch: { folder?: string; mediaType?: "article" | "video" | "podcast" },
+  ) => Promise<boolean>;
+  deleteFolderAndSubscriptions: (folderPath: string) => Promise<boolean>;
+  renameFolderByPath: (oldPath: string, newName: string) => Promise<boolean>;
 };
 
 describe("Sidebar Core", () => {
@@ -130,7 +142,407 @@ describe("Sidebar Core", () => {
       settings,
       saveSettings: vi.fn().mockResolvedValue(undefined),
       updateArticlesReadBatch: vi.fn().mockResolvedValue(true),
+      openAddSourceModal: vi.fn(),
+      updateSubscription: vi.fn().mockResolvedValue(true),
+      removeSubscription: vi.fn().mockResolvedValue(true),
+      applySidebarOrdering: vi.fn().mockResolvedValue({ ok: true }),
+      applyFolderMutation: vi.fn().mockResolvedValue({ ok: true }),
     };
+  });
+
+  it("opens verified onboarding from the sidebar add entry", () => {
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    );
+
+    (sidebar as unknown as { showAddFeedModal(folder: string): void })
+      .showAddFeedModal("Research");
+
+    expect(plugin.openAddSourceModal).toHaveBeenCalledWith({
+      initialFolder: "Research",
+    });
+  });
+
+  it("routes sidebar subscription editing to the unified external manager", () => {
+    const open = vi.spyOn(FeedManagerModal.prototype, "open")
+      .mockImplementation(() => {});
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    );
+    const selected = {
+      feedId: "feed-1",
+      title: "Feed",
+      url: "https://example.com/feed.xml",
+      folder: "Research",
+      items: [],
+      lastUpdated: 0,
+    } as Feed;
+
+    sidebar.showEditFeedModal(selected);
+
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes media and folder changes through typed subscription updates without mutating on failure", async () => {
+    const rss = {
+      feedId: "rss-id",
+      title: "RSS",
+      url: "https://example.com/feed.xml",
+      folder: "Old",
+      items: [],
+      lastUpdated: 0,
+      mediaType: "article",
+      sourceKind: "feed",
+      sourceConfig: { kind: "feed" },
+    } as Feed;
+    const xAccount = {
+      feedId: "x-id",
+      title: "OpenAI",
+      url: "tikhub://x-account/openai",
+      folder: "Old",
+      items: [],
+      lastUpdated: 0,
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "x-id",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "Old",
+        topics: [],
+      },
+    } as Feed;
+    settings.feeds = [rss, xAccount];
+    plugin.updateSubscription.mockResolvedValue(false);
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.updateSubscriptionOptions(rss, { mediaType: "video" }))
+      .resolves.toBe(false);
+    await expect(sidebar.updateSubscriptionOptions(xAccount, { folder: "New" }))
+      .resolves.toBe(false);
+
+    expect(plugin.updateSubscription.mock.calls).toEqual([
+      ["rss-id", { kind: "feed-options", mediaType: "video" }],
+      ["x-id", { kind: "x-account-options", folder: "New" }],
+    ]);
+    expect(rss.mediaType).toBe("article");
+    expect(rss.folder).toBe("Old");
+    expect(xAccount.folder).toBe("Old");
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("routes folder deletion through the single subscription folder transaction", async () => {
+    settings.folders = [{ name: "Tech", subfolders: [] }] as Folder[];
+    plugin.applyFolderMutation.mockResolvedValueOnce({
+      ok: false,
+      reason: "dragged-folder-not-found",
+    });
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.deleteFolderAndSubscriptions("Tech"))
+      .resolves.toBe(false);
+
+    expect(plugin.applyFolderMutation).toHaveBeenCalledWith({
+      kind: "delete",
+      folderPath: "Tech",
+    });
+    expect(plugin.removeSubscription).not.toHaveBeenCalled();
+    expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("returns success after the atomic folder deletion publishes", async () => {
+    settings.folders = [{ name: "Tech", subfolders: [] }] as Folder[];
+    settings.feeds = [{
+      feedId: "rss-id",
+      title: "RSS",
+      url: "https://example.com/feed.xml",
+      folder: "Tech",
+      items: [],
+      lastUpdated: 0,
+    } as Feed];
+    plugin.applyFolderMutation.mockImplementationOnce(async () => {
+      settings.feeds = [];
+      settings.folders = [];
+      return {
+        ok: true,
+        removedSourceIds: ["rss-id"],
+        topicDestinationFolder: "",
+      };
+    });
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.deleteFolderAndSubscriptions("Tech"))
+      .resolves.toBe(true);
+
+    expect(settings.folders.map((folder) => folder.name)).not.toContain("Tech");
+    expect(plugin.applyFolderMutation).toHaveBeenCalledTimes(1);
+    expect(plugin.removeSubscription).not.toHaveBeenCalled();
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("keeps controller state untouched when the atomic folder deletion fails", async () => {
+    const originalFolders = [{ name: "Tech", subfolders: [] }] as Folder[];
+    settings.folders = originalFolders;
+    settings.feeds = [{
+      feedId: "rss-id",
+      title: "RSS",
+      url: "https://example.com/feed.xml",
+      folder: "Tech",
+      items: [],
+      lastUpdated: 0,
+    } as Feed];
+    plugin.applyFolderMutation.mockRejectedValueOnce(new Error("disk full"));
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.deleteFolderAndSubscriptions("Tech"))
+      .resolves.toBe(false);
+
+    expect(settings.folders).toBe(originalFolders);
+    expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
+    expect(plugin.removeSubscription).not.toHaveBeenCalled();
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("keeps live feed ordering untouched while a drag transaction is pending", async () => {
+    settings.folders = [
+      { name: "Old", subfolders: [] },
+      { name: "New", subfolders: [] },
+    ] as Folder[];
+    settings.feeds = [
+      {
+        feedId: "first",
+        title: "First",
+        url: "https://example.com/first.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 0,
+      },
+      {
+        feedId: "target",
+        title: "Target",
+        url: "https://example.com/target.xml",
+        folder: "New",
+        items: [],
+        lastUpdated: 0,
+      },
+    ] as Feed[];
+    let release!: (value: { ok: true }) => void;
+    plugin.applySidebarOrdering.mockImplementation(async () => await new Promise(
+      (resolve) => { release = resolve; },
+    ));
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    );
+    sidebar.render();
+    const before = structuredClone(settings);
+    const target = container.querySelector<HTMLElement>(
+      '[data-feed-url="https://example.com/target.xml"]',
+    )!;
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: {
+        types: ["feed-url"],
+        getData: (kind: string) => kind === "feed-url"
+          ? "https://example.com/first.xml"
+          : "",
+      },
+    });
+
+    target.dispatchEvent(drop);
+
+    expect(settings).toEqual(before);
+    expect(plugin.applySidebarOrdering).toHaveBeenCalledWith({
+      kind: "feed-insert",
+      draggedUrl: "https://example.com/first.xml",
+      targetUrl: "https://example.com/target.xml",
+      placement: "after",
+    });
+    release({ ok: true });
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it("routes folder rename through one atomic subscription folder mutation", async () => {
+    settings.folders = [{ name: "Old", subfolders: [] }] as Folder[];
+    settings.feeds = [
+      {
+        feedId: "first",
+        title: "First",
+        url: "https://example.com/first.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 0,
+      },
+      {
+        feedId: "second",
+        title: "Second",
+        url: "https://example.com/second.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 0,
+      },
+    ] as Feed[];
+    plugin.applyFolderMutation.mockResolvedValueOnce({
+      ok: false,
+      reason: "duplicate-folder-target",
+    });
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.renameFolderByPath("Old", "New")).resolves.toBe(false);
+
+    expect(plugin.applyFolderMutation).toHaveBeenCalledWith({
+      kind: "rename",
+      folderPath: "Old",
+      newName: "New",
+    });
+    expect(plugin.updateSubscription).not.toHaveBeenCalled();
+    expect(settings.feeds.map((feed) => feed.folder)).toEqual(["Old", "Old"]);
+    expect(settings.folders[0].name).toBe("Old");
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("does not perform controller compensation when atomic rename rejects", async () => {
+    const originalFolders = [{ name: "Old", subfolders: [] }] as Folder[];
+    settings.folders = originalFolders;
+    settings.feeds = [
+      {
+        feedId: "rss",
+        title: "RSS",
+        url: "https://example.com/feed.xml",
+        folder: "Old",
+        items: [],
+        lastUpdated: 0,
+      },
+    ] as Feed[];
+    plugin.applyFolderMutation.mockRejectedValueOnce(new Error("disk full"));
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.renameFolderByPath("Old", "New")).resolves.toBe(false);
+
+    expect(settings.folders).toBe(originalFolders);
+    expect(settings.feeds.map((feed) => feed.folder)).toEqual(["Old"]);
+    expect(plugin.updateSubscription).not.toHaveBeenCalled();
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("renders the atomically published rename without local topic mutation", async () => {
+    settings.folders = [{ name: "Old", subfolders: [] }] as Folder[];
+    settings.collapsedFolders = ["Old"];
+    settings.folderFeedSortOrders = {
+      Old: { by: "custom", ascending: true },
+    };
+    settings.feeds = [{
+      feedId: "topic",
+      title: "Topic",
+      url: "tikhub://x-topic/topic",
+      folder: "Old",
+      items: [],
+      lastUpdated: 0,
+      sourceKind: "x-topic",
+      sourceConfig: { kind: "x-topic", id: "topic", name: "AI", folder: "Old" },
+    } as Feed];
+    plugin.applyFolderMutation.mockImplementationOnce(async () => {
+      settings.folders = [{ name: "New", subfolders: [] }] as Folder[];
+      settings.collapsedFolders = ["New"];
+      settings.folderFeedSortOrders = {
+        New: { by: "custom", ascending: true },
+      };
+      settings.feeds = [{
+        ...settings.feeds[0],
+        folder: "New",
+        sourceConfig: {
+          ...settings.feeds[0].sourceConfig,
+          folder: "New",
+        } as Feed["sourceConfig"],
+      }];
+      return { ok: true, newPath: "New" };
+    });
+    const sidebar = new Sidebar(
+      app,
+      container,
+      plugin as unknown as RssDashboardPlugin,
+      settings,
+      options,
+      callbacks,
+    ) as unknown as TestSidebar;
+
+    await expect(sidebar.renameFolderByPath("Old", "New")).resolves.toBe(true);
+
+    expect(plugin.updateSubscription).not.toHaveBeenCalled();
+    expect(plugin.applyFolderMutation).toHaveBeenCalledWith({
+      kind: "rename",
+      folderPath: "Old",
+      newName: "New",
+    });
+    expect(settings.folders[0].name).toBe("New");
+    expect(settings.feeds[0].folder).toBe("New");
+    expect((settings.feeds[0].sourceConfig as { folder: string }).folder).toBe("New");
+    expect(settings.collapsedFolders).toEqual(["New"]);
+    expect(settings.folderFeedSortOrders?.New).toEqual({
+      by: "custom",
+      ascending: true,
+    });
+    expect(settings.folderFeedSortOrders?.Old).toBeUndefined();
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
   });
 
   it("routes all-feed read changes through the status transaction batch", async () => {

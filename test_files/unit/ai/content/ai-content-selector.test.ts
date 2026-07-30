@@ -6,7 +6,10 @@ import {
   MAX_AI_SELECTED_CONTENT_CHARACTERS,
 } from "../../../../src/ai/ai-types";
 import type { CollectedItem } from "../../../../src/collection/collected-item";
-import type { CachedItemContent } from "../../../../src/collection/content-repository";
+import type {
+  CachedItemContent,
+  YouTubeTranscriptCachedItemContent,
+} from "../../../../src/collection/content-repository";
 import {
   AiContentSelector,
   type AiContentRepository,
@@ -63,6 +66,25 @@ function cached(text: string): CachedItemContent {
     fetchedAt: "2026-07-23T00:00:00.000Z",
     contentBasis: "full-text",
     text,
+  };
+}
+
+function cachedTranscript(
+  overrides: Partial<YouTubeTranscriptCachedItemContent> = {},
+): YouTubeTranscriptCachedItemContent {
+  return {
+    schemaVersion: 2,
+    itemId: ITEM_ID,
+    sourceUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    fetchedAt: "2026-07-23T00:00:00.000Z",
+    contentBasis: "youtube-transcript",
+    videoId: "dQw4w9WgXcQ",
+    languageCode: "en",
+    languageName: "English",
+    isGenerated: false,
+    provider: "innertube",
+    text: "Public subtitle transcript.",
+    ...overrides,
   };
 }
 
@@ -294,7 +316,125 @@ describe("AiContentSelector", () => {
     expect(fullTextFetcher).not.toHaveBeenCalled();
   });
 
-  it("uses only a YouTube title and channel-provided description", async () => {
+  it("prefers a matching schemaVersion 2 YouTube transcript and applies normal content limits", async () => {
+    const contentRepository = repository(
+      cachedTranscript({
+        text: `<p>字幕&nbsp;<strong>重点</strong></p><script>SECRET</script><p>${"内容".repeat(100)}</p>`,
+      }),
+    );
+    const fullTextFetcher = vi.fn();
+    const selector = new AiContentSelector({ contentRepository, fullTextFetcher });
+
+    const result = await selector.select({
+      item: item({
+        sourceType: "youtube",
+        contentBasis: "title-description",
+        title: "视频标题",
+        excerpt: "频道提供的视频说明",
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      }),
+      maxInputCharacters: 80,
+      fetchFullText: true,
+    });
+
+    expect(result.content.startsWith("字幕 重点 内容")).toBe(true);
+    expect(result.content).toContain(AI_CONTENT_OMISSION_MARKER);
+    expect(result.content).not.toContain("SECRET");
+    expect(result).toMatchObject({
+      basis: "youtube-transcript",
+      characterCount: 80,
+      truncated: true,
+    });
+    expect(contentRepository.read).toHaveBeenCalledTimes(1);
+    expect(contentRepository.read).toHaveBeenCalledWith(ITEM_ID);
+    expect(fullTextFetcher).not.toHaveBeenCalled();
+  });
+
+  it("uses a safe TikHub automatic-caption cache for AI content", async () => {
+    const contentRepository = repository(cachedTranscript({
+      languageCode: "a.zh-Hans",
+      languageName: "Chinese (auto)",
+      isGenerated: true,
+      provider: "tikhub",
+      text: "TikHub automatic Chinese transcript.",
+    }));
+    const selector = new AiContentSelector({ contentRepository });
+
+    const result = await selector.select({
+      item: item({
+        sourceType: "youtube",
+        contentBasis: "title-description",
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      }),
+      maxInputCharacters: 1_000,
+      fetchFullText: false,
+    });
+
+    expect(result).toMatchObject({
+      basis: "youtube-transcript",
+      content: "TikHub automatic Chinese transcript.",
+    });
+  });
+
+  it.each([
+    ["missing cache", null],
+    ["schemaVersion 1 full text", cached("不应用于 YouTube 的旧正文")],
+    [
+      "wrong item id",
+      cachedTranscript({ itemId: "b".repeat(64), text: "其他视频字幕" }),
+    ],
+    [
+      "malformed transcript",
+      {
+        ...cachedTranscript(),
+        provider: "unknown-provider",
+      } as unknown as CachedItemContent,
+    ],
+    [
+      "trailing language separator",
+      cachedTranscript({ languageCode: "en-" }),
+    ],
+    [
+      "consecutive language separators",
+      cachedTranscript({ languageCode: "en--US" }),
+    ],
+    [
+      "other content basis",
+      {
+        ...cachedTranscript(),
+        contentBasis: "full-text",
+      } as unknown as CachedItemContent,
+    ],
+  ])("falls back to the YouTube title and description for %s", async (_case, cache) => {
+    const contentRepository = repository(cache);
+    const fullTextFetcher = vi.fn(async () => {
+      throw new Error("YouTube selection must not fetch full text");
+    });
+    const selector = new AiContentSelector({ contentRepository, fullTextFetcher });
+
+    const result = await selector.select({
+      item: item({
+        sourceType: "youtube",
+        contentBasis: "title-description",
+        title: "视频标题",
+        excerpt: "频道提供的视频说明",
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      }),
+      maxInputCharacters: 1_000,
+      fetchFullText: true,
+    });
+
+    expect(result).toMatchObject({
+      content: "视频标题 频道提供的视频说明",
+      basis: "title-description",
+      truncated: false,
+    });
+    expect(contentRepository.read).toHaveBeenCalledTimes(1);
+    expect(contentRepository.read).toHaveBeenCalledWith(ITEM_ID);
+    expect(fullTextFetcher).not.toHaveBeenCalled();
+  });
+
+  it("still truncates the YouTube title and description when no valid transcript cache exists", async () => {
     const contentRepository = repository(cached("不应使用的缓存转录文本"));
     const fullTextFetcher = vi.fn();
     const selector = new AiContentSelector({ contentRepository, fullTextFetcher });
@@ -315,7 +455,7 @@ describe("AiContentSelector", () => {
     expect(result.content).toContain(AI_CONTENT_OMISSION_MARKER);
     expect(result.basis).toBe("title-description");
     expect(result.truncated).toBe(true);
-    expect(contentRepository.read).not.toHaveBeenCalled();
+    expect(contentRepository.read).toHaveBeenCalledTimes(1);
     expect(fullTextFetcher).not.toHaveBeenCalled();
   });
 

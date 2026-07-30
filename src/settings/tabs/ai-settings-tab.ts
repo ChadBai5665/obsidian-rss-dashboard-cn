@@ -20,7 +20,7 @@ import {
 import type { RssDashboardSettings } from "../../types/types";
 
 const TEST_USER_PROMPT = "回复 OK";
-const TEST_OUTPUT_TOKENS = 8;
+const TEST_OUTPUT_TOKENS = 32;
 const RENDER_EPOCHS = new WeakMap<HTMLElement, number>();
 const AI_OPERATION_QUEUES = new WeakMap<object, Promise<void>>();
 const AI_RENDER_SUBSCRIBERS = new WeakMap<object, Set<() => void>>();
@@ -207,7 +207,19 @@ export function renderAiSettingsTab(
             normalized.id,
             pendingKey,
           );
-          const provider = await providerFactory(normalized, testSecretStore);
+          const testConnection = normalizeAiConnection({
+            ...normalized,
+            thinkingMode: "disabled",
+            reasoningEffort: "platform-default",
+            responseMode: "complete",
+          });
+          if (!testConnection) {
+            return {
+              status: "error",
+              message: "settings.ai.connectionInvalid",
+            };
+          }
+          const provider = await providerFactory(testConnection, testSecretStore);
           if (signal.aborted) return { status: "cancelled" };
           operation.requestStarted = true;
           await provider.generate({

@@ -22,6 +22,7 @@
     "test:unit": "vitest run --config vitest.config.mjs",
     "fixtures:tikhub": "node scripts/capture-tikhub-fixtures.mjs",
     "hooks:install": "node scripts/setup-git-hooks.mjs",
+    "install:local": "node scripts/install-local-release.mjs",
     "prepare": "npm run hooks:install",
     "release:stage": "npm run build && node scripts/check-release-artifacts.mjs --stage",
     "release:check": "node scripts/check-release-artifacts.mjs --check",

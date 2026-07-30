@@ -17,15 +17,37 @@ export type OrderingFailureReason =
   | "unknown";
 
 export type OperationResult =
-  | { ok: true }
+  | { ok: true; settings: RssDashboardSettings }
   | { ok: false; reason: OrderingFailureReason };
 
 export type FolderOperationResult =
-  | { ok: true; newPath: string }
+  | { ok: true; newPath: string; settings: RssDashboardSettings }
   | { ok: false; reason: OrderingFailureReason };
 
 function normalizeFolderPath(folderPath: string | null | undefined): string {
   return folderPath ? folderPath : "";
+}
+
+function cloneOrderingSettings(
+  settings: RssDashboardSettings,
+): RssDashboardSettings {
+  return {
+    ...settings,
+    feeds: settings.feeds.map((feed) => ({
+      ...feed,
+      ...(feed.sourceConfig === undefined
+        ? {}
+        : { sourceConfig: structuredClone(feed.sourceConfig) }),
+    })),
+    folders: structuredClone(settings.folders),
+    collapsedFolders: [...(settings.collapsedFolders ?? [])],
+    ...(settings.folderSortOrder === undefined
+      ? {}
+      : { folderSortOrder: { ...settings.folderSortOrder } }),
+    ...(settings.folderFeedSortOrders === undefined
+      ? {}
+      : { folderFeedSortOrders: structuredClone(settings.folderFeedSortOrders) }),
+  };
 }
 
 function ensureFolderFeedSortOrders(settings: RssDashboardSettings): NonNullable<RssDashboardSettings["folderFeedSortOrders"]> {
@@ -60,26 +82,27 @@ export function moveFeedAndInsert(
   if (!targetUrl) return { ok: false, reason: "missing-drop-target" };
   if (draggedUrl === targetUrl) return { ok: false, reason: "no-op-drop" };
 
-  const dragged = settings.feeds.find((f) => f.url === draggedUrl);
-  const target = settings.feeds.find((f) => f.url === targetUrl);
+  const candidate = cloneOrderingSettings(settings);
+  const dragged = candidate.feeds.find((f) => f.url === draggedUrl);
+  const target = candidate.feeds.find((f) => f.url === targetUrl);
   if (!dragged) return { ok: false, reason: "dragged-feed-not-found" };
   if (!target) return { ok: false, reason: "target-feed-not-found" };
 
   const destinationFolderPath = normalizeFolderPath(target.folder);
   dragged.folder = destinationFolderPath;
 
-  const withoutDragged = settings.feeds.filter((f) => f.url !== draggedUrl);
+  const withoutDragged = candidate.feeds.filter((f) => f.url !== draggedUrl);
   const targetIndex = withoutDragged.findIndex((f) => f.url === targetUrl);
   if (targetIndex === -1) return { ok: false, reason: "target-feed-not-found" };
 
   const insertIndex = opts.placement === "before" ? targetIndex : targetIndex + 1;
   const next = [...withoutDragged];
   next.splice(insertIndex, 0, dragged);
-  settings.feeds = next;
+  candidate.feeds = next;
 
-  setFolderFeedSortCustom(settings, destinationFolderPath);
+  setFolderFeedSortCustom(candidate, destinationFolderPath);
 
-  return { ok: true };
+  return { ok: true, settings: candidate };
 }
 
 export function moveFeedToFolderAppend(
@@ -93,12 +116,13 @@ export function moveFeedToFolderAppend(
   const destinationFolderPath = normalizeFolderPath(opts.destinationFolderPath);
   if (!draggedUrl) return { ok: false, reason: "missing-drag-source" };
 
-  const dragged = settings.feeds.find((f) => f.url === draggedUrl);
+  const candidate = cloneOrderingSettings(settings);
+  const dragged = candidate.feeds.find((f) => f.url === draggedUrl);
   if (!dragged) return { ok: false, reason: "dragged-feed-not-found" };
 
   dragged.folder = destinationFolderPath;
 
-  const withoutDragged = settings.feeds.filter((f) => f.url !== draggedUrl);
+  const withoutDragged = candidate.feeds.filter((f) => f.url !== draggedUrl);
   let lastIndexInDestination = -1;
   for (let i = 0; i < withoutDragged.length; i++) {
     const folderPath = normalizeFolderPath(withoutDragged[i].folder);
@@ -108,10 +132,10 @@ export function moveFeedToFolderAppend(
   const insertIndex = lastIndexInDestination + 1;
   const next = [...withoutDragged];
   next.splice(insertIndex, 0, dragged);
-  settings.feeds = next;
+  candidate.feeds = next;
 
-  setFolderFeedSortCustom(settings, destinationFolderPath);
-  return { ok: true };
+  setFolderFeedSortCustom(candidate, destinationFolderPath);
+  return { ok: true, settings: candidate };
 }
 
 function splitPath(path: string): string[] {
@@ -206,11 +230,12 @@ export function moveFolder(
     return { ok: false, reason: "invalid-descendant-move" };
   }
 
-  const draggedLoc = findFolderLocation(settings.folders, draggedPath);
+  const candidate = cloneOrderingSettings(settings);
+  const draggedLoc = findFolderLocation(candidate.folders, draggedPath);
   if (!draggedLoc) return { ok: false, reason: "dragged-folder-not-found" };
 
   const targetLoc =
-    placement === "rootAppend" ? null : findFolderLocation(settings.folders, targetPath);
+    placement === "rootAppend" ? null : findFolderLocation(candidate.folders, targetPath);
   if (placement !== "rootAppend" && !targetLoc) {
     return { ok: false, reason: "target-folder-not-found" };
   }
@@ -223,7 +248,7 @@ export function moveFolder(
   let insertIndex = 0;
 
   if (placement === "rootAppend") {
-    destinationParentArray = settings.folders;
+    destinationParentArray = candidate.folders;
     destinationParentPath = "";
     insertIndex = destinationParentArray.length;
   } else if (placement === "nest") {
@@ -275,7 +300,7 @@ export function moveFolder(
 
   if (newBasePath !== draggedPath) {
     // Remap feed folder paths (in-place to preserve object identity)
-    for (const feed of settings.feeds) {
+    for (const feed of candidate.feeds) {
       if (!feed.folder) continue;
       if (feed.folder === draggedPath || feed.folder.startsWith(`${draggedPath}/`)) {
         feed.folder = remapPathPrefix(feed.folder, draggedPath, newBasePath);
@@ -283,21 +308,21 @@ export function moveFolder(
     }
 
     // Remap collapsed folders
-    settings.collapsedFolders = (settings.collapsedFolders ?? []).map((p) =>
+    candidate.collapsedFolders = (candidate.collapsedFolders ?? []).map((p) =>
       remapPathPrefix(p, draggedPath, newBasePath),
     );
 
     // Remap folder feed sort-order keys
-    if (settings.folderFeedSortOrders) {
+    if (candidate.folderFeedSortOrders) {
       const next: NonNullable<RssDashboardSettings["folderFeedSortOrders"]> = {};
-      for (const [key, value] of Object.entries(settings.folderFeedSortOrders)) {
+      for (const [key, value] of Object.entries(candidate.folderFeedSortOrders)) {
         const mappedKey = remapPathPrefix(key, draggedPath, newBasePath);
         next[mappedKey] = value;
       }
-      settings.folderFeedSortOrders = next;
+      candidate.folderFeedSortOrders = next;
     }
   }
 
-  setFolderSortCustom(settings);
-  return { ok: true, newPath: newBasePath };
+  setFolderSortCustom(candidate);
+  return { ok: true, newPath: newBasePath, settings: candidate };
 }

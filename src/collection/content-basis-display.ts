@@ -10,6 +10,7 @@ export function getContentBasisLabel(
   const keys: Record<ContentBasis, Parameters<typeof t>[0]> = {
     feed: "reader.contentBasisFeed",
     "full-text": "reader.contentBasisFullText",
+    "youtube-transcript": "reader.contentBasisYouTubeTranscript",
     "title-description": "reader.contentBasisTitleDescription",
     "x-post": "reader.contentBasisXPost",
     "linked-page": "reader.contentBasisLinkedPage",

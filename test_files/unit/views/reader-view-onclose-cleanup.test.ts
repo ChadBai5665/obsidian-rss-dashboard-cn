@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { ReaderView } from "../../../src/views/reader-view";
 import { DEFAULT_SETTINGS } from "../../../src/types/types";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
+import type { YouTubeTranscriptRequest } from "../../../src/youtube-transcript/youtube-transcript-service";
 
 installObsidianDomPolyfills();
 
@@ -20,6 +21,7 @@ type ReaderViewInternals = {
   currentItem: { guid: string } | null;
   podcastPlayer: { destroy: ReturnType<typeof vi.fn> } | null;
   videoPlayer: { destroy: ReturnType<typeof vi.fn> } | null;
+  aiPanel: { destroy: ReturnType<typeof vi.fn> } | null;
 };
 
 function getInternals(view: ReaderView): ReaderViewInternals {
@@ -79,13 +81,16 @@ describe("ReaderView onClose cleanup", () => {
 
     const podcastPlayer = { destroy: vi.fn() };
     const videoPlayer = { destroy: vi.fn() };
+    const aiPanel = { destroy: vi.fn() };
     getInternals(readerView).podcastPlayer = podcastPlayer;
     getInternals(readerView).videoPlayer = videoPlayer;
+    getInternals(readerView).aiPanel = aiPanel;
 
     await readerView.onClose();
 
     expect(podcastPlayer.destroy).toHaveBeenCalled();
     expect(videoPlayer.destroy).toHaveBeenCalled();
+    expect(aiPanel.destroy).toHaveBeenCalledTimes(1);
     expect(
       document.body.querySelector(".rss-reader-format-dropdown-portal"),
     ).toBeNull();
@@ -127,5 +132,64 @@ describe("ReaderView onClose cleanup", () => {
       180,
       true,
     );
+  });
+
+  it("aborts and destroys the inline transcript panel on close", async () => {
+    let request: YouTubeTranscriptRequest | undefined;
+    const never = new Promise<never>(() => undefined);
+    const transcriptRuntime = {
+      identity: "test-root",
+      service: {
+        get: vi.fn(async (nextRequest: YouTubeTranscriptRequest) => {
+          request = nextRequest;
+          return await never;
+        }),
+        revokeChoiceSet: vi.fn(),
+      },
+      contentRepository: { read: vi.fn(async () => null) },
+    };
+    const transcriptReader = new ReaderView(
+      mockLeaf as never,
+      { ...DEFAULT_SETTINGS, useWebViewer: false },
+      { saveArticle: vi.fn(), checkSavedFileExists: vi.fn(() => true) } as never,
+      vi.fn(),
+      vi.fn(),
+      {
+        youtubeTranscript: {
+          resolveRuntime: () => transcriptRuntime,
+        },
+      },
+    );
+    getInternals(transcriptReader).contentEl = document.createElement("div");
+    await transcriptReader.onOpen();
+    await transcriptReader.displayItem({
+      title: "Video",
+      link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      description: "Public description",
+      content: "",
+      pubDate: "2026-07-28T00:00:00.000Z",
+      guid: "video-guid",
+      read: false,
+      starred: false,
+      tags: [],
+      feedTitle: "Channel",
+      feedUrl: "https://www.youtube.com/feeds/videos.xml?channel_id=test",
+      coverImage: "",
+      mediaType: "video",
+      videoId: "dQw4w9WgXcQ",
+      saved: false,
+    });
+    getInternals(transcriptReader).readingContainer
+      .querySelector<HTMLButtonElement>(".rss-youtube-transcript-fetch")
+      ?.click();
+    await vi.waitFor(() => expect(request).toBeDefined());
+    const panel = getInternals(transcriptReader).readingContainer
+      .querySelector<HTMLElement>(".rss-youtube-transcript-panel");
+
+    await transcriptReader.onClose();
+
+    expect(request?.signal?.aborted).toBe(true);
+    expect(panel?.getAttribute("data-state")).toBe("destroyed");
+    expect(panel?.querySelector("button")).toBeNull();
   });
 });

@@ -127,6 +127,41 @@ describe("settings-loader", () => {
       });
     });
 
+    it("defaults the YouTube caption fallback opt-in to false and preserves only an explicit true", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+
+      expect(loadAndNormalizeSettings({
+        tikhub: { ...DEFAULT_SETTINGS.tikhub },
+      }).tikhub.youtubeTranscriptFallbackEnabled).toBe(false);
+
+      expect(loadAndNormalizeSettings({
+        tikhub: {
+          ...DEFAULT_SETTINGS.tikhub,
+          youtubeTranscriptFallbackEnabled: true,
+        },
+      } as unknown as Partial<RssDashboardSettings>).tikhub.youtubeTranscriptFallbackEnabled).toBe(true);
+    });
+
+    it("ignores inherited and getter-backed YouTube caption fallback opt-ins", async () => {
+      const { loadAndNormalizeSettings } =
+        await import("../../../src/utils/settings-loader");
+      const getter = vi.fn(() => true);
+      const tikhub = Object.create({ youtubeTranscriptFallbackEnabled: true });
+      Object.assign(tikhub, DEFAULT_SETTINGS.tikhub);
+      Object.defineProperty(tikhub, "youtubeTranscriptFallbackEnabled", {
+        enumerable: true,
+        get: getter,
+      });
+
+      const result = loadAndNormalizeSettings({
+        tikhub,
+      } as unknown as Partial<RssDashboardSettings>);
+
+      expect(result.tikhub.youtubeTranscriptFallbackEnabled).toBe(false);
+      expect(getter).not.toHaveBeenCalled();
+    });
+
     it("migrates AI metadata additively without inventing a connection or key", async () => {
       const { loadAndNormalizeSettings } =
         await import("../../../src/utils/settings-loader");
@@ -755,6 +790,48 @@ describe("settings-loader", () => {
   // ── migrateSettings ──────────────────────────────────────────────────────────
 
   describe("migrateSettings", () => {
+    it("leaves legacy feeds without import fields completed instead of pending", async () => {
+      const { migrateSettings } =
+        await import("../../../src/utils/settings-loader");
+      const feed = createFeed();
+      const settings = {
+        ...DEFAULT_SETTINGS,
+        feeds: [feed],
+      } as RssDashboardSettings;
+
+      migrateSettings(settings);
+
+      expect(settings.feeds[0]).not.toHaveProperty("initialImportPolicy");
+      expect(settings.feeds[0]).not.toHaveProperty("initialImportProgress");
+      expect(settings.feeds[0].subscriptionStatus).toBeUndefined();
+    });
+
+    it("normalizes only supplied import fields and discards invalid progress", async () => {
+      const { migrateSettings } =
+        await import("../../../src/utils/settings-loader");
+      const feed = createFeed() as Feed & Record<string, unknown>;
+      feed.initialImportPolicy = { mode: "lookback-days", days: 14 };
+      feed.initialImportProgress = {
+        status: "running",
+        pagesFetched: -1,
+        itemsImported: 2,
+      };
+      feed.subscriptionStatus = "paused";
+      const settings = {
+        ...DEFAULT_SETTINGS,
+        feeds: [feed],
+      } as RssDashboardSettings;
+
+      migrateSettings(settings);
+
+      expect(settings.feeds[0].initialImportPolicy).toEqual({
+        mode: "lookback-days",
+        days: 14,
+      });
+      expect(settings.feeds[0]).not.toHaveProperty("initialImportProgress");
+      expect(settings.feeds[0].subscriptionStatus).toBe("paused");
+    });
+
     it("migrates savePath to articleSaving.defaultFolder", async () => {
       const { migrateSettings } =
         await import("../../../src/utils/settings-loader");

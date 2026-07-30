@@ -64,6 +64,7 @@ vi.mock("../../../src/views/reader-view", () => ({
     displayItem = vi.fn(async () => {});
     focusReaderView = vi.fn();
     isPodcastPlaying = vi.fn(() => false);
+    showAiOperation = vi.fn(async () => {});
   },
   RSS_READER_VIEW_TYPE: "rss-reader-view",
 }));
@@ -73,17 +74,29 @@ type MockReaderView = {
   displayItem: ReturnType<typeof vi.fn>;
   focusReaderView: ReturnType<typeof vi.fn>;
   isPodcastPlaying: ReturnType<typeof vi.fn>;
+  showAiOperation: ReturnType<typeof vi.fn>;
 };
 
 type TestDashboardView = {
   app: App;
   render: ReturnType<typeof vi.fn>;
+  onOpen(): Promise<void>;
+  onClose(): Promise<void>;
+  articleRenderer: {
+    youtubeTranscript?: {
+      resolveRuntime(): unknown;
+    };
+  } | null;
   inlineArticle: import("../../../src/types/types").FeedItem | null;
   handleArticleClick: (
     item: import("../../../src/types/types").FeedItem,
   ) => Promise<void>;
   handleOpenInReaderView: (
     item: import("../../../src/types/types").FeedItem,
+  ) => Promise<void>;
+  openAiOperationInReader: (
+    item: import("../../../src/types/types").FeedItem,
+    operation: "summary" | "translate-zh-cn" | "core-points" | "deep-analysis",
   ) => Promise<void>;
   handleFeedClick: (
     feed: import("../../../src/types/types").Feed,
@@ -172,6 +185,16 @@ async function createDashboardView(
     settings,
     saveSettings: vi.fn(async () => {}),
     updateArticle: vi.fn(async () => {}),
+    updatePlaybackProgress: vi.fn(),
+    getCollectedItemsForDate: vi.fn(async () => []),
+    resolveYouTubeTranscriptRuntime: vi.fn(() => ({
+      identity: "dashboard-test-root",
+      service: {
+        get: vi.fn(),
+        readCached: vi.fn(async () => null),
+        revokeChoiceSet: vi.fn(),
+      },
+    })),
   };
   const dashboardLeaf = {
     app,
@@ -504,6 +527,28 @@ describe("Dashboard reader location", () => {
     windowOpenSpy.mockRestore();
   });
 
+  it("forces only AI actions into an internal reader when ordinary reading uses the external browser", async () => {
+    const settings = cloneSettings();
+    const feed = makeFeed("https://example.com/feed", [{}]);
+    settings.feeds = [feed];
+    settings.readerViewLocation = "external-browser";
+    const internalLeaf = createReaderLeaf(new App(), "ai-main");
+    const windowOpenSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const { view } = await createDashboardView(settings, {
+      getLeavesOfType: vi.fn(() => []),
+      getLeaf: vi.fn(() => internalLeaf),
+      getLeftLeaf: vi.fn(),
+      getRightLeaf: vi.fn(),
+      revealLeaf: vi.fn(async () => {}),
+    });
+
+    await view.openAiOperationInReader(feed.items[0], "summary");
+
+    expect(windowOpenSpy).not.toHaveBeenCalled();
+    expect(internalLeaf.view.displayItem).toHaveBeenCalledWith(feed.items[0], []);
+    expect(internalLeaf.view.showAiOperation).toHaveBeenCalledWith("summary");
+  });
+
   it("uses external browser for explicit open-in-reader actions when readerViewLocation is external-browser", async () => {
     const settings = cloneSettings();
     const feed = makeFeed("https://example.com/feed", [{}]);
@@ -616,6 +661,40 @@ describe("Dashboard reader location", () => {
     // Check state and re-render was triggered
     expect(view.inlineArticle).toBe(feed.items[0]);
     expect(view.render).toHaveBeenCalled();
+  });
+
+  it("renders Dashboard inline content before showing its AI panel", async () => {
+    const settings = cloneSettings();
+    const feed = makeFeed("https://example.com/feed", [{}]);
+    settings.feeds = [feed];
+    settings.readerViewLocation = "inline";
+    const { view } = await createDashboardView(settings);
+    const events: string[] = [];
+    view.render = vi.fn(() => { events.push("render"); });
+    (view as unknown as { articleRenderer: unknown }).articleRenderer = {
+      showAiOperation: vi.fn(async () => { events.push("show"); }),
+    };
+
+    await view.openAiOperationInReader(feed.items[0], "core-points");
+
+    expect(view.inlineArticle).toBe(feed.items[0]);
+    expect(events).toEqual(["render", "show"]);
+  });
+
+  it("injects the plugin-owned transcript runtime into the inline ArticleRenderer", async () => {
+    const settings = cloneSettings();
+    settings.readerViewLocation = "inline";
+    const { view, plugin } = await createDashboardView(settings);
+
+    await view.onOpen();
+    const runtime = view.articleRenderer?.youtubeTranscript?.resolveRuntime();
+
+    expect(runtime).toMatchObject({ identity: "dashboard-test-root" });
+    expect(
+      (plugin as { resolveYouTubeTranscriptRuntime: ReturnType<typeof vi.fn> })
+        .resolveYouTubeTranscriptRuntime,
+    ).toHaveBeenCalledTimes(1);
+    await view.onClose();
   });
 
   it("uses inline mode for explicit open-in-reader actions too", async () => {

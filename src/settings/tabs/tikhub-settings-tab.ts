@@ -28,6 +28,8 @@ interface TikHubSecretStoreLike {
   delete(connectionId: string): Promise<void>;
 }
 
+type TikHubSecretStatus = "checking" | "configured" | "missing" | "unavailable";
+
 export interface TikHubSettingsPlugin {
   app: App;
   settings: RssDashboardSettings;
@@ -77,7 +79,7 @@ export function renderTikHubSettingsTab(
   let operationSequence = 0;
   let activeOperation: number | undefined;
   let statusEpoch = 0;
-  let hasSecret = false;
+  let secretStatus: TikHubSecretStatus = "checking";
   const controls: RegisteredControl[] = [];
   const isRenderCurrent = (): boolean =>
     RENDER_EPOCHS.get(containerEl) === renderEpoch && containerEl.isConnected;
@@ -146,6 +148,37 @@ export function renderTikHubSettingsTab(
             await plugin.saveSettings();
           } catch {
             plugin.settings.tikhub.enabled = original;
+            if (isOperationCurrent(operation)) toggle.setValue(original);
+          } finally {
+            finishOperation(operation);
+          }
+        })();
+      });
+  });
+
+  const youtubeTranscriptFallbackSetting = new Setting(containerEl)
+    .setName(t("settings.tikhub.youtubeTranscriptFallbackEnabled"))
+    .setDesc(t("settings.tikhub.youtubeTranscriptFallbackEnabledDesc"));
+  youtubeTranscriptFallbackSetting.addToggle((toggle) => {
+    registerControl(toggle.toggleEl, (disabled) => {
+      const setDisabled = (toggle as unknown as {
+        setDisabled?: (value: boolean) => void;
+      }).setDisabled;
+      if (setDisabled) setDisabled.call(toggle, disabled);
+      else (toggle.toggleEl as unknown as { disabled: boolean }).disabled = disabled;
+    });
+    toggle
+      .setValue(plugin.settings.tikhub.youtubeTranscriptFallbackEnabled)
+      .onChange((value) => {
+        const operation = beginOperation();
+        if (operation === undefined) return;
+        const original = plugin.settings.tikhub.youtubeTranscriptFallbackEnabled;
+        plugin.settings.tikhub.youtubeTranscriptFallbackEnabled = value;
+        void (async () => {
+          try {
+            await plugin.saveSettings();
+          } catch {
+            plugin.settings.tikhub.youtubeTranscriptFallbackEnabled = original;
             if (isOperationCurrent(operation)) toggle.setValue(original);
           } finally {
             finishOperation(operation);
@@ -337,41 +370,46 @@ export function renderTikHubSettingsTab(
   statusEl.setAttribute("aria-live", "polite");
   statusEl.setAttribute("aria-atomic", "true");
   const updateStatus = (): void => {
-    statusEl.setText(t(hasSecret
-      ? "settings.tikhub.keyConfigured"
-      : "settings.tikhub.keyNotConfigured"));
+    const key = {
+      checking: "settings.tikhub.keyStatusChecking",
+      configured: "settings.tikhub.keyConfigured",
+      missing: "settings.tikhub.keyNotConfigured",
+      unavailable: "settings.tikhub.keyStatusUnavailable",
+    } as const;
+    statusEl.setText(t(key[secretStatus]));
+  };
+  const setSecretStatus = (nextStatus: TikHubSecretStatus): void => {
+    secretStatus = nextStatus;
+    updateStatus();
   };
   const refreshSecretStatus = (): void => {
     const connectionId = plugin.settings.tikhub.connectionId;
     const refreshEpoch = ++statusEpoch;
     if (!UUID_PATTERN.test(connectionId)) {
-      hasSecret = false;
-      updateStatus();
+      setSecretStatus("missing");
       return;
     }
+    setSecretStatus("checking");
     let statusPromise: Promise<{ hasSecret: boolean }>;
     try {
       statusPromise = secretStore.getStatus(connectionId);
     } catch {
       if (refreshEpoch === statusEpoch && isRenderCurrent()) {
-        hasSecret = false;
-        updateStatus();
+        setSecretStatus("unavailable");
       }
       return;
     }
     void statusPromise
       .then((status) => {
         if (refreshEpoch !== statusEpoch || !isRenderCurrent()) return;
-        hasSecret = status.hasSecret;
-        updateStatus();
+        setSecretStatus(status.hasSecret ? "configured" : "missing");
       })
       .catch(() => {
         if (refreshEpoch !== statusEpoch || !isRenderCurrent()) return;
-        hasSecret = false;
-        updateStatus();
+        setSecretStatus("unavailable");
       });
   };
-  updateStatus();
+  refreshSecretStatus();
 
   const secretErrorEl = containerEl.createEl("p", {
     cls: "rss-dashboard-validation-error",
@@ -426,8 +464,7 @@ export function renderTikHubSettingsTab(
               }
               await secretStore.set(connectionId, apiKey);
               if (!isOperationCurrent(operation)) return;
-              hasSecret = true;
-              updateStatus();
+              setSecretStatus("configured");
               secretErrorEl.setText(t("settings.tikhub.keySaved"));
             } catch {
               refreshAfter = true;
@@ -460,8 +497,7 @@ export function renderTikHubSettingsTab(
             }
             if (!isOperationCurrent(operation)) return;
             if (UUID_PATTERN.test(connectionId)) await secretStore.delete(connectionId);
-            hasSecret = false;
-            if (isOperationCurrent(operation)) updateStatus();
+            if (isOperationCurrent(operation)) setSecretStatus("missing");
             plugin.settings.tikhub.enabled = false;
             try {
               await plugin.saveSettings();
@@ -542,8 +578,6 @@ export function renderTikHubSettingsTab(
         })();
       });
   });
-
-  refreshSecretStatus();
 }
 
 export function getTikHubConnectionMessage(

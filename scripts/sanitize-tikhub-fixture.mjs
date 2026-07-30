@@ -1,3 +1,5 @@
+import { types } from "node:util";
+
 const ISO_FIXTURE_TIME = "2024-01-01T00:00:00.000Z";
 const TWITTER_FIXTURE_TIME = "Mon Jan 01 00:00:00 +0000 2024";
 const MAX_DEPTH = 64;
@@ -109,6 +111,84 @@ export function sanitizeTikHubFixture(value, aliases = {}) {
   return sanitize(value);
 }
 
+/**
+ * Rejects raw capture shapes that could otherwise be silently removed by the
+ * sanitizer. It reads descriptors only, so a rejected value is never logged,
+ * serialized, or exposed through an accessor.
+ */
+export function assertTikHubRawFixtureSafe(value) {
+  assertTikHubFixtureShape(value, true);
+}
+
+/**
+ * Rejects opaque or non-JSON fixture input without changing sanitization
+ * behavior. Proxy detection deliberately precedes all reflective traversal.
+ */
+export function assertTikHubFixtureShapeSafe(value) {
+  assertTikHubFixtureShape(value, false);
+}
+
+function assertTikHubFixtureShape(value, rejectRawCaptureFields) {
+  const seen = new WeakSet();
+  const stack = [{ value, depth: 0 }];
+  let nodes = 0;
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || current.depth > MAX_DEPTH) traversalLimit();
+    const candidate = current.value;
+    if (
+      candidate === null ||
+      typeof candidate === "string" ||
+      typeof candidate === "number" ||
+      typeof candidate === "boolean"
+    ) {
+      if (typeof candidate === "number" && !Number.isFinite(candidate)) unsafeShape();
+      continue;
+    }
+    if (typeof candidate !== "object") unsafeShape();
+    if (types.isProxy(candidate)) unsafeShape();
+
+    nodes += 1;
+    if (nodes > MAX_NODES || seen.has(candidate)) traversalLimit();
+    seen.add(candidate);
+    if (safeOwnPropertySymbols(candidate).length > 0) unsafeShape();
+
+    if (Array.isArray(candidate)) {
+      requirePrototype(candidate, Array.prototype);
+      const length = safeArrayLength(candidate);
+      if (length > MAX_ARRAY_ENTRIES) traversalLimit();
+      for (let index = 0; index < length; index += 1) {
+        const descriptor = safeDescriptor(candidate, String(index));
+        if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+          unsafeShape();
+        }
+        stack.push({ value: descriptor.value, depth: current.depth + 1 });
+      }
+      assertNoUnexpectedArrayProperties(candidate, length);
+      continue;
+    }
+
+    requirePrototype(candidate, Object.prototype, null);
+    const properties = safeOwnPropertyNames(candidate);
+    if (properties.length > MAX_OBJECT_PROPERTIES) traversalLimit();
+    for (const property of properties) {
+      if (isUnsafeProperty(property)) unsafeShape();
+      if (
+        rejectRawCaptureFields &&
+        (isSensitiveCredentialKey(property) || isRawCapturePayloadKey(property))
+      ) {
+        rawCaptureProhibited();
+      }
+      const descriptor = safeDescriptor(candidate, property);
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+        unsafeShape();
+      }
+      stack.push({ value: descriptor.value, depth: current.depth + 1 });
+    }
+  }
+}
+
 /** Ensures the write candidate is already canonical and contains no private input. */
 export function assertTikHubFixtureSanitized(value, aliases = {}) {
   const replacements = buildReplacements(aliases);
@@ -162,8 +242,17 @@ function isProviderMetadataKey(key) {
   return (
     tokens.includes("cursor") ||
     tokens.includes("support") ||
+    isRawCapturePayloadKey(key) ||
     compact.endsWith("requestid") ||
     compact.endsWith("cacheurl")
+  );
+}
+
+function isRawCapturePayloadKey(key) {
+  const tokens = keyTokens(key);
+  return (
+    hasTokenPair(tokens, "raw", "response") ||
+    hasTokenPair(tokens, "raw", "payload")
   );
 }
 
@@ -318,6 +407,14 @@ function safeOwnPropertyNames(value) {
   }
 }
 
+function safeOwnPropertySymbols(value) {
+  try {
+    return Object.getOwnPropertySymbols(value);
+  } catch {
+    unsafeShape();
+  }
+}
+
 function requirePrototype(value, ...allowed) {
   let prototype;
   try {
@@ -326,6 +423,30 @@ function requirePrototype(value, ...allowed) {
     unsafeShape();
   }
   if (!allowed.includes(prototype)) unsafeShape();
+}
+
+function safeArrayLength(value) {
+  const descriptor = safeDescriptor(value, "length");
+  if (
+    !descriptor ||
+    !("value" in descriptor) ||
+    !Number.isSafeInteger(descriptor.value) ||
+    descriptor.value < 0
+  ) {
+    unsafeShape();
+  }
+  return descriptor.value;
+}
+
+function assertNoUnexpectedArrayProperties(value, length) {
+  const properties = safeOwnPropertyNames(value);
+  if (properties.length > length + 1) unsafeShape();
+  for (const property of properties) {
+    if (property === "length") continue;
+    if (!/^(?:0|[1-9]\d*)$/.test(property) || Number(property) >= length) {
+      unsafeShape();
+    }
+  }
 }
 
 function safeSerialize(value) {
@@ -342,4 +463,8 @@ function unsafeShape() {
 
 function traversalLimit() {
   throw new Error("TikHub fixture exceeds safe traversal limits.");
+}
+
+function rawCaptureProhibited() {
+  throw new Error("TikHub fixture response contains prohibited raw data.");
 }

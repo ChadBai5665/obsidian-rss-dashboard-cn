@@ -1,5 +1,6 @@
 import { createTranslator } from "../i18n";
 import type { TranslationKey, Translator } from "../i18n/types";
+import type { Feed } from "../types/types";
 import type {
   LinkedPageGroupData,
   SourceAdapter,
@@ -260,6 +261,7 @@ function assertValidRefreshOutput(
   const items = ownDataValue(output, "items");
   const providerRequestCount = ownDataValue(output, "providerRequestCount");
   const warnings = ownDataValue(output, "warnings");
+  const collectionItems = ownDataValue(output, "collectionItems");
   const linkedPageGroups = ownDataValue(output, "linkedPageGroups");
   const linkedPageGroupSnapshot = linkedPageGroups === MISSING
     ? undefined
@@ -268,6 +270,7 @@ function assertValidRefreshOutput(
   const outputConfig = normalizeSourceConfig(ownDataValue(feed, "sourceConfig"));
   if (
     !isDenseOwnArray(items, isFeedItem) ||
+    (collectionItems !== MISSING && !isDenseOwnArray(collectionItems, isFeedItem)) ||
     typeof providerRequestCount !== "number" ||
     !Number.isSafeInteger(providerRequestCount) ||
     providerRequestCount < 0 ||
@@ -298,6 +301,13 @@ function assertValidRefreshOutput(
     items: [...(items as SourceRefreshOutput["items"])],
     providerRequestCount,
     warnings: [...(warnings as SourceRefreshOutput["warnings"])],
+    ...(collectionItems === MISSING
+      ? {}
+      : {
+          collectionItems: [
+            ...(collectionItems as SourceRefreshOutput["items"]),
+          ],
+        }),
     ...(linkedPageGroups === MISSING
       ? {}
       : { linkedPageGroups: linkedPageGroupSnapshot }),
@@ -343,10 +353,54 @@ export class SourceRegistry {
   ): Promise<SourceRefreshOutput> {
     const normalizedConfig = normalizeSourceConfig(config);
     if (!normalizedConfig) throw new InvalidSourceConfigError();
+    const adapterContext: SourceRefreshContext = {
+      now: context.now,
+      ...(context.signal ? { signal: context.signal } : {}),
+      ...(context.stopSignal ? { stopSignal: context.stopSignal } : {}),
+      ...(context.feed ? { feed: cloneFeedSnapshot(context.feed) } : {}),
+    };
     const output = await this.get(normalizedConfig.kind).refresh(
       normalizedConfig,
-      context,
+      adapterContext,
     );
     return assertValidRefreshOutput(output, normalizedConfig);
   }
+}
+
+function cloneFeedSnapshot(feed: Feed): Feed {
+  return cloneOwnData(feed, new WeakMap<object, object>());
+}
+
+function cloneOwnData<T>(
+  value: T,
+  seen: WeakMap<object, object>,
+): T {
+  if (!value || typeof value !== "object") return value;
+  const existing = seen.get(value);
+  if (existing) return existing as T;
+  if (Array.isArray(value)) {
+    const clone: unknown[] = [];
+    seen.set(value, clone);
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !("value" in descriptor)) {
+        throw new InvalidSourceConfigError();
+      }
+      clone.push(cloneOwnData(descriptor.value, seen));
+    }
+    return clone as T;
+  }
+  if (value instanceof Date) return new Date(value.getTime()) as T;
+  const prototype = Reflect.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+  const clone: Record<string, unknown> = {};
+  seen.set(value, clone);
+  for (const key of Object.keys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) {
+      throw new InvalidSourceConfigError();
+    }
+    clone[key] = cloneOwnData(descriptor.value as unknown, seen);
+  }
+  return clone as T;
 }

@@ -1,5 +1,8 @@
 import type { AiConnection, AiProtocol, AiProviderKind } from "./ai-types";
 import { normalizeAiConnection } from "./connection-validation";
+import {
+  defaultAiThinkingMode,
+} from "./connection-controls";
 
 export interface AiProviderPreset {
   providerKind: AiProviderKind;
@@ -123,6 +126,9 @@ export function createAiConnection(
         timeoutMs: 60_000,
         maxInputCharacters: 80_000,
         enabled: true,
+        thinkingMode: defaultAiThinkingMode(input.providerKind),
+        reasoningEffort: "platform-default",
+        responseMode: "stream",
       })
     : undefined;
   if (!connection) throw new Error("Invalid AI connection");

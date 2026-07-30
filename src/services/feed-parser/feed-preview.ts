@@ -1,23 +1,41 @@
 import { requestUrl } from "obsidian";
-import { isValidFeed } from "./feed-validation.js";
-import type { FeedPreviewData, Rss2JsonResponse } from "./types.js";
+import type {
+  FeedPreviewData,
+  JsonFeed,
+  Rss2JsonResponse,
+} from "./types.js";
 
 export type { FeedPreviewData } from "./types.js";
 
 const BARE_AMPERSAND_REGEX =
   /&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)/g;
+const SUPPORTED_JSON_FEED_VERSIONS = new Set([
+  "https://jsonfeed.org/version/1",
+  "https://jsonfeed.org/version/1.1",
+]);
 export function parseFeedPreviewFromXmlText(
   xmlText: string,
   feedUrl: string,
 ): FeedPreviewData | null {
-  if (!xmlText) return null;
+  return parseFeedPreviewFromText(xmlText, feedUrl);
+}
 
-  const sanitizedXmlText = xmlText.replace(BARE_AMPERSAND_REGEX, "&amp;");
+export function parseFeedPreviewFromText(
+  feedText: string,
+  feedUrl: string,
+): FeedPreviewData | null {
+  if (!feedText) return null;
+
+  const jsonPreview = parseJsonFeedPreview(feedText, feedUrl);
+  if (jsonPreview) return jsonPreview;
+
+  const sanitizedXmlText = feedText.replace(BARE_AMPERSAND_REGEX, "&amp;");
   const doc = new DOMParser().parseFromString(sanitizedXmlText, "text/xml");
 
   if (doc.querySelector("parsererror")) {
     return null;
   }
+  if (!isFeedDocument(doc)) return null;
 
   return parseFeedDoc(doc, feedUrl);
 }
@@ -38,11 +56,8 @@ export async function loadFeedForPreview(
       },
     });
 
-    if (response.text && isValidFeed(response.text)) {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(response.text, "text/xml");
-      return parseFeedDoc(doc, feedUrl);
-    }
+    const preview = parseFeedPreviewFromText(response.text, feedUrl);
+    if (preview) return preview;
   } catch {
     // Fall through to rss2json
   }
@@ -66,6 +81,8 @@ export async function loadFeedForPreview(
       description: data.feed.description || "",
       link: data.feed.link || "",
       image: data.feed.image || "",
+      format: "rss",
+      latestTitle: data.items?.[0]?.title || "",
       latestPubDate: data.items?.[0]?.pubDate || "",
       hasEntries: (data.items?.length || 0) > 0,
       feedUrl,
@@ -87,6 +104,9 @@ function parseFeedDoc(doc: Document, feedUrl: string): FeedPreviewData {
     "";
 
   const firstItem = doc.querySelector("item, entry");
+  const format =
+    doc.documentElement.localName.toLowerCase() === "feed" ? "atom" : "rss";
+  const latestTitle = firstItem?.querySelector("title")?.textContent || "";
   const latestPubDate =
     firstItem?.querySelector("pubDate, published, updated")?.textContent || "";
 
@@ -95,8 +115,44 @@ function parseFeedDoc(doc: Document, feedUrl: string): FeedPreviewData {
     description,
     link,
     image: imageEl,
+    format,
+    latestTitle,
     latestPubDate,
     hasEntries: !!firstItem,
     feedUrl,
   };
+}
+
+function parseJsonFeedPreview(
+  feedText: string,
+  feedUrl: string,
+): FeedPreviewData | null {
+  let feed: JsonFeed;
+  try {
+    feed = JSON.parse(feedText) as JsonFeed;
+  } catch {
+    return null;
+  }
+
+  if (!feed.version || !SUPPORTED_JSON_FEED_VERSIONS.has(feed.version)) {
+    return null;
+  }
+
+  const firstItem = feed.items?.[0];
+  return {
+    title: feed.title || "",
+    description: feed.description || "",
+    link: feed.home_page_url || "",
+    image: feed.icon || "",
+    format: "json",
+    latestTitle: firstItem?.title || "",
+    latestPubDate: firstItem?.date_published || "",
+    hasEntries: !!firstItem,
+    feedUrl,
+  };
+}
+
+function isFeedDocument(doc: Document): boolean {
+  const rootName = doc.documentElement.localName.toLowerCase();
+  return rootName === "rss" || rootName === "feed" || rootName === "rdf";
 }

@@ -9,6 +9,8 @@ import {
   type EventRef,
   type ObsidianProtocolData,
   apiVersion,
+  requestUrl,
+  normalizePath,
 } from "obsidian";
 
 import { getSettingManager } from "./src/utils/settings-manager";
@@ -71,7 +73,12 @@ import { OpmlManager } from "./src/services/opml-manager";
 import { MediaService } from "./src/services/media-service";
 
 import { ImportOpmlModal } from "./src/modals/import-opml-modal";
-import { AddFeedModal } from "./src/modals/feed-manager/add-feed-modal";
+import { DiagnosticsPreviewModal } from "./src/modals/diagnostics-preview-modal";
+import { OperationJournalClearModal } from "./src/modals/operation-journal-clear-modal";
+import {
+  AddSourceModal,
+  type AddSourceModalOptions,
+} from "./src/modals/source-onboarding/add-source-modal";
 import { StorageMigrationModal } from "./src/modals/storage-migration-modal";
 import {
   normalizeRefreshIntervalMinutes,
@@ -87,9 +94,22 @@ import { SourceRefreshLedger } from "./src/refresh/source-refresh-ledger";
 import { CollectionRepository } from "./src/collection/collection-repository";
 import { DailyIndexService } from "./src/collection/daily-index-service";
 import { CollectionService } from "./src/services/collection-service";
+import {
+  isSubscriptionRemovalPending,
+  SubscriptionService,
+  type RemoveSubscriptionOptions,
+  type SidebarOrderingMutationRequest,
+  type SidebarOrderingMutationResult,
+  type SubscriptionFolderMutationRequest,
+  type SubscriptionFolderMutationResult,
+  type SubscriptionSettingsPort,
+  type SubscriptionUpdateRequest,
+  type VerifiedSubscriptionRequest,
+} from "./src/services/subscription-service";
 import { isTimeoutFeedError } from "./src/services/feed-parser/feed-errors";
 import {
   bindFeedItemsToSourceIdentity,
+  createCanonicalFeedItemId,
   createSourceLocator,
   isStableItemId,
   resolveFeedItemStableId,
@@ -109,10 +129,23 @@ import {
 } from "./src/security/stable-own-data-json";
 import { normalizeFeedItem } from "./src/collection/feed-normalizer";
 import { ContentRepository } from "./src/collection/content-repository";
+import { InnerTubeTranscriptProvider } from "./src/youtube-transcript/innertube-transcript-provider";
+import { YtDlpTranscriptProvider } from "./src/youtube-transcript/yt-dlp-transcript-provider";
+import { YouTubeTranscriptService } from "./src/youtube-transcript/youtube-transcript-service";
+import { TikHubCaptionJobRepository } from "./src/youtube-transcript/tikhub-caption-job-repository";
+import { TikHubTranscriptProvider } from "./src/youtube-transcript/tikhub-transcript-provider";
+import type { YouTubeTranscriptPanelRuntime } from "./src/components/youtube-transcript-panel";
+import { createRuntimeTranscriptHttpTransport } from "./src/youtube-transcript/runtime-transcript-transport";
 import { AiContentSelector } from "./src/ai/content/ai-content-selector";
 import { AiOperationService } from "./src/ai/ai-operation-service";
 import { AnalysisRepository } from "./src/ai/analysis-repository";
 import { AnalysisNoteInserter } from "./src/ai/analysis-note-inserter";
+import { AiOperationTaskCoordinator } from "./src/ai/ai-operation-task-coordinator";
+import {
+  snapshotAiAnalysisResult,
+  type AiAnalysisResult,
+} from "./src/ai/analysis-result";
+import type { InlineAiPanelDependencies } from "./src/components/inline-ai-panel";
 import {
   cloneAiSourceItem,
   revalidateAiSourceForSave,
@@ -120,11 +153,6 @@ import {
   type AiSourceSnapshot,
 } from "./src/ai/ai-source-snapshot";
 import type { AiOperation } from "./src/ai/prompts/prompt-types";
-import {
-  AiOperationModal,
-  aiOperationLabel,
-  openAiOperationModal,
-} from "./src/modals/ai-operation-modal";
 import { fetchFullArticleContentWithOutcome } from "./src/utils/full-article-fetch";
 import { getContentBasisLabel } from "./src/collection/content-basis-display";
 import { SourceRegistry } from "./src/sources/source-registry";
@@ -142,6 +170,9 @@ import type {
 import { TikHubRequestLedger } from "./src/sources/tikhub/request-ledger";
 import { TikHubRequestBudget } from "./src/sources/tikhub/request-budget";
 import { TikHubClient } from "./src/sources/tikhub/tikhub-client";
+import { XProfileResolver } from "./src/sources/tikhub/x-profile-resolver";
+import { discoverRssWebsite } from "./src/services/source-verification/rss-website-discovery";
+import { resolveYouTubeChannel } from "./src/services/source-verification/youtube-channel-resolver";
 import {
   XAccountAdapter,
   XAccountRefreshError,
@@ -150,6 +181,22 @@ import {
   XTopicAdapter,
   XTopicRefreshError,
 } from "./src/sources/tikhub/x-topic-adapter";
+import {
+  OperationJournalService,
+  OperationJournalServiceError,
+  type OperationJournalListResult,
+  OperationJournalPort,
+  OperationJournalScope,
+} from "./src/operation-journal/operation-journal-service";
+import { OperationJournalRepository } from "./src/operation-journal/operation-journal-repository";
+import type { OperationJournalUiPort } from "./src/components/operation-journal-panel";
+import type { OperationJournalSettingsPort } from "./src/settings/tabs/import-export-settings-tab";
+import {
+  projectSafeOperationSubject,
+  type OperationErrorCode,
+  type OperationSubject,
+  type RefreshOperationDetails,
+} from "./src/operation-journal/operation-event";
 
 export interface FeedRefreshResult {
   feed: Feed;
@@ -159,6 +206,39 @@ export interface FeedRefreshResult {
   providerRequestCount: number;
   warnings: string[];
   linkedPageGroups?: SourceRefreshOutput["linkedPageGroups"];
+}
+
+interface FeedRefreshPublication {
+  result: FeedRefreshResult;
+  sourceId: string;
+  sourceIdentity: string;
+}
+
+type RefreshTrigger = "manual" | "startup" | "schedule";
+
+interface RefreshInvocation {
+  trigger: RefreshTrigger;
+  action: "all" | "failed" | "source" | "folder";
+  feeds?: readonly Feed[];
+  subject?: OperationSubject;
+}
+
+type FeedRefreshOutcome =
+  | {
+      status: "succeeded";
+      publication: FeedRefreshPublication;
+      newItems: number;
+    }
+  | {
+      status: "failed";
+      errorCode: OperationErrorCode;
+      timedOut: boolean;
+    }
+  | { status: "aborted" };
+
+interface RefreshBatchOutcome {
+  readonly outcomes: readonly FeedRefreshOutcome[];
+  readonly details: RefreshOperationDetails;
 }
 
 export interface FiltersUpdatedEventPayload {
@@ -174,6 +254,108 @@ interface AiArticleSaveSnapshot {
   saveFullContent: boolean;
   addSavedTag: boolean;
   savedTag: Tag;
+}
+
+interface AiRuntime {
+  dataRoot: string;
+  operationJournal: OperationJournalPort;
+  lifecycle: { revoked: boolean };
+  contentRepository: ContentRepository;
+  contentSelector: AiContentSelector;
+  operationService: AiOperationService;
+  analysisRepository: AnalysisRepository;
+  noteInserter: AnalysisNoteInserter;
+  coordinator: AiOperationTaskCoordinator;
+  generatedResults: Map<string, Readonly<AiAnalysisResult>>;
+}
+
+interface OperationJournalRuntime {
+  readonly dataRoot: string;
+  readonly service: OperationJournalService;
+  readonly lifecycle: { revoked: boolean };
+  clearFlight: Promise<void> | null;
+}
+
+interface OperationJournalUiSubscription {
+  readonly listener: () => void;
+  active: boolean;
+  runtime: OperationJournalRuntime | null;
+  unsubscribe: (() => void) | null;
+}
+
+const MAX_CURRENT_AI_INSERTION_RESULTS = 256;
+const MAX_OPERATION_JOURNAL_RUNTIME_READ_ATTEMPTS = 3;
+const UNAVAILABLE_OPERATION_JOURNAL_ID =
+  "00000000-0000-4000-8000-000000000000";
+const SAFE_OPERATION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const UNAVAILABLE_OPERATION_JOURNAL_CURSOR_LIMIT = 281_474_976_710_656;
+let unavailableOperationJournalCursor: number | null = null;
+
+function createFallbackUnavailableOperationJournalId(): string {
+  try {
+    if (unavailableOperationJournalCursor === null) {
+      let seed = 0;
+      try {
+        const now = Date.now();
+        if (Number.isSafeInteger(now) && now >= 0) {
+          seed = now % UNAVAILABLE_OPERATION_JOURNAL_CURSOR_LIMIT;
+        }
+      } catch {
+        // A missing clock starts the process-local cursor at zero.
+      }
+      unavailableOperationJournalCursor = seed;
+    }
+    unavailableOperationJournalCursor =
+      (unavailableOperationJournalCursor + 1) %
+        UNAVAILABLE_OPERATION_JOURNAL_CURSOR_LIMIT;
+    const operationId = `00000000-0000-4000-8000-${
+      unavailableOperationJournalCursor.toString(16).padStart(12, "0")
+    }`;
+    if (SAFE_OPERATION_ID.test(operationId)) return operationId;
+  } catch {
+    // Retain one fixed valid ID only as the final non-blocking fallback.
+  }
+  return UNAVAILABLE_OPERATION_JOURNAL_ID;
+}
+
+function createUnavailableOperationJournalId(): string {
+  try {
+    const operationId = activeWindow.crypto.randomUUID();
+    if (SAFE_OPERATION_ID.test(operationId)) return operationId;
+  } catch {
+    // Use the process-local fallback sequence below.
+  }
+  return createFallbackUnavailableOperationJournalId();
+}
+
+function createUnavailableOperationJournalScope(
+  requestedOperationId?: unknown,
+): OperationJournalScope {
+  const operationId =
+    typeof requestedOperationId === "string" &&
+      SAFE_OPERATION_ID.test(requestedOperationId)
+      ? requestedOperationId
+      : UNAVAILABLE_OPERATION_JOURNAL_ID;
+  const resolved = async (): Promise<void> => undefined;
+  return Object.freeze({
+    operationId,
+    progress: resolved,
+    succeed: resolved,
+    fail: resolved,
+    abort: resolved,
+  });
+}
+
+function createUnavailableOperationJournalPort(): OperationJournalPort {
+  return Object.freeze({
+    begin: () =>
+      createUnavailableOperationJournalScope(
+        createUnavailableOperationJournalId(),
+      ),
+    attach: (operationId: string) =>
+      createUnavailableOperationJournalScope(operationId),
+  });
 }
 
 function canWriteOwnDataValues(target: object, keys: string[]): boolean {
@@ -526,6 +708,13 @@ class FeedRefreshPipelineError extends Error {
   }
 }
 
+class RefreshSettingsSaveError extends Error {
+  constructor() {
+    super("Refresh settings save failed.");
+    this.name = "RefreshSettingsSaveError";
+  }
+}
+
 class RefreshAttemptToken {
   private active = true;
   private readonly controller = new AbortController();
@@ -547,6 +736,51 @@ class RefreshAttemptToken {
       );
     }
   }
+}
+
+function isActiveInitialImportProgress(
+  progress: Feed["initialImportProgress"],
+): boolean {
+  return progress?.status === "pending" ||
+    progress?.status === "running" ||
+    progress?.status === "paused-limit";
+}
+
+function stoppedInitialImportResult(feed: Feed, fetchedAt: Date): FeedRefreshResult {
+  const stoppedFeed = cloneRefreshData(feed);
+  if (stoppedFeed.initialImportProgress) {
+    stoppedFeed.initialImportProgress.status = "stopped";
+  }
+  return {
+    feed: stoppedFeed,
+    previousItems: cloneRefreshData(stoppedFeed.items),
+    refreshedItems: [],
+    fetchedAt,
+    providerRequestCount: 0,
+    warnings: [],
+  };
+}
+
+function combineAbortSignals(
+  primary: AbortSignal,
+  secondary?: AbortSignal,
+): { signal: AbortSignal; dispose: () => void } {
+  if (!secondary) return { signal: primary, dispose: () => undefined };
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  if (primary.aborted || secondary.aborted) {
+    controller.abort();
+    return { signal: controller.signal, dispose: () => undefined };
+  }
+  primary.addEventListener("abort", abort, { once: true });
+  secondary.addEventListener("abort", abort, { once: true });
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      primary.removeEventListener("abort", abort);
+      secondary.removeEventListener("abort", abort);
+    },
+  };
 }
 
 function cloneRefreshData<T>(value: T, seen = new WeakMap<object, object>()): T {
@@ -576,6 +810,34 @@ function cloneRefreshData<T>(value: T, seen = new WeakMap<object, object>()): T 
   return clone as T;
 }
 
+function refreshSourceIdentity(feed: Feed): string | undefined {
+  const config = normalizeSourceConfig(feed.sourceConfig);
+  if (config?.kind === "x-account") {
+    return JSON.stringify([
+      "x-account",
+      config.handle,
+      config.restId ?? "",
+      config.includeReplies,
+      config.includeReposts,
+    ]);
+  }
+  if (config?.kind === "x-topic") {
+    return JSON.stringify([
+      "x-topic",
+      config.id,
+      config.includeKeywords,
+      config.excludeKeywords,
+      config.priorityAccounts,
+      config.windowDays,
+    ]);
+  }
+  if (feed.sourceKind === undefined || feed.sourceKind === "feed") {
+    const url = feed.url.normalize("NFC").trim();
+    return url ? JSON.stringify(["feed", url]) : undefined;
+  }
+  return undefined;
+}
+
 function toFeedRefreshPipelineError(error: unknown): FeedRefreshPipelineError {
   if (error instanceof FeedRefreshPipelineError) {
     return error;
@@ -588,10 +850,95 @@ function toFeedRefreshPipelineError(error: unknown): FeedRefreshPipelineError {
     : new FeedRefreshPipelineError("refresh-failed", "Source refresh failed.");
 }
 
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    value,
-  );
+function toRefreshOperationErrorCode(
+  failure: FeedRefreshPipelineError,
+): OperationErrorCode {
+  switch (failure.code) {
+    case "timed-out":
+      return "timeout";
+    case "collection-failed":
+      return "cache-save-failed";
+    case "invalid-source-config":
+      return "source-validation-failed";
+    case "missing-key":
+      return "missing-key";
+    case "invalid-key":
+      return "invalid-key";
+    case "budget-unavailable":
+      return "budget-exhausted";
+    case "tikhub-disabled":
+      return "tikhub-disabled";
+    case "refresh-failed":
+      return "source-refresh-failed";
+    case "state-failed":
+      return "refresh-state-failed";
+  }
+}
+
+function countNewRefreshItems(result: FeedRefreshResult): number {
+  const sourceId = result.feed.feedId ?? result.feed.url;
+  const sourceType = result.feed.sourceKind ?? "feed";
+  const stableIds = (items: readonly FeedItem[]): Set<string> => {
+    const ids = new Set<string>();
+    for (const item of items) {
+      try {
+        ids.add(
+          isStableItemId(item.rssDashboardId)
+            ? item.rssDashboardId
+            : createCanonicalFeedItemId({ sourceType, sourceId, item }),
+        );
+      } catch {
+        // Malformed identities are not guessed into the journal count.
+      }
+    }
+    return ids;
+  };
+  const previousIds = stableIds(result.previousItems);
+  let newItems = 0;
+  for (const itemId of stableIds(result.refreshedItems)) {
+    if (!previousIds.has(itemId)) newItems += 1;
+  }
+  return newItems;
+}
+
+const tikhubLedgerVaultIdentities = new WeakMap<object, string>();
+let tikhubLedgerVaultIdentitySequence = 0;
+
+/**
+ * A ledger lock belongs to the physical Vault and data root, never to a
+ * connection. Settings may switch connections while an old operation is
+ * writing the same daily ledger, so connection-scoped lock identities lose
+ * updates.
+ */
+function tikhubLedgerStorageIdentity(vault: object): string {
+  const existing = tikhubLedgerVaultIdentities.get(vault);
+  if (existing) return existing;
+  const identity = `vault:${++tikhubLedgerVaultIdentitySequence}`;
+  tikhubLedgerVaultIdentities.set(vault, identity);
+  return identity;
+}
+
+/** Poll delays must stop promptly when the plugin-owned transcript service is disposed. */
+function waitForAbortableTranscriptPoll(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Transcript polling aborted"));
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error("Transcript polling aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -718,6 +1065,46 @@ export default class RssDashboardPlugin extends Plugin {
   private collectionService:
     | { dataRoot: string; dailyIndexFolder: string; service: CollectionService }
     | null = null;
+  private youtubeTranscriptRuntime:
+    | {
+        dataRoot: string;
+        operationJournal: OperationJournalPort;
+        service: YouTubeTranscriptService;
+        contentRepository: ContentRepository;
+      }
+    | null = null;
+  private aiRuntime: AiRuntime | null = null;
+  private committedOperationJournalDataRoot: string | null = null;
+  private operationJournalRuntime: OperationJournalRuntime | null = null;
+  private readonly unavailableOperationJournalPort =
+    createUnavailableOperationJournalPort();
+  private readonly operationJournalUiSubscriptions =
+    new Set<OperationJournalUiSubscription>();
+  private readonly operationJournalUiFacade: OperationJournalUiPort =
+    Object.freeze({
+      load: async (days: 7 | 30) => await this.loadOperationJournal(days),
+      subscribe: (listener: () => void) =>
+        this.subscribeToOperationJournalUi(listener),
+      exportSafe: async (days: 7 | 30) =>
+        await this.previewSafeOperationJournal(days),
+      requestClear: () => this.requestOperationJournalClear(),
+    });
+  private readonly operationJournalSettingsFacade: OperationJournalSettingsPort =
+    Object.freeze({
+      stats: async () =>
+        await this.requireOperationJournalRuntime().service.stats(new Date()),
+      createPreview: async (days: 7 | 30) =>
+        await this.importExportService.createOperationJournalPreview(days),
+      copyPreview: async (token: string, exactText: string) =>
+        await this.importExportService.copyOperationJournalPreview(
+          token,
+          exactText,
+        ),
+      revokePreview: (token: string) =>
+        this.importExportService.revokeOperationJournalPreview(token),
+      clear: async () => await this.clearOperationJournal(),
+      openDashboard: async () => await this.openOperationJournal(),
+    });
   private sourceRegistry:
     | { signature: string; registry: SourceRegistry }
     | null = null;
@@ -728,6 +1115,7 @@ export default class RssDashboardPlugin extends Plugin {
   // overwrite one another while either backing store is slow.
   private statusTransactionQueue: Promise<void> = Promise.resolve();
   private settingsImportQueue: Promise<void> = Promise.resolve();
+  private readonly activeInitialImportControllers = new Map<string, AbortController>();
   private isUnloading = false;
   private static readonly FEED_REFRESH_RENDER_THROTTLE_MS = 250;
   private readonly feedStorageRepository: FeedStorageRepository;
@@ -864,6 +1252,11 @@ export default class RssDashboardPlugin extends Plugin {
       importPublicSettingsBundle: (settings) =>
         this.applyPublicSettingsImport(settings),
       getLocale: () => this.settings.locale,
+      getSafeOperationJournalExport: async (days) =>
+        await this.requireOperationJournalRuntime().service.createSafeExport({
+          days,
+          now: new Date(),
+        }),
       getSafeDiagnosticsInput: () => {
         const failedSources = this.settings.feeds.filter((feed) =>
           Boolean(feed.lastFetchError),
@@ -979,7 +1372,7 @@ export default class RssDashboardPlugin extends Plugin {
         this.app.vault,
         this.settings.collection.dataFolder,
         {
-          storageIdentity: `vault:${isUuid(connectionId) ? connectionId : "unconfigured"}`,
+          storageIdentity: tikhubLedgerStorageIdentity(this.app.vault),
         },
       );
       const budget = new TikHubRequestBudget({
@@ -1168,9 +1561,197 @@ export default class RssDashboardPlugin extends Plugin {
       ),
       dailyIndex: new DailyIndexService(this.app.vault, dailyIndexFolder),
       ledger: this.getSourceRefreshLedger(),
+      isSourceActive: (sourceId) =>
+        this.settings.feeds.some(
+          (feed) => (feed.feedId ?? feed.url) === sourceId,
+        ),
     });
     this.collectionService = { dataRoot, dailyIndexFolder, service };
     return service;
+  }
+
+  private getYouTubeTranscriptRuntime(): {
+    dataRoot: string;
+    identity: string;
+    operationJournal: OperationJournalPort;
+    service: YouTubeTranscriptService;
+    contentRepository: ContentRepository;
+  } {
+    const dataRoot = this.settings.collection.dataFolder.trim();
+    const operationJournal = this.getOperationJournalPort();
+    if (
+      this.youtubeTranscriptRuntime?.dataRoot === dataRoot &&
+      this.youtubeTranscriptRuntime.operationJournal === operationJournal
+    ) {
+      return {
+        ...this.youtubeTranscriptRuntime,
+        identity: this.youtubeTranscriptRuntime.dataRoot,
+      };
+    }
+
+    const contentRepository = new ContentRepository(
+      this.app.vault,
+      dataRoot,
+      () => new Date(),
+    );
+    const metadataRepository = new CollectionRepository(
+      this.app.vault,
+      dataRoot,
+      () => new Date(),
+    );
+    const transport = createRuntimeTranscriptHttpTransport();
+    const innerTube = new InnerTubeTranscriptProvider(transport);
+    const tikhubJobs = new TikHubCaptionJobRepository(this.app.vault, dataRoot);
+    const tikhub = new TikHubTranscriptProvider({
+      getSettings: () => this.settings.tikhub,
+      getApiKey: async (connectionId) =>
+        await new DesktopSecretStore().get(connectionId),
+      createClient: (settings) => {
+        const ledger = new TikHubRequestLedger(this.app.vault, dataRoot, {
+          storageIdentity: tikhubLedgerStorageIdentity(this.app.vault),
+        });
+        const budget = new TikHubRequestBudget({
+          ledger,
+          maxRequestsPerRun: settings.maxRequestsPerRun,
+          maxRequestsPerDay: settings.maxRequestsPerDay,
+        });
+        return new TikHubClient({
+          baseUrl: settings.baseUrl,
+          timeoutMs: settings.timeoutMs,
+          budget,
+        });
+      },
+      jobs: tikhubJobs,
+      clock: () => new Date(),
+      delay: waitForAbortableTranscriptPoll,
+      operationJournal,
+    });
+    const ytDlp = Platform.isDesktopApp
+      ? new YtDlpTranscriptProvider(transport, {
+          cookiesFromBrowser: () => {
+            const browser = this.settings.media.youtubeTranscriptBrowserAuth;
+            return browser === "chrome" ||
+              browser === "safari" ||
+              browser === "firefox"
+              ? browser
+              : undefined;
+          },
+        })
+      : {
+          isAvailable: async () => false,
+          listTracks: async () => [],
+          fetchTrack: async () => {
+            throw new Error("Desktop transcript fallback unavailable");
+          },
+        };
+    const service = new YouTubeTranscriptService({
+      providers: [
+        { source: "innertube", provider: innerTube },
+        {
+          source: "tikhub",
+          provider: tikhub,
+          isAvailable: async () => await tikhub.isAvailable(),
+        },
+        {
+          source: "yt-dlp",
+          provider: ytDlp,
+          isAvailable: async () => await ytDlp.isAvailable(),
+        },
+      ],
+      contentRepository,
+      metadataRepository,
+      clock: () => new Date(),
+      operationJournal,
+    });
+    const previous = this.youtubeTranscriptRuntime;
+    const candidate = {
+      dataRoot,
+      operationJournal,
+      service,
+      contentRepository,
+    };
+    this.youtubeTranscriptRuntime = candidate;
+    previous?.service.dispose();
+    return { ...candidate, identity: dataRoot };
+  }
+
+  /** Shared, plugin-owned transcript runtime used by both reader layouts. */
+  public resolveYouTubeTranscriptRuntime(): YouTubeTranscriptPanelRuntime {
+    const runtime = this.getYouTubeTranscriptRuntime();
+    return {
+      identity: runtime.identity,
+      service: runtime.service,
+    };
+  }
+
+  private getSubscriptionService(): SubscriptionService {
+    return new SubscriptionService({
+      settings: this.settings,
+      getSettings: () => this.settings,
+      enqueueMutation: async (operation) =>
+        await this.enqueueSettingsOperation(operation),
+      defaults: {
+        autoDeleteDuration: this.settings.defaultAutoDeleteDuration,
+        maxItems: this.settings.maxItems,
+      },
+      getDefaults: () => ({
+        autoDeleteDuration: this.settings.defaultAutoDeleteDuration,
+        maxItems: this.settings.maxItems,
+      }),
+      parseFeed: async (url, seed) =>
+        await this.feedParser.parseFeed(url, seed, { allowEmpty: true }),
+      collectionService: this.getCollectionService(),
+      getCollectionService: () => this.getCollectionService(),
+      ensureFolder: async (folder) => {
+        if (folder) {
+          await this.ensureFolderExists(folder, {
+            saveSettings: false,
+            refreshView: false,
+          });
+        }
+      },
+      saveSettings: async () => await this.saveSettings(),
+      saveSettingsCandidate: async (candidate, publish) =>
+        await this.persistSubscriptionSettingsCandidate(candidate, publish),
+      prepareFeed: (feed) =>
+        MediaService.applyMediaTags(
+          feed,
+          this.settings.availableTags,
+          this.settings.media,
+          this.settings.folders,
+        ),
+      abortInitialImport: (feedId) => {
+        this.activeInitialImportControllers.get(feedId)?.abort();
+      },
+      getOperationJournal: () => this.getOperationJournalPort(),
+    });
+  }
+
+  private async persistSubscriptionSettingsCandidate(
+    subscriptionCandidate: SubscriptionSettingsPort,
+    publish: () => void,
+  ): Promise<void> {
+    // SubscriptionService invokes this only while it owns settingsImportQueue.
+    // Re-entering saveSettings() here would deadlock that queue.
+    const previousPersistenceSettings = cloneStableOwnData(this.settings);
+    const candidate = cloneStableOwnData(this.settings);
+    candidate.feeds = cloneStableOwnData(subscriptionCandidate.feeds);
+    candidate.folders = cloneStableOwnData(subscriptionCandidate.folders);
+    candidate.collapsedFolders = cloneStableOwnData(
+      subscriptionCandidate.collapsedFolders ?? [],
+    );
+    candidate.folderFeedSortOrders = cloneStableOwnData(
+      subscriptionCandidate.folderFeedSortOrders,
+    );
+    candidate.folderSortOrder = cloneStableOwnData(
+      subscriptionCandidate.folderSortOrder,
+    );
+    await this.feedStorageRepository.persistSettingsTransaction(
+      previousPersistenceSettings,
+      candidate,
+      this.getMetadataWritePlanFor(candidate),
+      async () => { publish(); },
+    );
   }
 
   /**
@@ -1209,7 +1790,7 @@ export default class RssDashboardPlugin extends Plugin {
       if (intervalMs !== null) {
         this.registerInterval(
           window.setInterval(() => {
-            void this.refreshFeeds();
+            void this.runRefresh({ trigger: "schedule", action: "all" });
           }, intervalMs),
         );
       }
@@ -1230,15 +1811,10 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private async refreshOnOpenIfNeeded(): Promise<void> {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      await this.refreshOnOpenWithinSession();
-    } finally {
-      this.endRefreshSession();
-    }
+    await this.prepareStartupRefresh();
   }
 
-  private async refreshOnOpenWithinSession(): Promise<void> {
+  private async prepareStartupRefresh(): Promise<void> {
     const generation = this.automaticRefreshGeneration;
     if (!this.isAutomaticRefreshActive(generation)) {
       return;
@@ -1246,6 +1822,11 @@ export default class RssDashboardPlugin extends Plugin {
 
     const refreshableFeeds = this.getRefreshableFeeds(this.settings.feeds);
     if (refreshableFeeds.length === 0) {
+      await this.runRefresh({
+        trigger: "startup",
+        action: "all",
+        feeds: [],
+      });
       return;
     }
 
@@ -1262,6 +1843,11 @@ export default class RssDashboardPlugin extends Plugin {
       dueSourceIdSet.has(feed.feedId ?? feed.url),
     );
     if (dueFeeds.length === 0) {
+      await this.runRefresh({
+        trigger: "startup",
+        action: "all",
+        feeds: [],
+      });
       return;
     }
 
@@ -1276,7 +1862,11 @@ export default class RssDashboardPlugin extends Plugin {
         if (!this.isAutomaticRefreshActive(generation)) {
           return;
         }
-        void this.refreshFeeds(dueFeeds);
+        void this.runRefresh({
+          trigger: "startup",
+          action: "all",
+          feeds: dueFeeds,
+        });
       }, delay * 1000);
       if (!this.isAutomaticRefreshActive(generation)) {
         window.clearTimeout(timeoutId);
@@ -1289,7 +1879,11 @@ export default class RssDashboardPlugin extends Plugin {
     if (!this.isAutomaticRefreshActive(generation)) {
       return;
     }
-    await this.refreshFeedsWithinSession(dueFeeds);
+    await this.runRefresh({
+      trigger: "startup",
+      action: "all",
+      feeds: dueFeeds,
+    });
   }
 
   private isAutomaticRefreshActive(generation: number): boolean {
@@ -1441,14 +2035,30 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   public async performFactoryReset(): Promise<void> {
-    const resetSettings = this.buildFactoryResetSettings();
-    this.settings = resetSettings;
-    this.activeRefreshState.clear();
-    this.isMultiFeedRefreshRunning = false;
-    this.initializeSettingsBackedServices();
-    this.clearFactoryResetLocalStorage();
-
-    await this.saveSettings();
+    await this.enqueueSettingsOperation(async () => {
+      const previousSettings = this.settings;
+      const previousRuntime = this.captureSettingsBackedRuntime();
+      const previousRefreshState = new Map(this.activeRefreshState);
+      const previousRefreshRunning = this.isMultiFeedRefreshRunning;
+      try {
+        this.settings = this.buildFactoryResetSettings();
+        this.activeRefreshState.clear();
+        this.isMultiFeedRefreshRunning = false;
+        this.initializeSettingsBackedServices();
+        await this.saveSettingsUnlocked();
+      } catch (error) {
+        this.settings = previousSettings;
+        this.restoreSettingsBackedRuntime(previousRuntime);
+        this.activeRefreshState.clear();
+        for (const [sourceId, state] of previousRefreshState) {
+          this.activeRefreshState.set(sourceId, state);
+        }
+        this.isMultiFeedRefreshRunning = previousRefreshRunning;
+        this.restoreCommittedDataRootAuthorityAfterFailure();
+        throw error;
+      }
+      this.clearFactoryResetLocalStorage();
+    });
 
     const dashboardView = await this.getActiveDashboardView();
     if (dashboardView) {
@@ -1507,100 +2117,198 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  /** Opens one explicitly requested AI operation for one selected feed item. */
-  public openAiOperationForItem(
+  /**
+   * Prepares only trusted, non-secret dependencies for an inline AI panel.
+   * The caller owns UI and the coordinator owns task lifetime.
+   */
+  public createAiPanelOptionsForItem(
     item: FeedItem,
-    operation: AiOperation,
-  ): AiOperationModal | null {
+  ): InlineAiPanelDependencies | null {
     try {
-      return openAiOperationModal({
-        connections: this.settings.ai.connections,
-        locale: this.settings.locale,
-        openSettings: () => { void this.openSettingsToTab("ai"); },
-        showNotice: () => { this.notify("ai.noEnabledConnection"); },
-        createModal: (enabledConnections) => {
-          const source = resolveAndSnapshotAiSource(this.settings.feeds, item);
-          if (!source) throw new Error("Selected AI item has no trusted source");
-          const normalizationItem = cloneAiSourceItem(source.item);
-          const normalizationFeed: Feed = {
-            ...source.feed,
-            items: [normalizationItem],
-          };
-          const selectedItem = normalizeFeedItem(
-            normalizationFeed,
-            normalizationItem,
-            new Date(),
-          );
-          const saveSnapshot = this.createAiArticleSaveSnapshot(source);
-          let savedNotePath = this.resolveExistingSavedNotePath(source.item);
-          const dataRoot = this.settings.collection.dataFolder.trim();
-          const contentSelector = new AiContentSelector({
-            contentRepository: new ContentRepository(
-              this.app.vault,
-              dataRoot,
-              () => new Date(),
-            ),
-            fullTextFetcher: async ({ url, signal }) =>
-              await fetchFullArticleContentWithOutcome(
-                url,
-                this.settings.corsProxyEnabled && this.settings.corsProxyUrl
-                  ? this.settings.corsProxyUrl
-                  : undefined,
-                signal,
-              ),
-          });
-          const operationService = new AiOperationService({
-            getAiSettings: () => this.settings.ai,
-            secretStore: new DesktopSecretStore(),
-            contentSelector,
-          });
-          const analysisRepository = new AnalysisRepository(
-            this.app.vault,
-            dataRoot,
-          );
-          const noteInserter = new AnalysisNoteInserter(this.app.vault);
-          const t = createTranslator(this.settings.locale ?? "zh-CN");
+      const source = resolveAndSnapshotAiSource(this.settings.feeds, item);
+      if (!source) return null;
+      const normalizationItem = cloneAiSourceItem(source.item);
+      const normalizationFeed: Feed = {
+        ...source.feed,
+        items: [normalizationItem],
+      };
+      const selectedItem = normalizeFeedItem(
+        normalizationFeed,
+        normalizationItem,
+        new Date(),
+      );
+      if (selectedItem.id !== source.expectedStableId) return null;
 
-          return new AiOperationModal(this.app, {
-            locale: this.settings.locale,
-            operation,
-            item: selectedItem,
-            connections: enabledConnections,
-            defaultConnectionId: this.settings.ai.defaultConnectionId,
-            contentSelector,
-            operationService,
-            analysisRepository,
-            openAnalysis: async (path) => {
-              await this.openAiVaultFile(path);
-            },
-            getSavedNotePath: () => savedNotePath,
-            insertIntoSavedNote: async (result, artifactPath, notePath) =>
-              await analysisRepository.withVerifiedArtifact(
-                artifactPath,
-                result,
-                async (trustedResult) => await noteInserter.insert({
-                  notePath,
-                  result: trustedResult,
-                  operationLabel: aiOperationLabel(trustedResult.operation, t),
-                  contentBasisLabel: getContentBasisLabel(
-                    trustedResult.contentBasis,
-                    this.settings.locale ?? "zh-CN",
-                  ),
-                }),
-              ),
-            openSavedNote: async (notePath, marker) => {
-              await this.openAiVaultFile(notePath, marker);
-            },
-            saveArticleFirst: async () => {
-              savedNotePath = await this.saveArticleForAiInsertion(saveSnapshot);
-            },
-          });
+      const runtime = this.getAiRuntime();
+      const saveSnapshot = this.createAiArticleSaveSnapshot(source);
+      let savedNotePath = this.resolveExistingSavedNotePath(source.item);
+      const itemId = selectedItem.id;
+      const currentInsertableResult = (
+        path: string,
+      ): Readonly<AiAnalysisResult> => {
+        if (runtime.lifecycle.revoked) {
+          throw new Error("The AI runtime is no longer active");
+        }
+        const result = runtime.generatedResults.get(path);
+        if (!result || result.itemId !== itemId) {
+          throw new Error("The AI result is not insertable");
+        }
+        return result;
+      };
+
+      return {
+        itemId,
+        connections: this.settings.ai.connections,
+        defaultConnectionId: this.settings.ai.defaultConnectionId,
+        coordinator: runtime.coordinator,
+        createStartInput: (operation, connectionId) => ({
+          operation,
+          item: selectedItem,
+          connectionId,
+          fetchFullText: false,
+        }),
+        listHistory: async (requestedItemId, operation) => {
+          if (requestedItemId !== itemId) return [];
+          return await runtime.analysisRepository.list(itemId, operation);
         },
-      });
+        openArtifact: async (path) => {
+          await this.openAiVaultFile(path);
+        },
+        openSettings: async () => {
+          await this.openSettingsToTab("ai");
+        },
+        canInsertArtifact: (path) =>
+          !runtime.lifecycle.revoked &&
+          runtime.generatedResults.get(path)?.itemId === itemId,
+        insertArtifact: async (path) => {
+          const result = currentInsertableResult(path);
+          if (!savedNotePath) {
+            savedNotePath = await this.saveArticleForAiInsertion(saveSnapshot);
+          }
+          const currentResult = currentInsertableResult(path);
+          if (currentResult !== result) {
+            throw new Error("The AI result is no longer current");
+          }
+          const notePath = savedNotePath;
+          const insertion = await runtime.analysisRepository.withVerifiedArtifact(
+            path,
+            currentResult,
+            async (trustedResult) => {
+              if (currentInsertableResult(path) !== currentResult) {
+                throw new Error("The AI result is no longer current");
+              }
+              return await runtime.noteInserter.insert({
+                notePath,
+                result: trustedResult,
+                operationLabel: this.aiOperationLabel(trustedResult.operation),
+                contentBasisLabel: getContentBasisLabel(
+                  trustedResult.contentBasis,
+                  this.settings.locale ?? "zh-CN",
+                ),
+              });
+            },
+          );
+          currentInsertableResult(path);
+          await this.openAiVaultFile(notePath, insertion.marker);
+        },
+      };
     } catch {
-      this.notify("ai.error.failed");
       return null;
     }
+  }
+
+  private getAiRuntime(): AiRuntime {
+    const dataRoot = this.settings.collection.dataFolder.trim();
+    const operationJournal = this.getOperationJournalPort();
+    if (
+      this.aiRuntime?.dataRoot === dataRoot &&
+      this.aiRuntime.operationJournal === operationJournal
+    ) {
+      return this.aiRuntime;
+    }
+
+    const transcriptRuntime = this.getYouTubeTranscriptRuntime();
+    const contentRepository = transcriptRuntime.contentRepository;
+    const contentSelector = new AiContentSelector({
+      contentRepository,
+      fullTextFetcher: async ({ url, signal }) =>
+        await fetchFullArticleContentWithOutcome(
+          url,
+          this.settings.corsProxyEnabled && this.settings.corsProxyUrl
+            ? this.settings.corsProxyUrl
+            : undefined,
+          signal,
+        ),
+    });
+    const operationService = new AiOperationService({
+      getAiSettings: () => this.settings.ai,
+      secretStore: new DesktopSecretStore(),
+      contentSelector,
+    });
+    const analysisRepository = new AnalysisRepository(this.app.vault, dataRoot);
+    const noteInserter = new AnalysisNoteInserter(this.app.vault);
+    const lifecycle = { revoked: false };
+    const generatedResults = new Map<string, Readonly<AiAnalysisResult>>();
+    const rememberGeneratedResult = (
+      path: string,
+      value: Readonly<AiAnalysisResult>,
+    ): void => {
+      if (lifecycle.revoked) return;
+      generatedResults.delete(path);
+      generatedResults.set(path, value);
+      while (generatedResults.size > MAX_CURRENT_AI_INSERTION_RESULTS) {
+        const oldest = generatedResults.keys().next().value;
+        if (!oldest) break;
+        generatedResults.delete(oldest);
+      }
+    };
+    const coordinator = new AiOperationTaskCoordinator({
+      service: operationService,
+      repository: {
+        latest: async (itemId, operation) =>
+          await analysisRepository.latest(itemId, operation),
+        save: async (value) => {
+          const result = Object.freeze(snapshotAiAnalysisResult(value));
+          const path = await analysisRepository.save(result);
+          rememberGeneratedResult(path, result);
+          return path;
+        },
+      },
+      operationJournal,
+    });
+    const candidate: AiRuntime = {
+      dataRoot,
+      operationJournal,
+      lifecycle,
+      contentRepository,
+      contentSelector,
+      operationService,
+      analysisRepository,
+      noteInserter,
+      coordinator,
+      generatedResults,
+    };
+    const previous = this.aiRuntime;
+    if (previous) this.revokeAiRuntime(previous);
+    this.aiRuntime = candidate;
+    return candidate;
+  }
+
+  private revokeAiRuntime(runtime: AiRuntime): void {
+    runtime.lifecycle.revoked = true;
+    runtime.generatedResults.clear();
+    void runtime.coordinator.shutdown();
+  }
+
+  private aiOperationLabel(operation: AiOperation): string {
+    const t = createTranslator(this.settings.locale ?? "zh-CN");
+    const keys: Record<AiOperation, Parameters<typeof t>[0]> = {
+      summary: "ai.operation.summary",
+      "translate-zh-cn": "ai.operation.translateZhCn",
+      "core-points": "ai.operation.corePoints",
+      "deep-analysis": "ai.operation.deepAnalysis",
+    };
+    return t(keys[operation]);
   }
 
   private resolveExistingSavedNotePath(item: FeedItem): string | undefined {
@@ -1762,6 +2470,16 @@ export default class RssDashboardPlugin extends Plugin {
     }
 
     await this.loadSettings();
+    try {
+      this.committedOperationJournalDataRoot =
+        this.normalizeOperationJournalDataRoot(this.settings);
+      const operationJournalRuntime = this.getOperationJournalRuntime();
+      void Promise.resolve(
+        operationJournalRuntime.service.prune(new Date()),
+      ).catch(() => undefined);
+    } catch {
+      // Journal maintenance is best-effort and cannot block plugin loading.
+    }
     this.commandTranslator = createTranslator(this.settings?.locale ?? "zh-CN");
     this.registerVaultMetadataChangeListeners();
 
@@ -1809,8 +2527,8 @@ export default class RssDashboardPlugin extends Plugin {
 
       this.registerView(
         RSS_READER_VIEW_TYPE,
-        (leaf) =>
-          new ReaderView(
+        (leaf) => {
+          return new ReaderView(
             leaf,
             this.settings,
             this.articleSaver,
@@ -1835,10 +2553,15 @@ export default class RssDashboardPlugin extends Plugin {
                   item,
                 );
               },
-              onAiOperation: (item, operation) =>
-                this.openAiOperationForItem(item, operation),
+              createAiPanelOptions: (item) =>
+                this.createAiPanelOptionsForItem(item),
+              youtubeTranscript: {
+                resolveRuntime: () => this.getYouTubeTranscriptRuntime(),
+                openTikHubSettings: () => this.openSettingsToTab("tikhub"),
+              },
             },
-          ),
+          );
+        },
       );
 
       this.registerView(
@@ -2034,16 +2757,6 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  private buildUriAddFeedTitle(feedUrl: string): string {
-    try {
-      const parsed = new URL(feedUrl);
-      const hostname = parsed.hostname.replace(/^www\./i, "").trim();
-      return hostname || feedUrl;
-    } catch {
-      return feedUrl;
-    }
-  }
-
   private async handleAddFeedUriAction(
     params: ObsidianProtocolData,
   ): Promise<void> {
@@ -2065,30 +2778,11 @@ export default class RssDashboardPlugin extends Plugin {
 
     await this.activateView();
 
-    new AddFeedModal(
-      this.app,
-      this.settings.folders,
-      async (request) =>
-        await this.addFeed(
-          request.title,
-          request.url,
-          request.folder,
-          request.autoDeleteDuration,
-          request.maxItemsLimit,
-          request.scanInterval,
-          request.feedKeywordRules,
-          request.customTemplate,
-          request.excludeFromRefresh,
-          request.customTags,
-        ),
-      () => {
-        void this.refreshDashboardViews();
-      },
-      defaultFolder,
-      this,
-      decodedUrl,
-      this.buildUriAddFeedTitle(decodedUrl),
-    ).open();
+    this.openAddSourceModal({
+      initialKind: "rss-website",
+      initialInput: decodedUrl,
+      initialFolder: defaultFolder,
+    });
   }
 
   private applyMobileOptimizations(): void {
@@ -2325,28 +3019,74 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  async refreshFeeds(selectedFeeds?: Feed[]) {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      await this.refreshFeedsWithinSession(selectedFeeds);
-    } finally {
-      this.endRefreshSession();
-    }
+  async refreshFeeds(selectedFeeds?: Feed[]): Promise<void> {
+    const selected = selectedFeeds ? [...selectedFeeds] : undefined;
+    await this.runRefresh({
+      trigger: "manual",
+      action: "all",
+      ...(selected ? { feeds: selected } : {}),
+    });
   }
 
-  private async refreshFeedsWithinSession(selectedFeeds?: Feed[]) {
+  private async runRefresh(invocation: RefreshInvocation): Promise<void> {
+    const startedAt = Date.now();
+    if (!this.tryBeginRefreshSession()) {
+      const rejectedScope = this.beginRefreshJournalSafely(invocation);
+      this.failRefreshJournalSafely(
+        rejectedScope,
+        "refresh-failed",
+        this.emptyRefreshDetails(Date.now() - startedAt),
+      );
+      return;
+    }
+
+    const scope = this.beginRefreshJournalSafely(invocation);
+    let total = 0;
     try {
-      const candidateFeeds = selectedFeeds || this.settings.feeds;
+      if (invocation.trigger === "manual") {
+        this.cancelPendingStartupRefresh();
+      }
+
+      const reconciledFeeds = invocation.feeds && invocation.action !== "source"
+        ? this.reconcileRefreshSnapshot(invocation.feeds)
+        : invocation.feeds;
+      let candidateFeeds: readonly Feed[];
+      if (invocation.action === "failed") {
+        const failedSourceIds = new Set(
+          await this.getSourceRefreshLedger().getSourceIdsWithStatus("error"),
+        );
+        candidateFeeds = this.settings.feeds.filter((feed) =>
+          failedSourceIds.has(feed.feedId ?? feed.url)
+        );
+      } else {
+        candidateFeeds = reconciledFeeds ?? this.settings.feeds;
+      }
+
       if (candidateFeeds.length === 0) {
+        if (invocation.action === "source") {
+          this.abortRefreshJournalSafely(scope);
+        } else {
+          this.succeedRefreshJournalSafely(
+            scope,
+            this.emptyRefreshDetails(Date.now() - startedAt),
+          );
+        }
         return;
       }
 
-      const feedsToRefresh = this.getRefreshableFeeds(candidateFeeds);
+      const feedsToRefresh = invocation.action === "source"
+        ? candidateFeeds.filter((feed) => !this.isDirectSourceRefreshBlocked(feed))
+        : this.getRefreshableFeeds(candidateFeeds);
+      total = feedsToRefresh.length;
       if (feedsToRefresh.length === 0) {
         this.notify(
-          selectedFeeds
+          invocation.feeds
             ? "plugin.refresh.allSelectedExcluded"
             : "plugin.refresh.allExcluded",
+        );
+        this.succeedRefreshJournalSafely(
+          scope,
+          this.emptyRefreshDetails(Date.now() - startedAt),
         );
         return;
       }
@@ -2355,86 +3095,81 @@ export default class RssDashboardPlugin extends Plugin {
         console.warn(
           "[RSS dashboard] Feed parser not initialized; skipping refresh.",
         );
+        this.failRefreshJournalSafely(scope, "refresh-failed", {
+          total,
+          succeeded: 0,
+          failed: total,
+          newItems: 0,
+          elapsedMs: Date.now() - startedAt,
+        });
         return;
       }
 
-      let feedNoticeText = "";
-      if (feedsToRefresh.length === 1) {
-        feedNoticeText = feedsToRefresh[0].title;
-      } else {
-        feedNoticeText = this.t("plugin.feedCount", {
-          count: feedsToRefresh.length,
-        });
-      }
-
+      const feedNoticeText = feedsToRefresh.length === 1
+        ? feedsToRefresh[0].title
+        : this.t("plugin.feedCount", { count: feedsToRefresh.length });
       this.notifyRefreshStart(feedsToRefresh, feedNoticeText);
       const sourceRegistry = this.takeSourceRegistryForRun();
-      if (feedsToRefresh.length === 1) {
-        await this.refreshSingleFeed(
-          feedsToRefresh[0],
-          feedNoticeText,
-          sourceRegistry,
-        );
-        return;
+      const outcomes = feedsToRefresh.length === 1
+        ? [await this.refreshSingleFeed(
+            feedsToRefresh[0],
+            feedNoticeText,
+            sourceRegistry,
+          )]
+        : await this.refreshFeedBatch(
+            feedsToRefresh,
+            feedNoticeText,
+            sourceRegistry,
+          );
+      if (feedsToRefresh.length === 1 && outcomes[0]?.status === "failed") {
+        console.error("[RSS dashboard] Refresh request failed.");
+        this.notify("plugin.refreshFailed");
       }
-
-      await this.refreshFeedBatch(
-        feedsToRefresh,
-        feedNoticeText,
-        sourceRegistry,
+      const batch = this.summarizeRefreshOutcomes(
+        outcomes,
+        total,
+        Date.now() - startedAt,
       );
-    } catch {
-      console.error("[RSS dashboard] Refresh request failed.");
-      this.notify("plugin.refreshFailed");
+      this.closeRefreshJournalSafely(scope, invocation, batch);
+    } catch (error) {
+      const errorCode: OperationErrorCode =
+        error instanceof RefreshSettingsSaveError
+          ? "settings-save-failed"
+          : "refresh-failed";
+      console.error(
+        invocation.action === "failed"
+          ? "[RSS dashboard] Failed-source refresh request failed."
+          : "[RSS dashboard] Refresh request failed.",
+      );
+      this.notify(
+        invocation.action === "failed"
+          ? "plugin.refresh.failedSourcesFailed"
+          : "plugin.refreshFailed",
+      );
+      this.failRefreshJournalSafely(scope, errorCode, {
+        total,
+        succeeded: 0,
+        failed: total,
+        newItems: 0,
+        elapsedMs: Date.now() - startedAt,
+      });
+    } finally {
+      this.endRefreshSession();
     }
   }
 
   async refreshFailedSources(): Promise<void> {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      await this.refreshFailedSourcesWithinSession();
-    } finally {
-      this.endRefreshSession();
-    }
-  }
-
-  private async refreshFailedSourcesWithinSession(): Promise<void> {
-    try {
-      const failedSourceIds = new Set(
-        await this.getSourceRefreshLedger().getSourceIdsWithStatus("error"),
-      );
-      const failedFeeds = this.getRefreshableFeeds(this.settings.feeds).filter(
-        (feed) => failedSourceIds.has(feed.feedId ?? feed.url),
-      );
-      if (failedFeeds.length > 0) {
-        await this.refreshFeedsWithinSession(failedFeeds);
-      }
-    } catch {
-      console.error("[RSS dashboard] Failed-source refresh request failed.");
-      this.notify("plugin.refresh.failedSourcesFailed");
-    }
+    await this.runRefresh({ trigger: "manual", action: "failed" });
   }
 
   /** Public manual entry point used by commands and dashboard controls. */
   public async manualRefreshAllSources(): Promise<void> {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      this.cancelPendingStartupRefresh();
-      await this.refreshFeedsWithinSession();
-    } finally {
-      this.endRefreshSession();
-    }
+    await this.runRefresh({ trigger: "manual", action: "all" });
   }
 
   /** Public manual entry point used by commands and dashboard controls. */
   public async manualRefreshFailedSources(): Promise<void> {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      this.cancelPendingStartupRefresh();
-      await this.refreshFailedSourcesWithinSession();
-    } finally {
-      this.endRefreshSession();
-    }
+    await this.runRefresh({ trigger: "manual", action: "failed" });
   }
 
   /** Public manual entry point used by collection source rows. */
@@ -2452,6 +3187,11 @@ export default class RssDashboardPlugin extends Plugin {
     );
     if (!feed) {
       this.notify("plugin.refresh.sourceGone");
+      await this.runRefresh({
+        trigger: "manual",
+        action: "source",
+        feeds: [],
+      });
       return;
     }
     await this.refreshSelectedFeed(feed);
@@ -2489,29 +3229,13 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  async refreshSelectedFeed(feed: Feed) {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      this.cancelPendingStartupRefresh();
-      if (!this.feedParser) {
-        console.warn(
-          "[RSS dashboard] Feed parser not initialized; skipping refresh.",
-        );
-        return;
-      }
-
-      this.notifyRefreshStart([feed], feed.title);
-      await this.refreshSingleFeed(
-        feed,
-        feed.title,
-        this.takeSourceRegistryForRun(),
-      );
-    } catch {
-      console.error("[RSS dashboard] Refresh request failed.");
-      this.notify("plugin.refreshFailed");
-    } finally {
-      this.endRefreshSession();
-    }
+  async refreshSelectedFeed(feed: Feed): Promise<void> {
+    await this.runRefresh({
+      trigger: "manual",
+      action: "source",
+      feeds: [feed],
+      subject: this.refreshSubjectForFeed(feed),
+    });
   }
 
   private tryBeginRefreshSession(): boolean {
@@ -2523,12 +3247,628 @@ export default class RssDashboardPlugin extends Plugin {
     return true;
   }
 
+  private reconcileRefreshSnapshot(feeds: readonly Feed[]): Feed[] {
+    const reconciled: Feed[] = [];
+    const seen = new Set<Feed>();
+    for (const snapshot of feeds) {
+      const sourceId = snapshot.feedId?.trim();
+      const current = sourceId
+        ? this.settings.feeds.find((feed) => feed.feedId?.trim() === sourceId)
+        : this.settings.feeds.find((feed) =>
+            feed.feedId === undefined &&
+            (feed.sourceKind === undefined || feed.sourceKind === "feed") &&
+            feed.url === snapshot.url
+          );
+      if (current && !seen.has(current)) {
+        seen.add(current);
+        reconciled.push(current);
+      }
+    }
+    return reconciled;
+  }
+
   private endRefreshSession(): void {
     this.activeRefreshState.clear();
     this.isMultiFeedRefreshRunning = false;
   }
 
-  async refreshFeedsInFolder(folderPath: string) {
+  private getOperationJournalRuntime(): OperationJournalRuntime {
+    const dataRoot = this.getCommittedOperationJournalDataRoot();
+    if (
+      this.operationJournalRuntime?.dataRoot === dataRoot &&
+      !this.operationJournalRuntime.lifecycle.revoked
+    ) {
+      return this.operationJournalRuntime;
+    }
+
+    const lifecycle = { revoked: false };
+    let runtimeCandidate: OperationJournalRuntime | null = null;
+    const service = new OperationJournalService(
+      new OperationJournalRepository(this.app.vault, dataRoot),
+      {
+        onHealthChange: () => {
+          if (
+            runtimeCandidate === null ||
+            lifecycle.revoked ||
+            this.operationJournalRuntime !== runtimeCandidate
+          ) {
+            return;
+          }
+          this.notifyOperationJournalUi(runtimeCandidate);
+        },
+      },
+    );
+    const candidate: OperationJournalRuntime = {
+      dataRoot,
+      service,
+      lifecycle,
+      clearFlight: null,
+    };
+    runtimeCandidate = candidate;
+    const previous = this.operationJournalRuntime;
+    this.operationJournalRuntime = candidate;
+    if (previous) this.revokeOperationJournalRuntime(previous);
+    this.rebindOperationJournalUiSubscriptions(candidate);
+    return candidate;
+  }
+
+  private normalizeOperationJournalDataRoot(
+    settings: RssDashboardSettings,
+  ): string {
+    return normalizePath(
+      settings.collection.dataFolder.trim().replace(/[\\/]+$/u, ""),
+    );
+  }
+
+  private getCommittedOperationJournalDataRoot(): string {
+    if (this.committedOperationJournalDataRoot !== null) {
+      return this.committedOperationJournalDataRoot;
+    }
+    const dataRoot = this.normalizeOperationJournalDataRoot(this.settings);
+    this.committedOperationJournalDataRoot = dataRoot;
+    return dataRoot;
+  }
+
+  private restoreCommittedDataRootAuthorityAfterFailure(): void {
+    const aiRuntime = this.aiRuntime;
+    const transcriptRuntime = this.youtubeTranscriptRuntime;
+    const collectionService = this.collectionService;
+    const sourceRefreshLedger = this.sourceRefreshLedger;
+    const sourceRegistry = this.sourceRegistry;
+
+    let dataRoot: string | null = null;
+    try {
+      dataRoot = this.getCommittedOperationJournalDataRoot();
+    } catch {
+      // Missing committed authority fails every data-root cache closed below.
+    }
+    let operationJournal: OperationJournalPort | null = null;
+    if (dataRoot !== null) {
+      try {
+        operationJournal = this.getOperationJournalPort();
+      } catch {
+        // A journal identity that cannot be resolved is not safe to retain.
+      }
+    }
+
+    const matchesDataRoot = (candidate: unknown): boolean => {
+      if (dataRoot === null || typeof candidate !== "string") return false;
+      try {
+        return normalizePath(candidate.trim().replace(/[\\/]+$/u, "")) ===
+          dataRoot;
+      } catch {
+        return false;
+      }
+    };
+    const runtimeMatches = (
+      runtime: { dataRoot: string; operationJournal: OperationJournalPort },
+    ): boolean => {
+      if (operationJournal === null) return false;
+      try {
+        return matchesDataRoot(runtime.dataRoot) &&
+          runtime.operationJournal === operationJournal;
+      } catch {
+        return false;
+      }
+    };
+    const cacheMatches = (cache: { dataRoot: string }): boolean => {
+      try {
+        return matchesDataRoot(cache.dataRoot);
+      } catch {
+        return false;
+      }
+    };
+    const keepAiRuntime = aiRuntime !== null && runtimeMatches(aiRuntime);
+    const keepTranscriptRuntime = transcriptRuntime !== null &&
+      runtimeMatches(transcriptRuntime);
+    const keepCollectionService = collectionService !== null &&
+      cacheMatches(collectionService);
+    const keepSourceRefreshLedger = sourceRefreshLedger !== null &&
+      cacheMatches(sourceRefreshLedger);
+    let keepSourceRegistry = false;
+    if (sourceRegistry !== null && dataRoot !== null) {
+      try {
+        const signature = JSON.parse(sourceRegistry.signature) as {
+          dataFolder?: unknown;
+        };
+        keepSourceRegistry = matchesDataRoot(signature.dataFolder);
+      } catch {
+        // A malformed cached registry is detached below.
+      }
+    }
+
+    if (!keepAiRuntime) this.aiRuntime = null;
+    if (!keepTranscriptRuntime) this.youtubeTranscriptRuntime = null;
+    if (!keepCollectionService) this.collectionService = null;
+    if (!keepSourceRefreshLedger) this.sourceRefreshLedger = null;
+    if (!keepSourceRegistry) this.sourceRegistry = null;
+
+    if (dataRoot !== null) {
+      try {
+        this.settings.collection.dataFolder = dataRoot;
+      } catch {
+        // Cleanup below remains mandatory when settings restoration is hostile.
+      }
+    }
+
+    if (aiRuntime !== null && !keepAiRuntime) {
+      try {
+        this.revokeAiRuntime(aiRuntime);
+      } catch {
+        // Detached AI authority cannot block the remaining cleanup.
+      }
+    }
+
+    if (transcriptRuntime !== null && !keepTranscriptRuntime) {
+      try {
+        transcriptRuntime.service.dispose();
+      } catch {
+        // Detached transcript authority cannot restore the failed root.
+      }
+    }
+  }
+
+  private activateCommittedOperationJournalDataRoot(
+    settings: RssDashboardSettings,
+  ): void {
+    let dataRoot: string;
+    try {
+      dataRoot = this.normalizeOperationJournalDataRoot(settings);
+    } catch {
+      return;
+    }
+    const rootChanged = this.committedOperationJournalDataRoot !== dataRoot;
+    this.committedOperationJournalDataRoot = dataRoot;
+    if (rootChanged) {
+      const previousRuntime = this.operationJournalRuntime;
+      this.operationJournalRuntime = null;
+      if (previousRuntime) this.revokeOperationJournalRuntime(previousRuntime);
+    }
+    try {
+      const runtime = this.getOperationJournalRuntime();
+      this.revokeBusinessRuntimesOutsideJournalAuthority(runtime.service);
+    } catch {
+      const failedRuntime = this.operationJournalRuntime;
+      this.operationJournalRuntime = null;
+      if (failedRuntime) this.revokeOperationJournalRuntime(failedRuntime);
+      this.revokeBusinessRuntimesOutsideJournalAuthority(
+        this.unavailableOperationJournalPort,
+      );
+      if (rootChanged) this.notifyUnavailableOperationJournalUi();
+    }
+  }
+
+  private revokeBusinessRuntimesOutsideJournalAuthority(
+    operationJournal: OperationJournalPort,
+  ): void {
+    const aiRuntime = this.aiRuntime;
+    if (
+      aiRuntime !== null &&
+      aiRuntime.operationJournal !== operationJournal
+    ) {
+      this.aiRuntime = null;
+      this.revokeAiRuntime(aiRuntime);
+    }
+
+    const transcriptRuntime = this.youtubeTranscriptRuntime;
+    if (
+      transcriptRuntime !== null &&
+      transcriptRuntime.operationJournal !== operationJournal
+    ) {
+      this.youtubeTranscriptRuntime = null;
+      try {
+        transcriptRuntime.service.dispose();
+      } catch {
+        // Stale journal authority remains detached if disposal is hostile.
+      }
+    }
+  }
+
+  private requireOperationJournalRuntime(): OperationJournalRuntime {
+    try {
+      return this.getOperationJournalRuntime();
+    } catch {
+      throw new OperationJournalServiceError();
+    }
+  }
+
+  private revokeOperationJournalRuntime(
+    runtime: OperationJournalRuntime,
+  ): void {
+    runtime.lifecycle.revoked = true;
+    for (const subscription of this.operationJournalUiSubscriptions) {
+      if (subscription.runtime !== runtime) continue;
+      this.releaseOperationJournalUiSubscription(subscription);
+    }
+  }
+
+  private rebindOperationJournalUiSubscriptions(
+    runtime: OperationJournalRuntime,
+  ): void {
+    for (const subscription of this.operationJournalUiSubscriptions) {
+      if (!subscription.active) continue;
+      this.bindOperationJournalUiSubscription(subscription, runtime);
+      this.invokeOperationJournalUiListener(subscription.listener);
+    }
+  }
+
+  private notifyOperationJournalUi(runtime: OperationJournalRuntime): void {
+    if (
+      runtime.lifecycle.revoked ||
+      this.operationJournalRuntime !== runtime
+    ) {
+      return;
+    }
+    for (const subscription of this.operationJournalUiSubscriptions) {
+      if (subscription.active && subscription.runtime === runtime) {
+        this.invokeOperationJournalUiListener(subscription.listener);
+      }
+    }
+  }
+
+  private notifyUnavailableOperationJournalUi(): void {
+    for (const subscription of this.operationJournalUiSubscriptions) {
+      if (subscription.active) {
+        this.invokeOperationJournalUiListener(subscription.listener);
+      }
+    }
+  }
+
+  private bindOperationJournalUiSubscription(
+    subscription: OperationJournalUiSubscription,
+    runtime: OperationJournalRuntime,
+  ): void {
+    this.releaseOperationJournalUiSubscription(subscription);
+    if (!subscription.active || runtime.lifecycle.revoked) return;
+    try {
+      const unsubscribe = runtime.service.subscribe(() => {
+        if (
+          !subscription.active ||
+          subscription.runtime !== runtime ||
+          runtime.lifecycle.revoked ||
+          this.operationJournalRuntime !== runtime
+        ) {
+          return;
+        }
+        this.invokeOperationJournalUiListener(subscription.listener);
+      });
+      if (typeof unsubscribe !== "function") return;
+      subscription.runtime = runtime;
+      subscription.unsubscribe = unsubscribe;
+    } catch {
+      subscription.runtime = null;
+      subscription.unsubscribe = null;
+    }
+  }
+
+  private releaseOperationJournalUiSubscription(
+    subscription: OperationJournalUiSubscription,
+  ): void {
+    const unsubscribe = subscription.unsubscribe;
+    subscription.unsubscribe = null;
+    subscription.runtime = null;
+    if (unsubscribe === null) return;
+    try {
+      const result = unsubscribe();
+      void Promise.resolve(result).catch(() => undefined);
+    } catch {
+      // A listener cleanup failure cannot retain authority to the active root.
+    }
+  }
+
+  private invokeOperationJournalUiListener(listener: () => void): void {
+    try {
+      const result = listener();
+      void Promise.resolve(result).catch(() => undefined);
+    } catch {
+      // UI observers never alter journal persistence or clearing.
+    }
+  }
+
+  private subscribeToOperationJournalUi(listener: () => void): () => void {
+    if (typeof listener !== "function") return () => undefined;
+    const subscription: OperationJournalUiSubscription = {
+      listener,
+      active: true,
+      runtime: null,
+      unsubscribe: null,
+    };
+    this.operationJournalUiSubscriptions.add(subscription);
+    try {
+      this.bindOperationJournalUiSubscription(
+        subscription,
+        this.getOperationJournalRuntime(),
+      );
+    } catch {
+      // The panel remains usable through bounded manual reload attempts.
+    }
+    return () => {
+      if (!subscription.active) return;
+      subscription.active = false;
+      this.operationJournalUiSubscriptions.delete(subscription);
+      this.releaseOperationJournalUiSubscription(subscription);
+    };
+  }
+
+  private async loadOperationJournal(
+    days: 7 | 30,
+  ): Promise<OperationJournalListResult> {
+    for (
+      let attempt = 0;
+      attempt < MAX_OPERATION_JOURNAL_RUNTIME_READ_ATTEMPTS;
+      attempt += 1
+    ) {
+      const runtime = this.requireOperationJournalRuntime();
+      const result = await runtime.service.list({ days, now: new Date() });
+      if (
+        !runtime.lifecycle.revoked &&
+        this.operationJournalRuntime === runtime
+      ) {
+        return result;
+      }
+    }
+    throw new OperationJournalServiceError();
+  }
+
+  private async previewSafeOperationJournal(days: 7 | 30): Promise<void> {
+    const preview = await this.importExportService
+      .createOperationJournalPreview(days);
+    new DiagnosticsPreviewModal(this.app, {
+      locale: this.settings.locale ?? "zh-CN",
+      kind: "operation-journal",
+      preview,
+      copyPreview: async (token, exactText) =>
+        await this.importExportService.copyOperationJournalPreview(
+          token,
+          exactText,
+        ),
+      revokePreview: (token) =>
+        this.importExportService.revokeOperationJournalPreview(token),
+    }).open();
+  }
+
+  private clearOperationJournal(): Promise<void> {
+    const runtime = this.requireOperationJournalRuntime();
+    if (runtime.clearFlight !== null) return runtime.clearFlight;
+    const started = Promise.resolve().then(async () => {
+      if (
+        runtime.lifecycle.revoked ||
+        this.operationJournalRuntime !== runtime
+      ) {
+        throw new Error("Operation journal runtime changed.");
+      }
+      await runtime.service.clearOrThrow();
+      if (
+        runtime.lifecycle.revoked ||
+        this.operationJournalRuntime !== runtime
+      ) {
+        throw new OperationJournalServiceError();
+      }
+      this.notifyOperationJournalUi(runtime);
+    });
+    const flight = started.finally(() => {
+      if (runtime.clearFlight === flight) runtime.clearFlight = null;
+    });
+    runtime.clearFlight = flight;
+    return flight;
+  }
+
+  private requestOperationJournalClear(): void {
+    try {
+      new OperationJournalClearModal(this.app, {
+        locale: this.settings.locale ?? "zh-CN",
+        clear: async () => await this.clearOperationJournal(),
+        onCleared: () => undefined,
+      }).open();
+    } catch {
+      // Dashboard remains usable if the confirmation UI cannot be opened.
+    }
+  }
+
+  private getOperationJournalPort(): OperationJournalPort {
+    try {
+      return this.getOperationJournalRuntime().service;
+    } catch {
+      return this.unavailableOperationJournalPort;
+    }
+  }
+
+  public getOperationJournalUi(): OperationJournalUiPort {
+    return this.operationJournalUiFacade;
+  }
+
+  public getOperationJournalSettings(): OperationJournalSettingsPort {
+    return this.operationJournalSettingsFacade;
+  }
+
+  public async openOperationJournal(): Promise<void> {
+    await this.activateView();
+    const view = await this.getActiveDashboardView();
+    view?.openOperationJournal();
+  }
+
+  private refreshSubjectForFeed(feed: Feed): OperationSubject {
+    const subject: Record<string, unknown> = {};
+    for (const [feedKey, subjectKey] of [
+      ["feedId", "sourceId"],
+      ["title", "label"],
+    ] as const) {
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(feed, feedKey);
+        if (
+          descriptor?.enumerable === true &&
+          Object.prototype.hasOwnProperty.call(descriptor, "value")
+        ) {
+          subject[subjectKey] = descriptor.value;
+        }
+      } catch {
+        // Hostile descriptor access discards only this optional field.
+      }
+    }
+    return projectSafeOperationSubject(subject);
+  }
+
+  private beginRefreshJournalSafely(
+    invocation: RefreshInvocation,
+  ): OperationJournalScope | undefined {
+    try {
+      const port = this.getOperationJournalPort();
+      if (!port || typeof port.begin !== "function") return undefined;
+      const scope = port.begin({
+        category: "refresh",
+        action: invocation.action,
+        trigger: invocation.trigger,
+        stage: "preparing",
+        subject: invocation.subject ?? {},
+        details: {},
+      });
+      return this.isRefreshJournalScope(scope) ? scope : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private isRefreshJournalScope(value: unknown): value is OperationJournalScope {
+    if (!value || typeof value !== "object") return false;
+    const scope = value as Partial<OperationJournalScope>;
+    return (
+      typeof scope.progress === "function" &&
+      typeof scope.succeed === "function" &&
+      typeof scope.fail === "function" &&
+      typeof scope.abort === "function"
+    );
+  }
+
+  private invokeRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+    invoke: (scope: OperationJournalScope) => Promise<void>,
+  ): void {
+    if (!scope) return;
+    try {
+      void Promise.resolve(invoke(scope)).catch(() => undefined);
+    } catch {
+      // Journal failures never alter refresh behavior.
+    }
+  }
+
+  private succeedRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+    details: RefreshOperationDetails,
+  ): void {
+    this.invokeRefreshJournalSafely(
+      scope,
+      async (activeScope) => await activeScope.succeed("completed", details),
+    );
+  }
+
+  private failRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+    errorCode: OperationErrorCode,
+    details: RefreshOperationDetails,
+  ): void {
+    this.invokeRefreshJournalSafely(
+      scope,
+      async (activeScope) =>
+        await activeScope.fail("completed", errorCode, details),
+    );
+  }
+
+  private abortRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+  ): void {
+    this.invokeRefreshJournalSafely(
+      scope,
+      async (activeScope) => await activeScope.abort("completed"),
+    );
+  }
+
+  private progressRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+    details: RefreshOperationDetails,
+  ): void {
+    this.invokeRefreshJournalSafely(
+      scope,
+      async (activeScope) => await activeScope.progress("completed", details),
+    );
+  }
+
+  private emptyRefreshDetails(elapsedMs: number): RefreshOperationDetails {
+    return {
+      total: 0,
+      succeeded: 0,
+      failed: 0,
+      newItems: 0,
+      elapsedMs,
+    };
+  }
+
+  private summarizeRefreshOutcomes(
+    outcomes: readonly FeedRefreshOutcome[],
+    total: number,
+    elapsedMs: number,
+  ): RefreshBatchOutcome {
+    return {
+      outcomes,
+      details: {
+        total,
+        succeeded: outcomes.filter((outcome) => outcome.status === "succeeded")
+          .length,
+        failed: outcomes.filter((outcome) => outcome.status === "failed").length,
+        newItems: outcomes.reduce(
+          (count, outcome) =>
+            count + (outcome.status === "succeeded" ? outcome.newItems : 0),
+          0,
+        ),
+        elapsedMs,
+      },
+    };
+  }
+
+  private closeRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+    invocation: RefreshInvocation,
+    batch: RefreshBatchOutcome,
+  ): void {
+    const failures = batch.outcomes.filter(
+      (outcome): outcome is Extract<FeedRefreshOutcome, { status: "failed" }> =>
+        outcome.status === "failed",
+    );
+    if (failures.length > 0) {
+      const errorCode = invocation.action === "source" && failures.length === 1
+        ? failures[0].errorCode
+        : "refresh-failed";
+      this.failRefreshJournalSafely(scope, errorCode, batch.details);
+      return;
+    }
+    if (batch.outcomes.some((outcome) => outcome.status === "aborted")) {
+      this.progressRefreshJournalSafely(scope, batch.details);
+      this.abortRefreshJournalSafely(scope);
+      return;
+    }
+    this.succeedRefreshJournalSafely(scope, batch.details);
+  }
+
+  async refreshFeedsInFolder(folderPath: string): Promise<void> {
     const feedsInFolder = this.settings.feeds.filter((feed) => {
       if (!feed.folder) return false;
       return (
@@ -2536,17 +3876,14 @@ export default class RssDashboardPlugin extends Plugin {
       );
     });
 
-    if (feedsInFolder.length > 0) {
-      if (!this.tryBeginRefreshSession()) return;
-      try {
-        this.cancelPendingStartupRefresh();
-        await this.refreshFeedsWithinSession(feedsInFolder);
-      } finally {
-        this.endRefreshSession();
-      }
-    } else {
+    if (feedsInFolder.length === 0) {
       this.notify("plugin.refresh.folderEmpty");
     }
+    await this.runRefresh({
+      trigger: "manual",
+      action: "folder",
+      feeds: feedsInFolder,
+    });
   }
 
   async updateArticle(
@@ -3358,9 +4695,11 @@ export default class RssDashboardPlugin extends Plugin {
         },
         { forceAllShards: true, forceMetadata: true },
       );
+      this.activateCommittedOperationJournalDataRoot(candidate);
     } catch (error) {
       this.settings = previousSettings;
       this.restoreSettingsBackedRuntime(previousRuntime);
+      this.restoreCommittedDataRootAuthorityAfterFailure();
       if (this.isUnloading) {
         this.importExportService?.revokeAllSafeDiagnosticsPreviews();
       } else if (candidatePublished) {
@@ -3766,119 +5105,273 @@ export default class RssDashboardPlugin extends Plugin {
     options?: { showNotice?: boolean },
   ) {
     const showNotice = options?.showNotice !== false;
+    let mediaType: "article" | "video" | "podcast" = "article";
+    if (folder === this.settings.media.defaultYouTubeFolder) {
+      mediaType = "video";
+    } else if (folder === this.settings.media.defaultPodcastFolder) {
+      mediaType = "podcast";
+    }
     try {
-      if (this.settings.feeds.some((f) => f.url === url)) {
-        if (showNotice) {
-          this.notify("plugin.feedDuplicate");
-        }
-        return false;
-      }
-
-      let mediaType: "article" | "video" | "podcast" = "article";
-      if (folder === this.settings.media.defaultYouTubeFolder) {
-        mediaType = "video";
-      } else if (folder === this.settings.media.defaultPodcastFolder) {
-        mediaType = "podcast";
-      }
-
-      const newFeed: Feed = {
-        title,
-        url,
-        folder,
-        items: [],
-        lastUpdated: Date.now(),
-        autoDeleteDuration:
-          typeof autoDeleteDuration === "number"
-            ? autoDeleteDuration
-            : this.settings.defaultAutoDeleteDuration,
-        maxItemsLimit:
-          typeof maxItemsLimit === "number"
-            ? maxItemsLimit
-            : this.settings.maxItems,
-        scanInterval: typeof scanInterval === "number" ? scanInterval : 0,
-        excludeFromRefresh: excludeFromRefresh === true,
-        mediaType: mediaType,
-        customTemplate: customTemplate || undefined,
-        customTags:
-          Array.isArray(customTags) && customTags.length > 0
-            ? [...customTags]
-            : undefined,
-        keywordRules: feedKeywordRules || {
-          overrideGlobalRules: false,
-          includeLogic: "AND",
-          rules: [],
+      await this.getSubscriptionService().add({
+        kind: "rss-website",
+        verification: {
+          inputUrl: url,
+          siteUrl: url,
+          candidates: [{ url, title, format: "rss" }],
+          selected: { url, title, format: "rss" },
+          hasEntries: true,
         },
-      };
-
-      // Try to parse the feed BEFORE adding it to settings
-      try {
-        const parsedFeed = await this.feedParser.parseFeed(url, newFeed, {
-          allowEmpty: true,
-        });
-        const feedToStore: Feed = {
-          ...newFeed,
-          ...parsedFeed,
-          autoDeleteDuration:
-            typeof parsedFeed.autoDeleteDuration === "number"
-              ? parsedFeed.autoDeleteDuration
-              : newFeed.autoDeleteDuration,
-          maxItemsLimit:
-            typeof parsedFeed.maxItemsLimit === "number"
-              ? parsedFeed.maxItemsLimit
-              : newFeed.maxItemsLimit,
-          scanInterval:
-            typeof parsedFeed.scanInterval === "number"
-              ? parsedFeed.scanInterval
-              : newFeed.scanInterval,
-          excludeFromRefresh:
-            parsedFeed.excludeFromRefresh ?? newFeed.excludeFromRefresh,
-          customTemplate: parsedFeed.customTemplate ?? newFeed.customTemplate,
-          customTags: parsedFeed.customTags ?? newFeed.customTags,
-          keywordRules: parsedFeed.keywordRules ?? newFeed.keywordRules,
-        };
-        if (feedToStore.folder) {
-          await this.ensureFolderExists(feedToStore.folder, {
-            saveSettings: false,
-            refreshView: false,
-          });
-        }
-
-        // Re-apply tags after ensureFolderExists so folder auto-tags resolve
-        // against the current folder tree (parseFeed also tags, but may run
-        // before missing folder paths are created).
-        const feedWithTags = MediaService.applyMediaTags(
-          feedToStore,
-          this.settings.availableTags,
-          this.settings.media,
-          this.settings.folders,
-        );
-
-        // Only add to settings if parsing succeeded
-        this.settings.feeds.push(feedWithTags);
-        await this.saveSettings();
-
-        const view = await this.getActiveDashboardView();
-        if (view) {
-          void view.refresh();
-        }
-        if (showNotice) {
-          this.notify("plugin.feedAdded", { feed: title });
-        }
-        return true;
-      } catch (error) {
-        if (showNotice) {
-          console.error("[RSS Dashboard] Feed parse failed:", error);
-          this.notify("plugin.feedAddFailed");
-        }
-        return false;
-      }
-    } catch (error) {
+        selectedCandidateUrl: url,
+        displayName: title,
+        folder,
+        tags: Array.isArray(customTags) ? [...customTags] : [],
+        // URI and OPML callers retain their existing current-feed behavior.
+        initialImportPolicy: { mode: "all-available" },
+        autoDeleteDuration,
+        maxItemsLimit,
+        scanInterval,
+        keywordRules: feedKeywordRules,
+        customTemplate,
+        excludeFromRefresh,
+        mediaType,
+      });
+    } catch {
       if (showNotice) {
-        console.error("[RSS Dashboard] Feed add failed:", error);
+        console.error("[RSS Dashboard] Feed add failed.");
         this.notify("plugin.feedAddFailed");
       }
       return false;
     }
+    try {
+      const view = await this.getActiveDashboardView();
+      if (view) await Promise.resolve(view.refresh());
+    } catch {
+      console.error(
+        "[RSS Dashboard] Feed saved; dashboard refresh deferred.",
+      );
+    }
+    if (showNotice) {
+      try {
+        this.notify("plugin.feedAdded", { feed: title });
+      } catch {
+        console.error(
+          "[RSS Dashboard] Feed saved; success notice unavailable.",
+        );
+      }
+    }
+    return true;
+  }
+
+  async addVerifiedSubscription(
+    request: VerifiedSubscriptionRequest,
+  ): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().add(request);
+    } catch {
+      console.error("[RSS Dashboard] Verified subscription add failed.");
+      return false;
+    }
+    try {
+      await this.refreshDashboardViews();
+    } catch {
+      console.error(
+        "[RSS Dashboard] Verified subscription saved; dashboard refresh deferred.",
+      );
+      void Promise.resolve().then(async () => {
+        await this.refreshDashboardViews().catch(() => {
+          console.error("[RSS Dashboard] Deferred dashboard refresh failed.");
+        });
+      });
+    }
+    return true;
+  }
+
+  async updateSubscription(
+    feedId: string,
+    request: SubscriptionUpdateRequest,
+  ): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().update(feedId, request);
+    } catch {
+      console.error("[RSS Dashboard] Subscription update failed.");
+      return false;
+    }
+    await this.refreshDashboardViewsAfterSubscriptionMutation(
+      "Subscription update",
+    );
+    return true;
+  }
+
+  async applySidebarOrdering(
+    request: SidebarOrderingMutationRequest,
+  ): Promise<SidebarOrderingMutationResult> {
+    return await this.getSubscriptionService().applySidebarOrdering(request);
+  }
+
+  async applyFolderMutation(
+    request: SubscriptionFolderMutationRequest,
+  ): Promise<SubscriptionFolderMutationResult> {
+    const result = await this.getSubscriptionService().applyFolderMutation(
+      request,
+    );
+    if (result.ok) {
+      await this.refreshDashboardViewsAfterSubscriptionMutation(
+        request.kind === "rename" ? "Folder rename" : "Folder deletion",
+      );
+    }
+    return result;
+  }
+
+  async setSubscriptionPaused(feedId: string, paused: boolean): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().setPaused(feedId, paused);
+    } catch {
+      console.error("[RSS Dashboard] Subscription pause update failed.");
+      return false;
+    }
+    await this.refreshDashboardViewsAfterSubscriptionMutation(
+      "Subscription pause update",
+    );
+    return true;
+  }
+
+  async stopSubscriptionInitialImport(feedId: string): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().stopInitialImport(feedId);
+    } catch {
+      console.error("[RSS Dashboard] Historical import stop failed.");
+      return false;
+    }
+    await this.refreshDashboardViewsAfterSubscriptionMutation(
+      "Historical import stop",
+    );
+    return true;
+  }
+
+  async resumeSubscriptionInitialImport(feedId: string): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().resumeInitialImport(feedId);
+    } catch {
+      console.error("[RSS Dashboard] Historical import resume failed.");
+      return false;
+    }
+    await this.refreshDashboardViewsAfterSubscriptionMutation(
+      "Historical import resume",
+    );
+    return true;
+  }
+
+  private async refreshDashboardViewsAfterSubscriptionMutation(
+    operation: string,
+  ): Promise<void> {
+    try {
+      await this.refreshDashboardViews();
+    } catch {
+      console.error(
+        `[RSS Dashboard] ${operation} saved; dashboard refresh deferred.`,
+      );
+      void Promise.resolve().then(async () => {
+        await this.refreshDashboardViews().catch(() => {
+          console.error(
+            `[RSS Dashboard] Deferred dashboard refresh after ${operation.toLowerCase()} failed.`,
+          );
+        });
+      });
+    }
+  }
+
+  /** Opens the verified subscription workflow used by every public add entry. */
+  public openAddSourceModal(
+    initial?: Pick<
+      AddSourceModalOptions,
+      "initialKind" | "initialInput" | "initialFolder"
+    >,
+    existingFeedId?: string,
+    onSubscribed?: () => void,
+  ): AddSourceModal {
+    const requestText = async (url: string, signal: AbortSignal) => {
+      if (signal.aborted) throw new Error("source-verification-aborted");
+      const response = await requestUrl({
+        url,
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; Obsidian RSS Dashboard/0.1)",
+        },
+        throw: false,
+      });
+      if (signal.aborted) throw new Error("source-verification-aborted");
+      if (response.status < 200 || response.status >= 400) {
+        throw new Error("source-verification-request-failed");
+      }
+      return {
+        url,
+        text: response.text,
+        contentType: response.headers["content-type"],
+      };
+    };
+    const modal = new AddSourceModal(this.app, {
+      ...initial,
+      locale: this.settings.locale ?? "zh-CN",
+      verifyRss: async (input, signal) => await discoverRssWebsite(input, {
+        request: async (url) => await requestText(url, signal),
+      }),
+      verifyYouTube: async (input, signal) => await resolveYouTubeChannel(input, {
+        request: async (url) => await requestText(url, signal),
+      }),
+      verifyX: async (input, signal) => {
+        const ledger = new TikHubRequestLedger(
+          this.app.vault,
+          this.settings.collection.dataFolder,
+          {
+            storageIdentity: tikhubLedgerStorageIdentity(this.app.vault),
+          },
+        );
+        const budget = new TikHubRequestBudget({
+          ledger,
+          maxRequestsPerRun: this.settings.tikhub.maxRequestsPerRun,
+          maxRequestsPerDay: this.settings.tikhub.maxRequestsPerDay,
+        });
+        const client = new TikHubClient({
+          baseUrl: this.settings.tikhub.baseUrl,
+          timeoutMs: this.settings.tikhub.timeoutMs,
+          budget,
+        });
+        return await new XProfileResolver({
+          settings: this.settings.tikhub,
+          client,
+          secretStore: new DesktopSecretStore(),
+        }).resolve(input, signal);
+      },
+      onSubscribe: async (request) => existingFeedId
+        ? await this.updateSubscription(existingFeedId, request)
+        : await this.addVerifiedSubscription(request),
+      onSubscribed,
+      onOpenSettings: () => { void this.openSettingsToTab("tikhub"); },
+      xRequestCaps: {
+        run: this.settings.tikhub.maxRequestsPerRun,
+        day: this.settings.tikhub.maxRequestsPerDay,
+      },
+      defaultAutoDeleteDuration: this.settings.defaultAutoDeleteDuration,
+      defaultMaxItems: this.settings.maxItems,
+    });
+    modal.open();
+    return modal;
+  }
+
+  async removeSubscription(
+    feedId: string,
+    options: RemoveSubscriptionOptions,
+  ): Promise<boolean> {
+    try {
+      await this.getSubscriptionService().remove(feedId, options);
+    } catch {
+      console.error("[RSS Dashboard] Subscription removal failed.");
+      return false;
+    }
+    await this.refreshDashboardViewsAfterSubscriptionMutation(
+      "Subscription removal",
+    );
+    return true;
   }
 
   async addYouTubeFeed(input: string, customTitle?: string) {
@@ -4042,6 +5535,7 @@ export default class RssDashboardPlugin extends Plugin {
       if (shouldSave) {
         await this.saveSettings();
       }
+      this.activateCommittedOperationJournalDataRoot(this.settings);
     } catch (error) {
       storageError("Error loading plugin settings", error);
       this.notify("plugin.settings.loadFailed");
@@ -4457,31 +5951,39 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   async saveSettings(options: PersistSettingsOptions = {}) {
-    return this.enqueueSettingsOperation(async () => {
-      const settings = this.settings;
-      storageLog("saveSettings invoked", {
+    return this.enqueueSettingsOperation(
+      async () => await this.saveSettingsUnlocked(options),
+    );
+  }
+
+  private async saveSettingsUnlocked(
+    options: PersistSettingsOptions = {},
+  ): Promise<void> {
+    const settings = this.settings;
+    storageLog("saveSettings invoked", {
+      mode: settings.storageMode,
+      folder: settings.storageFolder,
+      metadataMode: settings.metadataStorageMode,
+      feedCount: settings.feeds.length,
+    });
+
+    try {
+      const result = await this.feedStorageRepository.persistSettings(
+        settings,
+        this.getMetadataWritePlanFor(settings),
+        options,
+      );
+      this.activateCommittedOperationJournalDataRoot(settings);
+      storageLog("saveSettings completed", result);
+    } catch (error) {
+      this.restoreCommittedDataRootAuthorityAfterFailure();
+      storageError("saveSettings failed", error, {
         mode: settings.storageMode,
         folder: settings.storageFolder,
         metadataMode: settings.metadataStorageMode,
-        feedCount: settings.feeds.length,
       });
-
-      try {
-        const result = await this.feedStorageRepository.persistSettings(
-          settings,
-          this.getMetadataWritePlanFor(settings),
-          options,
-        );
-        storageLog("saveSettings completed", result);
-      } catch (error) {
-        storageError("saveSettings failed", error, {
-          mode: settings.storageMode,
-          folder: settings.storageFolder,
-          metadataMode: settings.metadataStorageMode,
-        });
-        throw error;
-      }
-    });
+      throw error;
+    }
   }
 
   /**
@@ -4543,10 +6045,18 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private isFeedExcludedFromRefresh(feed: Feed): boolean {
-    return feed.excludeFromRefresh === true;
+    return feed.excludeFromRefresh === true || this.isDirectSourceRefreshBlocked(feed);
   }
 
-  private getRefreshableFeeds(feeds: Feed[]): Feed[] {
+  private isDirectSourceRefreshBlocked(feed: Feed): boolean {
+    if (feed.subscriptionStatus === "paused") return true;
+    const progress = feed.initialImportProgress;
+    return (feed.sourceKind === undefined || feed.sourceKind === "feed") &&
+      progress !== undefined &&
+      progress.status !== "completed";
+  }
+
+  private getRefreshableFeeds(feeds: readonly Feed[]): Feed[] {
     return feeds.filter((feed) => !this.isFeedExcludedFromRefresh(feed));
   }
 
@@ -4586,45 +6096,116 @@ export default class RssDashboardPlugin extends Plugin {
     return count;
   }
 
-  private mergeRefreshedFeed(updatedFeed: Feed): void {
-    const index = this.settings.feeds.findIndex(
-      (f) => f.url === updatedFeed.url,
+  private mergeRefreshedFeed(
+    feeds: Feed[],
+    publication: FeedRefreshPublication,
+  ): boolean {
+    const index = feeds.findIndex((feed) =>
+      (feed.feedId ?? feed.url) === publication.sourceId
     );
-    if (index >= 0) {
-      this.settings.feeds[index] = {
-        ...updatedFeed,
-        excludeFromRefresh:
-          updatedFeed.excludeFromRefresh ??
-          this.settings.feeds[index].excludeFromRefresh,
-      };
+    if (index < 0) return false;
+
+    const current = feeds[index];
+    if (
+      isSubscriptionRemovalPending(this.settings, publication.sourceId) ||
+      current.subscriptionStatus === "paused" ||
+      current.initialImportProgress?.status === "stopped" ||
+      refreshSourceIdentity(current) !== publication.sourceIdentity ||
+      refreshSourceIdentity(publication.result.feed) !== publication.sourceIdentity
+    ) {
+      return false;
     }
+
+    const updatedFeed = cloneRefreshData(publication.result.feed);
+    feeds[index] = {
+      ...updatedFeed,
+      feedId: current.feedId,
+      sourceKind: current.sourceKind,
+      sourceConfig: cloneRefreshData(current.sourceConfig),
+      url: current.url,
+      title: current.title,
+      folder: current.folder,
+      customTags: cloneRefreshData(current.customTags),
+      initialImportPolicy: cloneRefreshData(current.initialImportPolicy),
+      autoDeleteDuration: current.autoDeleteDuration,
+      maxItemsLimit: current.maxItemsLimit,
+      scanInterval: current.scanInterval,
+      keywordRules: cloneRefreshData(current.keywordRules),
+      customTemplate: current.customTemplate,
+      excludeFromRefresh: current.excludeFromRefresh,
+      mediaType: current.mediaType,
+      subscriptionStatus: current.subscriptionStatus,
+    };
+    return true;
+  }
+
+  private async publishRefreshResults(
+    publications: FeedRefreshPublication[],
+  ): Promise<ReadonlySet<string>> {
+    if (publications.length === 0) return new Set();
+    return await this.enqueueSettingsOperation(async () => {
+      const candidateFeeds = cloneRefreshData(this.settings.feeds);
+      const publishedSourceIds = new Set<string>();
+      for (const publication of publications) {
+        if (this.mergeRefreshedFeed(candidateFeeds, publication)) {
+          publishedSourceIds.add(publication.sourceId);
+        }
+      }
+      if (publishedSourceIds.size === 0) return publishedSourceIds;
+
+      const previousFeeds = this.settings.feeds;
+      const previousRefreshTimestamp = this.settings.lastRefreshTimestamp;
+      this.settings.feeds = candidateFeeds;
+      this.settings.lastRefreshTimestamp = Date.now();
+      try {
+        await this.saveSettingsUnlocked();
+      } catch {
+        this.settings.feeds = previousFeeds;
+        this.settings.lastRefreshTimestamp = previousRefreshTimestamp;
+        throw new RefreshSettingsSaveError();
+      }
+      return publishedSourceIds;
+    });
   }
 
   private async refreshSingleFeed(
     feed: Feed,
     feedNoticeText: string,
     sourceRegistry: SourceRegistry,
-  ): Promise<void> {
-    const result = await this.refreshFeedPipeline(feed, sourceRegistry);
-    this.mergeRefreshedFeed(result.feed);
+  ): Promise<FeedRefreshOutcome> {
+    const outcome = await this.refreshFeedPipeline(feed, sourceRegistry);
+    if (outcome.status !== "succeeded") return outcome;
+    const publishedSourceIds = await this.publishRefreshResults([
+      outcome.publication,
+    ]);
+    if (!publishedSourceIds.has(outcome.publication.sourceId)) {
+      return { status: "aborted" };
+    }
 
-    await this.validateSavedArticles({ suppressCollectionBroadcast: true });
-    this.settings.lastRefreshTimestamp = Date.now();
-    await this.saveSettings();
-    await this.refreshDashboardViews();
+    await this.runPostRefreshPublicationSafely();
     this.notify("plugin.refreshed", { source: feedNoticeText });
+    return outcome;
+  }
+
+  private async runPostRefreshPublicationSafely(): Promise<void> {
+    try {
+      await this.validateSavedArticles({ suppressCollectionBroadcast: true });
+    } catch {
+      console.error("[RSS dashboard] Post-refresh validation failed.");
+    }
+    try {
+      await this.refreshDashboardViews();
+    } catch {
+      console.error("[RSS dashboard] Post-refresh view update failed.");
+    }
   }
 
   private async refreshFeedBatch(
     feedsToRefresh: Feed[],
     feedNoticeText: string,
     sourceRegistry: SourceRegistry,
-  ): Promise<void> {
+  ): Promise<FeedRefreshOutcome[]> {
     this.activeRefreshState.clear();
-    const refreshSummary = {
-      failed: 0,
-      timedOut: 0,
-    };
 
     for (const feed of feedsToRefresh) {
       this.activeRefreshState.set(feed.url, {
@@ -4657,6 +6238,7 @@ export default class RssDashboardPlugin extends Plugin {
     };
 
     const backgroundPromises: Promise<void>[] = [];
+    const outcomes: FeedRefreshOutcome[] = [];
 
     const worker = async (): Promise<void> => {
       while (true) {
@@ -4671,10 +6253,11 @@ export default class RssDashboardPlugin extends Plugin {
 
         const refreshPromise = this.processRefreshBatchFeed(
           currentFeed,
-          refreshSummary,
           refreshView,
           sourceRegistry,
-        ).finally(() => {
+        ).then((outcome) => {
+          outcomes.push(outcome);
+        }).finally(() => {
           globalFetchSemaphore.release();
         });
 
@@ -4700,13 +6283,28 @@ export default class RssDashboardPlugin extends Plugin {
       await Promise.all(workers);
       await Promise.all(backgroundPromises);
 
-      await this.validateSavedArticles({ suppressCollectionBroadcast: true });
-      this.settings.lastRefreshTimestamp = Date.now();
-      await this.saveSettings();
+      const publications = outcomes.flatMap((outcome) =>
+        outcome.status === "succeeded" ? [outcome.publication] : []
+      );
+      const publishedSourceIds = await this.publishRefreshResults(publications);
+      const finalizedOutcomes = outcomes.map((outcome): FeedRefreshOutcome =>
+        outcome.status === "succeeded" &&
+          !publishedSourceIds.has(outcome.publication.sourceId)
+          ? { status: "aborted" }
+          : outcome
+      );
+      if (publishedSourceIds.size === 0) return finalizedOutcomes;
+      await this.runPostRefreshPublicationSafely();
       this.activeRefreshState.clear();
-      await this.refreshDashboardViews();
 
-      const failureSuffix = this.buildRefreshFailureSummary(refreshSummary);
+      const failureSuffix = this.buildRefreshFailureSummary({
+        failed: finalizedOutcomes.filter(
+          (outcome) => outcome.status === "failed" && !outcome.timedOut,
+        ).length,
+        timedOut: finalizedOutcomes.filter(
+          (outcome) => outcome.status === "failed" && outcome.timedOut,
+        ).length,
+      });
       this.notify(
         failureSuffix
           ? "plugin.refreshedWithFailures"
@@ -4715,6 +6313,7 @@ export default class RssDashboardPlugin extends Plugin {
           ? { source: feedNoticeText, failures: failureSuffix }
           : { source: feedNoticeText },
       );
+      return finalizedOutcomes;
     } finally {
       this.activeRefreshState.clear();
     }
@@ -4741,28 +6340,20 @@ export default class RssDashboardPlugin extends Plugin {
 
   private async processRefreshBatchFeed(
     currentFeed: Feed,
-    refreshSummary: { failed: number; timedOut: number },
     refreshView: () => Promise<void>,
     sourceRegistry: SourceRegistry,
-  ): Promise<void> {
+  ): Promise<FeedRefreshOutcome> {
     this.activeRefreshState.set(currentFeed.url, {
       status: "processing",
       startedAt: Date.now(),
     });
 
     try {
-      const result = await this.refreshFeedPipeline(currentFeed, sourceRegistry);
-      this.mergeRefreshedFeed(result.feed);
-    } catch (error) {
-      const isTimedOut =
-        error instanceof FeedRefreshPipelineError && error.code === "timed-out";
-      if (isTimedOut) {
-        refreshSummary.timedOut += 1;
-      } else {
-        refreshSummary.failed += 1;
+      const outcome = await this.refreshFeedPipeline(currentFeed, sourceRegistry);
+      if (outcome.status === "failed") {
+        console.error("[RSS dashboard] A source refresh failed.");
       }
-
-      console.error("[RSS dashboard] A source refresh failed.");
+      return outcome;
     } finally {
       this.activeRefreshState.delete(currentFeed.url);
 
@@ -4781,50 +6372,122 @@ export default class RssDashboardPlugin extends Plugin {
   private async refreshFeedPipeline(
     feed: Feed,
     sourceRegistry: SourceRegistry,
-  ): Promise<FeedRefreshResult> {
-    this.feedStorageRepository.ensureFeedIds(this.settings);
-    if (!feed.feedId) {
-      feed.feedId = this.settings.feeds.find(
-        (candidate) => candidate.url === feed.url,
-      )?.feedId;
-    }
-    bindFeedItemsToSourceIdentity(feed);
-    const sourceId = feed.feedId ?? feed.url;
-    const attemptedAt = new Date();
-    const ledger = this.getSourceRefreshLedger();
+  ): Promise<FeedRefreshOutcome> {
     try {
-      await ledger.recordAttempt(sourceId, attemptedAt);
-    } catch {
-      throw new FeedRefreshPipelineError(
-        "state-failed",
-        "Refresh state is unavailable.",
+      const publication = await this.createRefreshPublication(
+        feed,
+        sourceRegistry,
       );
-    }
-
-    const attempt = new RefreshAttemptToken();
-    let result: FeedRefreshResult;
-    try {
-      result = await this.refreshFeedWithTimeout(feed, attempt, sourceRegistry);
-      attempt.assertActive();
+      return publication
+        ? {
+            status: "succeeded",
+            publication,
+            newItems: countNewRefreshItems(publication.result),
+          }
+        : { status: "aborted" };
     } catch (error) {
       const failure = toFeedRefreshPipelineError(error);
-      await this.recordRefreshErrorSafely(
-        ledger,
-        sourceId,
-        attemptedAt,
-        failure,
-      );
-      throw failure;
+      return {
+        status: "failed",
+        errorCode: toRefreshOperationErrorCode(failure),
+        timedOut: failure.code === "timed-out",
+      };
     }
+  }
 
-    if (!this.settings.collection.enabled) {
+  private async createRefreshPublication(
+    feed: Feed,
+    sourceRegistry: SourceRegistry,
+  ): Promise<FeedRefreshPublication | null> {
+    const detachedFeed = cloneRefreshData(feed);
+    detachedFeed.feedId ??= this.settings.feeds.find(
+      (candidate) => candidate.url === detachedFeed.url,
+    )?.feedId;
+    bindFeedItemsToSourceIdentity(detachedFeed);
+    const sourceId = detachedFeed.feedId ?? detachedFeed.url;
+    if (isSubscriptionRemovalPending(this.settings, sourceId)) return null;
+    const persistedAtStart = this.findCurrentFeedForRefresh(
+      detachedFeed,
+      sourceId,
+    );
+    const currentAtStart = persistedAtStart ?? detachedFeed;
+    const attemptedAt = new Date();
+    const ledger = this.getSourceRefreshLedger();
+    const initialImportController =
+      currentAtStart.sourceKind === "x-account" &&
+        isActiveInitialImportProgress(currentAtStart.initialImportProgress)
+        ? new AbortController()
+        : undefined;
+    if (initialImportController) {
+      this.activeInitialImportControllers.set(sourceId, initialImportController);
+    }
+    try {
       try {
-        await ledger.recordSuccess(sourceId, result.fetchedAt);
+        await ledger.recordAttempt(sourceId, attemptedAt);
       } catch {
-        const failure = new FeedRefreshPipelineError(
+        throw new FeedRefreshPipelineError(
           "state-failed",
           "Refresh state is unavailable.",
         );
+      }
+
+      if (isSubscriptionRemovalPending(this.settings, sourceId)) return null;
+
+      const persistedCurrent = this.findCurrentFeedForRefresh(
+        currentAtStart,
+        sourceId,
+      );
+      const sourceDisappeared = persistedAtStart !== undefined &&
+        persistedCurrent === undefined;
+      const unpersistedActiveXImport = persistedAtStart === undefined &&
+        initialImportController !== undefined;
+      if (sourceDisappeared) return null;
+      if (
+        unpersistedActiveXImport ||
+        initialImportController?.signal.aborted ||
+        (initialImportController &&
+          persistedCurrent?.initialImportProgress?.status === "stopped")
+      ) {
+        const stoppedFeed = persistedCurrent ?? currentAtStart;
+        const sourceIdentity = refreshSourceIdentity(stoppedFeed);
+        return sourceIdentity
+          ? {
+              result: stoppedInitialImportResult(stoppedFeed, attemptedAt),
+              sourceId,
+              sourceIdentity,
+            }
+          : null;
+      }
+
+      const currentFeed = persistedCurrent ?? feed;
+      const feedForAttempt =
+        currentFeed.initialImportProgress !== undefined ||
+          feed.initialImportProgress !== undefined
+          ? currentFeed
+          : detachedFeed;
+      const sourceIdentity = refreshSourceIdentity(feedForAttempt);
+      if (!sourceIdentity) {
+        throw new FeedRefreshPipelineError(
+          "invalid-source-config",
+          this.t("source.invalidConfiguration"),
+        );
+      }
+
+      const attempt = new RefreshAttemptToken();
+      let result: FeedRefreshResult;
+      try {
+        result = await this.refreshFeedWithTimeout(
+          feedForAttempt,
+          attempt,
+          sourceRegistry,
+          initialImportController,
+        );
+        attempt.assertActive();
+      } catch (error) {
+        if (initialImportController?.signal.aborted) {
+          return null;
+        }
+        const failure = toFeedRefreshPipelineError(error);
         await this.recordRefreshErrorSafely(
           ledger,
           sourceId,
@@ -4833,36 +6496,100 @@ export default class RssDashboardPlugin extends Plugin {
         );
         throw failure;
       }
-      return result;
-    }
 
-    try {
-      attempt.assertActive();
-      await this.getCollectionService().collectFeedRefresh({
-        feed: result.feed,
-        previousItems: result.previousItems,
-        refreshedItems: result.refreshedItems,
-        fetchedAt: result.fetchedAt,
-      });
-      attempt.assertActive();
-    } catch (error) {
-      const failure =
-        error instanceof FeedRefreshPipelineError &&
-        error.code === "timed-out"
-          ? error
-          : new FeedRefreshPipelineError(
-              "collection-failed",
-              "Collection persistence failed.",
-            );
-      await this.recordRefreshErrorSafely(
-        ledger,
-        sourceId,
-        attemptedAt,
-        failure,
-      );
-      throw failure;
+      if (
+        persistedAtStart !== undefined &&
+        !this.isRefreshPublicationCurrent(sourceId, sourceIdentity)
+      ) {
+        return null;
+      }
+
+      if (!this.settings.collection.enabled) {
+        try {
+          await ledger.recordSuccess(sourceId, result.fetchedAt);
+        } catch {
+          const failure = new FeedRefreshPipelineError(
+            "state-failed",
+            "Refresh state is unavailable.",
+          );
+          await this.recordRefreshErrorSafely(
+            ledger,
+            sourceId,
+            attemptedAt,
+            failure,
+          );
+          throw failure;
+        }
+        if (!this.isRefreshPublicationCurrent(sourceId, sourceIdentity)) {
+          return null;
+        }
+        return { result, sourceId, sourceIdentity };
+      }
+
+      try {
+        attempt.assertActive();
+        await this.getCollectionService().collectFeedRefresh({
+          feed: result.feed,
+          previousItems: result.previousItems,
+          refreshedItems: result.refreshedItems,
+          fetchedAt: result.fetchedAt,
+        });
+        attempt.assertActive();
+      } catch (error) {
+        const failure =
+          error instanceof FeedRefreshPipelineError &&
+          error.code === "timed-out"
+            ? error
+            : new FeedRefreshPipelineError(
+                "collection-failed",
+                "Collection persistence failed.",
+              );
+        await this.recordRefreshErrorSafely(
+          ledger,
+          sourceId,
+          attemptedAt,
+          failure,
+        );
+        throw failure;
+      }
+      if (!this.isRefreshPublicationCurrent(sourceId, sourceIdentity)) {
+        return null;
+      }
+      return { result, sourceId, sourceIdentity };
+    } finally {
+      if (
+        initialImportController &&
+        this.activeInitialImportControllers.get(sourceId) === initialImportController
+      ) {
+        this.activeInitialImportControllers.delete(sourceId);
+      }
     }
-    return result;
+  }
+
+  private isRefreshPublicationCurrent(
+    sourceId: string,
+    sourceIdentity: string,
+  ): boolean {
+    const current = this.settings.feeds.find(
+      (feed) => (feed.feedId ?? feed.url) === sourceId,
+    );
+    return current !== undefined &&
+      !isSubscriptionRemovalPending(this.settings, sourceId) &&
+      current.subscriptionStatus !== "paused" &&
+      current.initialImportProgress?.status !== "stopped" &&
+      refreshSourceIdentity(current) === sourceIdentity;
+  }
+
+  private findCurrentFeedForRefresh(
+    feed: Feed,
+    sourceId: string,
+  ): Feed | undefined {
+    const matchingIds = this.settings.feeds.filter(
+      (candidate) => (candidate.feedId ?? candidate.url) === sourceId,
+    );
+    return matchingIds.find((candidate) => candidate.url === feed.url) ??
+      (matchingIds.length === 1 ? matchingIds[0] : undefined) ??
+      this.settings.feeds.find((candidate) => candidate.url === feed.url);
   }
 
   private async recordRefreshErrorSafely(
@@ -4885,11 +6612,17 @@ export default class RssDashboardPlugin extends Plugin {
     feed: Feed,
     attempt: RefreshAttemptToken,
     sourceRegistry: SourceRegistry,
+    initialImportController?: AbortController,
   ): Promise<FeedRefreshResult> {
     let timeoutId: number | null = null;
     try {
       return await Promise.race([
-        this.refreshFeedDirect(feed, attempt, sourceRegistry),
+        this.refreshFeedDirect(
+          feed,
+          attempt,
+          sourceRegistry,
+          initialImportController,
+        ),
         new Promise<FeedRefreshResult>((_, reject) => {
           timeoutId = window.setTimeout(() => {
             attempt.cancel();
@@ -4913,6 +6646,7 @@ export default class RssDashboardPlugin extends Plugin {
     feed: Feed,
     attempt: RefreshAttemptToken,
     sourceRegistry: SourceRegistry,
+    initialImportController?: AbortController,
   ): Promise<FeedRefreshResult> {
     const parserInput = cloneRefreshData(feed);
     parserInput.lastFetchError = undefined;
@@ -4936,11 +6670,23 @@ export default class RssDashboardPlugin extends Plugin {
       );
     }
     const fetchedAt = new Date();
-    const output = await sourceRegistry.refresh(config, {
-      now: fetchedAt,
-      signal: attempt.signal,
-      ...(config.kind === "feed" ? { feed: parserInput } : {}),
-    });
+    const combined = combineAbortSignals(
+      attempt.signal,
+      initialImportController?.signal,
+    );
+    let output: SourceRefreshOutput;
+    try {
+      output = await sourceRegistry.refresh(config, {
+        now: fetchedAt,
+        signal: combined.signal,
+        ...(initialImportController
+          ? { stopSignal: initialImportController.signal }
+          : {}),
+        feed: parserInput,
+      });
+    } finally {
+      combined.dispose();
+    }
     const updatedFeed = output.feed;
     updatedFeed.feedId ??= parserInput.feedId;
     bindFeedItemsToSourceIdentity(updatedFeed);
@@ -4959,7 +6705,7 @@ export default class RssDashboardPlugin extends Plugin {
     return {
       feed: updatedFeed,
       previousItems,
-      refreshedItems: updatedFeed.items,
+      refreshedItems: output.collectionItems ?? updatedFeed.items,
       fetchedAt,
       providerRequestCount: output.providerRequestCount,
       warnings: [...output.warnings],
@@ -4987,7 +6733,23 @@ export default class RssDashboardPlugin extends Plugin {
 
   onunload() {
     this.isUnloading = true;
+    if (this.operationJournalRuntime) {
+      this.revokeOperationJournalRuntime(this.operationJournalRuntime);
+      this.operationJournalRuntime = null;
+    }
+    for (const subscription of this.operationJournalUiSubscriptions) {
+      subscription.active = false;
+      this.releaseOperationJournalUiSubscription(subscription);
+    }
+    this.operationJournalUiSubscriptions.clear();
+    if (this.aiRuntime) {
+      this.revokeAiRuntime(this.aiRuntime);
+      this.aiRuntime = null;
+    }
+    this.youtubeTranscriptRuntime?.service.dispose();
+    this.youtubeTranscriptRuntime = null;
     this.importExportService?.revokeAllSafeDiagnosticsPreviews();
+    this.importExportService?.revokeAllOperationJournalPreviews();
     if (this.progressSaveDebounce !== null) {
       window.clearTimeout(this.progressSaveDebounce);
       this.progressSaveDebounce = null;

@@ -43,13 +43,20 @@ export class ExplicitContentCoordinator {
       () => new Date(),
     );
     try {
-      const cached = await contentRepository.read(input.itemId);
-      // ContentRepository already validates that a cached artifact is non-empty
-      // and belongs to this stable ID. Once durable, it is the cache truth even
-      // when the publisher article itself is intentionally short.
-      if (cached) {
-        await this.syncMetadata(input, contentRepository.pathFor(input.itemId));
-        return { content: cached.text, failureType: "none" };
+      const cachedResult = await contentRepository.transaction(
+        input.itemId,
+        async (transaction) => {
+          const cached = await transaction.read();
+          // ContentRepository already validates that a cached artifact is
+          // non-empty and belongs to this stable ID. Metadata repair stays in
+          // the same item transaction so another basis cannot overtake it.
+          if (cached?.contentBasis !== "full-text") return null;
+          await this.syncMetadata(input, transaction.pathFor());
+          return { content: cached.text, failureType: "none" as const };
+        },
+      );
+      if (cachedResult) {
+        return cachedResult;
       }
     } catch {
       // A cache read problem must not block a user-requested article open.
@@ -59,15 +66,17 @@ export class ExplicitContentCoordinator {
     if (!hasMeaningfulFullText(fetched.content)) return fetched;
 
     try {
-      const contentPath = await contentRepository.write({
-        schemaVersion: 1,
-        itemId: input.itemId,
-        sourceUrl: input.sourceUrl,
-        fetchedAt: new Date().toISOString(),
-        contentBasis: "full-text",
-        text: fetched.content,
+      await contentRepository.transaction(input.itemId, async (transaction) => {
+        const contentPath = await transaction.write({
+          schemaVersion: 1,
+          itemId: input.itemId,
+          sourceUrl: input.sourceUrl,
+          fetchedAt: new Date().toISOString(),
+          contentBasis: "full-text",
+          text: fetched.content,
+        });
+        await this.syncMetadata(input, contentPath);
       });
-      await this.syncMetadata(input, contentPath);
     } catch {
       console.warn(
         "[RSS Dashboard] Content cache write failed; showing fetched article without caching.",

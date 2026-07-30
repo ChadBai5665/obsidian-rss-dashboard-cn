@@ -22,6 +22,10 @@ import {
 } from "../sources/source-config";
 import { normalizeTikHubBaseUrl } from "../sources/tikhub/tikhub-types";
 import { normalizeAiSettings } from "../ai/connection-validation";
+import {
+  normalizeInitialImportPolicy,
+  normalizeInitialImportProgress,
+} from "../sources/initial-import-policy";
 
 const DEFAULT_FEED_KEYWORD_RULES = {
   overrideGlobalRules: false,
@@ -507,6 +511,8 @@ function normalizeTikHubSettings(
 
   return {
     enabled: sanitized.enabled === true,
+    youtubeTranscriptFallbackEnabled:
+      sanitized.youtubeTranscriptFallbackEnabled === true,
     connectionId,
     baseUrl,
     timeoutMs: positiveIntegerOrDefault(
@@ -713,6 +719,7 @@ export function migrateSettings(settings: RssDashboardSettings): boolean {
       DEFAULT_FEED_KEYWORD_RULES,
       feed.keywordRules ?? {},
     );
+    if (normalizeExistingInitialImportFields(feed)) didChange = true;
   });
 
   settings.autoBackup = Object.assign(
@@ -722,6 +729,101 @@ export function migrateSettings(settings: RssDashboardSettings): boolean {
   );
 
   return didChange;
+}
+
+function normalizeExistingInitialImportFields(feed: Feed): boolean {
+  const record = feed as unknown as Record<string, unknown>;
+  let didChange = false;
+
+  const policy = ownDataProperty(record, "initialImportPolicy");
+  if (policy.present) {
+    const normalized = normalizeInitialImportPolicy(policy.value);
+    if (!normalized) {
+      delete record.initialImportPolicy;
+      didChange = true;
+    } else if (!sameInitialImportPolicy(policy.value, normalized)) {
+      record.initialImportPolicy = normalized;
+      didChange = true;
+    }
+  } else if (policy.accessor) {
+    delete record.initialImportPolicy;
+    didChange = true;
+  }
+
+  const progress = ownDataProperty(record, "initialImportProgress");
+  if (progress.present) {
+    const normalized = normalizeInitialImportProgress(progress.value);
+    if (!normalized) {
+      delete record.initialImportProgress;
+      didChange = true;
+    } else if (!sameInitialImportProgress(progress.value, normalized)) {
+      record.initialImportProgress = normalized;
+      didChange = true;
+    }
+  } else if (progress.accessor) {
+    delete record.initialImportProgress;
+    didChange = true;
+  }
+
+  const subscriptionStatus = ownDataProperty(record, "subscriptionStatus");
+  if (subscriptionStatus.present) {
+    if (
+      subscriptionStatus.value !== "active" &&
+      subscriptionStatus.value !== "paused"
+    ) {
+      delete record.subscriptionStatus;
+      didChange = true;
+    }
+  } else if (subscriptionStatus.accessor) {
+    delete record.subscriptionStatus;
+    didChange = true;
+  }
+
+  return didChange;
+}
+
+function ownDataProperty(
+  record: Record<string, unknown>,
+  key: string,
+):
+  | { present: true; value: unknown; accessor: false }
+  | { present: false; accessor: boolean } {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    if (!descriptor) return { present: false, accessor: false };
+    if (!("value" in descriptor)) return { present: false, accessor: true };
+    return { present: true, value: descriptor.value, accessor: false };
+  } catch {
+    return { present: false, accessor: false };
+  }
+}
+
+function sameInitialImportPolicy(
+  value: unknown,
+  normalized: Feed["initialImportPolicy"],
+): boolean {
+  if (!normalized || !isRecord(value)) return false;
+  const keys = Object.keys(value);
+  if (normalized.mode === "lookback-days") {
+    return keys.length === 2 && value.mode === normalized.mode && value.days === normalized.days;
+  }
+  if (normalized.mode === "since-date") {
+    return keys.length === 2 && value.mode === normalized.mode && value.since === normalized.since;
+  }
+  return keys.length === 1 && value.mode === normalized.mode;
+}
+
+function sameInitialImportProgress(
+  value: unknown,
+  normalized: Feed["initialImportProgress"],
+): boolean {
+  if (!normalized || !isRecord(value)) return false;
+  const keys = Object.keys(value);
+  const expectedKeys = Object.keys(normalized);
+  return (
+    keys.length === expectedKeys.length &&
+    expectedKeys.every((key) => value[key] === normalized[key as keyof typeof normalized])
+  );
 }
 
 export function dedupeAndNormalizeFeedItems(feeds: Feed[]): boolean {

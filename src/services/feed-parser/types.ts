@@ -54,6 +54,8 @@ export interface FeedPreviewData {
   description: string;
   link: string;
   image: string;
+  format: "rss" | "atom" | "json";
+  latestTitle?: string;
   latestPubDate: string;
   hasEntries: boolean;
   feedUrl: string;

@@ -5,7 +5,7 @@ import { AnthropicMessagesProvider } from "./anthropic-messages-provider";
 import { OpenAiChatProvider } from "./openai-chat-provider";
 import { ProviderError } from "./provider-error";
 import type {
-  AiTransport,
+  AiStreamingTransport,
   TextGenerationProvider,
 } from "./text-generation-provider";
 import { validApiKeyValue } from "./text-generation-provider";
@@ -15,7 +15,7 @@ export interface AiSecretReader {
 }
 
 export interface ProviderFactoryOptions {
-  transport?: AiTransport;
+  transport?: AiStreamingTransport;
 }
 
 const STORE_FALSE_CAPABLE_PROVIDER_KINDS: ReadonlySet<AiProviderKind> =

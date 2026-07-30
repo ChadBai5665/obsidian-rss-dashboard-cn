@@ -46,6 +46,7 @@ describe("renderAnalysisMarkdown", () => {
       sourceUrl: "https://example.com/research?id=42",
       operation: "deep-analysis",
       createdAt: "2026-07-21T12:34:56.789Z",
+      connectionId: CONNECTION_ID,
       connectionName: "Kimi research",
       providerKind: "kimi",
       model: "moonshot-v1-128k",
@@ -73,6 +74,17 @@ describe("renderAnalysisMarkdown", () => {
       }))).not.toThrow();
     },
   );
+
+  it("accepts the strict YouTube transcript basis without allowing unknown bases", () => {
+    const markdown = renderAnalysisMarkdown(result({
+      contentBasis: "youtube-transcript",
+    }));
+
+    expect(frontmatter(markdown).contentBasis).toBe("youtube-transcript");
+    expect(() => renderAnalysisMarkdown(result({
+      contentBasis: "unknown-basis" as AiAnalysisResult["contentBasis"],
+    }))).toThrow("Invalid AI analysis result");
+  });
 
   it("round-trips YAML-sensitive Unicode metadata without frontmatter injection", () => {
     const connectionName = "---\n名称: \"研究\" # 标签 !<tag:yaml.org,2002:js/function> 🌏\u2028行分隔";

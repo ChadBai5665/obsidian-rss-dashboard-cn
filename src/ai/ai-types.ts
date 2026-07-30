@@ -1,5 +1,21 @@
 export type AiProtocol = "openai-chat" | "anthropic-messages";
 
+export type AiThinkingMode =
+  | "platform-default"
+  | "disabled"
+  | "enabled"
+  | "adaptive";
+
+export type AiReasoningEffort =
+  | "platform-default"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "max";
+
+export type AiResponseMode = "stream" | "complete";
+
 export type AiProviderKind =
   | "kimi"
   | "deepseek"
@@ -23,6 +39,12 @@ export interface AiConnection {
   timeoutMs: number;
   maxInputCharacters: number;
   enabled: boolean;
+  /** Missing on legacy records; request resolution supplies safe defaults. */
+  thinkingMode?: AiThinkingMode;
+  /** Used only when the selected provider/model supports an effort control. */
+  reasoningEffort?: AiReasoningEffort;
+  /** Missing legacy values retain the original streaming behavior. */
+  responseMode?: AiResponseMode;
 }
 
 export interface AiSettings {

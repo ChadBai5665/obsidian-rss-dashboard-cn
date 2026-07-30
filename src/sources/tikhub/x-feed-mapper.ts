@@ -66,18 +66,21 @@ export function mapXAccountPostsToFeed(
   config: XAccountSourceConfig,
   posts: readonly XPost[],
   now: Date,
+  previousFeed?: Feed,
 ): XAccountFeedMapping {
   const feedUrl = sourceConfigUrl(config);
   if (!feedUrl) throw new Error("Invalid X account source configuration");
   const feedTitle = config.displayName ?? `@${config.handle}`;
-  const items = [...posts]
+  const currentItems = [...posts]
     .sort(compareXPosts)
     .map((post) => mapPost(config, post, feedTitle, feedUrl));
+  const items = mergeXAccountFeedItems(previousFeed?.items ?? [], currentItems);
   const sourceConfig: XAccountSourceConfig = {
     ...config,
     topics: [...config.topics],
   };
   const feed: XAccountFeed = {
+    ...previousFeed,
     feedId: config.id,
     sourceKind: "x-account",
     sourceConfig,
@@ -90,7 +93,49 @@ export function mapXAccountPostsToFeed(
     author: feedTitle,
     mediaType: "article",
   };
-  return { feed, items };
+  return { feed, items: currentItems };
+}
+
+function mergeXAccountFeedItems(
+  previousItems: readonly FeedItem[],
+  currentItems: readonly XAccountFeedItem[],
+): XAccountFeedItem[] {
+  const merged = new Map<string, XAccountFeedItem>();
+  for (const item of previousItems) {
+    if (/^\d{1,30}$/u.test(item.guid)) {
+      merged.set(item.guid, cloneFeedItem(item) as XAccountFeedItem);
+    }
+  }
+  for (const item of currentItems) {
+    const previous = merged.get(item.guid);
+    merged.set(item.guid, {
+      ...previous,
+      ...cloneFeedItem(item),
+      ...(previous?.read === undefined ? {} : { read: previous.read }),
+      ...(previous?.starred === undefined ? {} : { starred: previous.starred }),
+      ...(previous?.saved === undefined ? {} : { saved: previous.saved }),
+      ...(previous?.savedFilePath === undefined
+        ? {}
+        : { savedFilePath: previous.savedFilePath }),
+    } as XAccountFeedItem);
+  }
+  return [...merged.values()].sort(compareFeedItems);
+}
+
+function cloneFeedItem(item: FeedItem): FeedItem {
+  return {
+    ...item,
+    ...(item.tags ? { tags: item.tags.map((tag) => ({ ...tag })) } : {}),
+  };
+}
+
+function compareFeedItems(left: FeedItem, right: FeedItem): number {
+  const leftTime = Date.parse(left.pubDate);
+  const rightTime = Date.parse(right.pubDate);
+  const normalizedLeft = Number.isFinite(leftTime) ? leftTime : Number.NEGATIVE_INFINITY;
+  const normalizedRight = Number.isFinite(rightTime) ? rightTime : Number.NEGATIVE_INFINITY;
+  if (normalizedLeft !== normalizedRight) return normalizedRight - normalizedLeft;
+  return compareDecimalIdsDescending(left.guid, right.guid);
 }
 
 /** Maps observed topic posts without adding a score or recommendation. */

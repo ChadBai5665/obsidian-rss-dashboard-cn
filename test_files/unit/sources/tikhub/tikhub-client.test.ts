@@ -5,12 +5,27 @@ import {
   type TikHubBatchHandle,
   type TikHubTransport,
   type TikHubTransportRequest,
+  type TikHubYouTubeCaptionRequest,
 } from "../../../../src/sources/tikhub/tikhub-client";
 import type { TikHubRequestBudgetLike } from "../../../../src/sources/tikhub/request-budget";
 import { DEFAULT_SETTINGS } from "../../../../src/types/types";
 import { loadAndNormalizeSettings } from "../../../../src/utils/settings-loader";
 
 const API_KEY = "external-secret";
+const INVALID_CAPTION_LANGUAGE_CODES = [
+  ["empty", ""],
+  ["control", "en\u0000"],
+  ["whitespace", "a.zh Hans"],
+  ["slash", "a.zh/Hans"],
+  ["query", "a.zh?format=txt"],
+  ["leading separator", ".zh-Hans"],
+  ["trailing separator", "zh-Hans."],
+  ["consecutive separators", "a..zh-Hans"],
+  ["mixed empty segment", "a.-zh-Hans"],
+  ["trailing hyphen", "en-"],
+  ["repeated hyphen", "en--US"],
+  ["overlong", "a".repeat(65)],
+] as const;
 
 function success(data: unknown = { items: [1] }, requestId = "req-safe-123") {
   return {
@@ -22,6 +37,7 @@ function success(data: unknown = { items: [1] }, requestId = "req-safe-123") {
 
 function createHarness(
   response: Awaited<ReturnType<TikHubTransport>> = success(),
+  baseUrl = "https://api.tikhub.dev",
 ) {
   const markAttempted = vi.fn();
   const releaseUnused = vi.fn();
@@ -49,7 +65,7 @@ function createHarness(
     return response;
   });
   const client = new TikHubClient({
-    baseUrl: "https://api.tikhub.dev",
+    baseUrl,
     timeoutMs: 20_000,
     budget,
     transport,
@@ -70,6 +86,311 @@ afterEach(() => {
 });
 
 describe("TikHubClient exact request contract", () => {
+  it("sends exact budgeted YouTube caption list and content requests", async () => {
+    const list = createHarness(success({
+      video_id: "dQw4w9WgXcQ",
+      captions: [{ language_code: "en", language_name: "English" }],
+    }));
+
+    await expect(list.client.fetchYouTubeCaptions({
+      apiKey: API_KEY,
+      videoId: "dQw4w9WgXcQ",
+    })).resolves.toEqual({
+      data: {
+        video_id: "dQw4w9WgXcQ",
+        captions: [{ language_code: "en", language_name: "English" }],
+      },
+      requestId: "req-safe-123",
+    });
+    expect(list.requests).toEqual([{
+      url: "https://api.tikhub.dev/api/v1/youtube/web_v2/get_video_captions?video_id=dQw4w9WgXcQ",
+      method: "GET",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    }]);
+    expect(list.reserve).toHaveBeenCalledWith(1);
+    expect(list.markAttempted).toHaveBeenCalledOnce();
+
+    const content = createHarness(success({
+      video_id: "dQw4w9WgXcQ",
+      language_code: "en",
+      language_name: "English",
+      format: "txt",
+      content: "Caption text",
+    }));
+    await expect(content.client.fetchYouTubeCaptions({
+      apiKey: API_KEY,
+      videoId: "dQw4w9WgXcQ",
+      languageCode: "en",
+      format: "txt",
+    })).resolves.toMatchObject({ data: { content: "Caption text" } });
+    expect(content.requests[0]?.url).toBe(
+      "https://api.tikhub.dev/api/v1/youtube/web_v2/get_video_captions?video_id=dQw4w9WgXcQ&language_code=en&format=txt",
+    );
+    expect(content.reserve).toHaveBeenCalledWith(1);
+    expect(content.markAttempted).toHaveBeenCalledOnce();
+  });
+
+  it("sends an automatic-caption language using the exact safe query value", async () => {
+    const test = createHarness(success({
+      video_id: "dQw4w9WgXcQ",
+      language_code: "a.zh-Hans",
+      language_name: "Chinese (auto)",
+      format: "txt",
+      content: "Caption text",
+    }));
+
+    await test.client.fetchYouTubeCaptions({
+      apiKey: API_KEY,
+      videoId: "dQw4w9WgXcQ",
+      languageCode: "a.zh-Hans",
+      format: "txt",
+    });
+
+    expect(test.requests[0]?.url).toBe(
+      "https://api.tikhub.dev/api/v1/youtube/web_v2/get_video_captions?video_id=dQw4w9WgXcQ&language_code=a.zh-Hans&format=txt",
+    );
+  });
+
+  it("ignores a runtime cursor instead of contaminating a caption request", async () => {
+    const test = createHarness(success({
+      video_id: "dQw4w9WgXcQ",
+      captions: [{ language_code: "en", language_name: "English" }],
+    }));
+    const input = {
+      apiKey: API_KEY,
+      videoId: "dQw4w9WgXcQ",
+      cursor: "private-cursor",
+    } as TikHubYouTubeCaptionRequest & { cursor: string };
+
+    await test.client.fetchYouTubeCaptions(input);
+
+    expect(test.requests[0]?.url).toBe(
+      "https://api.tikhub.dev/api/v1/youtube/web_v2/get_video_captions?video_id=dQw4w9WgXcQ",
+    );
+    expect(test.requests[0]?.url).not.toContain("cursor");
+    expect(test.reserve).toHaveBeenCalledWith(1);
+  });
+
+  it("polls only the fixed free caption-result endpoint without reserving budget", async () => {
+    const test = createHarness(success({ status: "active", job_id: "123e4567-e89b-12d3-a456-426614174000" }));
+
+    await expect(test.client.fetchYouTubeCaptionResult({
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt",
+    })).resolves.toEqual({
+      data: {
+        status: "active",
+        job_id: "123e4567-e89b-12d3-a456-426614174000",
+      },
+      requestId: "req-safe-123",
+    });
+
+    expect(test.requests).toEqual([{
+      url: "https://api.tikhub.dev/api/v1/youtube/web_v2/get_video_captions_result?job_id=123e4567-e89b-12d3-a456-426614174000&format=txt",
+      method: "GET",
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    }]);
+    expect(test.reserve).not.toHaveBeenCalled();
+    expect(test.markAttempted).not.toHaveBeenCalled();
+    expect(test.releaseUnused).not.toHaveBeenCalled();
+  });
+
+  it("cannot use an internal generic executor to send an arbitrary free request", async () => {
+    const test = createHarness();
+    const internal = test.client as unknown as {
+      performRequest?: (
+        url: URL,
+        apiKey: string,
+        signal: AbortSignal | undefined,
+        markAttempted: () => void,
+      ) => Promise<unknown>;
+    };
+
+    const invoke = async () => {
+      if (typeof internal.performRequest !== "function") {
+        throw new Error("Generic free executor is unavailable.");
+      }
+      return await internal.performRequest(
+        new URL("https://untrusted.invalid/private"),
+        API_KEY,
+        undefined,
+        () => undefined,
+      );
+    };
+
+    await expect(invoke()).rejects.toThrow("Generic free executor is unavailable.");
+    expect(test.requests).toEqual([]);
+    expect(test.reserve).not.toHaveBeenCalled();
+  });
+
+  it("ignores arbitrary runtime fields on the free caption-result request", async () => {
+    const test = createHarness(success({
+      status: "queued",
+      job_id: "123e4567-e89b-12d3-a456-426614174000",
+    }));
+    const input = {
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt" as const,
+      endpoint: "https://untrusted.invalid/private",
+      cursor: "private-cursor",
+      query: "private-query",
+    };
+
+    await test.client.fetchYouTubeCaptionResult(input);
+
+    expect(test.requests[0]?.url).toBe(
+      "https://api.tikhub.dev/api/v1/youtube/web_v2/get_video_captions_result?job_id=123e4567-e89b-12d3-a456-426614174000&format=txt",
+    );
+    expect(test.reserve).not.toHaveBeenCalled();
+  });
+
+  it("keeps the YouTube request contract identical on the international base", async () => {
+    const paid = createHarness(success({
+      video_id: "dQw4w9WgXcQ",
+      captions: [],
+      message: "No captions found",
+      message_zh: "未找到字幕",
+    }), "https://api.tikhub.io");
+    await paid.client.fetchYouTubeCaptions({
+      apiKey: API_KEY,
+      videoId: "dQw4w9WgXcQ",
+    });
+    expect(paid.requests[0]?.url).toBe(
+      "https://api.tikhub.io/api/v1/youtube/web_v2/get_video_captions?video_id=dQw4w9WgXcQ",
+    );
+
+    const free = createHarness(success({
+      status: "queued",
+      job_id: "123e4567-e89b-12d3-a456-426614174000",
+    }), "https://api.tikhub.io");
+    await free.client.fetchYouTubeCaptionResult({
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt",
+    });
+    expect(free.requests[0]?.url).toBe(
+      "https://api.tikhub.io/api/v1/youtube/web_v2/get_video_captions_result?job_id=123e4567-e89b-12d3-a456-426614174000&format=txt",
+    );
+    expect(free.reserve).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid caption inputs before budget or transport", async () => {
+    const test = createHarness();
+
+    await expect(test.client.fetchYouTubeCaptions({
+      apiKey: API_KEY,
+      videoId: "../private",
+    })).rejects.toMatchObject({
+      code: "invalid-query",
+      paidRequestAttempted: false,
+    });
+    await expect(test.client.fetchYouTubeCaptions({
+      apiKey: API_KEY,
+      videoId: "dQw4w9WgXcQ",
+      languageCode: "en\u0000",
+      format: "txt",
+    })).rejects.toMatchObject({ code: "invalid-query" });
+    await expect(test.client.fetchYouTubeCaptionResult({
+      apiKey: API_KEY,
+      jobId: "../private-job",
+      format: "txt",
+    })).rejects.toMatchObject({ code: "invalid-query" });
+
+    expect(test.reserve).not.toHaveBeenCalled();
+    expect(test.transport).not.toHaveBeenCalled();
+  });
+
+  it.each(INVALID_CAPTION_LANGUAGE_CODES)(
+    "rejects an unsafe caption language before budget or transport: %s",
+    async (_label, languageCode) => {
+      const test = createHarness();
+
+      await expect(test.client.fetchYouTubeCaptions({
+        apiKey: API_KEY,
+        videoId: "dQw4w9WgXcQ",
+        languageCode,
+        format: "txt",
+      })).rejects.toMatchObject({ code: "invalid-query" });
+      expect(test.reserve).not.toHaveBeenCalled();
+      expect(test.transport).not.toHaveBeenCalled();
+    },
+  );
+
+  it("applies the shared response-size limit to free caption-result polling", async () => {
+    const text = JSON.stringify({
+      code: 200,
+      data: { padding: "x".repeat(5_000_000) },
+    });
+    const test = createHarness({ status: 200, text, headers: {} });
+
+    const error = await test.client.fetchYouTubeCaptionResult({
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt",
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: "malformed-response",
+      paidRequestAttempted: false,
+    });
+    expect(test.reserve).not.toHaveBeenCalled();
+  });
+
+  it("shares sanitized status and abort handling with free result polling", async () => {
+    const rejected = createHarness({
+      status: 401,
+      text: `provider leaked ${API_KEY}`,
+      headers: { "x-request-id": "req-safe-poll" },
+    });
+    const error = await rejected.client.fetchYouTubeCaptionResult({
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt",
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: "invalid-key",
+      status: 401,
+      requestId: "req-safe-poll",
+      paidRequestAttempted: false,
+    });
+    expect(String(error)).not.toContain(API_KEY);
+    expect(rejected.reserve).not.toHaveBeenCalled();
+
+    const aborted = createHarness();
+    aborted.transport.mockImplementationOnce(() => new Promise(() => undefined));
+    const controller = new AbortController();
+    const pending = aborted.client.fetchYouTubeCaptionResult({
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt",
+      signal: controller.signal,
+    });
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({
+      code: "aborted",
+      paidRequestAttempted: false,
+    });
+    expect(aborted.reserve).not.toHaveBeenCalled();
+  });
+
+  it("rejects a caption result whose job ID does not match the requested job", async () => {
+    const test = createHarness(success({
+      status: "active",
+      job_id: "87654321-e89b-12d3-a456-426614174000",
+    }));
+
+    const error = await test.client.fetchYouTubeCaptionResult({
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt",
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: "malformed-response" });
+    expect(String(error)).not.toContain("87654321");
+    expect(test.reserve).not.toHaveBeenCalled();
+  });
+
   it("verifies the saved key against the official account endpoint without requiring content data", async () => {
     const test = createHarness({
       status: 200,
@@ -107,6 +428,12 @@ describe("TikHubClient exact request contract", () => {
   });
 
   it.each([
+    {
+      name: "user profile",
+      invoke: (client: TikHubClient) =>
+        client.fetchUserProfile({ apiKey: API_KEY, handle: "openai" }),
+      url: "https://api.tikhub.dev/api/v1/twitter/web/fetch_user_profile?screen_name=openai",
+    },
     {
       name: "user posts",
       invoke: (client: TikHubClient) =>
@@ -158,6 +485,16 @@ describe("TikHubClient exact request contract", () => {
     expect(test.reserve).toHaveBeenCalledWith(1);
     expect(test.markAttempted).toHaveBeenCalledTimes(1);
     expect(test.releaseUnused).toHaveBeenCalledTimes(1);
+  });
+
+  it("joins the official profile path onto the selected international preset", async () => {
+    const test = createHarness(success(), "https://api.tikhub.io");
+
+    await test.client.fetchUserProfile({ apiKey: API_KEY, handle: "openai" });
+
+    expect(test.requests[0]?.url).toBe(
+      "https://api.tikhub.io/api/v1/twitter/web/fetch_user_profile?screen_name=openai",
+    );
   });
 
   it("includes a non-empty cursor and omits an empty cursor instead of serializing undefined", async () => {
@@ -334,7 +671,10 @@ describe("TikHubClient exact request contract", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(TikHubClientError);
-    expect(error).toMatchObject({ code: "network-failure" });
+    expect(error).toMatchObject({
+      code: "network-failure",
+      paidRequestAttempted: true,
+    });
     expect(String(error)).not.toContain(API_KEY);
     expect(String(error)).not.toContain("private-handle");
     expect(String(error)).not.toContain("keyword=private");
@@ -354,7 +694,15 @@ describe("TikHubClient exact request contract", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(TikHubClientError);
-    expect(error).toMatchObject({ code: "network-failure" });
+    expect(error).toMatchObject({
+      code: "network-failure",
+      paidRequestAttempted: true,
+    });
+    expect(Object.getOwnPropertyDescriptor(error, "paidRequestAttempted")).toMatchObject({
+      value: true,
+      writable: false,
+      configurable: false,
+    });
     expect(String(error)).not.toContain(API_KEY);
     expect(String(error)).not.toContain("private-handle");
   });
@@ -440,12 +788,15 @@ describe("TikHubClient exact request contract", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(TikHubClientError);
-    expect(error).toMatchObject({ code: "network-failure" });
+    expect(error).toMatchObject({
+      code: "network-failure",
+      paidRequestAttempted: true,
+    });
     expect(String(error)).not.toContain(API_KEY);
     expect(JSON.stringify(error)).not.toContain(API_KEY);
   });
 
-  it("releases the reservation when transport throws before a network attempt", async () => {
+  it("counts an entered paid transport even when it throws synchronously", async () => {
     const test = createHarness();
     test.transport.mockImplementationOnce(() => {
       throw new TikHubClientError(
@@ -459,10 +810,36 @@ describe("TikHubClient exact request contract", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(TikHubClientError);
-    expect(error).toMatchObject({ code: "network-failure" });
+    expect(error).toMatchObject({
+      code: "network-failure",
+      paidRequestAttempted: true,
+    });
     expect(String(error)).not.toContain(API_KEY);
-    expect(test.markAttempted).not.toHaveBeenCalled();
+    expect(test.markAttempted).toHaveBeenCalledTimes(1);
     expect(test.releaseUnused).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not count URL serialization failure as an entered paid transport", async () => {
+    const test = createHarness();
+    const serialize = vi.spyOn(URL.prototype, "toString").mockImplementationOnce(() => {
+      throw new Error("URL serialization failed");
+    });
+
+    try {
+      const error = await test.client
+        .fetchUserPosts({ apiKey: "key", handle: "openai" })
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "network-failure",
+        paidRequestAttempted: false,
+      });
+      expect(test.transport).not.toHaveBeenCalled();
+      expect(test.markAttempted).not.toHaveBeenCalled();
+      expect(test.releaseUnused).toHaveBeenCalledTimes(1);
+    } finally {
+      serialize.mockRestore();
+    }
   });
 
   it.each([
@@ -486,7 +863,11 @@ describe("TikHubClient exact request contract", () => {
       .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(TikHubClientError);
-    expect(error).toMatchObject({ code, status });
+    expect(error).toMatchObject({
+      code,
+      status,
+      paidRequestAttempted: true,
+    });
     expect(String(error)).not.toContain(API_KEY);
     expect(String(error)).not.toContain("private-handle");
     expect(String(error)).not.toContain("keyword=private");
@@ -499,7 +880,11 @@ describe("TikHubClient exact request contract", () => {
 
     await expect(
       test.client.fetchUserPosts({ apiKey: API_KEY, handle: "openai" }),
-    ).rejects.toMatchObject({ code: "malformed-response", status: 200 });
+    ).rejects.toMatchObject({
+      code: "malformed-response",
+      status: 200,
+      paidRequestAttempted: true,
+    });
   });
 
   it("maps a non-200 provider envelope without exposing the provider body", async () => {
@@ -520,6 +905,7 @@ describe("TikHubClient exact request contract", () => {
       code: "rate-limited",
       status: 429,
       requestId: "req-safe",
+      paidRequestAttempted: true,
     });
     expect(String(error)).not.toContain(API_KEY);
   });
@@ -588,7 +974,10 @@ describe("TikHubClient exact request contract", () => {
     const test = createHarness();
     test.transport.mockImplementationOnce(() => new Promise(() => undefined));
     const promise = test.client.fetchUserPosts({ apiKey: API_KEY, handle: "openai" });
-    const assertion = expect(promise).rejects.toMatchObject({ code: "timeout" });
+    const assertion = expect(promise).rejects.toMatchObject({
+      code: "timeout",
+      paidRequestAttempted: true,
+    });
 
     await vi.advanceTimersByTimeAsync(20_000);
 
@@ -609,7 +998,10 @@ describe("TikHubClient exact request contract", () => {
     await vi.waitFor(() => expect(test.markAttempted).toHaveBeenCalledTimes(1));
     controller.abort();
 
-    await expect(promise).rejects.toMatchObject({ code: "aborted" });
+    await expect(promise).rejects.toMatchObject({
+      code: "aborted",
+      paidRequestAttempted: true,
+    });
     expect(test.markAttempted).toHaveBeenCalledTimes(1);
     expect(test.releaseUnused).toHaveBeenCalledTimes(1);
   });
@@ -633,7 +1025,10 @@ describe("TikHubClient exact request contract", () => {
         handle: "openai",
         signal: controller.signal,
       }),
-    ).rejects.toMatchObject({ code: "aborted" });
+    ).rejects.toMatchObject({
+      code: "aborted",
+      paidRequestAttempted: false,
+    });
     expect(test.transport).not.toHaveBeenCalled();
     expect(test.markAttempted).not.toHaveBeenCalled();
     expect(test.releaseUnused).toHaveBeenCalledTimes(1);
@@ -644,7 +1039,10 @@ describe("TikHubClient exact request contract", () => {
 
     await expect(
       test.client.fetchUserPosts({ apiKey: "   ", handle: "openai" }),
-    ).rejects.toMatchObject({ code: "missing-key" });
+    ).rejects.toMatchObject({
+      code: "missing-key",
+      paidRequestAttempted: false,
+    });
     expect(test.reserve).not.toHaveBeenCalled();
     expect(test.transport).not.toHaveBeenCalled();
   });
@@ -679,6 +1077,7 @@ describe("TikHub settings metadata", () => {
   it("defaults to the official primary API with bounded request limits", () => {
     expect(DEFAULT_SETTINGS.tikhub).toEqual({
       enabled: false,
+      youtubeTranscriptFallbackEnabled: false,
       connectionId: "",
       baseUrl: "https://api.tikhub.io",
       timeoutMs: 20_000,
@@ -700,6 +1099,7 @@ describe("TikHub settings metadata", () => {
     });
     expect(normalized.tikhub).toEqual({
       enabled: true,
+      youtubeTranscriptFallbackEnabled: false,
       connectionId: "d4eb3f58-b672-4f73-b9f3-9cd2f0e57a8d",
       baseUrl: "https://custom.example.com",
       timeoutMs: 9_000,
@@ -797,6 +1197,7 @@ describe("TikHub settings metadata", () => {
 
     expect(first.tikhub).toEqual({
       enabled: true,
+      youtubeTranscriptFallbackEnabled: false,
       connectionId: "d4eb3f58-b672-4f73-b9f3-9cd2f0e57a8d",
       baseUrl: "https://custom.example.com",
       timeoutMs: 9_000,
@@ -861,5 +1262,48 @@ describe("TikHub settings metadata", () => {
 
     expect(getterCalls).toBe(0);
     expect(JSON.stringify(normalized)).not.toContain(TIKHUB_SECRET_SENTINEL);
+  });
+});
+
+describe("strict async track completion client compatibility", () => {
+  it("accepts completed tracks only when the result job matches the requested job", async () => {
+    const test = createHarness(success({
+      job_id: "123e4567-e89b-12d3-a456-426614174000",
+      status: "completed",
+      video_id: "dQw4w9WgXcQ",
+      captions: [{ language_code: "en", language_name: "English" }],
+    }));
+
+    await expect(test.client.fetchYouTubeCaptionResult({
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt",
+    })).resolves.toMatchObject({
+      data: {
+        job_id: "123e4567-e89b-12d3-a456-426614174000",
+        status: "completed",
+        video_id: "dQw4w9WgXcQ",
+      },
+    });
+    expect(test.reserve).not.toHaveBeenCalled();
+  });
+
+  it("rejects completed tracks when the result job does not match", async () => {
+    const test = createHarness(success({
+      job_id: "87654321-e89b-12d3-a456-426614174000",
+      status: "completed",
+      video_id: "dQw4w9WgXcQ",
+      captions: [],
+    }));
+
+    const error = await test.client.fetchYouTubeCaptionResult({
+      apiKey: API_KEY,
+      jobId: "123e4567-e89b-12d3-a456-426614174000",
+      format: "txt",
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: "malformed-response" });
+    expect(String(error)).not.toContain("87654321");
+    expect(test.reserve).not.toHaveBeenCalled();
   });
 });

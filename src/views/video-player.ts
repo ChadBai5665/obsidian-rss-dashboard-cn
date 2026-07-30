@@ -13,8 +13,11 @@ export class VideoPlayer {
   private container: HTMLElement;
   private currentItem: FeedItem | null = null;
   private playerEl: HTMLElement | null = null;
+  private videoContainerEl: HTMLElement | null = null;
+  private inlineToggleEl: HTMLButtonElement | null = null;
   private iframeEl: HTMLIFrameElement | null = null;
   private progressInterval: number | null = null;
+  private restoreTimeout: number | null = null;
   private lastTrackedPosition: number | null = null;
   private progressTrackingEnabled: boolean;
   private onVideoSelect?: (item: FeedItem) => void;
@@ -51,7 +54,6 @@ export class VideoPlayer {
     this.onPlaybackProgress = onPlaybackProgress;
     this.progressTrackingEnabled = progressTrackingEnabled;
     this.locale = locale;
-    this.setupMessageListener();
   }
 
   loadVideo(item: FeedItem): void {
@@ -62,6 +64,7 @@ export class VideoPlayer {
     }
 
     try {
+      this.closeInlinePreview();
       this.currentItem = item;
       this.lastTrackedPosition = item.playbackProgress?.position ?? null;
       this.render();
@@ -73,12 +76,17 @@ export class VideoPlayer {
     }
   }
 
-  /** Update localized links/headings without recreating the YouTube iframe. */
+  /** Update localized controls without recreating an active YouTube iframe. */
   public refreshLocalization(locale: Locale): void {
     this.locale = locale;
     this.playerEl
       ?.querySelector<HTMLElement>(".rss-video-youtube-button span:last-child")
       ?.setText(this.t("video.watch"));
+    this.inlineToggleEl?.setText(
+      this.iframeEl
+        ? this.t("video.closeInlinePreview")
+        : this.t("video.inlinePreview"),
+    );
     this.playerEl
       ?.querySelector<HTMLElement>(".rss-video-tos-link")
       ?.setText(this.t("settings.media.youtubeTos"));
@@ -87,26 +95,16 @@ export class VideoPlayer {
 
   private render(): void {
     if (!this.currentItem || !this.currentItem.videoId) return;
-    const embed = MediaService.buildYouTubeEmbed(this.currentItem.videoId);
+    const watchUrl = MediaService.buildYouTubeWatchUrl(
+      this.currentItem.videoId,
+    );
 
     this.container.empty();
     this.playerEl = this.container.createDiv({ cls: "rss-video-player" });
 
-    const videoContainer = this.playerEl.createDiv({
-      cls: "rss-video-container",
+    this.videoContainerEl = this.playerEl.createDiv({
+      cls: "rss-video-container is-collapsed",
     });
-    const iframeId = `yt-player-${Math.random().toString(36).substring(2, 11)}`;
-
-    this.iframeEl = activeDocument.createElement("iframe");
-    this.iframeEl.id = iframeId;
-    this.iframeEl.src = `${embed.embedUrl}&id=${iframeId}`;
-    this.iframeEl.setAttribute("allow", embed.allow);
-    this.iframeEl.setAttribute("referrerpolicy", embed.referrerPolicy);
-    this.iframeEl.allowFullscreen = true;
-
-    videoContainer.appendChild(this.iframeEl);
-
-    this.initPlayer(iframeId);
 
     const details = this.playerEl.createDiv({ cls: "rss-video-details" });
     const titleSetting = new Setting(details)
@@ -148,7 +146,7 @@ export class VideoPlayer {
     const linksContainer = this.playerEl.createDiv({ cls: "rss-video-links" });
     const youtubeButton = linksContainer.createEl("a", {
       cls: "rss-video-youtube-button",
-      href: embed.watchUrl,
+      href: watchUrl,
     });
     youtubeButton.target = "_blank";
     youtubeButton.rel = "noopener noreferrer";
@@ -157,6 +155,19 @@ export class VideoPlayer {
     });
     setIcon(youtubeIcon, "youtube");
     youtubeButton.createSpan({ text: this.t("video.watch") });
+
+    this.inlineToggleEl = linksContainer.createEl("button", {
+      cls: "rss-video-inline-toggle",
+      text: this.t("video.inlinePreview"),
+      attr: { type: "button" },
+    });
+    this.inlineToggleEl.addEventListener("click", () => {
+      if (this.iframeEl) {
+        this.closeInlinePreview();
+      } else {
+        this.openInlinePreview();
+      }
+    });
 
     const tosLink = linksContainer.createEl("a", {
       cls: "rss-video-tos-link",
@@ -168,6 +179,63 @@ export class VideoPlayer {
 
     this.playerEl.createDiv({ cls: "rss-video-related" });
     this.renderRelatedVideos();
+  }
+
+  private openInlinePreview(): void {
+    if (
+      this.iframeEl ||
+      !this.currentItem?.videoId ||
+      !this.videoContainerEl
+    ) {
+      return;
+    }
+
+    try {
+      const embed = MediaService.buildYouTubeEmbed(this.currentItem.videoId);
+      const iframeId = `yt-player-${Math.random().toString(36).substring(2, 11)}`;
+      const iframeUrl = new URL(embed.embedUrl);
+      iframeUrl.searchParams.set("id", iframeId);
+
+      const iframe = activeDocument.createElement("iframe");
+      iframe.id = iframeId;
+      iframe.src = iframeUrl.toString();
+      iframe.setAttribute("allow", embed.allow);
+      iframe.setAttribute("referrerpolicy", embed.referrerPolicy);
+      iframe.allowFullscreen = true;
+
+      this.iframeEl = iframe;
+      this.videoContainerEl.removeClass("is-collapsed");
+      this.videoContainerEl.appendChild(iframe);
+      this.setupMessageListener();
+      this.initPlayer(iframeId);
+      this.inlineToggleEl?.setText(this.t("video.closeInlinePreview"));
+    } catch (error) {
+      console.error("[RSS Dashboard] Inline video preview failed:", error);
+      this.closeInlinePreview();
+      new Notice(this.t("video.loadError"));
+    }
+  }
+
+  private closeInlinePreview(): void {
+    this.stopTracking();
+    this.flushProgress();
+    if (this.restoreTimeout !== null) {
+      window.clearTimeout(this.restoreTimeout);
+      this.restoreTimeout = null;
+    }
+    if (this.messageHandler) {
+      window.removeEventListener("message", this.messageHandler);
+      this.messageHandler = null;
+    }
+    if (this.iframeEl) {
+      this.iframeEl.remove();
+      this.iframeEl = null;
+    }
+    this.playStartTime = null;
+    this.videoDuration = null;
+    this.lastTrackedPosition = null;
+    this.videoContainerEl?.addClass("is-collapsed");
+    this.inlineToggleEl?.setText(this.t("video.inlinePreview"));
   }
 
   private sendCommand(func: string, args: unknown[] = []): void {
@@ -187,6 +255,7 @@ export class VideoPlayer {
   }
 
   private setupMessageListener(): void {
+    if (this.messageHandler) return;
     this.messageHandler = (event: MessageEvent) => {
       if (
         event.origin !== "https://www.youtube.com" &&
@@ -267,7 +336,9 @@ export class VideoPlayer {
       this.progressTrackingEnabled &&
       this.currentItem?.playbackProgress?.position
     ) {
-      window.setTimeout(() => {
+      this.restoreTimeout = window.setTimeout(() => {
+        this.restoreTimeout = null;
+        if (this.iframeEl?.id !== _iframeId) return;
         this.sendCommand("seekTo", [
           this.currentItem!.playbackProgress!.position,
           true,
@@ -296,14 +367,14 @@ export class VideoPlayer {
 
   private startTracking(): void {
     if (!this.progressTrackingEnabled) return;
-    if (this.progressInterval) return;
+    if (this.progressInterval !== null) return;
     this.progressInterval = window.setInterval(() => {
       this.saveProgress();
     }, 5000);
   }
 
   private stopTracking(): void {
-    if (this.progressInterval) {
+    if (this.progressInterval !== null) {
       window.clearInterval(this.progressInterval);
       this.progressInterval = null;
     }
@@ -423,16 +494,10 @@ export class VideoPlayer {
   }
 
   destroy(): void {
-    this.stopTracking();
-    this.flushProgress();
-    if (this.messageHandler) {
-      window.removeEventListener("message", this.messageHandler);
-      this.messageHandler = null;
-    }
-    if (this.iframeEl) {
-      this.iframeEl.remove();
-      this.iframeEl = null;
-    }
+    this.closeInlinePreview();
+    this.currentItem = null;
+    this.videoContainerEl = null;
+    this.inlineToggleEl = null;
     this.playerEl = null;
   }
 }

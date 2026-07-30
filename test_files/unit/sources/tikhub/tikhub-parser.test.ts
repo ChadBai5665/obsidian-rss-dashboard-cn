@@ -5,6 +5,65 @@ import topFixture from "../../../fixtures/tikhub/synthetic/search-top-edge.json"
 import { parseTikHubTimeline } from "../../../../src/sources/tikhub/tikhub-parser";
 
 describe("parseTikHubTimeline", () => {
+  it("extracts the single own bottom cursor from a timeline page", () => {
+    expect(parseTikHubTimeline(accountFixture).nextCursor).toBe("fixture-cursor");
+  });
+
+  it("rejects hostile and ambiguous bottom cursors without disclosing them", () => {
+    const bottom = (value: unknown, entryId = "cursor-bottom-test") => ({
+      entryId,
+      content: {
+        entryType: "TimelineTimelineCursor",
+        cursorType: "Bottom",
+        value,
+      },
+    });
+    const payload = (entries: unknown[]) => ({
+      data: { instructions: [{ entries }] },
+    });
+    const inheritedValue = Object.create({ value: "private-inherited-cursor" });
+    Object.assign(inheritedValue, {
+      entryType: "TimelineTimelineCursor",
+      cursorType: "Bottom",
+    });
+    const cases = [
+      payload([bottom("private\u0001cursor")]),
+      payload([bottom("x".repeat(4_097))]),
+      payload([{
+        entryId: "cursor-bottom-inherited",
+        content: inheritedValue,
+      }]),
+      payload([bottom("private-repeated-cursor"), bottom("private-repeated-cursor")]),
+      payload([bottom("private-first-cursor"), bottom("private-second-cursor")]),
+    ];
+
+    for (const hostile of cases) {
+      const result = parseTikHubTimeline(hostile);
+      expect(result.nextCursor).toBeUndefined();
+      expect(result.warnings.length).toBeGreaterThan(0);
+      expect(JSON.stringify(result.warnings)).not.toContain("private");
+    }
+  });
+
+  it("ignores a non-bottom cursor without treating a normal page shape as hostile", () => {
+    const result = parseTikHubTimeline({
+      data: {
+        instructions: [{
+          entries: [{
+            entryId: "cursor-top-test",
+            content: {
+              entryType: "TimelineTimelineCursor",
+              cursorType: "Top",
+              value: "private-top-cursor",
+            },
+          }],
+        }],
+      },
+    });
+
+    expect(result).toEqual({ posts: [], warnings: [], candidateCount: 0 });
+  });
+
   it("maps an original post, URL entities, article links, and metrics", () => {
     const result = parseTikHubTimeline(accountFixture);
     const post = result.posts.find(({ id }) => id === "100");

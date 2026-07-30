@@ -4,18 +4,21 @@ export interface TikHubTimelineParseResult {
   posts: XPost[];
   warnings: string[];
   candidateCount: number;
+  nextCursor?: string;
 }
 
 const MAX_WALK_DEPTH = 32;
 const MAX_WALK_NODES = 25_000;
 const MAX_ARRAY_ENTRIES = 100_000;
 const MAX_OBJECT_PROPERTIES = 10_000;
+const MAX_CURSOR_LENGTH = 4_096;
 const X_HANDLE = /^[A-Za-z0-9_]{1,15}$/;
 
 /** Converts untrusted TikHub GraphQL timeline data into provider-neutral records. */
 export function parseTikHubTimeline(payload: unknown): TikHubTimelineParseResult {
   const warnings: string[] = [];
   const posts: XPost[] = [];
+  const bottomCursors: string[] = [];
   let candidateCount = 0;
   const instructionArrays = findNamedArrays(payload, "instructions");
 
@@ -25,7 +28,14 @@ export function parseTikHubTimeline(payload: unknown): TikHubTimelineParseResult
       if (!entries) continue;
 
       for (const entry of ownArrayValues(entries)) {
-        if (isCursorEntry(entry)) continue;
+        if (isCursorEntry(entry)) {
+          if (isBottomCursorEntry(entry)) {
+            const cursor = bottomCursor(entry);
+            if (cursor) bottomCursors.push(cursor);
+            else warnings.push("Skipped an invalid X timeline cursor.");
+          }
+          continue;
+        }
         const candidates = findTweetResults(entry);
         candidateCount += candidates.length;
         if (candidates.length === 0) {
@@ -49,7 +59,15 @@ export function parseTikHubTimeline(payload: unknown): TikHubTimelineParseResult
     }
   }
 
-  return { posts, warnings, candidateCount };
+  if (bottomCursors.length > 1) {
+    warnings.push("Stopped X pagination because the timeline cursor was ambiguous.");
+  }
+  return {
+    posts,
+    warnings,
+    candidateCount,
+    ...(bottomCursors.length === 1 ? { nextCursor: bottomCursors[0] } : {}),
+  };
 }
 
 function parseTweetResult(candidate: unknown): XPost | undefined {
@@ -206,6 +224,40 @@ function isCursorEntry(entry: unknown): boolean {
   const entryType = optionalString(ownValue(content, "entryType"));
   const cursorType = optionalString(ownValue(content, "cursorType"));
   return entryType === "TimelineTimelineCursor" || cursorType !== undefined;
+}
+
+function isBottomCursorEntry(entry: unknown): boolean {
+  const entryId = ownValue(entry, "entryId");
+  const content = ownRecord(ownValue(entry, "content"));
+  const cursorType = ownValue(content, "cursorType");
+  return cursorType === "Bottom" ||
+    (typeof entryId === "string" &&
+      entryId.toLowerCase().startsWith("cursor-bottom"));
+}
+
+function bottomCursor(entry: unknown): string | undefined {
+  const content = ownRecord(ownValue(entry, "content"));
+  const value = ownValue(content, "value");
+  return typeof value === "string" &&
+      value.length > 0 &&
+      value.length <= MAX_CURSOR_LENGTH &&
+      isPrintable(value)
+    ? value
+    : undefined;
+}
+
+function isPrintable(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint === undefined ||
+      codePoint <= 31 ||
+      (codePoint >= 127 && codePoint <= 159)
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isUnavailable(candidate: unknown): boolean {

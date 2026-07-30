@@ -7,6 +7,7 @@ import {
   type SourceKind,
 } from "../sources/source-config";
 import { normalizeTikHubBaseUrl } from "../sources/tikhub/tikhub-types";
+import { normalizeInitialImportPolicy } from "../sources/initial-import-policy";
 
 const MAX_COLLECTION_ENTRIES = 5_000;
 const MAX_FOLDER_DEPTH = 16;
@@ -287,8 +288,20 @@ function copyFeeds(value: unknown): Record<string, unknown>[] {
     copyInteger(feed, output, "scanInterval", 1, MAX_SAFE_NUMBER);
     copyBoolean(feed, output, "excludeFromRefresh");
     copyNested(feed, output, "keywordRules", copyFeedKeywordRules);
+    copyNested(feed, output, "initialImportPolicy", copyInitialImportPolicy);
+    copyEnum(feed, output, "subscriptionStatus", new Set(["active", "paused"]));
     return output;
   });
+}
+
+function copyInitialImportPolicy(value: unknown): Record<string, unknown> {
+  const policy = normalizeInitialImportPolicy(value);
+  if (!policy) throw new PublicSettingsExportError("invalid-settings");
+  const output = createRecord();
+  output.mode = policy.mode;
+  if (policy.mode === "lookback-days") output.days = policy.days;
+  if (policy.mode === "since-date") output.since = policy.since;
+  return output;
 }
 
 function copySourceConfig(value: unknown): Record<string, unknown> {
@@ -373,6 +386,7 @@ function copyTikHubSettings(value: unknown): Record<string, unknown> {
   const settings = objectRecord(value);
   const output = createRecord();
   copyBoolean(settings, output, "enabled");
+  copyBoolean(settings, output, "youtubeTranscriptFallbackEnabled");
   if (hasOwnData(settings, "connectionId")) {
     const raw = requiredData(settings, "connectionId");
     if (raw === "") output.connectionId = "";
@@ -399,7 +413,20 @@ function copyAiSettings(value: unknown): Record<string, unknown> {
   const connections: AiConnection[] = entries.map((entry) => {
     const source = objectRecord(entry);
     const snapshot = createRecord();
-    for (const key of ["id", "name", "providerKind", "protocol", "baseUrl", "model", "timeoutMs", "maxInputCharacters", "enabled"] as const) {
+    for (const key of [
+      "id",
+      "name",
+      "providerKind",
+      "protocol",
+      "baseUrl",
+      "model",
+      "timeoutMs",
+      "maxInputCharacters",
+      "enabled",
+      "thinkingMode",
+      "reasoningEffort",
+      "responseMode",
+    ] as const) {
       copyOwnDataIfPresent(source, snapshot, key);
     }
     const normalized = normalizeAiConnection(snapshot);
@@ -488,6 +515,7 @@ function copyMediaSettings(value: unknown): Record<string, unknown> {
     copyStringArray(input, output, field, 256);
   }
   copyEnum(input, output, "podcastTheme", new Set(["obsidian", "minimal", "gradient", "spotify", "nord", "dracula", "solarized", "catppuccin", "gruvbox", "tokyonight"]));
+  copyEnum(input, output, "youtubeTranscriptBrowserAuth", new Set(["none", "chrome", "safari", "firefox"]));
   copyInteger(input, output, "defaultPlaySpeed", 1, 10);
   return output;
 }

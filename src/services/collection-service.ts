@@ -1,4 +1,6 @@
 import type { CollectedItem } from "../collection/collected-item";
+import type { RemovedCollectionDay } from "../collection/collection-repository";
+import type { DailyIndexSnapshot } from "../collection/daily-index-service";
 import {
   createFeedItemMaterialFingerprint,
   normalizeFeedItem,
@@ -12,6 +14,8 @@ interface CollectionRepositoryPort {
     localDate: string,
   ): Promise<CollectedItem[]>;
   hasItemsForSource(sourceId: string): Promise<boolean>;
+  removeBySourceId(sourceId: string): Promise<RemovedCollectionDay[]>;
+  restoreRemovedSource(days: RemovedCollectionDay[]): Promise<void>;
 }
 
 interface DailyIndexPort {
@@ -19,6 +23,8 @@ interface DailyIndexPort {
     localDate: string;
     items: CollectedItem[];
   }): Promise<string>;
+  snapshotDailyIndex(localDate: string): Promise<DailyIndexSnapshot>;
+  restoreDailyIndex(snapshot: DailyIndexSnapshot): Promise<void>;
 }
 
 interface RefreshLedgerPort {
@@ -30,6 +36,13 @@ interface CollectionServiceDependencies {
   dailyIndex: DailyIndexPort;
   ledger: RefreshLedgerPort;
   normalize?: typeof normalizeFeedItem;
+  isSourceActive?: (sourceId: string) => boolean;
+}
+
+export interface CollectionRemovalReceipt {
+  days: RemovedCollectionDay[];
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
 }
 
 export class CollectionService {
@@ -54,6 +67,100 @@ export class CollectionService {
     return await operation;
   }
 
+  async removeSource(sourceId: string): Promise<CollectionRemovalReceipt> {
+    let resolveReceipt!: (receipt: CollectionRemovalReceipt) => void;
+    let rejectReceipt!: (error: unknown) => void;
+    const receiptPromise = new Promise<CollectionRemovalReceipt>(
+      (resolve, reject) => {
+        resolveReceipt = resolve;
+        rejectReceipt = reject;
+      },
+    );
+    const operation = this.collectionQueue.then(async () => {
+      try {
+        const affected = await this.dependencies.repository.removeBySourceId(
+          sourceId,
+        );
+        const dailySnapshots: DailyIndexSnapshot[] = [];
+        try {
+          for (const day of affected) {
+            dailySnapshots.push(
+              await this.dependencies.dailyIndex.snapshotDailyIndex(day.localDate),
+            );
+          }
+          for (const day of affected) {
+            await this.dependencies.dailyIndex.writeDailyIndex({
+              localDate: day.localDate,
+              items: day.remainingItems,
+            });
+          }
+        } catch (purgeError) {
+          const rollbackComplete = await this.rollbackRemoval(
+            affected,
+            dailySnapshots,
+          );
+          if (!rollbackComplete) {
+            throw new Error("Source purge failed and rollback was incomplete");
+          }
+          throw purgeError;
+        }
+
+        let finalized = false;
+        let releaseQueue!: () => void;
+        const queueBarrier = new Promise<void>((resolve) => {
+          releaseQueue = resolve;
+        });
+        const receipt: CollectionRemovalReceipt = {
+          days: structuredClone(affected),
+          commit: async (): Promise<void> => {
+            if (finalized) return;
+            finalized = true;
+            releaseQueue();
+          },
+          rollback: async (): Promise<void> => {
+            if (finalized) return;
+            const complete = await this.rollbackRemoval(affected, dailySnapshots);
+            finalized = true;
+            releaseQueue();
+            if (!complete) {
+              throw new Error("Source purge rollback was incomplete");
+            }
+          },
+        };
+        resolveReceipt(receipt);
+        await queueBarrier;
+      } catch (purgeError) {
+        rejectReceipt(purgeError);
+        throw purgeError;
+      }
+    });
+    this.collectionQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await receiptPromise;
+  }
+
+  private async rollbackRemoval(
+    affected: RemovedCollectionDay[],
+    dailySnapshots: DailyIndexSnapshot[],
+  ): Promise<boolean> {
+    let complete = true;
+    try {
+      await this.dependencies.repository.restoreRemovedSource(affected);
+    } catch {
+      complete = false;
+    }
+    for (const snapshot of [...dailySnapshots].reverse()) {
+      try {
+        await this.dependencies.dailyIndex.restoreDailyIndex(snapshot);
+      } catch {
+        complete = false;
+      }
+    }
+    return complete;
+  }
+
   private async collect(input: {
     feed: Feed;
     previousItems: FeedItem[];
@@ -61,6 +168,9 @@ export class CollectionService {
     fetchedAt: Date;
   }): Promise<CollectedItem[]> {
     const sourceId = input.feed.feedId ?? input.feed.url;
+    if (this.dependencies.isSourceActive?.(sourceId) === false) {
+      throw new Error("Collection source is no longer active");
+    }
     const normalizedItems = input.refreshedItems.map((item) => ({
       source: item,
       collected: this.normalize(input.feed, item, input.fetchedAt),

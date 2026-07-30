@@ -1,5 +1,15 @@
 import { App, Modal, Setting } from "obsidian";
-import type { AiConnection, AiProviderKind } from "../ai/ai-types";
+import type {
+  AiConnection,
+  AiProviderKind,
+  AiReasoningEffort,
+  AiResponseMode,
+  AiThinkingMode,
+} from "../ai/ai-types";
+import {
+  aiConnectionControlCapabilities,
+  defaultAiThinkingMode,
+} from "../ai/connection-controls";
 import {
   normalizeAiBaseUrl,
   normalizeAiConnection,
@@ -109,6 +119,9 @@ export class AiConnectionModal extends Modal {
     let model = existing?.model ?? "";
     let baseUrl = existing?.baseUrl ?? getAiProviderPreset(providerKind)?.baseUrl ?? "";
     let enabled = existing?.enabled ?? true;
+    let thinkingMode = existing?.thinkingMode ?? defaultAiThinkingMode(providerKind);
+    let reasoningEffort = existing?.reasoningEffort ?? "platform-default";
+    let responseMode = existing?.responseMode ?? "stream";
     let pendingKey = "";
     let generatedConnectionId: string | undefined;
     let inFlight = false;
@@ -137,6 +150,9 @@ export class AiConnectionModal extends Modal {
     let modelSetting: Setting;
     let modelInput: HTMLInputElement;
     let keyInput: HTMLInputElement;
+    let thinkingModeSelect: HTMLSelectElement;
+    let reasoningEffortSetting: Setting;
+    let reasoningEffortSelect: HTMLSelectElement;
     let cancelButton: HTMLButtonElement | undefined;
     let testButton: HTMLButtonElement | undefined;
     let saveButton: HTMLButtonElement | undefined;
@@ -163,6 +179,8 @@ export class AiConnectionModal extends Modal {
           const preset = getAiProviderPreset(providerKind);
           baseUrl = preset?.baseUrl ?? "";
           model = "";
+          thinkingMode = defaultAiThinkingMode(providerKind);
+          reasoningEffort = "platform-default";
           baseUrlInput.value = baseUrl;
           modelInput.value = "";
           markDraftChanged();
@@ -206,6 +224,44 @@ export class AiConnectionModal extends Modal {
         });
         modelInput.maxLength = MAX_MODEL_CHARACTERS;
       });
+
+    fieldSetting()
+      .setName(t("settings.ai.thinkingMode"))
+      .setDesc(t("settings.ai.thinkingModeDesc"))
+      .addDropdown((dropdown) => {
+        thinkingModeSelect = dropdown.selectEl;
+        dropdown.onChange((value) => {
+          if (!isThinkingMode(value)) return;
+          thinkingMode = value;
+          markDraftChanged();
+          renderProviderFields();
+        });
+      });
+
+    reasoningEffortSetting = fieldSetting()
+      .setName(t("settings.ai.reasoningEffort"))
+      .setDesc(t("settings.ai.reasoningEffortDesc"))
+      .addDropdown((dropdown) => {
+        reasoningEffortSelect = dropdown.selectEl;
+        dropdown.onChange((value) => {
+          if (!isReasoningEffort(value)) return;
+          reasoningEffort = value;
+          markDraftChanged();
+        });
+      });
+
+    fieldSetting()
+      .setName(t("settings.ai.responseMode"))
+      .setDesc(t("settings.ai.responseModeDesc"))
+      .addDropdown((dropdown) => dropdown
+        .addOption("stream", t("settings.ai.responseModeStream"))
+        .addOption("complete", t("settings.ai.responseModeComplete"))
+        .setValue(responseMode)
+        .onChange((value) => {
+          if (!isResponseMode(value)) return;
+          responseMode = value;
+          markDraftChanged();
+        }));
 
     fieldSetting()
       .setName(t("settings.ai.apiKey"))
@@ -262,6 +318,37 @@ export class AiConnectionModal extends Modal {
         ? t("settings.ai.modelDefaultPlaceholder", { model: defaultModel })
         : t("settings.ai.modelRequiredPlaceholder");
       providerGuidanceEl.setText(providerGuidance(providerKind, t));
+      const capabilities = aiConnectionControlCapabilities(providerKind);
+      if (!capabilities.thinkingModes.includes(thinkingMode)) {
+        thinkingMode = defaultAiThinkingMode(providerKind);
+      }
+      replaceSelectOptions(
+        thinkingModeSelect,
+        capabilities.thinkingModes.map((value) => ({
+          value,
+          label: t(thinkingModeLabel(value)),
+        })),
+        thinkingMode,
+      );
+      const effortOptions = [
+        "platform-default" as const,
+        ...capabilities.reasoningEfforts,
+      ];
+      if (!effortOptions.includes(reasoningEffort)) {
+        reasoningEffort = "platform-default";
+      }
+      replaceSelectOptions(
+        reasoningEffortSelect,
+        effortOptions.map((value) => ({
+          value,
+          label: t(reasoningEffortLabel(value)),
+        })),
+        reasoningEffort,
+      );
+      const showsEffort = capabilities.reasoningEfforts.length > 0 &&
+        thinkingMode !== "disabled";
+      reasoningEffortSetting.settingEl.hidden = !showsEffort;
+      reasoningEffortSetting.settingEl.style.display = showsEffort ? "" : "none";
     };
     renderProviderFields();
 
@@ -283,6 +370,9 @@ export class AiConnectionModal extends Modal {
               model,
               baseUrl,
               enabled,
+              thinkingMode,
+              reasoningEffort,
+              responseMode,
               createConnectionId: () => {
                 generatedConnectionId ??=
                   (this.options.createConnectionId ?? defaultConnectionId)();
@@ -366,6 +456,9 @@ export class AiConnectionModal extends Modal {
               model,
               baseUrl,
               enabled,
+              thinkingMode,
+              reasoningEffort,
+              responseMode,
               createConnectionId: () => {
                 generatedConnectionId ??=
                   (this.options.createConnectionId ?? defaultConnectionId)();
@@ -470,6 +563,9 @@ interface BuildConnectionInput {
   model: string;
   baseUrl: string;
   enabled: boolean;
+  thinkingMode: AiThinkingMode;
+  reasoningEffort: AiReasoningEffort;
+  responseMode: AiResponseMode;
   createConnectionId(): string;
 }
 
@@ -518,6 +614,9 @@ function buildConnection(input: BuildConnectionInput): BuildConnectionResult {
       maxInputCharacters:
         input.existing?.maxInputCharacters ?? created.maxInputCharacters,
       enabled: input.enabled,
+      thinkingMode: input.thinkingMode,
+      reasoningEffort: input.reasoningEffort,
+      responseMode: input.responseMode,
     });
     return connection
       ? { ok: true, connection }
@@ -561,6 +660,42 @@ function validSubmittedKey(value: string): boolean {
 
 function isProviderKind(value: string): value is AiProviderKind {
   return AI_PROVIDER_PRESETS.some((preset) => preset.providerKind === value);
+}
+
+function isThinkingMode(value: string): value is AiThinkingMode {
+  return ["platform-default", "disabled", "enabled", "adaptive"].includes(value);
+}
+
+function isReasoningEffort(value: string): value is AiReasoningEffort {
+  return ["platform-default", "minimal", "low", "medium", "high", "max"]
+    .includes(value);
+}
+
+function isResponseMode(value: string): value is AiResponseMode {
+  return value === "stream" || value === "complete";
+}
+
+function replaceSelectOptions(
+  select: HTMLSelectElement,
+  options: readonly { value: string; label: string }[],
+  selected: string,
+): void {
+  const elements = options.map(({ value, label }) => {
+    const option = select.ownerDocument.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    return option;
+  });
+  select.replaceChildren(...elements);
+  select.value = selected;
+}
+
+function thinkingModeLabel(value: AiThinkingMode): TranslationKey {
+  return `settings.ai.thinkingMode.${value}` as TranslationKey;
+}
+
+function reasoningEffortLabel(value: AiReasoningEffort): TranslationKey {
+  return `settings.ai.reasoningEffort.${value}` as TranslationKey;
 }
 
 function providerGuidance(

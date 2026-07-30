@@ -34,6 +34,10 @@ class InMemoryAdapter {
     }
     this.directories.add(path);
   }
+
+  async remove(path: string): Promise<void> {
+    this.files.delete(path);
+  }
 }
 
 function createItem(overrides: Partial<CollectedItem> = {}): CollectedItem {
@@ -113,6 +117,24 @@ describe("DailyIndexService", () => {
     ).rejects.toThrow("Invalid daily index ownership markers");
 
     expect(adapter.files.get(path)).toBe(original);
+  });
+
+  it("restores the exact prior daily index generation, including prior absence", async () => {
+    const { adapter, service } = createHarness();
+    adapter.directories.add("信息收集");
+    adapter.directories.add("信息收集/每日采集");
+    const existingPath = "信息收集/每日采集/2026-07-21.md";
+    adapter.files.set(existingPath, "# User-owned exact content\n");
+    const existing = await service.snapshotDailyIndex("2026-07-21");
+    const absent = await service.snapshotDailyIndex("2026-07-22");
+
+    await service.writeDailyIndex({ localDate: "2026-07-21", items: [createItem()] });
+    await service.writeDailyIndex({ localDate: "2026-07-22", items: [createItem()] });
+    await service.restoreDailyIndex(existing);
+    await service.restoreDailyIndex(absent);
+
+    expect(adapter.files.get(existingPath)).toBe("# User-owned exact content\n");
+    expect(adapter.files.has("信息收集/每日采集/2026-07-22.md")).toBe(false);
   });
 
   it("rejects invalid local dates before touching the vault", async () => {

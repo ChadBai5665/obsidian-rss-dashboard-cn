@@ -1,3 +1,6 @@
+import process from "node:process";
+import { setImmediate } from "node:timers";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { AiConnection, AiSettings } from "../../../src/ai/ai-types";
@@ -80,6 +83,7 @@ function harness(options: {
   aiSettings?: AiSettings;
   key?: string;
   selectedContent?: SelectedAiContent;
+  select?: Pick<AiContentSelector, "select">["select"];
   provider?: TextGenerationProvider;
   providerFactory?: AiOperationServiceDependencies["providerFactory"];
 } = {}) {
@@ -87,7 +91,8 @@ function harness(options: {
     connections: [connection()],
     defaultConnectionId: CONNECTION_ID,
   };
-  const select = vi.fn(async () => options.selectedContent ?? selected());
+  const select = vi.fn(options.select ?? (async () =>
+    options.selectedContent ?? selected()));
   const generate = vi.fn(async (_request: TextGenerationRequest) => ({
     text: "模型结果",
     providerRequestId: "safe-request-id",
@@ -125,6 +130,16 @@ function runInput(overrides: Partial<Parameters<AiOperationService["run"]>[0]> =
 
 async function caught(promise: Promise<unknown>): Promise<AiOperationError> {
   return promise.catch((error: unknown) => error) as Promise<AiOperationError>;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("manual AI operation service", () => {
@@ -235,6 +250,68 @@ describe("manual AI operation service", () => {
       inputTruncated: false,
       text: "模型结果",
     });
+  });
+
+  it("reports one frozen prepared snapshot with resolved connection metadata and the actual content basis before generation", async () => {
+    const observed: unknown[] = [];
+    const order: string[] = [];
+    const generate = vi.fn(async () => {
+      order.push("generate");
+      return { text: "模型结果" };
+    });
+    const test = harness({
+      aiSettings: {
+        connections: [connection({
+          name: "Kimi",
+          providerKind: "kimi",
+          baseUrl: "https://api.moonshot.cn/v1",
+          model: "",
+        })],
+      },
+      selectedContent: selected({ basis: "full-text" }),
+      providerFactory: vi.fn(async () => ({ generate })),
+    });
+
+    const result = await test.service.run(runInput({
+      onPrepared: ((metadata: unknown) => {
+        order.push("prepared");
+        observed.push(metadata);
+      }) as never,
+    }));
+
+    expect(order).toEqual(["prepared", "generate"]);
+    expect(observed).toEqual([{
+      connectionName: "Kimi",
+      providerKind: "kimi",
+      model: "kimi-latest",
+      contentBasis: "full-text",
+    }]);
+    expect(Object.isFrozen(observed[0])).toBe(true);
+    expect(Object.keys(observed[0] as object).sort()).toEqual([
+      "connectionName",
+      "contentBasis",
+      "model",
+      "providerKind",
+    ]);
+    expect(JSON.stringify(observed)).not.toContain("来源正文");
+    expect(JSON.stringify(observed)).not.toContain("https://");
+    expect(result.contentBasis).toBe("full-text");
+  });
+
+  it("isolates a synchronous prepared observer failure from provider generation", async () => {
+    const observer = vi.fn(() => {
+      throw new Error("external-secret raw-observer-error");
+    });
+    const test = harness();
+
+    const result = await test.service.run(runInput({
+      onPrepared: observer as never,
+    }));
+
+    expect(observer).toHaveBeenCalledTimes(1);
+    expect(test.generate).toHaveBeenCalledTimes(1);
+    expect(result.text).toBe("模型结果");
+    expect(JSON.stringify(result)).not.toContain("external-secret");
   });
 
   it("uses the resolved Kimi model for the provider request and result provenance", async () => {
@@ -499,5 +576,419 @@ describe("manual AI operation service", () => {
     expect(String(error)).not.toContain("private-material");
     expect(String(error)).not.toContain("Authorization");
     expect(JSON.stringify(error)).not.toContain("provider envelope");
+  });
+
+  it("finishes selection and prompt construction before forwarding ordered deltas exactly once", async () => {
+    let selectionFinished = false;
+    const forwarded: string[] = [];
+    const generate = vi.fn(async (
+      request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      expect(selectionFinished).toBe(true);
+      expect(JSON.parse(request.user)).toMatchObject({
+        operationId: "summary",
+        content: "选定内容",
+      });
+      onTextDelta?.("相同");
+      onTextDelta?.("相同");
+      onTextDelta?.("结尾");
+      return { text: "相同相同结尾" };
+    });
+    const test = harness({
+      select: async () => {
+        selectionFinished = true;
+        return selected({ content: "选定内容", characterCount: 4 });
+      },
+      providerFactory: vi.fn(async () => ({ generate })),
+    });
+
+    const result = await test.service.run(runInput({
+      onTextDelta: (text) => forwarded.push(text),
+    }));
+
+    expect(forwarded).toEqual(["相同", "相同", "结尾"]);
+    expect(forwarded.join("")).toBe(result.text);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts a provider result that emits no deltas", async () => {
+    const forwarded: string[] = [];
+    const generate = vi.fn(async () => ({ text: "同一响应 JSON 结果" }));
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+
+    const result = await test.service.run(runInput({
+      onTextDelta: (text) => forwarded.push(text),
+    }));
+
+    expect(result.text).toBe("同一响应 JSON 结果");
+    expect(forwarded).toEqual([]);
+  });
+
+  it("snapshots the callback before awaits and isolates callback exceptions", async () => {
+    const selection = deferred<SelectedAiContent>();
+    const original = vi.fn(() => { throw new Error("private callback detail"); });
+    const replacement = vi.fn();
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      onTextDelta?.("第一段");
+      onTextDelta?.("第二段");
+      return { text: "第一段第二段" };
+    });
+    const test = harness({
+      select: () => selection.promise,
+      providerFactory: vi.fn(async () => ({ generate })),
+    });
+    const input = runInput({ onTextDelta: original });
+
+    const pending = test.service.run(input);
+    await vi.waitFor(() => expect(test.select).toHaveBeenCalledTimes(1));
+    input.onTextDelta = replacement;
+    selection.resolve(selected());
+    const result = await pending;
+
+    expect(result.text).toBe("第一段第二段");
+    expect(original).toHaveBeenCalledTimes(2);
+    expect(replacement).not.toHaveBeenCalled();
+  });
+
+  it("consumes async callback failures and hostile thenables without leaking", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    let callbackIndex = 0;
+    let resolvingThenCalls = 0;
+    let rejectingThenCalls = 0;
+    let throwingGetterReads = 0;
+    const resolvingThenable = {
+      then(resolve: (value: undefined) => void) {
+        resolvingThenCalls += 1;
+        resolve(undefined);
+      },
+    };
+    const rejectingThenable = {
+      then(_resolve: (value: never) => void, reject: (reason: unknown) => void) {
+        rejectingThenCalls += 1;
+        reject(new Error("external-secret raw-provider-error"));
+      },
+    };
+    const throwingGetterThenable = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(throwingGetterThenable, "then", {
+      get: () => {
+        throwingGetterReads += 1;
+        throw new Error("external-secret raw-provider-error");
+      },
+    });
+    const results = [
+      () => Promise.reject(new Error("external-secret raw-provider-error")),
+      () => resolvingThenable,
+      () => rejectingThenable,
+      () => throwingGetterThenable,
+    ];
+    const callback = vi.fn((_text: string): unknown =>
+      results[callbackIndex++]?.());
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      onTextDelta?.("一");
+      onTextDelta?.("二");
+      onTextDelta?.("三");
+      onTextDelta?.("四");
+      return { text: "一二三四" };
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      const result = await test.service.run(runInput({
+        onTextDelta: callback as unknown as (text: string) => void,
+      }));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(result.text).toBe("一二三四");
+      expect(callback.mock.calls.map(([text]) => text)).toEqual([
+        "一",
+        "二",
+        "三",
+        "四",
+      ]);
+      expect(resolvingThenCalls).toBe(1);
+      expect(rejectingThenCalls).toBe(1);
+      expect(throwingGetterReads).toBe(1);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("does not await a pending callback result or reorder later deltas", async () => {
+    const forwarded: string[] = [];
+    const pending = new Promise<never>(() => undefined);
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      onTextDelta?.("第一段");
+      onTextDelta?.("第二段");
+      return { text: "第一段第二段" };
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+    const callback = (text: string): unknown => {
+      forwarded.push(text);
+      return pending;
+    };
+
+    const result = await test.service.run(runInput({
+      onTextDelta: callback as unknown as (text: string) => void,
+    }));
+
+    expect(result.text).toBe("第一段第二段");
+    expect(forwarded).toEqual(["第一段", "第二段"]);
+  });
+
+  it("rejects accessor, inherited, undefined, and non-function callbacks before side effects", async () => {
+    let getterRead = false;
+    const accessorInput = runInput() as Record<string, unknown>;
+    Object.defineProperty(accessorInput, "onTextDelta", {
+      enumerable: true,
+      get: () => {
+        getterRead = true;
+        return () => undefined;
+      },
+    });
+    const accessor = harness();
+    const accessorError = await caught(accessor.service.run(
+      accessorInput as unknown as Parameters<AiOperationService["run"]>[0],
+    ));
+    expect(accessorError.code).toBe("invalid-request");
+    expect(getterRead).toBe(false);
+    expect(accessor.providerFactory).not.toHaveBeenCalled();
+    expect(accessor.select).not.toHaveBeenCalled();
+
+    Object.defineProperty(Object.prototype, "onTextDelta", {
+      configurable: true,
+      value: () => undefined,
+    });
+    try {
+      const inherited = harness();
+      const inheritedError = await caught(inherited.service.run(runInput()));
+      expect(inheritedError.code).toBe("invalid-request");
+      expect(inherited.providerFactory).not.toHaveBeenCalled();
+      expect(inherited.select).not.toHaveBeenCalled();
+    } finally {
+      Reflect.deleteProperty(Object.prototype, "onTextDelta");
+    }
+
+    for (const invalid of [undefined, "callback", { call: () => undefined }]) {
+      const test = harness();
+      const error = await caught(test.service.run(runInput({
+        onTextDelta: invalid as never,
+      })));
+      expect(error.code).toBe("invalid-request");
+      expect(test.providerFactory).not.toHaveBeenCalled();
+      expect(test.select).not.toHaveBeenCalled();
+    }
+  });
+
+  it("stops forwarding immediately after abort during generation", async () => {
+    const controller = new AbortController();
+    const forwarded: string[] = [];
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      onTextDelta?.("取消前");
+      controller.abort();
+      onTextDelta?.("取消后");
+      await new Promise<void>(() => undefined);
+      return { text: "unreachable" };
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+
+    const error = await caught(test.service.run(runInput({
+      signal: controller.signal,
+      onTextDelta: (text) => forwarded.push(text),
+    })));
+
+    expect(error.code).toBe("aborted");
+    expect(forwarded).toEqual(["取消前"]);
+  });
+
+  it("does not create a provider or forward when already aborted", async () => {
+    const controller = new AbortController();
+    const forwarded = vi.fn();
+    const test = harness();
+    controller.abort();
+
+    const error = await caught(test.service.run(runInput({
+      signal: controller.signal,
+      onTextDelta: forwarded,
+    })));
+
+    expect(error.code).toBe("aborted");
+    expect(test.providerFactory).not.toHaveBeenCalled();
+    expect(test.select).not.toHaveBeenCalled();
+    expect(forwarded).not.toHaveBeenCalled();
+  });
+
+  it("does not forward callbacks retained by the provider after success", async () => {
+    const controller = new AbortController();
+    let retained: ((text: string) => void) | undefined;
+    const forwarded: string[] = [];
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      retained = onTextDelta;
+      onTextDelta?.("完成");
+      return { text: "完成" };
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+
+    await test.service.run(runInput({
+      signal: controller.signal,
+      onTextDelta: (text) => forwarded.push(text),
+    }));
+    controller.abort();
+    retained?.("迟到内容");
+
+    expect(forwarded).toEqual(["完成"]);
+  });
+
+  it.each([
+    ["empty", "", "正常结果", "malformed-response"],
+    ["non-string", 7, "正常结果", "malformed-response"],
+    ["oversized", "x".repeat(65_537), "x".repeat(65_537), "response-too-large"],
+  ] as const)("fails safely for a %s provider delta", async (
+    _label,
+    delta,
+    text,
+    expectedCode,
+  ) => {
+    const forwarded: string[] = [];
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      (onTextDelta as ((value: unknown) => void) | undefined)?.(delta);
+      return { text };
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+
+    const error = await caught(test.service.run(runInput({
+      onTextDelta: (value) => forwarded.push(value),
+    })));
+
+    expect(error.code).toBe(expectedCode);
+    expect(forwarded).toEqual([]);
+  });
+
+  it("enforces the cumulative delta bound", async () => {
+    const forwarded: string[] = [];
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      onTextDelta?.("a".repeat(40_000));
+      onTextDelta?.("b".repeat(30_000));
+      onTextDelta?.("must-not-forward");
+      return { text: `${"a".repeat(40_000)}${"b".repeat(30_000)}` };
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+
+    const error = await caught(test.service.run(runInput({
+      onTextDelta: (value) => forwarded.push(value),
+    })));
+
+    expect(error.code).toBe("response-too-large");
+    expect(forwarded).toEqual(["a".repeat(40_000)]);
+  });
+
+  it("fails with a static malformed response when deltas differ from final text", async () => {
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      onTextDelta?.("可见部分");
+      return {
+        text: "不一致结果",
+        providerRequestId: "unsafe-provider-envelope-private-material",
+      };
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+
+    const error = await caught(test.service.run(runInput({
+      onTextDelta: () => undefined,
+    })));
+
+    expect(error.code).toBe("malformed-response");
+    expect(String(error)).not.toContain("private-material");
+    expect(JSON.stringify(error)).not.toContain("unsafe-provider-envelope");
+  });
+
+  it("enforces the final invariant even when the caller omits a callback", async () => {
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      onTextDelta?.("provider delta");
+      return { text: "different final text" };
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+
+    const error = await caught(test.service.run(runInput()));
+
+    expect(error.code).toBe("malformed-response");
+  });
+
+  it("keeps provider errors and stops forwarding retained callbacks after failure", async () => {
+    let retained: ((text: string) => void) | undefined;
+    const forwarded: string[] = [];
+    const generate = vi.fn(async (
+      _request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      retained = onTextDelta;
+      onTextDelta?.("部分结果");
+      throw new ProviderError("invalid-key", "private provider error");
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+
+    const error = await caught(test.service.run(runInput({
+      onTextDelta: (text) => forwarded.push(text),
+    })));
+    retained?.("失败后迟到内容");
+
+    expect(error.code).toBe("invalid-key");
+    expect(String(error)).not.toContain("private provider error");
+    expect(forwarded).toEqual(["部分结果"]);
+  });
+
+  it("forwards prepared-operation deltas with the same invariant", async () => {
+    const forwarded: string[] = [];
+    const generate = vi.fn(async (
+      request: TextGenerationRequest,
+      onTextDelta?: (text: string) => void,
+    ) => {
+      expect(JSON.parse(request.user)).toMatchObject({ content: "来源正文" });
+      onTextDelta?.("预览");
+      onTextDelta?.("结果");
+      return { text: "预览结果" };
+    });
+    const test = harness({ providerFactory: vi.fn(async () => ({ generate })) });
+
+    const result = await test.service.runPrepared({
+      operation: "summary",
+      itemId: ITEM_ID,
+      connectionId: CONNECTION_ID,
+      connection: connection(),
+      selectedContent: selected(),
+      onTextDelta: (text) => forwarded.push(text),
+    });
+
+    expect(forwarded).toEqual(["预览", "结果"]);
+    expect(result.text).toBe("预览结果");
   });
 });

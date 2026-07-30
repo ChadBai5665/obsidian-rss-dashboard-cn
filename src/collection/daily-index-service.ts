@@ -2,6 +2,13 @@ import { type Vault } from "obsidian";
 import type { CollectedItem } from "./collected-item";
 import { renderDailyIndex } from "./daily-index-renderer";
 
+export interface DailyIndexSnapshot {
+  localDate: string;
+  path: string;
+  existed: boolean;
+  content?: string;
+}
+
 export class DailyIndexService {
   private readonly dailyIndexFolder: string;
 
@@ -27,6 +34,36 @@ export class DailyIndexService {
     await this.ensureParentFolders();
     await this.vault.adapter.write(path, markdown);
     return path;
+  }
+
+  async snapshotDailyIndex(localDate: string): Promise<DailyIndexSnapshot> {
+    assertLocalDate(localDate);
+    const path = `${this.dailyIndexFolder}/${localDate}.md`;
+    const existed = await this.vault.adapter.exists(path);
+    return {
+      localDate,
+      path,
+      existed,
+      ...(existed ? { content: await this.vault.adapter.read(path) } : {}),
+    };
+  }
+
+  async restoreDailyIndex(snapshot: DailyIndexSnapshot): Promise<void> {
+    assertLocalDate(snapshot.localDate);
+    const expectedPath = `${this.dailyIndexFolder}/${snapshot.localDate}.md`;
+    if (snapshot.path !== expectedPath) throw new Error("Invalid daily index snapshot");
+    if (snapshot.existed) {
+      if (typeof snapshot.content !== "string") {
+        throw new Error("Invalid daily index snapshot");
+      }
+      await this.ensureParentFolders();
+      await this.vault.adapter.write(snapshot.path, snapshot.content);
+      return;
+    }
+    if (snapshot.content !== undefined) throw new Error("Invalid daily index snapshot");
+    if (await this.vault.adapter.exists(snapshot.path)) {
+      await this.vault.adapter.remove(snapshot.path);
+    }
   }
 
   private async ensureParentFolders(): Promise<void> {

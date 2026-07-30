@@ -28,18 +28,21 @@ import {
  * Extracted from RssDashboardPlugin to allow isolated testing.
  */
 export class ImportExportService {
-  private static readonly DIAGNOSTICS_PREVIEW_TTL_MS = 5 * 60_000;
+  private static readonly TRUSTED_PREVIEW_TTL_MS = 5 * 60_000;
   private settings: RssDashboardSettings;
   private isMobile: boolean;
   private getPortableDataBundle?: () => PortableDataBundle;
   private importPublicSettingsBundle?: (settings: unknown) => Promise<void>;
   private readonly getSafeDiagnosticsInput?: () => SafeDiagnosticsInput;
+  private readonly getSafeOperationJournalExport?: (
+    days: 7 | 30,
+  ) => Promise<string>;
   private readonly getLocale: () => Locale;
-  private readonly trustedDiagnosticsPreviews = new Map<
+  private readonly trustedPreviews = new Map<
     string,
-    { text: string; expiresAt: number }
+    { kind: "diagnostics" | "operation-journal"; text: string; expiresAt: number }
   >();
-  private readonly createDiagnosticsToken: () => string;
+  private readonly createPreviewToken: () => string;
 
   constructor(options: {
     settings: RssDashboardSettings;
@@ -47,6 +50,7 @@ export class ImportExportService {
     getPortableDataBundle?: () => PortableDataBundle;
     importPublicSettingsBundle?: (settings: unknown) => Promise<void>;
     getSafeDiagnosticsInput?: () => SafeDiagnosticsInput;
+    getSafeOperationJournalExport?: (days: 7 | 30) => Promise<string>;
     createDiagnosticsToken?: () => string;
     getLocale?: () => Locale;
     /** Legacy fixed-locale option retained for direct integration compatibility. */
@@ -57,7 +61,9 @@ export class ImportExportService {
     this.getPortableDataBundle = options.getPortableDataBundle;
     this.importPublicSettingsBundle = options.importPublicSettingsBundle;
     this.getSafeDiagnosticsInput = options.getSafeDiagnosticsInput;
-    this.createDiagnosticsToken =
+    this.getSafeOperationJournalExport =
+      options.getSafeOperationJournalExport;
+    this.createPreviewToken =
       options.createDiagnosticsToken ?? (() => activeWindow.crypto.randomUUID());
     this.getLocale = options.getLocale ?? (() => options.locale ?? "en");
   }
@@ -253,58 +259,141 @@ export class ImportExportService {
       throw new Error("Safe diagnostics are unavailable.");
     }
     const text = stringifySafeDiagnostics(this.getSafeDiagnosticsInput());
-    this.revokeAllSafeDiagnosticsPreviews();
-    const token = this.createDiagnosticsToken();
-    if (
-      typeof token !== "string" ||
-      token.length === 0 ||
-      token.length > 256 ||
-      this.trustedDiagnosticsPreviews.has(token)
-    ) {
-      throw new Error("Unable to create a diagnostics preview token.");
-    }
-    this.trustedDiagnosticsPreviews.set(token, {
-      text,
-      expiresAt:
-        Date.now() + ImportExportService.DIAGNOSTICS_PREVIEW_TTL_MS,
-    });
-    return Object.freeze({ token, text });
+    return this.createTrustedPreview("diagnostics", text);
   }
 
   async copySafeDiagnosticsPreview(
     token: string,
     preview: string,
   ): Promise<void> {
-    this.purgeExpiredDiagnosticsPreviews();
-    const trustedPreview = this.trustedDiagnosticsPreviews.get(token);
-    this.trustedDiagnosticsPreviews.delete(token);
-    if (trustedPreview === undefined || trustedPreview.text !== preview) {
-      new Notice(this.t("service.diagnostics.copyFailed"));
-      return;
-    }
-    const result = await copyTextToClipboard(preview);
-    new Notice(
-      this.t(
-        result === "copied"
-          ? "service.diagnostics.copied"
-          : "service.diagnostics.copyFailed",
-      ),
+    await this.copyTrustedPreview(
+      "diagnostics",
+      token,
+      preview,
+      "service.diagnostics.copied",
+      "service.diagnostics.copyFailed",
     );
   }
 
   revokeSafeDiagnosticsPreview(token: string): void {
-    this.trustedDiagnosticsPreviews.delete(token);
+    this.revokeTrustedPreview("diagnostics", token);
   }
 
   revokeAllSafeDiagnosticsPreviews(): void {
-    this.trustedDiagnosticsPreviews.clear();
+    this.revokeTrustedPreviewsByKind("diagnostics");
   }
 
-  private purgeExpiredDiagnosticsPreviews(): void {
+  async createOperationJournalPreview(
+    days: 7 | 30,
+  ): Promise<Readonly<{ token: string; text: string }>> {
+    if (!this.getSafeOperationJournalExport) {
+      throw new Error("Operation journal export is unavailable.");
+    }
+    if (days !== 7 && days !== 30) {
+      throw new Error("Unable to create an operation journal preview.");
+    }
+    const text = await this.getSafeOperationJournalExport(days);
+    if (typeof text !== "string") {
+      throw new Error("Unable to create an operation journal preview.");
+    }
+    return this.createTrustedPreview("operation-journal", text);
+  }
+
+  async copyOperationJournalPreview(
+    token: string,
+    exactText: string,
+  ): Promise<void> {
+    await this.copyTrustedPreview(
+      "operation-journal",
+      token,
+      exactText,
+      "service.operationJournal.copied",
+      "service.operationJournal.copyFailed",
+    );
+  }
+
+  revokeOperationJournalPreview(token: string): void {
+    this.revokeTrustedPreview("operation-journal", token);
+  }
+
+  revokeAllOperationJournalPreviews(): void {
+    this.revokeTrustedPreviewsByKind("operation-journal");
+  }
+
+  private createTrustedPreview(
+    kind: "diagnostics" | "operation-journal",
+    text: string,
+  ): Readonly<{ token: string; text: string }> {
+    this.revokeTrustedPreviewsByKind(kind);
+    const token = this.createPreviewToken();
+    if (
+      typeof token !== "string" ||
+      token.length === 0 ||
+      token.length > 256 ||
+      this.trustedPreviews.has(token)
+    ) {
+      throw new Error("Unable to create a trusted preview token.");
+    }
+    this.trustedPreviews.set(token, {
+      kind,
+      text,
+      expiresAt: Date.now() + ImportExportService.TRUSTED_PREVIEW_TTL_MS,
+    });
+    return Object.freeze({ token, text });
+  }
+
+  private async copyTrustedPreview(
+    kind: "diagnostics" | "operation-journal",
+    token: string,
+    exactText: string,
+    copiedKey:
+      | "service.diagnostics.copied"
+      | "service.operationJournal.copied",
+    failedKey:
+      | "service.diagnostics.copyFailed"
+      | "service.operationJournal.copyFailed",
+  ): Promise<void> {
+    this.purgeExpiredTrustedPreviews();
+    if (typeof token !== "string" || typeof exactText !== "string") {
+      new Notice(this.t(failedKey));
+      return;
+    }
+    const trustedPreview = this.trustedPreviews.get(token);
+    this.trustedPreviews.delete(token);
+    if (
+      trustedPreview === undefined ||
+      trustedPreview.kind !== kind ||
+      trustedPreview.text !== exactText
+    ) {
+      new Notice(this.t(failedKey));
+      return;
+    }
+    const result = await copyTextToClipboard(exactText);
+    new Notice(this.t(result === "copied" ? copiedKey : failedKey));
+  }
+
+  private revokeTrustedPreview(
+    kind: "diagnostics" | "operation-journal",
+    token: string,
+  ): void {
+    if (typeof token !== "string") return;
+    const trustedPreview = this.trustedPreviews.get(token);
+    if (trustedPreview?.kind === kind) this.trustedPreviews.delete(token);
+  }
+
+  private revokeTrustedPreviewsByKind(
+    kind: "diagnostics" | "operation-journal",
+  ): void {
+    for (const [token, preview] of this.trustedPreviews) {
+      if (preview.kind === kind) this.trustedPreviews.delete(token);
+    }
+  }
+
+  private purgeExpiredTrustedPreviews(): void {
     const now = Date.now();
-    for (const [token, preview] of this.trustedDiagnosticsPreviews) {
+    for (const [token, preview] of this.trustedPreviews) {
       if (preview.expiresAt <= now) {
-        this.trustedDiagnosticsPreviews.delete(token);
+        this.trustedPreviews.delete(token);
       }
     }
   }

@@ -12,6 +12,26 @@ export interface TikHubEnvelope<T = unknown> {
   requestId?: unknown;
 }
 
+export interface TikHubCaptionTrack {
+  languageCode: string;
+  languageName: string;
+  isGenerated: boolean;
+}
+
+export type TikHubCaptionResponse =
+  | { kind: "tracks"; videoId: string; tracks: TikHubCaptionTrack[] }
+  | {
+    kind: "content";
+    videoId: string;
+    languageCode: string;
+    languageName: string;
+    isGenerated: boolean;
+    text: string;
+  }
+  | { kind: "processing"; videoId: string; jobId: string }
+  | { kind: "pending"; jobId: string }
+  | { kind: "no-captions"; videoId: string };
+
 export type TikHubClientErrorCode =
   | "missing-key"
   | "invalid-key"

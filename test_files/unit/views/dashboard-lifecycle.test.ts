@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 import { App } from "obsidian";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import {
@@ -123,8 +123,16 @@ interface DashViewTestAPI {
     foldersToCollapse: string[],
     foldersToExpand: string[],
   ): void;
-  handleDeleteFeed(feed: Feed): void;
-  handleDeleteFolder(folder: string): void;
+  handleDeleteFeed(feed: Feed): Promise<void>;
+  removeSubscription: Mock<
+    (
+      sourceId: string,
+      options: { purgeCollection: false },
+    ) => Promise<boolean>
+  >;
+  applyFolderMutation: Mock;
+  saveSettings: Mock<() => Promise<void>>;
+  handleDeleteFolder(folder: string): Promise<void>;
   syncCurrentFeedReference(): void;
   getAllDescendantFolders(folderPath: string): string[];
   syncDashboardMultiFiltersFromSettings(): void;
@@ -140,11 +148,53 @@ async function makeView(
   const { RssDashboardView } =
     await import("../../../src/views/dashboard-view");
   const app = new App();
-  const plugin = { settings, saveSettings: vi.fn(async () => {}) };
+  const plugin = {
+    settings,
+    saveSettings: vi.fn(async () => {}),
+    removeSubscription: vi.fn(async (sourceId: string) => {
+      settings.feeds = settings.feeds.filter(
+        (feed) => (feed.feedId ?? feed.url) !== sourceId,
+      );
+      return true;
+    }),
+    applyFolderMutation: vi.fn(async (request: {
+      kind: "delete";
+      folderPath: string;
+    }) => {
+      const parentPath = request.folderPath.split("/").slice(0, -1).join("/");
+      const within = (path: string): boolean =>
+        path === request.folderPath || path.startsWith(`${request.folderPath}/`);
+      const removedSourceIds: string[] = [];
+      settings.feeds = settings.feeds.flatMap((feed) => {
+        if (!within(feed.folder)) return [feed];
+        if (feed.sourceKind !== "x-topic") {
+          removedSourceIds.push(feed.feedId ?? feed.url);
+          return [];
+        }
+        return [{
+          ...feed,
+          folder: parentPath,
+          sourceConfig: { ...feed.sourceConfig, folder: parentPath },
+        } as Feed];
+      });
+      settings.folders = settings.folders.filter(
+        (folder) => folder.name !== request.folderPath,
+      );
+      return {
+        ok: true,
+        removedSourceIds,
+        topicDestinationFolder: parentPath,
+      };
+    }),
+  };
   const leaf = { app } as unknown as import("obsidian").WorkspaceLeaf;
   const view = new RssDashboardView(leaf, plugin as never);
   view.render = vi.fn();
-  return view as unknown as DashViewTestAPI;
+  const testView = view as unknown as DashViewTestAPI;
+  testView.removeSubscription = plugin.removeSubscription;
+  testView.applyFolderMutation = plugin.applyFolderMutation;
+  testView.saveSettings = plugin.saveSettings;
+  return testView;
 }
 
 describe("Dashboard lifecycle", () => {
@@ -627,9 +677,11 @@ describe("Dashboard lifecycle", () => {
       const feed2 = makeFeed("https://b.com/feed");
       settings.feeds = [feed1, feed2];
       const view = await makeView(settings);
-      view.handleDeleteFeed(feed1);
+      await view.handleDeleteFeed(feed1);
       expect(settings.feeds).toHaveLength(1);
       expect(settings.feeds[0].url).toBe("https://b.com/feed");
+      expect(view.removeSubscription)
+        .toHaveBeenCalledWith("https://a.com/feed", { purgeCollection: false });
     });
 
     it("clears currentFeed if the deleted feed was active", async () => {
@@ -638,7 +690,7 @@ describe("Dashboard lifecycle", () => {
       settings.feeds = [feed];
       const view = await makeView(settings);
       view.currentFeed = feed;
-      view.handleDeleteFeed(feed);
+      await view.handleDeleteFeed(feed);
       expect(view.currentFeed).toBeNull();
     });
   });
@@ -652,9 +704,14 @@ describe("Dashboard lifecycle", () => {
         { name: "News", subfolders: [], pinned: false },
       ];
       const view = await makeView(settings);
-      view.handleDeleteFolder("Tech");
+      await view.handleDeleteFolder("Tech");
       expect(settings.folders.map((f) => f.name)).not.toContain("Tech");
       expect(settings.feeds.some((f) => f.folder === "Tech")).toBe(false);
+      expect(view.applyFolderMutation).toHaveBeenCalledWith({
+        kind: "delete",
+        folderPath: "Tech",
+      });
+      expect(view.removeSubscription).not.toHaveBeenCalled();
     });
 
     it("clears currentFolder if the deleted folder was active", async () => {
@@ -663,8 +720,52 @@ describe("Dashboard lifecycle", () => {
       settings.folders = [{ name: "Science", subfolders: [], pinned: false }];
       const view = await makeView(settings);
       view.currentFolder = "Science";
-      view.handleDeleteFolder("Science");
+      await view.handleDeleteFolder("Science");
       expect(view.currentFolder).toBeNull();
+    });
+
+    it("keeps the folder when the shared atomic delete route declines", async () => {
+      const settings = cloneSettings();
+      const first = makeFeed("https://a.com/feed", "Tech");
+      const failed = makeFeed("https://b.com/feed", "Tech");
+      const topic = {
+        ...makeFeed("tikhub://x-topic/ai", "Tech"),
+        feedId: "topic",
+        sourceKind: "x-topic",
+        sourceConfig: { kind: "x-topic", id: "topic", name: "AI" },
+      } as Feed;
+      settings.feeds = [first, failed, topic];
+      settings.folders = [{ name: "Tech", subfolders: [], pinned: false }];
+      const view = await makeView(settings);
+      view.applyFolderMutation.mockResolvedValueOnce({
+        ok: false,
+        reason: "dragged-folder-not-found",
+      });
+
+      await view.handleDeleteFolder("Tech");
+
+      expect(view.applyFolderMutation).toHaveBeenCalledTimes(1);
+      expect(view.removeSubscription).not.toHaveBeenCalled();
+      expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
+      expect(settings.feeds).toContain(topic);
+    });
+
+    it("keeps the folder graph when the shared atomic delete route rejects", async () => {
+      const settings = cloneSettings();
+      const originalFolders = [
+        { name: "Tech", subfolders: [], pinned: false },
+      ];
+      settings.feeds = [makeFeed("https://a.com/feed", "Tech")];
+      settings.folders = originalFolders;
+      const view = await makeView(settings);
+      view.applyFolderMutation.mockRejectedValueOnce(new Error("disk full"));
+
+      await expect(view.handleDeleteFolder("Tech")).resolves.toBeUndefined();
+
+      expect(settings.folders).toBe(originalFolders);
+      expect(settings.folders.map((folder) => folder.name)).toContain("Tech");
+      expect(view.removeSubscription).not.toHaveBeenCalled();
+      expect(view.saveSettings).not.toHaveBeenCalled();
     });
   });
 

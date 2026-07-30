@@ -1,9 +1,17 @@
 import { normalizePath, type DataAdapter, type Vault } from "obsidian";
 import { renderAnalysisMarkdown } from "./analysis-markdown";
 import {
+  analysisArtifactPathItemId,
+  parseAnalysisMarkdown,
+  parseAnalysisArtifactPath,
+  type AiAnalysisArtifact,
+} from "./analysis-markdown-parser";
+import {
+  AI_ANALYSIS_OPERATIONS,
   snapshotAiAnalysisResult,
   type AiAnalysisResult,
 } from "./analysis-result";
+import type { AiOperation } from "./prompts/prompt-types";
 
 export interface AnalysisRepositoryOptions {
   /** Test seam; production values must remain unique and high entropy. */
@@ -18,14 +26,29 @@ type BoundAnalysisAdapter = Required<Pick<
   | "read"
   | "copy"
   | "remove"
+  | "rmdir"
   | "rename"
-  | "process"
->> & { identity: object };
+>> & {
+  identity: object;
+  createFolder: (path: string) => Promise<unknown>;
+};
+type BoundAnalysisReadAdapter = Required<Pick<DataAdapter, "read">> & {
+  identity: object;
+};
+type BoundAnalysisListAdapter = Required<Pick<DataAdapter, "list" | "read">> & {
+  identity: object;
+};
 
 const adapterQueues = new WeakMap<object, Map<string, Promise<void>>>();
 const CLAIM_SOURCE_CONTENT = "rss-dashboard-cn-analysis-claim-source-v1";
 const MAX_COLLISION_ATTEMPTS = 10_000;
 const MAX_TEMP_ATTEMPTS = 32;
+export const MAX_AI_ANALYSIS_HISTORY_FILES = 256;
+export const MAX_AI_ANALYSIS_MARKDOWN_CHARACTERS = 1_100_000;
+export const MAX_AI_ANALYSIS_MARKDOWN_BYTES = 4_400_000;
+export const MAX_AI_ANALYSIS_HISTORY_TOTAL_BYTES = 16_000_000;
+const STABLE_ITEM_ID = /^[a-f0-9]{64}$/u;
+const OPERATIONS: ReadonlySet<string> = new Set(AI_ANALYSIS_OPERATIONS);
 
 export class AnalysisArtifactVerificationError extends Error {
   constructor() {
@@ -50,6 +73,101 @@ export class AnalysisRepository {
     this.randomSuffix = options.randomSuffix ?? defaultRandomSuffix;
   }
 
+  async list(
+    itemId: string,
+    operation?: AiOperation,
+  ): Promise<AiAnalysisArtifact[]> {
+    if (
+      typeof itemId !== "string" ||
+      !STABLE_ITEM_ID.test(itemId) ||
+      (operation !== undefined &&
+        (typeof operation !== "string" || !OPERATIONS.has(operation)))
+    ) {
+      return frozenArtifacts([]);
+    }
+    const adapter = this.listAdapter();
+    const directory = this.itemDirectory(itemId);
+    let listed: unknown;
+    try {
+      listed = await adapter.list(directory);
+    } catch {
+      return frozenArtifacts([]);
+    }
+    const files = snapshotListedFiles(listed);
+    if (!files) return frozenArtifacts([]);
+
+    const canonicalPaths: Array<{
+      path: string;
+      createdAt: string;
+    }> = [];
+    for (const path of files) {
+      const metadata = parseAnalysisArtifactPath(path, this.analysisDirectory);
+      if (
+        metadata?.itemId !== itemId ||
+        (operation !== undefined && metadata.operation !== operation)
+      ) {
+        continue;
+      }
+      canonicalPaths.push({ path, createdAt: metadata.createdAt });
+    }
+    const candidates = canonicalPaths
+      .sort((left, right) =>
+        compareText(right.createdAt, left.createdAt) ||
+        compareText(left.path, right.path))
+      .slice(0, MAX_AI_ANALYSIS_HISTORY_FILES)
+      .map(({ path }) => path);
+    const artifacts: AiAnalysisArtifact[] = [];
+    let totalBytes = 0;
+    for (const path of candidates) {
+      const artifactContent = await this.readBounded(adapter, path);
+      if (!artifactContent) continue;
+      totalBytes += artifactContent.bytes;
+      if (totalBytes > MAX_AI_ANALYSIS_HISTORY_TOTAL_BYTES) break;
+      const artifact = parseAnalysisMarkdown(
+        artifactContent.text,
+        path,
+        this.analysisDirectory,
+      );
+      if (!artifact || (operation !== undefined &&
+        artifact.record.operation !== operation)) {
+        continue;
+      }
+      artifacts.push(artifact);
+    }
+    artifacts.sort((left, right) => {
+      const newestFirst = right.record.createdAt.localeCompare(
+        left.record.createdAt,
+      );
+      return newestFirst || compareText(left.path, right.path);
+    });
+    return frozenArtifacts(artifacts);
+  }
+
+  async latest(
+    itemId: string,
+    operation: AiOperation,
+  ): Promise<AiAnalysisArtifact | null> {
+    const artifacts = await this.list(itemId, operation);
+    return artifacts[0] ?? null;
+  }
+
+  async read(path: string): Promise<AiAnalysisArtifact | null> {
+    if (
+      analysisArtifactPathItemId(path, this.analysisDirectory) === undefined
+    ) {
+      return null;
+    }
+    const adapter = this.readAdapter();
+    const artifactContent = await this.readBounded(adapter, path);
+    return artifactContent
+      ? parseAnalysisMarkdown(
+        artifactContent.text,
+        path,
+        this.analysisDirectory,
+      )
+      : null;
+  }
+
   async save(value: unknown): Promise<string> {
     // Snapshot and render before checking or creating anything in the vault.
     const result = snapshotAiAnalysisResult(value);
@@ -65,7 +183,7 @@ export class AnalysisRepository {
       await this.ensureDirectory(adapter, this.dataRoot);
       await this.ensureDirectory(adapter, this.analysisDirectory);
       await this.ensureDirectory(adapter, this.itemDirectory(result.itemId));
-      await this.ensureClaimSource(adapter);
+      await this.ensureClaimSource(adapter, transactionId);
       return await this.saveExclusive(
         result,
         markdown,
@@ -106,14 +224,17 @@ export class AnalysisRepository {
   private atomicAdapter(): BoundAnalysisAdapter {
     const identity = this.vault.adapter as object;
     const adapter = identity as Partial<DataAdapter>;
+    const createFolder = typeof this.vault.createFolder === "function"
+      ? this.vault.createFolder.bind(this.vault)
+      : undefined;
     const exists = adapter.exists;
     const mkdir = adapter.mkdir;
     const write = adapter.write;
     const read = adapter.read;
     const copy = adapter.copy;
     const remove = adapter.remove;
+    const rmdir = adapter.rmdir;
     const rename = adapter.rename;
-    const process = adapter.process;
     if (
       typeof exists !== "function" ||
       typeof mkdir !== "function" ||
@@ -121,25 +242,79 @@ export class AnalysisRepository {
       typeof read !== "function" ||
       typeof copy !== "function" ||
       typeof remove !== "function" ||
+      typeof rmdir !== "function" ||
       typeof rename !== "function" ||
-      typeof process !== "function"
+      typeof createFolder !== "function"
     ) {
       throw new Error("AI analysis writes require complete atomic storage support");
     }
     return {
       identity,
+      createFolder,
       exists: exists.bind(identity),
       mkdir: mkdir.bind(identity),
       write: write.bind(identity),
       read: read.bind(identity),
       copy: copy.bind(identity),
       remove: remove.bind(identity),
+      rmdir: rmdir.bind(identity),
       rename: rename.bind(identity),
-      process: process.bind(identity),
     };
   }
 
-  private async ensureClaimSource(adapter: BoundAnalysisAdapter): Promise<void> {
+  private readAdapter(): BoundAnalysisReadAdapter {
+    const identity = this.vault.adapter as object;
+    const read = (identity as Partial<DataAdapter>).read;
+    if (typeof read !== "function") {
+      throw new Error("AI analysis reads require storage read support");
+    }
+    return {
+      identity,
+      read: read.bind(identity),
+    };
+  }
+
+  private listAdapter(): BoundAnalysisListAdapter {
+    const identity = this.vault.adapter as object;
+    const adapter = identity as Partial<DataAdapter>;
+    const list = adapter.list;
+    const read = adapter.read;
+    if (typeof list !== "function" || typeof read !== "function") {
+      throw new Error("AI analysis listing requires list and read support");
+    }
+    return {
+      identity,
+      list: list.bind(identity),
+      read: read.bind(identity),
+    };
+  }
+
+  private async readBounded(
+    adapter: BoundAnalysisReadAdapter,
+    path: string,
+  ): Promise<{ text: string; bytes: number } | null> {
+    let text: string;
+    try {
+      text = await adapter.read(path);
+    } catch {
+      return null;
+    }
+    if (
+      typeof text !== "string" ||
+      text.length > MAX_AI_ANALYSIS_MARKDOWN_CHARACTERS
+    ) {
+      return null;
+    }
+    const bytes = new TextEncoder().encode(text).byteLength;
+    return bytes <= MAX_AI_ANALYSIS_MARKDOWN_BYTES
+      ? { text, bytes }
+      : null;
+  }
+
+  private async ensureClaimSource(
+    adapter: BoundAnalysisAdapter,
+    transactionId: string,
+  ): Promise<void> {
     if (await adapter.exists(this.claimSourcePath, true)) {
       if (await this.fileEquals(adapter, this.claimSourcePath, CLAIM_SOURCE_CONTENT)) {
         return;
@@ -147,25 +322,70 @@ export class AnalysisRepository {
       throw new Error("AI analysis claim source conflicts with an existing file");
     }
 
-    let conflict = false;
-    // DataAdapter.process cannot distinguish a missing file from an empty file
-    // created in the exists-to-process window. A constant bootstrap value makes
-    // cooperating repository races byte-identical; non-empty foreign data is
-    // preserved and rejected.
-    const processed = await adapter.process(this.claimSourcePath, (current) => {
-      if (current && current !== CLAIM_SOURCE_CONTENT) {
-        conflict = true;
-        return current;
+    const bootstrap = await this.createClaimBootstrap(adapter, transactionId);
+    try {
+      try {
+        // DataAdapter.copy is the public exclusive-create primitive: it fails
+        // instead of overwriting when another writer already owns the target.
+        await adapter.copy(bootstrap.sourcePath, this.claimSourcePath);
+      } catch (error) {
+        if (await this.fileEquals(
+          adapter,
+          this.claimSourcePath,
+          CLAIM_SOURCE_CONTENT,
+        )) {
+          return;
+        }
+        if (await adapter.exists(this.claimSourcePath, true)) {
+          throw new Error("AI analysis claim source conflicts with an existing file");
+        }
+        throw error;
       }
-      return CLAIM_SOURCE_CONTENT;
-    });
-    if (
-      conflict ||
-      processed !== CLAIM_SOURCE_CONTENT ||
-      !(await this.fileEquals(adapter, this.claimSourcePath, CLAIM_SOURCE_CONTENT))
-    ) {
-      throw new Error("AI analysis claim source could not be initialized safely");
+      if (!(await this.fileEquals(
+        adapter,
+        this.claimSourcePath,
+        CLAIM_SOURCE_CONTENT,
+      ))) {
+        throw new Error("AI analysis claim source could not be initialized safely");
+      }
+    } finally {
+      await this.removeIfExact(adapter, bootstrap.sourcePath, CLAIM_SOURCE_CONTENT);
+      await this.removeEmptyDirectory(adapter, bootstrap.directoryPath);
     }
+  }
+
+  private async createClaimBootstrap(
+    adapter: BoundAnalysisAdapter,
+    transactionId: string,
+  ): Promise<{ directoryPath: string; sourcePath: string }> {
+    for (let attempt = 0; attempt < MAX_TEMP_ATTEMPTS; attempt += 1) {
+      const directoryPath = normalizePath(
+        `${this.analysisDirectory}/.claim-bootstrap-${transactionId}-${attempt}`,
+      );
+      try {
+        // Vault.createFolder throws when the path already exists, so a
+        // successful call proves this writer exclusively owns the bootstrap
+        // directory. DataAdapter.mkdir is intentionally idempotent and cannot
+        // provide that ownership guarantee.
+        await adapter.createFolder(directoryPath);
+      } catch (error) {
+        if (await adapter.exists(directoryPath, true)) continue;
+        throw error;
+      }
+      const sourcePath = normalizePath(`${directoryPath}/source`);
+      try {
+        await adapter.write(sourcePath, CLAIM_SOURCE_CONTENT);
+        if (!(await this.fileEquals(adapter, sourcePath, CLAIM_SOURCE_CONTENT))) {
+          throw new Error("AI analysis bootstrap source could not be verified");
+        }
+        return { directoryPath, sourcePath };
+      } catch (error) {
+        await this.removeIfExact(adapter, sourcePath, CLAIM_SOURCE_CONTENT);
+        await this.removeEmptyDirectory(adapter, directoryPath);
+        throw error;
+      }
+    }
+    throw new Error("Could not allocate an AI analysis bootstrap directory");
   }
 
   private async saveExclusive(
@@ -395,6 +615,17 @@ export class AnalysisRepository {
     }
   }
 
+  private async removeEmptyDirectory(
+    adapter: BoundAnalysisAdapter,
+    path: string,
+  ): Promise<void> {
+    try {
+      await adapter.rmdir(path, false);
+    } catch {
+      // Preserve ambiguous/non-empty directories rather than deleting recursively.
+    }
+  }
+
   private nextTransactionId(): string {
     const random = this.randomSuffix();
     assertSafeRandomSuffix(random);
@@ -452,4 +683,66 @@ function defaultRandomSuffix(): string {
   const words = new Uint32Array(4);
   window.crypto.getRandomValues(words);
   return Array.from(words, (word) => word.toString(16).padStart(8, "0")).join("");
+}
+
+function frozenArtifacts(
+  artifacts: AiAnalysisArtifact[],
+): AiAnalysisArtifact[] {
+  return Object.freeze(artifacts) as unknown as AiAnalysisArtifact[];
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function snapshotListedFiles(value: unknown): string[] | undefined {
+  const record = plainRecord(value);
+  const files = denseStringArray(ownData(record, "files"));
+  const folders = denseStringArray(ownData(record, "folders"));
+  return files && folders ? files : undefined;
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return undefined;
+    }
+    const prototype = Reflect.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null
+      ? value as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function ownData(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): unknown {
+  if (!record) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function denseStringArray(value: unknown): string[] | undefined {
+  try {
+    if (!Array.isArray(value)) return undefined;
+    const result: string[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !("value" in descriptor) ||
+        typeof descriptor.value !== "string") {
+        return undefined;
+      }
+      result.push(descriptor.value);
+    }
+    return result;
+  } catch {
+    return undefined;
+  }
 }

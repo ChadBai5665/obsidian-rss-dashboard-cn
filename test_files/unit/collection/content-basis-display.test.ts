@@ -8,4 +8,11 @@ describe("content basis display", () => {
     expect(getContentBasisLabel(stored, "en")).toBe("Retrieved full text");
     expect(stored).toBe("full-text");
   });
+
+  it("localizes the YouTube transcript basis", () => {
+    expect(getContentBasisLabel("youtube-transcript")).toBe("YouTube 字幕");
+    expect(getContentBasisLabel("youtube-transcript", "en")).toBe(
+      "YouTube transcript",
+    );
+  });
 });

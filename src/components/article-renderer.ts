@@ -25,6 +25,18 @@ import { isYouTubeItem } from "../utils/youtube-detection";
 import { createTranslator } from "../i18n";
 import type { ContentBasis } from "../collection/collected-item";
 import { resolveItemExternalUrl } from "../utils/item-url-utils";
+import {
+  YouTubeTranscriptPanel,
+  type YouTubeTranscriptPanelController,
+  type YouTubeTranscriptRuntimeOptions,
+} from "./youtube-transcript-panel";
+import { isValidYouTubeVideoId } from "../youtube-transcript/transcript-types";
+import type { AiOperation } from "../ai/prompts/prompt-types";
+import {
+  createInlineAiPanel,
+  type InlineAiPanelController,
+  type InlineAiPanelDependencies,
+} from "./inline-ai-panel";
 
 const MAX_SESSION_CONTENT_ITEMS = 12;
 
@@ -44,6 +56,11 @@ export interface ArticleRendererOptions {
     duration: number,
     flush?: boolean,
   ) => void;
+  youtubeTranscript?: YouTubeTranscriptRuntimeOptions;
+  onContentBasisChange?: (item: FeedItem, basis: ContentBasis) => void;
+  createAiPanelOptions?: (
+    item: FeedItem,
+  ) => InlineAiPanelDependencies | null;
 }
 
 export class ArticleRenderer {
@@ -62,9 +79,17 @@ export class ArticleRenderer {
     duration: number,
     flush?: boolean,
   ) => void;
+  private readonly youtubeTranscript: YouTubeTranscriptRuntimeOptions | undefined;
+  private readonly onContentBasisChange:
+    | ((item: FeedItem, basis: ContentBasis) => void)
+    | undefined;
+  private readonly createAiPanelOptions:
+    | ((item: FeedItem) => InlineAiPanelDependencies | null)
+    | undefined;
 
   private podcastPlayer: PodcastPlayer | null = null;
   private videoPlayer: VideoPlayer | null = null;
+  private transcriptPanel: YouTubeTranscriptPanelController | null = null;
   private currentItem: FeedItem | null = null;
   private relatedItems: FeedItem[] = [];
   private currentFullContent?: string;
@@ -76,6 +101,10 @@ export class ArticleRenderer {
   private renderRequestSequence = 0;
   private readonly explicitContentCoordinator: ExplicitContentCoordinator;
   private disposed = false;
+  private currentVideoContentBasis: ContentBasis = "title-description";
+  private aiPanel: InlineAiPanelController | null = null;
+  private aiPanelMount: HTMLElement | null = null;
+  private activeAiOperation: AiOperation | null = null;
   private readonly sessionContent = new Map<
     string,
     { content: string; failureType: FullArticleFetchFailureType }
@@ -95,6 +124,9 @@ export class ArticleRenderer {
     this.onArticleUpdate = options.onArticleUpdate;
     this.onOpenSavedArticle = options.onOpenSavedArticle;
     this.onPlaybackProgress = options.onPlaybackProgress;
+    this.youtubeTranscript = options.youtubeTranscript;
+    this.onContentBasisChange = options.onContentBasisChange;
+    this.createAiPanelOptions = options.createAiPanelOptions;
     this.explicitContentCoordinator = new ExplicitContentCoordinator(
       this.app.vault,
     );
@@ -108,12 +140,29 @@ export class ArticleRenderer {
   ): Promise<ContentBasis | null> {
     if (this.disposed) return null;
     const renderRequest = ++this.renderRequestSequence;
+    const previousItemId = this.currentItem?.rssDashboardId;
+    const previousOperation = this.activeAiOperation;
+    this.destroyAiPanel(true);
+    this.destroyTranscriptPanel();
     if (this.currentItem?.guid !== item.guid) {
       this.lastRestrictedNoticeGuid = null;
     }
 
     container.empty();
     this.currentItem = item;
+    this.aiPanelMount = container.ownerDocument.createElement("div");
+    this.aiPanelMount.className = "rss-reader-ai-mount";
+    container.appendChild(this.aiPanelMount);
+    if (
+      previousOperation &&
+      previousItemId &&
+      previousItemId === item.rssDashboardId
+    ) {
+      this.activeAiOperation = previousOperation;
+      void this.showAiOperation(previousOperation);
+    } else {
+      this.activeAiOperation = null;
+    }
     this.relatedItems = relatedItems;
     this.currentDisplayTitle = undefined;
     this.currentReaderTitle = this.isTweetLikeItem(item)
@@ -121,6 +170,7 @@ export class ArticleRenderer {
       : undefined;
     this.currentContentIsFullArticle = false;
     this.currentFullContentFailureType = "none";
+    this.currentVideoContentBasis = "title-description";
 
     if (item.mediaType === "video" && !item.videoId && item.link) {
       const vid = MediaService.extractYouTubeVideoId(item.link);
@@ -128,8 +178,15 @@ export class ArticleRenderer {
     }
 
     if (item.mediaType === "video" && item.videoId) {
-      await this.displayVideo(container, item);
-      return "title-description";
+      await this.displayVideo(container, item, renderRequest);
+      if (
+        this.disposed ||
+        renderRequest !== this.renderRequestSequence ||
+        this.currentItem !== item
+      ) {
+        return null;
+      }
+      return this.currentVideoContentBasis;
     } else if (this.isVideoPodcastItem(item)) {
       await this.displayVideoPodcast(container, item);
       return "title-description";
@@ -213,6 +270,7 @@ export class ArticleRenderer {
   private async displayVideo(
     container: HTMLElement,
     item: FeedItem,
+    renderRequest: number,
   ): Promise<void> {
     this.cleanupPlayers();
     const videoContainer = container.createDiv({
@@ -229,6 +287,18 @@ export class ArticleRenderer {
         this.settings.locale,
       );
       this.videoPlayer.loadVideo(item);
+      await this.mountTranscriptPanel(
+        item,
+        videoContainer,
+        renderRequest,
+      );
+      if (
+        this.disposed ||
+        renderRequest !== this.renderRequestSequence ||
+        this.currentItem !== item
+      ) {
+        return;
+      }
       if (this.relatedItems.length > 0) {
         this.videoPlayer.setRelatedVideos(this.relatedItems);
       }
@@ -248,6 +318,66 @@ export class ArticleRenderer {
       }
       await this.displayArticle(container, item);
     }
+  }
+
+  private async mountTranscriptPanel(
+    item: FeedItem,
+    videoContainer: HTMLElement,
+    renderRequest: number,
+  ): Promise<void> {
+    const runtimeOptions = this.youtubeTranscript;
+    const videoId = item.videoId;
+    if (!runtimeOptions || !videoId || !isValidYouTubeVideoId(videoId)) return;
+
+    const itemId = this.getCollectedItemId(item);
+    const mount = videoContainer.ownerDocument.createElement("div");
+    mount.className = "rss-youtube-transcript-mount";
+    const player = videoContainer.querySelector<HTMLElement>(
+      ".rss-video-player",
+    );
+    const insertionPoint = player?.querySelector<HTMLElement>(
+      ".rss-video-description, .rss-video-links",
+    );
+    if (insertionPoint?.parentElement) {
+      insertionPoint.parentElement.insertBefore(mount, insertionPoint);
+    } else if (player) {
+      player.appendChild(mount);
+    } else {
+      videoContainer.appendChild(mount);
+    }
+
+    const panel = new YouTubeTranscriptPanel({
+      container: mount,
+      locale: this.settings.locale ?? "zh-CN",
+      request: {
+        itemId,
+        videoId,
+        sourceUrl: item.link || undefined,
+      },
+      resolveRuntime: () => runtimeOptions.resolveRuntime(),
+      openExternal: runtimeOptions.openExternalUrl ?? ((url) => {
+        activeWindow.open(url, "_blank", "noopener,noreferrer");
+      }),
+      onReady: () => {
+        if (
+          this.transcriptPanel !== panel ||
+          this.disposed ||
+          renderRequest !== this.renderRequestSequence ||
+          this.currentItem !== item
+        ) {
+          return;
+        }
+        this.currentVideoContentBasis = "youtube-transcript";
+        this.onContentBasisChange?.(item, "youtube-transcript");
+      },
+    });
+    this.transcriptPanel = panel;
+    await panel.showCached();
+  }
+
+  private destroyTranscriptPanel(): void {
+    this.transcriptPanel?.destroy();
+    this.transcriptPanel = null;
   }
 
   private async displayVideoPodcast(
@@ -712,12 +842,64 @@ export class ArticleRenderer {
     }
   }
 
+  /** Opens one explicitly requested operation in the Dashboard inline reader. */
+  public async showAiOperation(operation: AiOperation): Promise<void> {
+    if (!this.currentItem || !this.aiPanelMount) return;
+    if (!this.aiPanel) {
+      let dependencies: InlineAiPanelDependencies | null = null;
+      try {
+        dependencies = this.createAiPanelOptions?.(this.currentItem) ?? null;
+      } catch {
+        dependencies = null;
+      }
+      if (!dependencies) {
+        this.aiPanelMount.empty();
+        this.aiPanelMount.createDiv({
+          cls: "rss-reader-ai-unavailable",
+          text: this.t("ai.itemUnavailable"),
+        });
+        return;
+      }
+      try {
+        this.aiPanel = createInlineAiPanel({
+          ...dependencies,
+          container: this.aiPanelMount,
+          locale: this.settings.locale ?? "zh-CN",
+        });
+      } catch {
+        this.aiPanelMount.empty();
+        this.aiPanelMount.createDiv({
+          cls: "rss-reader-ai-unavailable",
+          text: this.t("ai.itemUnavailable"),
+        });
+        return;
+      }
+    }
+    this.activeAiOperation = operation;
+    await this.aiPanel.show(operation);
+  }
+
+  private destroyAiPanel(preserveOperation = false): void {
+    this.aiPanel?.destroy();
+    this.aiPanel = null;
+    this.aiPanelMount?.remove();
+    this.aiPanelMount = null;
+    if (!preserveOperation) this.activeAiOperation = null;
+  }
+
+  /** Detaches inline AI UI without affecting coordinator-owned work. */
+  public detachAiPanel(): void {
+    this.destroyAiPanel();
+  }
+
   public dispose(): void {
     this.disposed = true;
     this.renderRequestSequence += 1;
     this.currentItem = null;
     this.currentFullContent = undefined;
     this.sessionContent.clear();
+    this.destroyAiPanel();
+    this.destroyTranscriptPanel();
     this.cleanupPlayers();
   }
 

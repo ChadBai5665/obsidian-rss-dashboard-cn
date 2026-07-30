@@ -10,9 +10,21 @@ export interface XAccountSourceModalOptions {
   locale?: Locale;
   existing?: XAccountSourceConfig;
   existingAccounts: readonly XAccountSourceConfig[];
+  existingRetention?: Readonly<{
+    autoDeleteDuration: number;
+    maxItemsLimit: number;
+  }>;
   maxRequestsPerRun: number;
   maxRequestsPerDay: number;
-  onSave(config: XAccountSourceConfig): Promise<void> | void;
+  onSave(
+    config: XAccountSourceConfig,
+    retention: Readonly<{
+      autoDeleteDuration: number;
+      maxItemsLimit: number;
+    }>,
+  ): Promise<void> | void;
+  /** Changed identities must return to the verified onboarding flow. */
+  onIdentityChange?(normalizedHandle: string): Promise<void> | void;
   onClose?(): void;
 }
 
@@ -33,6 +45,9 @@ export class XAccountSourceModal extends Modal {
     contentEl.empty();
     this.modalEl.addClass("rss-dashboard-modal");
     this.modalEl.addClass("rss-dashboard-form-modal");
+    if (this.options.existing) {
+      this.modalEl.addClass("rss-dashboard-x-account-options-modal");
+    }
 
     contentEl.createEl("h2", {
       text: t(this.options.existing
@@ -44,6 +59,8 @@ export class XAccountSourceModal extends Modal {
     let displayName = this.options.existing?.displayName ?? "";
     let folder = this.options.existing?.folder ?? "";
     let topics = this.options.existing?.topics.join(", ") ?? "";
+    let autoDeleteDuration = this.options.existingRetention?.autoDeleteDuration ?? 0;
+    let maxItemsLimit = this.options.existingRetention?.maxItemsLimit ?? 0;
     let includeReplies = this.options.existing?.includeReplies ?? false;
     let includeReposts = this.options.existing?.includeReposts ?? false;
     const fieldSetting = (): Setting => {
@@ -61,9 +78,12 @@ export class XAccountSourceModal extends Modal {
         .onChange((value) => { handle = value; }));
     fieldSetting()
       .setName(t("modal.xAccount.displayName"))
-      .addText((text) => text
-        .setValue(displayName)
-        .onChange((value) => { displayName = value; }));
+      .addText((text) => {
+        text.inputEl.readOnly = this.options.existing !== undefined;
+        return text
+          .setValue(displayName)
+          .onChange((value) => { displayName = value; });
+      });
     fieldSetting()
       .setName(t("modal.xAccount.folder"))
       .addText((text) => text
@@ -75,6 +95,30 @@ export class XAccountSourceModal extends Modal {
       .addText((text) => text
         .setValue(topics)
         .onChange((value) => { topics = value; }));
+    fieldSetting()
+      .setName(t("modal.xAccount.autoDelete"))
+      .setDesc(t("modal.feed.autoDeleteDesc"))
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = "0";
+        return text
+          .setValue(String(autoDeleteDuration))
+          .onChange((value) => {
+            autoDeleteDuration = nonNegativeInteger(value);
+          });
+      });
+    fieldSetting()
+      .setName(t("modal.xAccount.maxItems"))
+      .setDesc(t("modal.feed.maxItemsDesc"))
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = "0";
+        return text
+          .setValue(String(maxItemsLimit))
+          .onChange((value) => {
+            maxItemsLimit = nonNegativeInteger(value);
+          });
+      });
 
     const estimateEl = contentEl.createEl("p", {
       cls: "rss-dashboard-request-estimate",
@@ -164,6 +208,14 @@ export class XAccountSourceModal extends Modal {
                 errorEl.setText(t("modal.xAccount.duplicate"));
                 return;
               }
+              if (
+                this.options.existing &&
+                normalizedHandle !== this.options.existing.handle
+              ) {
+                await this.options.onIdentityChange?.(normalizedHandle);
+                if (isCurrent()) this.close();
+                return;
+              }
               let config: XAccountSourceConfig;
               try {
                 config = createXAccountSourceConfig({
@@ -179,7 +231,10 @@ export class XAccountSourceModal extends Modal {
                 errorEl.setText(t("modal.xAccount.invalidHandle"));
                 return;
               }
-              await this.options.onSave(config);
+              await this.options.onSave(config, {
+                autoDeleteDuration,
+                maxItemsLimit,
+              });
               if (isCurrent()) this.close();
             } catch {
               if (isCurrent()) errorEl.setText(t("modal.xAccount.saveFailed"));
@@ -206,4 +261,9 @@ export class XAccountSourceModal extends Modal {
 
 function splitList(value: string): string[] {
   return value.split(/[\n,]/u).map((entry) => entry.trim()).filter(Boolean);
+}
+
+function nonNegativeInteger(value: string): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
 }

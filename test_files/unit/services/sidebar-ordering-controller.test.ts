@@ -45,6 +45,29 @@ describe("sidebar-ordering-controller helpers", () => {
 });
 
 describe("moveFeedAndInsert", () => {
+  it("returns an isolated candidate without mutating the live settings", () => {
+    const settings = cloneSettings();
+    settings.feeds = [
+      makeFeed("A", "a", "Work"),
+      makeFeed("B", "b", "Home"),
+    ];
+    const before = structuredClone(settings);
+
+    const result = moveFeedAndInsert(settings, {
+      draggedUrl: "a",
+      targetUrl: "b",
+      placement: "before",
+    });
+
+    expect(settings).toEqual(before);
+    expect(result.ok).toBe(true);
+    expect((result as unknown as { settings: RssDashboardSettings }).settings.feeds)
+      .toEqual([
+        expect.objectContaining({ url: "a", folder: "Home" }),
+        expect.objectContaining({ url: "b", folder: "Home" }),
+      ]);
+  });
+
   it("rejects missing urls and no-op drops", () => {
     const settings = cloneSettings();
     settings.feeds = [makeFeed("A", "a", "Work"), makeFeed("B", "b", "Work")];
@@ -90,18 +113,20 @@ describe("moveFeedAndInsert", () => {
     });
 
     expect(before.ok).toBe(true);
-    expect(settings.feeds.map((f) => f.url)).toEqual(["a", "b", "c"]);
-    expect(settings.feeds.find((f) => f.url === "a")?.folder).toBe("Home");
-    expect(settings.folderFeedSortOrders?.["Home"]?.by).toBe("custom");
+    if (!before.ok) throw new Error(before.reason);
+    expect(before.settings.feeds.map((f) => f.url)).toEqual(["a", "b", "c"]);
+    expect(before.settings.feeds.find((f) => f.url === "a")?.folder).toBe("Home");
+    expect(before.settings.folderFeedSortOrders?.["Home"]?.by).toBe("custom");
 
-    const after = moveFeedAndInsert(settings, {
+    const after = moveFeedAndInsert(before.settings, {
       draggedUrl: "a",
       targetUrl: "c",
       placement: "after",
     });
 
     expect(after.ok).toBe(true);
-    expect(settings.feeds.map((f) => f.url)).toEqual(["b", "c", "a"]);
+    if (!after.ok) throw new Error(after.reason);
+    expect(after.settings.feeds.map((f) => f.url)).toEqual(["b", "c", "a"]);
   });
 
   it("normalizes undefined target folder to root (empty string) and writes sort key", () => {
@@ -118,8 +143,9 @@ describe("moveFeedAndInsert", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(settings.feeds.find((f) => f.url === "d")?.folder).toBe("");
-    expect(settings.folderFeedSortOrders?.[""]?.by).toBe("custom");
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.settings.feeds.find((f) => f.url === "d")?.folder).toBe("");
+    expect(result.settings.folderFeedSortOrders?.[""]?.by).toBe("custom");
   });
 });
 
@@ -152,9 +178,10 @@ describe("moveFeedToFolderAppend", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(settings.feeds.find((f) => f.url === "a")?.folder).toBe("Home");
-    expect(settings.feeds.map((f) => f.url)).toEqual(["b", "c", "a", "d"]);
-    expect(settings.folderFeedSortOrders?.["Home"]?.by).toBe("custom");
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.settings.feeds.find((f) => f.url === "a")?.folder).toBe("Home");
+    expect(result.settings.feeds.map((f) => f.url)).toEqual(["b", "c", "a", "d"]);
+    expect(result.settings.folderFeedSortOrders?.["Home"]?.by).toBe("custom");
   });
 });
 
@@ -224,8 +251,9 @@ describe("moveFolder", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(settings.folders.map((f) => f.name)).toEqual(["B", "C", "A"]);
-    expect(settings.folderSortOrder?.by).toBe("custom");
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.settings.folders.map((f) => f.name)).toEqual(["B", "C", "A"]);
+    expect(result.settings.folderSortOrder?.by).toBe("custom");
     expect(result.newPath).toBe("A");
   });
 
@@ -251,11 +279,12 @@ describe("moveFolder", () => {
     });
 
     expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
     expect(result.newPath).toBe("Beta/Alpha");
-    expect(settings.feeds.find((f) => f.url === "f")?.folder).toBe("Beta/Alpha/Child");
-    expect(settings.collapsedFolders).toEqual(["Beta/Alpha", "Beta/Alpha/Child"]);
-    expect(settings.folderFeedSortOrders?.["Beta/Alpha/Child"]?.by).toBe("name");
-    expect(settings.folderFeedSortOrders?.["Alpha/Child"]).toBeUndefined();
-    expect(settings.folderSortOrder?.by).toBe("custom");
+    expect(result.settings.feeds.find((f) => f.url === "f")?.folder).toBe("Beta/Alpha/Child");
+    expect(result.settings.collapsedFolders).toEqual(["Beta/Alpha", "Beta/Alpha/Child"]);
+    expect(result.settings.folderFeedSortOrders?.["Beta/Alpha/Child"]?.by).toBe("name");
+    expect(result.settings.folderFeedSortOrders?.["Alpha/Child"]).toBeUndefined();
+    expect(result.settings.folderSortOrder?.by).toBe("custom");
   });
 });

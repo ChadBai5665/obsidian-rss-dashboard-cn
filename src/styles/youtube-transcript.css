@@ -1,0 +1,105 @@
+.rss-reader-view .rss-youtube-transcript-mount {
+  margin-block: 12px;
+  min-width: 0;
+}
+
+.rss-reader-view .rss-youtube-transcript-panel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  overflow-wrap: anywhere;
+}
+
+.rss-reader-view .rss-youtube-transcript-header,
+.rss-reader-view .rss-youtube-transcript-actions,
+.rss-reader-view .rss-youtube-transcript-languages {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rss-reader-view .rss-youtube-transcript-header {
+  justify-content: space-between;
+}
+
+.rss-reader-view .rss-youtube-transcript-title {
+  font-size: var(--font-ui-medium);
+}
+
+.rss-reader-view .rss-youtube-transcript-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.rss-reader-view .rss-youtube-transcript-meta,
+.rss-reader-view .rss-youtube-transcript-status,
+.rss-reader-view .rss-youtube-transcript-source,
+.rss-reader-view .rss-youtube-transcript-cost-warning,
+.rss-reader-view .rss-youtube-transcript-usage {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.rss-reader-view .rss-youtube-transcript-error {
+  color: var(--text-error);
+}
+
+.rss-reader-view .rss-youtube-transcript-cost-warning {
+  color: var(--text-warning);
+}
+
+.rss-reader-view .rss-youtube-transcript-details {
+  min-width: 0;
+}
+
+.rss-reader-view .rss-youtube-transcript-details > summary {
+  cursor: pointer;
+  color: var(--text-accent);
+}
+
+.rss-reader-view .rss-youtube-transcript-body {
+  max-height: 360px;
+  margin-top: 8px;
+  padding: 10px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--background-primary);
+  white-space: pre-wrap;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.rss-reader-view .rss-youtube-transcript-actions > button,
+.rss-reader-view .rss-youtube-transcript-languages > button,
+.rss-reader-view .rss-youtube-transcript-panel > button {
+  max-width: 100%;
+  white-space: normal;
+}
+
+@media (max-width: 720px) {
+  .rss-reader-view .rss-youtube-transcript-header,
+  .rss-reader-view .rss-youtube-transcript-actions,
+  .rss-reader-view .rss-youtube-transcript-languages {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .rss-reader-view .rss-youtube-transcript-actions > button,
+  .rss-reader-view .rss-youtube-transcript-languages > button {
+    width: 100%;
+  }
+
+  .rss-reader-view .rss-youtube-transcript-actions > .rss-youtube-transcript-cost-warning {
+    width: 100%;
+  }
+}

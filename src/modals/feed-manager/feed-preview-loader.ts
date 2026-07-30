@@ -34,8 +34,11 @@ export interface MediaFolderDefaults {
   defaultRssFolder?: string;
 }
 
+const YOUTUBE_CHANNEL_ID = /^UC[A-Za-z0-9_-]{22}$/u;
+
 function isYouTubePageUrl(url: string): boolean {
   if (!url) return false;
+  if (YOUTUBE_CHANNEL_ID.test(url)) return true;
   if (!MediaService.isYouTubeFeed(url)) return false;
   if (url.includes("youtube.com/feeds/videos.xml")) return false;
   return true;
@@ -165,17 +168,6 @@ export async function resolveAndLoadPreview(
     }
   }
 
-  if (MediaService.isMastodonUrl(url)) {
-    const mastodonFeedUrl = await MediaService.getMastodonRssFeed(url);
-    if (!mastodonFeedUrl) {
-      throw new Error(t("modal.feed.mastodonResolve"));
-    }
-
-    url = mastodonFeedUrl;
-    finalUrl = mastodonFeedUrl;
-    isMastodonConversion = true;
-  }
-
   if (isYouTubePageUrl(url)) {
     detectedType = "youtube";
     const rssUrl = await MediaService.getYouTubeRssFeed(
@@ -189,7 +181,20 @@ export async function resolveAndLoadPreview(
     finalUrl = rssUrl;
   } else if (MediaService.isYouTubeFeed(url) && isYouTubeRssFeedUrl(url)) {
     detectedType = "youtube";
-  } else {
+  }
+
+  if (MediaService.isMastodonUrl(url)) {
+    const mastodonFeedUrl = await MediaService.getMastodonRssFeed(url);
+    if (!mastodonFeedUrl) {
+      throw new Error(t("modal.feed.mastodonResolve"));
+    }
+
+    url = mastodonFeedUrl;
+    finalUrl = mastodonFeedUrl;
+    isMastodonConversion = true;
+  }
+
+  if (detectedType !== "youtube") {
     const platform = detectPodcastPlatform(url);
     if (platform) {
       if (platform.id === "pocketcasts" && !options?.corsProxyEnabled) {

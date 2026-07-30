@@ -71,6 +71,7 @@ function settingsFixture(): RssDashboardSettings {
   };
   settings.tikhub = {
     enabled: true,
+    youtubeTranscriptFallbackEnabled: true,
     connectionId: CONNECTION_ID,
     baseUrl: "https://api.tikhub.dev",
     timeoutMs: 20_000,
@@ -130,6 +131,7 @@ describe("buildPublicSettingsExport", () => {
     });
     expect(exported.tikhub).toEqual({
       enabled: true,
+      youtubeTranscriptFallbackEnabled: true,
       connectionId: CONNECTION_ID,
       baseUrl: "https://api.tikhub.dev",
       timeoutMs: 20_000,
@@ -156,6 +158,34 @@ describe("buildPublicSettingsExport", () => {
     }
   });
 
+  it("exports import policy and subscription state but never provider cursors", () => {
+    const settings = settingsFixture();
+    settings.feeds[0].initialImportPolicy = {
+      mode: "since-date",
+      since: "2026-07-01",
+    };
+    settings.feeds[0].initialImportProgress = {
+      status: "running",
+      pagesFetched: 1,
+      itemsImported: 2,
+      nextCursor: "PRIVATE_PROVIDER_CURSOR",
+      replyCursor: "PRIVATE_REPLY_CURSOR",
+    };
+    settings.feeds[0].subscriptionStatus = "paused";
+
+    const exported = buildPublicSettingsExport(settings, { includeSources: true });
+    const feed = (exported.feeds as Array<Record<string, unknown>>)[0];
+
+    expect(feed.initialImportPolicy).toEqual({
+      mode: "since-date",
+      since: "2026-07-01",
+    });
+    expect(feed.subscriptionStatus).toBe("paused");
+    expect(feed).not.toHaveProperty("initialImportProgress");
+    expect(JSON.stringify(exported)).not.toContain("PRIVATE_PROVIDER_CURSOR");
+    expect(JSON.stringify(exported)).not.toContain("PRIVATE_REPLY_CURSOR");
+  });
+
   it("omits source collections for a preferences-only export", () => {
     const exported = buildPublicSettingsExport(settingsFixture(), {
       includeSources: false,
@@ -164,6 +194,9 @@ describe("buildPublicSettingsExport", () => {
     expect(exported).not.toHaveProperty("folders");
     expect(exported).not.toHaveProperty("availableTags");
     expect(exported.refreshInterval).toBe(60);
+    expect(exported.tikhub).toMatchObject({
+      youtubeTranscriptFallbackEnabled: true,
+    });
   });
 
   it("does not invoke unknown getters, accessors, inherited fields, or toJSON", () => {
@@ -246,7 +279,11 @@ describe("buildPublicSettingsExport", () => {
       createConnectionId: () => nextId,
     });
     expect(imported.tikhub).toEqual(
-      expect.objectContaining({ enabled: false, connectionId: "" }),
+      expect.objectContaining({
+        enabled: false,
+        connectionId: "",
+        youtubeTranscriptFallbackEnabled: true,
+      }),
     );
     expect(imported.ai).toEqual({
       connections: [

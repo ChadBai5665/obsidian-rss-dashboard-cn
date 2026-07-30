@@ -25,6 +25,7 @@ class InMemoryAdapter {
     | null = null;
   private nextRemoveFailure: ((path: string) => boolean) | null = null;
   private statOverride: number | null | undefined;
+  readonly removedPaths: string[] = [];
 
   async exists(path: string): Promise<boolean> {
     return this.files.has(path) || this.directories.has(path);
@@ -121,6 +122,7 @@ class InMemoryAdapter {
     }
     this.files.delete(path);
     this.mtimes.delete(path);
+    this.removedPaths.push(path);
   }
 
   async list(path: string): Promise<{ files: string[]; folders: string[] }> {
@@ -353,6 +355,28 @@ describe("CollectionRepository", () => {
     ]);
   });
 
+  it("links a durable transcript with an explicit transcript content basis", async () => {
+    const { repository } = createHarness();
+    const id = "e".repeat(64);
+    const contentPath = `${DATA_ROOT}/content/${id}.md`;
+    await repository.upsertDaily(
+      [createItem({ id, sourceType: "youtube", contentBasis: "title-description" })],
+      "2026-07-21",
+    );
+
+    await repository.updateContentMetadata(
+      id,
+      contentPath,
+      "youtube-transcript",
+    );
+
+    expect(await repository.findById(id)).toMatchObject({
+      id,
+      contentBasis: "youtube-transcript",
+      contentPath,
+    });
+  });
+
   it("does no constructor I/O and creates only collection persistence directories", async () => {
     const { adapter, repository } = createHarness();
 
@@ -473,6 +497,120 @@ describe("CollectionRepository", () => {
 
     expect(await repository.hasItemsForSource("feed-1")).toBe(true);
     expect(await repository.hasItemsForSource("deleted-source")).toBe(false);
+  });
+
+  it("removes only one source across dates, rebuilds the item index, and leaves durable content outside collection JSONL untouched", async () => {
+    const { adapter, repository } = createHarness();
+    const retained = createItem({ id: "retained", sourceId: "feed-2" });
+    await repository.upsertDaily(
+      [createItem({ id: "removed-1" }), retained],
+      "2026-07-21",
+    );
+    await repository.upsertDaily(
+      [createItem({ id: "removed-2" })],
+      "2026-07-22",
+    );
+    await adapter.mkdir(`${DATA_ROOT}/content`);
+    await adapter.write(`${DATA_ROOT}/content/removed-1.md`, "cached body");
+    await adapter.mkdir(`${DATA_ROOT}/analysis`);
+    await adapter.write(`${DATA_ROOT}/analysis/removed-1.json`, "manual AI");
+    await adapter.mkdir("Saved");
+    await adapter.write("Saved/removed-1.md", "saved note");
+
+    const removed = await repository.removeBySourceId("feed-1");
+
+    expect(removed).toEqual([
+      {
+        localDate: "2026-07-21",
+        previousItems: [createItem({ id: "removed-1" }), retained],
+        remainingItems: [retained],
+      },
+      {
+        localDate: "2026-07-22",
+        previousItems: [createItem({ id: "removed-2" })],
+        remainingItems: [],
+      },
+    ]);
+    expect(await repository.listByDate("2026-07-21")).toEqual([retained]);
+    expect(await repository.listByDate("2026-07-22")).toEqual([]);
+    expect(
+      JSON.parse(await adapter.read(`${DATA_ROOT}/state/item-index.json`)),
+    ).toEqual({
+      schemaVersion: 1,
+      items: {
+        retained: {
+          earliestDate: "2026-07-21",
+          latestDate: "2026-07-21",
+        },
+      },
+    });
+    await expect(adapter.read(`${DATA_ROOT}/content/removed-1.md`)).resolves.toBe(
+      "cached body",
+    );
+    await expect(adapter.read(`${DATA_ROOT}/analysis/removed-1.json`)).resolves.toBe(
+      "manual AI",
+    );
+    await expect(adapter.read("Saved/removed-1.md")).resolves.toBe("saved note");
+    expect(adapter.removedPaths.some((path) => path.endsWith("removed-1.md")))
+      .toBe(false);
+  });
+
+  it("restores collection JSONL and the item index from a completed source-removal receipt", async () => {
+    const { adapter, repository } = createHarness();
+    const removedItem = createItem({ id: "removed-1" });
+    const retained = createItem({ id: "retained", sourceId: "feed-2" });
+    await repository.upsertDaily([removedItem, retained], "2026-07-21");
+
+    const receipt = await repository.removeBySourceId("feed-1");
+    await repository.restoreRemovedSource(receipt);
+
+    expect(await repository.listByDate("2026-07-21")).toEqual([
+      removedItem,
+      retained,
+    ]);
+    expect(
+      JSON.parse(await adapter.read(`${DATA_ROOT}/state/item-index.json`)),
+    ).toEqual({
+      schemaVersion: 1,
+      items: {
+        "removed-1": {
+          earliestDate: "2026-07-21",
+          latestDate: "2026-07-21",
+        },
+        retained: {
+          earliestDate: "2026-07-21",
+          latestDate: "2026-07-21",
+        },
+      },
+    });
+  });
+
+  it("rolls back earlier collection days when a later source-removal rewrite fails", async () => {
+    const { adapter, repository } = createHarness();
+    await repository.upsertDaily(
+      [createItem({ id: "removed-1" })],
+      "2026-07-21",
+    );
+    await repository.upsertDaily(
+      [createItem({ id: "removed-2" })],
+      "2026-07-22",
+    );
+    adapter.failNextWriteWhere((path) =>
+      path.startsWith(`${DATA_ROOT}/collections/2026-07-22.jsonl.tmp-`),
+    );
+
+    await expect(repository.removeBySourceId("feed-1")).rejects.toThrow(
+      "Injected write failure",
+    );
+
+    await expect(repository.listByDate("2026-07-21")).resolves.toHaveLength(1);
+    await expect(repository.listByDate("2026-07-22")).resolves.toHaveLength(1);
+    await expect(repository.findById("removed-1")).resolves.toMatchObject({
+      sourceId: "feed-1",
+    });
+    await expect(repository.findById("removed-2")).resolves.toMatchObject({
+      sourceId: "feed-1",
+    });
   });
 
   it("quarantines malformed lines exactly once without erasing valid records", async () => {

@@ -41,6 +41,12 @@ function getButton(container: HTMLElement, label: string): HTMLButtonElement {
   return button;
 }
 
+function getSecretStatus(container: HTMLElement): HTMLElement {
+  const status = container.querySelector<HTMLElement>(".rss-dashboard-secret-status");
+  if (!status) throw new Error("Missing TikHub secret status");
+  return status;
+}
+
 function harness(options: {
   confirmed?: boolean;
   hasSecret?: boolean;
@@ -116,6 +122,47 @@ describe("renderTikHubSettingsTab", () => {
     expect(test.plugin.saveSettings).toHaveBeenCalledTimes(1);
   });
 
+  it("persists the explicit YouTube caption fallback opt-in without reading a key or testing a connection", async () => {
+    const test = harness();
+    const mainToggle = getSetting(test.containerEl, "启用 TikHub");
+    const fallbackSetting = getSetting(test.containerEl, "允许 TikHub 字幕回退");
+    const toggle = fallbackSetting.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+
+    expect(mainToggle.compareDocumentPosition(fallbackSetting)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(fallbackSetting.textContent).toContain("仅在你主动获取 YouTube 字幕时使用");
+    expect(fallbackSetting.textContent).toContain("预计费用 $0.016");
+    expect(toggle.checked).toBe(false);
+    expect(test.secretStore.getStatus).toHaveBeenCalledOnce();
+    expect(test.secretStore.get).not.toHaveBeenCalled();
+    expect(test.testConnection).not.toHaveBeenCalled();
+
+    toggle.click();
+    await flushPromises();
+
+    expect(test.plugin.settings.tikhub.youtubeTranscriptFallbackEnabled).toBe(true);
+    expect(test.plugin.saveSettings).toHaveBeenCalledTimes(1);
+    expect(test.secretStore.getStatus).toHaveBeenCalledOnce();
+    expect(test.secretStore.get).not.toHaveBeenCalled();
+    expect(test.testConnection).not.toHaveBeenCalled();
+  });
+
+  it("rolls back the YouTube caption fallback opt-in when saving fails", async () => {
+    const saveSettings = vi.fn(async () => { throw new Error("save failed"); });
+    const test = harness({ saveSettings });
+    const toggle = getSetting(test.containerEl, "允许 TikHub 字幕回退")
+      .querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+
+    toggle.click();
+    expect(test.plugin.settings.tikhub.youtubeTranscriptFallbackEnabled).toBe(true);
+    await flushPromises();
+
+    expect(test.plugin.settings.tikhub.youtubeTranscriptFallbackEnabled).toBe(false);
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(false);
+  });
+
   it("offers the official primary API first, keeps the mainland accelerator, and saves only validated custom HTTPS origins", async () => {
     const test = harness();
     const preset = getSetting(test.containerEl, "接口地址")
@@ -180,9 +227,8 @@ describe("renderTikHubSettingsTab", () => {
     expect(test.containerEl.textContent).not.toContain(credential);
   });
 
-  it("keeps a valid initial key status alive when an empty key save is rejected", async () => {
-    const status = deferred<{ hasSecret: boolean }>();
-    const test = harness({ getStatus: () => status.promise });
+  it("rejects an empty key save without querying desktop secrets", async () => {
+    const test = harness();
     const keySetting = getSetting(test.containerEl, "API 密钥");
     const input = keySetting.querySelector<HTMLInputElement>("input")!;
     const save = getButton(keySetting, "保存密钥");
@@ -193,9 +239,8 @@ describe("renderTikHubSettingsTab", () => {
     expect(input.value).toBe("");
     expect(save.disabled).toBe(false);
     expect(test.containerEl.textContent).toContain("请输入非空 API 密钥");
-    status.resolve({ hasSecret: true });
-    await flushPromises();
-    expect(test.containerEl.textContent).toContain("状态：已配置");
+    expect(test.secretStore.getStatus).toHaveBeenCalledOnce();
+    expect(test.secretStore.get).not.toHaveBeenCalled();
   });
 
   it("requires deletion confirmation, removes only the external key, and disables paid refresh", async () => {
@@ -298,15 +343,27 @@ describe("renderTikHubSettingsTab", () => {
     expect(save.getAttribute("aria-disabled")).toBe("false");
 
     document.body.empty();
-    const deletion = harness({ confirmed: true });
-    deletion.secretStore.delete.mockRejectedValueOnce(new Error("delete failed"));
+    const refresh = deferred<{ hasSecret: boolean }>();
+    const deletion = harness({
+      confirmed: true,
+      getStatus: vi.fn()
+        .mockResolvedValueOnce({ hasSecret: true })
+        .mockImplementationOnce(() => refresh.promise),
+    });
+    await flushPromises();
+    deletion.secretStore.delete.mockRejectedValueOnce(new Error());
     const remove = getButton(deletion.containerEl, "删除密钥");
     remove.click();
     expect(remove.disabled).toBe(true);
     await flushPromises();
     expect(deletion.secretStore.delete).toHaveBeenCalledTimes(1);
+    expect(deletion.secretStore.getStatus).toHaveBeenCalledTimes(2);
+    expect(getSecretStatus(deletion.containerEl).textContent).toBe("正在检查密钥状态…");
+    refresh.reject(new Error());
+    await flushPromises();
     expect(remove.disabled).toBe(false);
     expect(remove.getAttribute("aria-disabled")).toBe("false");
+    expect(getSecretStatus(deletion.containerEl).textContent).toBe("无法读取密钥状态，请稍后重试。");
   });
 
   it("updates every cap display immediately, restores the last valid value, and freezes the test snapshot", async () => {
@@ -343,6 +400,151 @@ describe("renderTikHubSettingsTab", () => {
         maxRequestsPerDay: 11,
       }),
     );
+  });
+
+  it("checks the canonical connection once and projects its configured status after a neutral pending state", async () => {
+    const status = deferred<{ hasSecret: boolean }>();
+    const test = harness({ getStatus: () => status.promise });
+
+    expect(test.secretStore.getStatus).toHaveBeenCalledTimes(1);
+    expect(test.secretStore.getStatus).toHaveBeenCalledWith(CONNECTION_ID);
+    expect(getSecretStatus(test.containerEl).textContent).toBe("正在检查密钥状态…");
+
+    status.resolve({ hasSecret: true });
+    await flushPromises();
+
+    expect(getSecretStatus(test.containerEl).textContent).toBe("状态：已配置");
+  });
+
+  it("projects a resolved missing secret without reading the secret value", async () => {
+    const status = deferred<{ hasSecret: boolean }>();
+    const test = harness({ getStatus: () => status.promise });
+
+    expect(getSecretStatus(test.containerEl).textContent).toBe("正在检查密钥状态…");
+    status.resolve({ hasSecret: false });
+    await flushPromises();
+
+    expect(getSecretStatus(test.containerEl).textContent).toBe("状态：未配置");
+    expect(test.secretStore.get).not.toHaveBeenCalled();
+  });
+
+  it("shows a safe unavailable status when a secret-status read throws or rejects", async () => {
+    const thrown = harness({ getStatus: () => { throw new Error("secret read failure"); } });
+    expect(getSecretStatus(thrown.containerEl).textContent).toBe("无法读取密钥状态，请稍后重试。");
+
+    document.body.empty();
+    const rejected = harness({
+      getStatus: async () => { throw new Error("secret read failure"); },
+    });
+    await flushPromises();
+
+    expect(getSecretStatus(rejected.containerEl).textContent).toBe("无法读取密钥状态，请稍后重试。");
+    expect(rejected.containerEl.textContent).not.toContain("secret read failure");
+  });
+
+  it("keeps a blank or invalid connection missing without consulting secure storage", () => {
+    const blank = harness({ connectionId: "" });
+    expect(getSecretStatus(blank.containerEl).textContent).toBe("状态：未配置");
+    expect(blank.secretStore.getStatus).not.toHaveBeenCalled();
+    expect(blank.secretStore.get).not.toHaveBeenCalled();
+
+    document.body.empty();
+    const invalid = harness({ connectionId: "not-a-connection" });
+    expect(getSecretStatus(invalid.containerEl).textContent).toBe("状态：未配置");
+    expect(invalid.secretStore.getStatus).not.toHaveBeenCalled();
+    expect(invalid.secretStore.get).not.toHaveBeenCalled();
+  });
+
+  it("does not let a stale status completion mutate a cleared and rerendered tab", async () => {
+    const first = deferred<{ hasSecret: boolean }>();
+    const second = deferred<{ hasSecret: boolean }>();
+    const test = harness({
+      getStatus: vi.fn()
+        .mockImplementationOnce(() => first.promise)
+        .mockImplementationOnce(() => second.promise),
+    });
+    const staleStatusEl = getSecretStatus(test.containerEl);
+
+    test.containerEl.empty();
+    renderTikHubSettingsTab(test.containerEl, test.plugin, {
+      secretStore: test.secretStore,
+      testConnection: test.testConnection,
+      confirmPaidRequest: test.confirmPaidRequest,
+      confirmDeleteSecret: test.confirmDeleteSecret,
+      createConnectionId: () => CONNECTION_ID,
+    });
+    expect(test.secretStore.getStatus).toHaveBeenCalledTimes(2);
+    const currentStatusEl = getSecretStatus(test.containerEl);
+    expect(test.containerEl.querySelectorAll(".rss-dashboard-secret-status")).toHaveLength(1);
+    expect(currentStatusEl.textContent).toBe("正在检查密钥状态…");
+    second.resolve({ hasSecret: false });
+    await flushPromises();
+    first.resolve({ hasSecret: true });
+    await flushPromises();
+
+    expect(staleStatusEl.textContent).toBe("正在检查密钥状态…");
+    expect(currentStatusEl.textContent).toBe("状态：未配置");
+  });
+
+  it("leaves a disposed tab in its pending state when its status read completes late", async () => {
+    const status = deferred<{ hasSecret: boolean }>();
+    const test = harness({ getStatus: () => status.promise });
+    const statusEl = getSecretStatus(test.containerEl);
+
+    test.containerEl.remove();
+    status.resolve({ hasSecret: true });
+    await flushPromises();
+
+    expect(statusEl.textContent).toBe("正在检查密钥状态…");
+  });
+
+  it("refreshes a safe configured projection after saving a key fails", async () => {
+    const refreshed = deferred<{ hasSecret: boolean }>();
+    const test = harness({
+      getStatus: vi.fn()
+        .mockResolvedValueOnce({ hasSecret: false })
+        .mockImplementationOnce(() => refreshed.promise),
+    });
+    await flushPromises();
+    test.secretStore.set.mockRejectedValueOnce(new Error());
+    const keySetting = getSetting(test.containerEl, "API 密钥");
+    const input = keySetting.querySelector<HTMLInputElement>("input")!;
+    input.value = syntheticCredential();
+
+    getButton(keySetting, "保存密钥").click();
+    await flushPromises();
+
+    expect(test.secretStore.getStatus).toHaveBeenCalledTimes(2);
+    expect(getSecretStatus(test.containerEl).textContent).toBe("正在检查密钥状态…");
+    refreshed.resolve({ hasSecret: true });
+    await flushPromises();
+
+    expect(getSecretStatus(test.containerEl).textContent).toBe("状态：已配置");
+  });
+
+  it("refreshes a safe missing projection after deletion cannot be persisted", async () => {
+    const refreshed = deferred<{ hasSecret: boolean }>();
+    const saveSettings = vi.fn(async () => { throw new Error(); });
+    const test = harness({
+      confirmed: true,
+      saveSettings,
+      getStatus: vi.fn()
+        .mockResolvedValueOnce({ hasSecret: true })
+        .mockImplementationOnce(() => refreshed.promise),
+    });
+    await flushPromises();
+
+    getButton(test.containerEl, "删除密钥").click();
+    await flushPromises();
+
+    expect(test.secretStore.delete).toHaveBeenCalledTimes(1);
+    expect(saveSettings).toHaveBeenCalledTimes(1);
+    expect(test.secretStore.getStatus).toHaveBeenCalledTimes(2);
+    expect(getSecretStatus(test.containerEl).textContent).toBe("正在检查密钥状态…");
+    refreshed.resolve({ hasSecret: false });
+    await flushPromises();
+
+    expect(getSecretStatus(test.containerEl).textContent).toBe("状态：未配置");
   });
 
   it("ignores a late initial secret status after a confirmed delete", async () => {

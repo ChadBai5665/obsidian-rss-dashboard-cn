@@ -3,7 +3,12 @@ import * as obsidian from "obsidian";
 import { FeedManagerModal } from "../../../src/modals/feed-manager/feed-manager-modal";
 import { ImportOpmlModal } from "../../../src/modals/import-opml-modal";
 import {
+  createXAccountSourceConfig,
+  createXTopicSourceConfig,
+} from "../../../src/sources/source-config";
+import {
   DEFAULT_SETTINGS,
+  type Feed,
   type RssDashboardSettings,
 } from "../../../src/types/types";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
@@ -11,6 +16,57 @@ import type RssDashboardPlugin from "../../../main";
 
 function cloneSettings(): RssDashboardSettings {
   return JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as RssDashboardSettings;
+}
+
+function feed(overrides: Partial<Feed> & Pick<Feed, "title" | "url">): Feed {
+  return {
+    folder: "",
+    items: [],
+    lastUpdated: Date.UTC(2026, 6, 27, 8, 30),
+    ...overrides,
+  };
+}
+
+function makePlugin(feeds: Feed[] = []) {
+  const app = obsidian.App.createMock();
+  const settings = cloneSettings();
+  settings.feeds = feeds;
+  return {
+    app,
+    settings,
+    saveSettings: vi.fn(async () => {}),
+    getActiveDashboardView: vi.fn(async () => null),
+    exportOpml: vi.fn(),
+    addFeed: vi.fn(async () => true),
+    openAddSourceModal: vi.fn(),
+    manualRefreshSourceById: vi.fn(async () => {}),
+    updateSubscription: vi.fn(async () => true),
+    setSubscriptionPaused: vi.fn(async () => true),
+    stopSubscriptionInitialImport: vi.fn(async () => true),
+    resumeSubscriptionInitialImport: vi.fn(async () => true),
+    removeSubscription: vi.fn(async () => true),
+  };
+}
+
+function button(container: ParentNode, text: string): HTMLButtonElement {
+  const match = Array.from(container.querySelectorAll("button"))
+    .find((candidate) => candidate.textContent?.trim() === text);
+  if (!match) throw new Error(`Missing button: ${text}`);
+  return match;
+}
+
+function flushPromises(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 beforeEach(() => {
@@ -25,15 +81,8 @@ beforeEach(() => {
 
 describe("FeedManagerModal", () => {
   it("closes after the OPML import modal reports import started", () => {
-    const app = obsidian.App.createMock();
-    const plugin = {
-      app,
-      settings: cloneSettings(),
-      saveSettings: vi.fn(async () => {}),
-      getActiveDashboardView: vi.fn(async () => null),
-      exportOpml: vi.fn(),
-      addFeed: vi.fn(async () => true),
-    };
+    const plugin = makePlugin();
+    const { app } = plugin;
 
     const openSpy = vi
       .spyOn(ImportOpmlModal.prototype, "open")
@@ -57,5 +106,627 @@ describe("FeedManagerModal", () => {
 
     expect(openSpy).toHaveBeenCalledTimes(1);
     expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens verified onboarding from its add button", () => {
+    const plugin = makePlugin();
+    const { app } = plugin;
+    const modal = new FeedManagerModal(
+      app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+
+    (modal.contentEl.querySelector(".feed-manager-add-button") as HTMLButtonElement).click();
+
+    expect(plugin.openAddSourceModal).toHaveBeenCalledWith();
+  });
+
+  it("renders every subscription kind except X topics with stable row keys and type filtering", () => {
+    const plugin = makePlugin([
+      feed({
+        feedId: "rss-mckinsey",
+        title: "McKinsey",
+        url: "https://example.com/feed.xml",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+      }),
+      feed({
+        title: "Legacy podcast",
+        url: "https://podcasts.example/show.xml",
+        mediaType: "podcast",
+      }),
+      feed({
+        feedId: "youtube-ai",
+        title: "AI channel",
+        url: "https://www.youtube.com/feeds/videos.xml?channel_id=UC123",
+        mediaType: "video",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+      }),
+      feed({
+        feedId: "mastodon-account",
+        title: "Mastodon account",
+        url: "https://mastodon.social/@news.rss",
+      }),
+      feed({
+        feedId: "x-account-openai",
+        title: "OpenAI",
+        url: "tikhub://x-account/openai",
+        sourceKind: "x-account",
+        sourceConfig: createXAccountSourceConfig({
+          id: "x-account-openai",
+          handle: "openai",
+          displayName: "OpenAI",
+        }),
+      }),
+      feed({
+        feedId: "x-topic-ai",
+        title: "AI topic",
+        url: "tikhub://x-topic/ai",
+        sourceKind: "x-topic",
+        sourceConfig: createXTopicSourceConfig({
+          id: "x-topic-ai",
+          name: "AI",
+        }),
+      }),
+    ]);
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+
+    const rows = Array.from(
+      modal.contentEl.querySelectorAll<HTMLElement>(".rss-subscription-row"),
+    );
+    expect(rows.map((row) => row.dataset.sourceId)).toEqual([
+      "rss-mckinsey",
+      "https://podcasts.example/show.xml",
+      "youtube-ai",
+      "mastodon-account",
+      "x-account-openai",
+    ]);
+    expect(rows.map((row) => row.dataset.sourceKind)).toEqual([
+      "feed",
+      "feed",
+      "feed",
+      "feed",
+      "x-account",
+    ]);
+    expect(rows.map((row) => row.dataset.sourceType)).toEqual([
+      "rss-website",
+      "podcast",
+      "youtube",
+      "mastodon",
+      "x-account",
+    ]);
+    expect(modal.contentEl.textContent).toContain("RSS / 网站");
+    expect(modal.contentEl.textContent).toContain("YouTube");
+    expect(modal.contentEl.textContent).toContain("播客");
+    expect(modal.contentEl.textContent).toContain("Mastodon");
+    expect(modal.contentEl.textContent).toContain("X 账号");
+    expect(modal.contentEl.textContent).not.toContain("AI topic");
+
+    const filter = modal.contentEl.querySelector<HTMLSelectElement>(
+      ".rss-subscription-type-filter",
+    )!;
+    filter.value = "youtube";
+    filter.dispatchEvent(new Event("change"));
+    expect(rows.map((row) => row.hidden)).toEqual([true, true, false, true, true]);
+  });
+
+  it("shows lifecycle state, safe progress, last success, and a redacted error without diagnostics", () => {
+    const plugin = makePlugin([
+      feed({
+        feedId: "normal",
+        title: "Normal",
+        url: "https://normal.example/feed",
+        initialImportProgress: {
+          status: "completed",
+          pagesFetched: 2,
+          itemsImported: 18,
+          nextCursor: "secret-next-cursor",
+        },
+      }),
+      feed({
+        feedId: "failed",
+        title: "Failed",
+        url: "https://failed.example/feed",
+        lastFetchError:
+          "GET https://api.tikhub.io/api/v1/twitter/web/fetch_user_post_tweet?handle=openai request_id=req-secret cursor=cursor-secret Authorization: Bearer sk-secret",
+      }),
+      feed({
+        feedId: "paused",
+        title: "Paused",
+        url: "https://paused.example/feed",
+        subscriptionStatus: "paused",
+      }),
+      feed({
+        feedId: "history-paused",
+        title: "History paused",
+        url: "tikhub://x-account/anthropicai",
+        sourceKind: "x-account",
+        sourceConfig: createXAccountSourceConfig({
+          id: "history-paused",
+          handle: "anthropicai",
+        }),
+        initialImportProgress: {
+          status: "paused-limit",
+          pagesFetched: 4,
+          itemsImported: 71,
+          phase: "replies",
+          nextCursor: "do-not-show-next",
+          replyCursor: "do-not-show-reply",
+        },
+      }),
+    ]);
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+
+    const rows = Array.from(
+      modal.contentEl.querySelectorAll<HTMLElement>(".rss-subscription-row"),
+    );
+    expect(rows.map((row) => row.dataset.status)).toEqual([
+      "normal",
+      "failed",
+      "paused",
+      "initial-import-paused",
+    ]);
+    expect(rows[0].textContent).toContain("2 页 · 18 条");
+    expect(rows[3].textContent).toContain("4 页 · 71 条");
+    expect(rows[0].textContent).toContain("2026");
+    expect(rows[1].textContent).toContain("最近刷新失败");
+    expect(modal.contentEl.textContent).not.toContain("secret-next-cursor");
+    expect(modal.contentEl.textContent).not.toContain("do-not-show");
+    expect(modal.contentEl.textContent).not.toContain("api.tikhub.io");
+    expect(modal.contentEl.textContent).not.toContain("openai");
+    expect(modal.contentEl.textContent).not.toContain("req-secret");
+    expect(modal.contentEl.textContent).not.toContain("sk-secret");
+  });
+
+  it("routes refresh, pause, resume, stop history, and continue history through subscription commands", async () => {
+    const plugin = makePlugin([
+      feed({
+        feedId: "active",
+        title: "Active",
+        url: "https://active.example/feed",
+        initialImportProgress: {
+          status: "running",
+          pagesFetched: 1,
+          itemsImported: 5,
+        },
+      }),
+      feed({
+        feedId: "paused",
+        title: "Paused",
+        url: "https://paused.example/feed",
+        subscriptionStatus: "paused",
+      }),
+      feed({
+        feedId: "stopped",
+        title: "Stopped",
+        url: "tikhub://x-account/openai",
+        sourceKind: "x-account",
+        sourceConfig: createXAccountSourceConfig({
+          id: "stopped",
+          handle: "openai",
+        }),
+        initialImportProgress: {
+          status: "stopped",
+          pagesFetched: 3,
+          itemsImported: 30,
+          nextCursor: "resume-me",
+        },
+      }),
+    ]);
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+    const row = (id: string) => modal.contentEl.querySelector<HTMLElement>(
+      `.rss-subscription-row[data-source-id="${id}"]`,
+    )!;
+
+    button(row("active"), "刷新").click();
+    await flushPromises();
+    button(row("active"), "暂停").click();
+    await flushPromises();
+    button(row("paused"), "继续订阅").click();
+    await flushPromises();
+    button(row("active"), "停止历史导入").click();
+    await flushPromises();
+    button(row("stopped"), "继续历史导入").click();
+    await flushPromises();
+
+    expect(plugin.manualRefreshSourceById).toHaveBeenCalledWith("active");
+    expect(plugin.setSubscriptionPaused).toHaveBeenCalledWith("active", true);
+    expect(plugin.setSubscriptionPaused).toHaveBeenCalledWith("paused", false);
+    expect(plugin.stopSubscriptionInitialImport).toHaveBeenCalledWith("active");
+    expect(plugin.resumeSubscriptionInitialImport).toHaveBeenCalledWith("stopped");
+  });
+
+  it("offers failed history resume for feed subscriptions but never for failed X accounts", async () => {
+    const failedProgress = {
+      status: "failed" as const,
+      pagesFetched: 1,
+      itemsImported: 4,
+    };
+    const plugin = makePlugin([
+      feed({
+        feedId: "rss-failed",
+        title: "RSS failed",
+        url: "https://example.com/feed.xml",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        initialImportProgress: failedProgress,
+      }),
+      feed({
+        feedId: "youtube-failed",
+        title: "YouTube failed",
+        url: "https://www.youtube.com/feeds/videos.xml?channel_id=UC123",
+        sourceKind: "feed",
+        sourceConfig: { kind: "feed" },
+        initialImportProgress: failedProgress,
+      }),
+      feed({
+        feedId: "legacy-failed",
+        title: "Legacy failed",
+        url: "https://legacy.example/feed.xml",
+        initialImportProgress: failedProgress,
+      }),
+      feed({
+        feedId: "x-failed",
+        title: "X failed",
+        url: "tikhub://x-account/openai",
+        sourceKind: "x-account",
+        sourceConfig: createXAccountSourceConfig({
+          id: "x-failed",
+          handle: "openai",
+        }),
+        initialImportProgress: failedProgress,
+      }),
+    ]);
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+    const row = (id: string) => modal.contentEl.querySelector<HTMLElement>(
+      `.rss-subscription-row[data-source-id="${id}"]`,
+    )!;
+
+    expect(button(row("rss-failed"), "继续历史导入")).toBeTruthy();
+    expect(button(row("youtube-failed"), "继续历史导入")).toBeTruthy();
+    expect(button(row("legacy-failed"), "继续历史导入")).toBeTruthy();
+    expect(Array.from(row("x-failed").querySelectorAll("button")).some(
+      (candidate) => candidate.textContent === "继续历史导入",
+    )).toBe(false);
+
+    button(row("rss-failed"), "继续历史导入").click();
+    await flushPromises();
+    expect(plugin.resumeSubscriptionInitialImport).toHaveBeenCalledWith(
+      "rss-failed",
+    );
+  });
+
+  it("disables manager actions synchronously and ignores repeated refresh clicks", async () => {
+    const pending = deferred<void>();
+    const plugin = makePlugin([
+      feed({ feedId: "rss", title: "RSS", url: "https://example.com/feed" }),
+    ]);
+    plugin.manualRefreshSourceById.mockImplementation(async () => {
+      await pending.promise;
+    });
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+    const row = modal.contentEl.querySelector<HTMLElement>(
+      '.rss-subscription-row[data-source-id="rss"]',
+    )!;
+    const refresh = button(row, "刷新");
+
+    refresh.click();
+    refresh.click();
+
+    expect(plugin.manualRefreshSourceById).toHaveBeenCalledTimes(1);
+    expect(refresh.disabled).toBe(true);
+    expect(Array.from(row.querySelectorAll("button")).every(
+      (candidate) => candidate.disabled,
+    )).toBe(true);
+
+    modal.close();
+    pending.resolve();
+    await flushPromises();
+    expect(modal.contentEl.childElementCount).toBe(0);
+  });
+
+  it("catches rejected manager actions and restores an interactive row", async () => {
+    const plugin = makePlugin([
+      feed({ feedId: "rss", title: "RSS", url: "https://example.com/feed" }),
+    ]);
+    plugin.setSubscriptionPaused.mockRejectedValueOnce(
+      new Error("private rejection detail"),
+    );
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+    button(modal.contentEl, "暂停").click();
+    await flushPromises();
+
+    expect(plugin.setSubscriptionPaused).toHaveBeenCalledTimes(1);
+    expect(button(modal.contentEl, "暂停").disabled).toBe(false);
+  });
+
+  it("routes identity edits back through onboarding and saves X options without re-verification", async () => {
+    const plugin = makePlugin([
+      feed({
+        feedId: "youtube-ai",
+        title: "AI channel",
+        url: "https://www.youtube.com/feeds/videos.xml?channel_id=UC123",
+        folder: "Videos",
+        mediaType: "video",
+      }),
+      feed({
+        feedId: "x-account-openai",
+        title: "OpenAI",
+        url: "tikhub://x-account/openai",
+        folder: "AI",
+        customTags: ["模型"],
+        sourceKind: "x-account",
+        sourceConfig: createXAccountSourceConfig({
+          id: "x-account-openai",
+          handle: "openai",
+          displayName: "OpenAI",
+          includeReplies: false,
+          includeReposts: false,
+          folder: "AI",
+          topics: ["模型"],
+        }),
+      }),
+    ]);
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+    const youtube = modal.contentEl.querySelector<HTMLElement>(
+      '.rss-subscription-row[data-source-id="youtube-ai"]',
+    )!;
+    button(youtube, "更改地址").click();
+    expect(plugin.openAddSourceModal).toHaveBeenCalledWith(
+      {
+        initialKind: "youtube",
+        initialInput: "https://www.youtube.com/feeds/videos.xml?channel_id=UC123",
+        initialFolder: "Videos",
+      },
+      "youtube-ai",
+      expect.any(Function),
+    );
+
+    const xRow = modal.contentEl.querySelector<HTMLElement>(
+      '.rss-subscription-row[data-source-id="x-account-openai"]',
+    )!;
+    button(xRow, "编辑选项").click();
+    const editor = document.body.querySelector<HTMLElement>(
+      ".rss-dashboard-x-account-options-modal",
+    )!;
+    const folder = Array.from(editor.querySelectorAll(".setting-item"))
+      .find((item) => item.querySelector(".setting-item-name")?.textContent === "文件夹")!
+      .querySelector<HTMLInputElement>("input")!;
+    folder.value = "Research";
+    folder.dispatchEvent(new Event("input"));
+    const replies = Array.from(editor.querySelectorAll(".setting-item"))
+      .find((item) => item.querySelector(".setting-item-name")?.textContent === "包含回复")!
+      .querySelector<HTMLInputElement>("input")!;
+    replies.click();
+    button(editor, "保存").click();
+    await flushPromises();
+
+    expect(plugin.updateSubscription).toHaveBeenCalledWith(
+      "x-account-openai",
+      expect.objectContaining({
+        kind: "x-account-options",
+        folder: "Research",
+        tags: ["模型"],
+        includeReplies: true,
+        includeReposts: false,
+      }),
+    );
+    expect(plugin.openAddSourceModal).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes an open manager after verified identity editing and ignores it after close", () => {
+    const original = feed({
+      feedId: "youtube-ai",
+      title: "Old channel",
+      url: "https://www.youtube.com/feeds/videos.xml?channel_id=UC123",
+      mediaType: "video",
+    });
+    const plugin = makePlugin([original]);
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+    button(modal.contentEl, "更改地址").click();
+    const completion = plugin.openAddSourceModal.mock.calls[0][2] as
+      | (() => void)
+      | undefined;
+    expect(completion).toBeTypeOf("function");
+
+    plugin.settings.feeds = [{ ...original, title: "New channel" }];
+    completion?.();
+    expect(modal.contentEl.textContent).toContain("New channel");
+
+    modal.close();
+    plugin.settings.feeds = [{ ...original, title: "Late channel" }];
+    completion?.();
+    expect(modal.contentEl.childElementCount).toBe(0);
+  });
+
+  it("submits feed option saves once while the update is pending", async () => {
+    const pending = deferred<boolean>();
+    const plugin = makePlugin([
+      feed({ feedId: "rss", title: "RSS", url: "https://example.com/feed" }),
+    ]);
+    plugin.updateSubscription.mockImplementation(async () => await pending.promise);
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+    button(modal.contentEl, "编辑选项").click();
+    const editor = document.body.querySelector<HTMLElement>(
+      ".rss-subscription-options-modal",
+    )!;
+    const save = button(editor, "保存");
+
+    save.click();
+    save.click();
+
+    expect(plugin.updateSubscription).toHaveBeenCalledTimes(1);
+    expect(save.disabled).toBe(true);
+    pending.resolve(true);
+    await flushPromises();
+  });
+
+  it("defaults deletion to retaining collected content and requires a second confirmation to purge", async () => {
+    const plugin = makePlugin([
+      feed({
+        feedId: "x-account-openai",
+        title: "OpenAI",
+        url: "tikhub://x-account/openai",
+        sourceKind: "x-account",
+        sourceConfig: createXAccountSourceConfig({
+          id: "x-account-openai",
+          handle: "openai",
+        }),
+      }),
+    ]);
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+    let row = modal.contentEl.querySelector<HTMLElement>(
+      '.rss-subscription-row[data-source-id="x-account-openai"]',
+    )!;
+
+    button(row, "删除").click();
+    let confirmation = document.body.querySelector<HTMLElement>(
+      ".rss-subscription-delete-confirm",
+    )!;
+    expect(confirmation.textContent).toContain("保留已经采集的历史内容");
+    button(confirmation, "确认删除").click();
+    await flushPromises();
+    expect(plugin.removeSubscription).toHaveBeenCalledWith(
+      "x-account-openai",
+      { purgeCollection: false },
+    );
+
+    plugin.removeSubscription.mockClear();
+    row = modal.contentEl.querySelector<HTMLElement>(
+      '.rss-subscription-row[data-source-id="x-account-openai"]',
+    )!;
+    button(row, "删除").click();
+    confirmation = document.body.querySelector<HTMLElement>(
+      ".rss-subscription-delete-confirm",
+    )!;
+    const purge = confirmation.querySelector<HTMLInputElement>(
+      'input[type="checkbox"]',
+    )!;
+    purge.click();
+    button(confirmation, "确认删除").click();
+    expect(plugin.removeSubscription).not.toHaveBeenCalled();
+    const second = document.body.querySelector<HTMLElement>(
+      ".rss-subscription-purge-confirm",
+    )!;
+    expect(second.textContent).toContain("不可恢复");
+    button(second, "永久删除").click();
+    await flushPromises();
+    expect(plugin.removeSubscription).toHaveBeenCalledTimes(1);
+    const [sourceId, options] = plugin.removeSubscription.mock.calls[0];
+    expect(sourceId).toBe("x-account-openai");
+    expect(options.purgeCollection).toBe(true);
+    expect(options.confirmation.matches("x-account-openai")).toBe(true);
+  });
+
+  it("deletes all visible subscriptions through the same retention-safe service path", async () => {
+    const plugin = makePlugin([
+      feed({ feedId: "rss", title: "RSS", url: "https://example.com/feed" }),
+      feed({
+        feedId: "x-account-openai",
+        title: "OpenAI",
+        url: "tikhub://x-account/openai",
+        sourceKind: "x-account",
+        sourceConfig: createXAccountSourceConfig({
+          id: "x-account-openai",
+          handle: "openai",
+        }),
+      }),
+      feed({
+        feedId: "x-topic-ai",
+        title: "AI topic",
+        url: "tikhub://x-topic/ai",
+        sourceKind: "x-topic",
+        sourceConfig: createXTopicSourceConfig({ id: "x-topic-ai", name: "AI" }),
+      }),
+    ]);
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+
+    button(modal.contentEl, "删除全部订阅").click();
+    const confirmation = document.body.querySelector<HTMLElement>(
+      ".rss-subscription-delete-confirm",
+    )!;
+    expect(confirmation.textContent).toContain("2");
+    button(confirmation, "确认删除").click();
+    await flushPromises();
+
+    expect(plugin.removeSubscription.mock.calls).toEqual([
+      ["rss", { purgeCollection: false }],
+      ["x-account-openai", { purgeCollection: false }],
+    ]);
+  });
+
+  it("runs a delete-all batch only once while its first removal is pending", async () => {
+    const pending = deferred<boolean>();
+    const plugin = makePlugin([
+      feed({ feedId: "rss", title: "RSS", url: "https://example.com/feed" }),
+      feed({ feedId: "rss-2", title: "RSS 2", url: "https://example.com/feed2" }),
+    ]);
+    plugin.removeSubscription
+      .mockImplementationOnce(async () => await pending.promise)
+      .mockResolvedValue(true);
+    const modal = new FeedManagerModal(
+      plugin.app as unknown as obsidian.App,
+      plugin as unknown as RssDashboardPlugin,
+    );
+    modal.open();
+    button(modal.contentEl, "删除全部订阅").click();
+    const confirmation = document.body.querySelector<HTMLElement>(
+      ".rss-subscription-delete-confirm",
+    )!;
+    const confirm = button(confirmation, "确认删除");
+
+    confirm.click();
+    confirm.click();
+
+    expect(plugin.removeSubscription).toHaveBeenCalledTimes(1);
+    pending.resolve(true);
+    await flushPromises();
+    expect(plugin.removeSubscription).toHaveBeenCalledTimes(2);
   });
 });

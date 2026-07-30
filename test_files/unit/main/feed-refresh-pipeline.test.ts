@@ -14,6 +14,22 @@ import type { FeedSourceConfig } from "../../../src/sources/source-config";
 import { createTranslator } from "../../../src/i18n";
 import { XTopicRefreshError } from "../../../src/sources/tikhub/x-topic-adapter";
 import { createXPostCollectedItemId } from "../../../src/collection/item-identity";
+import {
+  SubscriptionService,
+  createConfirmedCollectionPurge,
+} from "../../../src/services/subscription-service";
+import {
+  OperationJournalService,
+  type OperationBeginInput,
+  type OperationJournalPort,
+  type OperationJournalScope,
+} from "../../../src/operation-journal/operation-journal-service";
+import type {
+  OperationDetails,
+  OperationErrorCode,
+  OperationEvent,
+  OperationStage,
+} from "../../../src/operation-journal/operation-event";
 
 let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
@@ -66,6 +82,31 @@ function createFeed(overrides: Partial<Feed> = {}): Feed {
   };
 }
 
+function createActiveXImportFeed(feedId: string): Feed {
+  return createFeed({
+    feedId,
+    sourceKind: "x-account",
+    sourceConfig: {
+      kind: "x-account",
+      id: feedId,
+      handle: "openai",
+      includeReplies: false,
+      includeReposts: false,
+      folder: "X",
+      topics: [],
+    },
+    url: "tikhub://x-account/openai",
+    initialImportPolicy: { mode: "all-available" },
+    initialImportProgress: {
+      status: "running",
+      pagesFetched: 1,
+      itemsImported: 1,
+      phase: "posts",
+      nextCursor: "next-page",
+    },
+  });
+}
+
 interface TestFeedParser {
   refreshFeed: ReturnType<typeof vi.fn>;
   refreshAllFeeds: ReturnType<typeof vi.fn>;
@@ -88,19 +129,71 @@ interface TestPlugin {
   saveData: ReturnType<typeof vi.fn>;
   feedParser: TestFeedParser;
   refreshFeeds: (selectedFeeds?: Feed[]) => Promise<void>;
-  refreshFeedsWithinSession: (selectedFeeds?: Feed[]) => Promise<void>;
+  runRefresh: (invocation: {
+    trigger: "manual" | "startup" | "schedule";
+    action: "all" | "failed" | "source" | "folder";
+    feeds?: readonly Feed[];
+  }) => Promise<void>;
   activeRefreshState: Map<string, unknown>;
   getActiveDashboardView: ReturnType<typeof vi.fn>;
   validateSavedArticles: ReturnType<typeof vi.fn>;
   getSourceRefreshLedger: ReturnType<typeof vi.fn>;
   getCollectionService: ReturnType<typeof vi.fn>;
   refreshFailedSources: () => Promise<void>;
+  manualRefreshFailedSources: () => Promise<void>;
   refreshSelectedFeed: (feed: Feed) => Promise<void>;
   manualRefreshAllSources: () => Promise<void>;
   manualRefreshSourceById: (sourceId: string) => Promise<void>;
   refreshOnOpenIfNeeded: () => Promise<void>;
+  refreshFeedsInFolder: (folderPath: string) => Promise<void>;
+  getOperationJournalPort: () => OperationJournalPort | undefined;
   saveSettings: (options?: { forceAllShards?: boolean; forceMetadata?: boolean }) => Promise<void>;
   createSourceRegistryForRun: () => SourceRegistry;
+  getSubscriptionService: () => import("../../../src/services/subscription-service").SubscriptionService;
+}
+
+type RecordedRefreshEvent =
+  | { status: "started"; input: OperationBeginInput }
+  | {
+      status: "progress" | "succeeded";
+      stage: OperationStage;
+      details: OperationDetails;
+    }
+  | {
+      status: "failed";
+      stage: OperationStage;
+      errorCode: OperationErrorCode;
+      details?: OperationDetails;
+    }
+  | { status: "aborted"; stage: OperationStage };
+
+function recordRefreshJournal(plugin: TestPlugin): RecordedRefreshEvent[] {
+  const events: RecordedRefreshEvent[] = [];
+  const begin = (input: OperationBeginInput): OperationJournalScope => {
+    events.push({ status: "started", input });
+    return {
+      operationId: `refresh-${events.length}`,
+      progress: async (stage, details) => {
+        events.push({ status: "progress", stage, details });
+      },
+      succeed: async (stage, details) => {
+        events.push({ status: "succeeded", stage, details });
+      },
+      fail: async (stage, errorCode, details) => {
+        events.push({ status: "failed", stage, errorCode, details });
+      },
+      abort: async (stage) => {
+        events.push({ status: "aborted", stage });
+      },
+    };
+  };
+  plugin.getOperationJournalPort = () => ({
+    begin,
+    attach: () => {
+      throw new Error("refresh tests never attach journal scopes");
+    },
+  });
+  return events;
 }
 
 function createPluginWithSettings(feeds: Feed[]): TestPlugin {
@@ -131,6 +224,16 @@ function createPluginWithSettings(feeds: Feed[]): TestPlugin {
   testPlugin.getCollectionService = vi.fn(() => ({
     collectFeedRefresh: vi.fn().mockResolvedValue([]),
   }));
+  (
+    testPlugin as unknown as {
+      persistSubscriptionSettingsCandidate(
+        candidate: unknown,
+        publish: () => void,
+      ): Promise<void>;
+    }
+  ).persistSubscriptionSettingsCandidate = async (_candidate, publish) => {
+    publish();
+  };
 
   return testPlugin;
 }
@@ -160,6 +263,708 @@ beforeEach(() => {
 });
 
 describe("refreshFeeds() pipeline behavior", () => {
+  it("reconciles a delayed startup snapshot before ledger or provider work", async () => {
+    vi.useFakeTimers();
+    const source = createFeed({ feedId: "deleted-during-startup-delay" });
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.refreshMode = "daily-on-open";
+    plugin.settings.startupRefreshDelaySeconds = 15;
+    const ledger = {
+      getDueSourceIds: vi.fn().mockResolvedValue([source.feedId]),
+      recordAttempt: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+    };
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+
+    await plugin.refreshOnOpenIfNeeded();
+    plugin.settings.feeds = [];
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushMicrotasks();
+
+    expect(ledger.recordAttempt).not.toHaveBeenCalled();
+    expect(plugin.feedParser.refreshFeed).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(
+      getNoticeMessages(consoleLogSpy).some((message) =>
+        message.includes("deleted-during-startup-delay")
+      ),
+    ).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("keeps legacy refreshFeeds singleton selection bulk-classified and excluded", async () => {
+    const excluded = createFeed({
+      feedId: "legacy-selected-excluded",
+      excludeFromRefresh: true,
+    });
+    const plugin = createPluginWithSettings([excluded]);
+    const events = recordRefreshJournal(plugin);
+
+    await plugin.refreshFeeds([excluded]);
+
+    expect(events[0]).toMatchObject({
+      status: "started",
+      input: { trigger: "manual", action: "all", subject: {} },
+    });
+    expect(events.at(-1)).toMatchObject({
+      status: "succeeded",
+      details: { total: 0, succeeded: 0, failed: 0, newItems: 0 },
+    });
+    expect(plugin.feedParser.refreshFeed).not.toHaveBeenCalled();
+  });
+
+  it("journals every user refresh entry as an explicit manual action", async () => {
+    const sourceA = createFeed({
+      feedId: "source-a",
+      title: "Source A",
+      folder: "News/Tech",
+      url: [
+        "https://",
+        "secret.example/a.xml",
+        "?to",
+        "ken=never-log",
+      ].join(""),
+    });
+    const sourceB = createFeed({
+      feedId: "source-b",
+      title: "Source B",
+      folder: "Other",
+      url: "https://example.com/b.xml",
+    });
+    const plugin = createPluginWithSettings([sourceA, sourceB]);
+    const events = recordRefreshJournal(plugin);
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (refresh: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (feed) => ({
+        ...feed,
+        lastUpdated: feed.lastUpdated + 1,
+      }));
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue(["source-b"]),
+      recordAttempt: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    await plugin.manualRefreshAllSources();
+    await plugin.manualRefreshFailedSources();
+    await plugin.manualRefreshSourceById("source-a");
+    await plugin.refreshFeedsInFolder("News");
+
+    const starts = events.filter(
+      (event): event is Extract<RecordedRefreshEvent, { status: "started" }> =>
+        event.status === "started",
+    );
+    expect(starts.map(({ input }) => [input.trigger, input.action])).toEqual([
+      ["manual", "all"],
+      ["manual", "failed"],
+      ["manual", "source"],
+      ["manual", "folder"],
+    ]);
+    expect(starts[2].input.subject).toEqual({
+      sourceId: "source-a",
+      label: "Source A",
+    });
+    expect(JSON.stringify(starts)).not.toContain("secret.example");
+    expect(JSON.stringify(starts)).not.toContain("never-log");
+    expect(starts[3].input.subject).toEqual({});
+  });
+
+  it("aggregates closed outcomes and counts only stable-identity additions", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-30T10:00:00.000Z"));
+    const unchanged = createItem({
+      guid: "same-guid",
+      link: "https://example.com/same?utm_source=old",
+    });
+    const sourceA = createFeed({
+      feedId: "source-a",
+      items: [unchanged],
+      url: "https://example.com/a.xml",
+    });
+    const sourceB = createFeed({
+      feedId: "source-b",
+      title: "Source B",
+      url: "https://example.com/b.xml",
+    });
+    const plugin = createPluginWithSettings([sourceA, sourceB]);
+    const events = recordRefreshJournal(plugin);
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (refresh: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (feed) => {
+        if (feed.feedId === "source-b") {
+          throw new Error([
+            "raw response https://",
+            "private.example/body",
+            "?to",
+            "ken=secret",
+          ].join(""));
+        }
+        return {
+          ...feed,
+          items: [
+            { ...unchanged, link: "https://example.com/same?utm_source=new" },
+            createItem({
+              guid: "new-guid",
+              link: "https://example.com/new",
+              feedUrl: feed.url,
+            }),
+          ],
+          lastUpdated: 2,
+        };
+      });
+
+    const refresh = plugin.manualRefreshAllSources();
+    await vi.advanceTimersByTimeAsync(25);
+    await refresh;
+
+    const terminal = events.at(-1);
+    expect(terminal).toMatchObject({
+      status: "failed",
+      stage: "completed",
+      errorCode: "refresh-failed",
+      details: {
+        total: 2,
+        succeeded: 1,
+        failed: 1,
+        newItems: 1,
+        elapsedMs: expect.any(Number),
+      },
+    });
+    vi.useRealTimers();
+  });
+
+  it("uses only safe source identity and a standard code for single-source failure", async () => {
+    const source = createFeed({
+      feedId: "safe-source-id",
+      title: "Safe source name",
+      url: [
+        "https://",
+        "private.example/feed.xml",
+        "?api_",
+        "key=secret",
+      ].join(""),
+    });
+    const plugin = createPluginWithSettings([source]);
+    const events = recordRefreshJournal(plugin);
+    plugin.feedParser.refreshFeed.mockRejectedValue(
+      new Error(["Author", "ization: Bearer raw-secret response-body"].join("")),
+    );
+
+    await plugin.manualRefreshSourceById("safe-source-id");
+
+    expect(events[0]).toMatchObject({
+      status: "started",
+      input: {
+        trigger: "manual",
+        action: "source",
+        subject: { sourceId: "safe-source-id", label: "Safe source name" },
+      },
+    });
+    expect(events.at(-1)).toMatchObject({
+      status: "failed",
+      stage: "completed",
+      errorCode: "source-refresh-failed",
+    });
+    const rendered = JSON.stringify(events);
+    expect(rendered).not.toContain("private.example");
+    expect(rendered).not.toContain("raw-secret");
+    expect(rendered).not.toContain("response-body");
+  });
+
+  it("keeps a real journal invocation when an unsafe source title is projected out", async () => {
+    const source = createFeed({
+      feedId: "safe-source-id",
+      title: "www.private.example sk-123456789 ghp_abcdefghijklmnopqrstuvwxyz1234567890 feeds/credentials/token/source",
+    });
+    const plugin = createPluginWithSettings([source]);
+    plugin.feedParser.refreshFeed.mockResolvedValue({ ...source, lastUpdated: 2 });
+    const appended: OperationEvent[] = [];
+    let nextId = 1;
+    const service = new OperationJournalService(
+      {
+        append: async (event) => {
+          appended.push(event);
+          return { maintenanceIncomplete: false };
+        },
+        readRange: async () => ({
+          events: [],
+          incompleteDates: [],
+          corruptDates: [],
+          truncated: false,
+        }),
+        stats: async () => ({ bytes: 0, days: 0, eventCount: 0 }),
+        prune: async () => undefined,
+        clear: async () => undefined,
+      },
+      {
+        createId: () =>
+          `10000000-0000-4000-8000-${String(nextId++).padStart(12, "0")}`,
+        clock: () => new Date("2026-07-30T10:00:00.000Z"),
+      },
+    );
+    plugin.getOperationJournalPort = () => service;
+
+    await plugin.manualRefreshSourceById(source.feedId!);
+    await flushMicrotasks();
+
+    expect(appended[0]).toMatchObject({
+      category: "refresh",
+      action: "source",
+      trigger: "manual",
+      status: "started",
+      subject: { sourceId: "safe-source-id" },
+    });
+    expect(appended[0]?.subject).not.toHaveProperty("label");
+  });
+
+  it("does not execute an own feedId getter before explicit refresh journaling", async () => {
+    let getterRuns = 0;
+    const source = createFeed({
+      feedId: "replaced-by-hostile-getter",
+      title: "Safe own title",
+      subscriptionStatus: "paused",
+    });
+    Object.defineProperty(source, "feedId", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        getterRuns += 1;
+        throw new Error("must not run");
+      },
+    });
+    const plugin = createPluginWithSettings([source]);
+    const events = recordRefreshJournal(plugin);
+
+    await expect(plugin.refreshSelectedFeed(source)).resolves.toBeUndefined();
+
+    expect(getterRuns).toBe(0);
+    expect(events[0]).toMatchObject({
+      status: "started",
+      input: {
+        trigger: "manual",
+        action: "source",
+        subject: { label: "Safe own title" },
+      },
+    });
+    expect(
+      (events[0] as Extract<RecordedRefreshEvent, { status: "started" }>).input
+        .subject,
+    ).not.toHaveProperty("sourceId");
+  });
+
+  it("does not execute an inherited title getter before explicit refresh journaling", async () => {
+    let getterRuns = 0;
+    const source = createFeed({
+      feedId: "safe-own-source-id",
+      subscriptionStatus: "paused",
+    });
+    Reflect.deleteProperty(source, "title");
+    const hostilePrototype = {};
+    Object.defineProperty(hostilePrototype, "title", {
+      enumerable: true,
+      get() {
+        getterRuns += 1;
+        throw new Error("must not run");
+      },
+    });
+    Object.setPrototypeOf(source, hostilePrototype);
+    const plugin = createPluginWithSettings([source]);
+    const events = recordRefreshJournal(plugin);
+
+    await expect(plugin.refreshSelectedFeed(source)).resolves.toBeUndefined();
+
+    expect(getterRuns).toBe(0);
+    expect(events[0]).toMatchObject({
+      status: "started",
+      input: {
+        trigger: "manual",
+        action: "source",
+        subject: { sourceId: "safe-own-source-id" },
+      },
+    });
+    expect(
+      (events[0] as Extract<RecordedRefreshEvent, { status: "started" }>).input
+        .subject,
+    ).not.toHaveProperty("label");
+  });
+
+  it.each(["attempt", "success"] as const)(
+    "journals a dedicated refresh-state error when ledger %s persistence fails",
+    async (failure) => {
+      const source = createFeed({ feedId: `ledger-${failure}` });
+      const plugin = createPluginWithSettings([source]);
+      const events = recordRefreshJournal(plugin);
+      plugin.settings.collection = { ...plugin.settings.collection, enabled: false };
+      plugin.feedParser.refreshFeed.mockResolvedValue({ ...source, lastUpdated: 2 });
+      const ledger = {
+        getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+        recordAttempt: failure === "attempt"
+          ? vi.fn().mockRejectedValue(new Error("attempt state failed"))
+          : vi.fn().mockResolvedValue(undefined),
+        recordSuccess: failure === "success"
+          ? vi.fn().mockRejectedValue(new Error("success state failed"))
+          : vi.fn().mockResolvedValue(undefined),
+        recordError: vi.fn().mockResolvedValue(undefined),
+      };
+      plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+
+      await plugin.manualRefreshSourceById(source.feedId!);
+
+      expect(events.at(-1)).toMatchObject({
+        status: "failed",
+        stage: "completed",
+        errorCode: "refresh-state-failed",
+        details: {
+          total: 1,
+          succeeded: 0,
+          failed: 1,
+          newItems: 0,
+          elapsedMs: expect.any(Number),
+        },
+      });
+    },
+  );
+
+  it("closes empty, excluded, and occupied invocations without extra refresh work", async () => {
+    const emptyPlugin = createPluginWithSettings([]);
+    const emptyEvents = recordRefreshJournal(emptyPlugin);
+    await emptyPlugin.manualRefreshAllSources();
+    expect(emptyEvents).toHaveLength(2);
+    expect(emptyEvents.at(-1)).toMatchObject({
+      status: "succeeded",
+      details: { total: 0, succeeded: 0, failed: 0, newItems: 0 },
+    });
+
+    const excluded = createFeed({
+      feedId: "excluded",
+      excludeFromRefresh: true,
+    });
+    const excludedPlugin = createPluginWithSettings([excluded]);
+    const excludedEvents = recordRefreshJournal(excludedPlugin);
+    await excludedPlugin.manualRefreshAllSources();
+    expect(excludedEvents).toHaveLength(2);
+    expect(excludedEvents.at(-1)).toMatchObject({
+      status: "succeeded",
+      details: { total: 0, succeeded: 0, failed: 0, newItems: 0 },
+    });
+    expect(excludedPlugin.feedParser.refreshFeed).not.toHaveBeenCalled();
+
+    const source = createFeed({ feedId: "occupied" });
+    const occupiedPlugin = createPluginWithSettings([source]);
+    const occupiedEvents = recordRefreshJournal(occupiedPlugin);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (occupiedPlugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (refresh: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (feed) => {
+        await blocked;
+        return { ...feed, lastUpdated: 2 };
+      });
+    const first = occupiedPlugin.manualRefreshAllSources();
+    await flushMicrotasks();
+    await occupiedPlugin.manualRefreshAllSources();
+
+    expect(occupiedPlugin.feedParser.refreshFeed).toHaveBeenCalledOnce();
+    expect(occupiedEvents).toHaveLength(3);
+    expect(occupiedEvents[1]).toMatchObject({
+      status: "started",
+      input: { trigger: "manual", action: "all" },
+    });
+    expect(occupiedEvents[2]).toMatchObject({
+      status: "failed",
+      stage: "completed",
+      errorCode: "refresh-failed",
+      details: { total: 0, succeeded: 0, failed: 0, newItems: 0 },
+    });
+    expect(getNoticeMessages(consoleLogSpy)).toContain(
+      "已有多来源刷新正在进行。",
+    );
+
+    occupiedPlugin.getOperationJournalPort = () => {
+      throw new Error("journal unavailable");
+    };
+    await occupiedPlugin.manualRefreshAllSources();
+    expect(occupiedPlugin.feedParser.refreshFeed).toHaveBeenCalledOnce();
+    expect(
+      getNoticeMessages(consoleLogSpy).filter(
+        (message) => message === "已有多来源刷新正在进行。",
+      ),
+    ).toHaveLength(2);
+    expect(occupiedEvents).toHaveLength(3);
+
+    release();
+    await first;
+    expect(occupiedEvents).toHaveLength(4);
+  });
+
+  it("distinguishes collection, settings, deletion, and stop terminal outcomes", async () => {
+    const collectionSource = createFeed({ feedId: "collection-failure" });
+    const collectionPlugin = createPluginWithSettings([collectionSource]);
+    const collectionEvents = recordRefreshJournal(collectionPlugin);
+    collectionPlugin.feedParser.refreshFeed.mockResolvedValue({
+      ...collectionSource,
+      lastUpdated: 2,
+    });
+    collectionPlugin.getCollectionService = vi.fn(() => ({
+      collectFeedRefresh: vi.fn().mockRejectedValue(new Error("disk path secret")),
+    }));
+    await collectionPlugin.manualRefreshSourceById("collection-failure");
+    expect(collectionEvents.at(-1)).toMatchObject({
+      status: "failed",
+      errorCode: "cache-save-failed",
+    });
+
+    const settingsSource = createFeed({ feedId: "settings-failure" });
+    const settingsPlugin = createPluginWithSettings([settingsSource]);
+    const settingsEvents = recordRefreshJournal(settingsPlugin);
+    settingsPlugin.feedParser.refreshFeed.mockResolvedValue({
+      ...settingsSource,
+      lastUpdated: 2,
+    });
+    vi.spyOn(
+      settingsPlugin as unknown as { saveSettingsUnlocked(): Promise<void> },
+      "saveSettingsUnlocked",
+    ).mockRejectedValue(new Error("settings write failed"));
+    await settingsPlugin.manualRefreshSourceById("settings-failure");
+    expect(settingsEvents.at(-1)).toMatchObject({
+      status: "failed",
+      errorCode: "settings-save-failed",
+    });
+
+    for (const terminalState of ["deleted", "stopped"] as const) {
+      const source = createFeed({
+        feedId: `source-${terminalState}`,
+        sourceKind: terminalState === "stopped" ? "x-account" : "feed",
+        sourceConfig: terminalState === "stopped"
+          ? {
+              kind: "x-account",
+              id: "source-stopped",
+              handle: "openai",
+              includeReplies: false,
+              includeReposts: false,
+              folder: "X",
+              topics: [],
+            }
+          : { kind: "feed" },
+        initialImportProgress: terminalState === "stopped"
+          ? { status: "running", pagesFetched: 1, itemsImported: 1 }
+          : undefined,
+        url: terminalState === "stopped"
+          ? "tikhub://x-account/openai"
+          : "https://example.com/deleted.xml",
+      });
+      const plugin = createPluginWithSettings([source]);
+      const events = recordRefreshJournal(plugin);
+      if (terminalState === "stopped") {
+        plugin.settings.tikhub = {
+          ...plugin.settings.tikhub,
+          enabled: true,
+          connectionId: "11111111-1111-4111-8111-111111111111",
+        };
+      }
+      let release!: () => void;
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      plugin.createSourceRegistryForRun = vi.fn(() => ({
+        refresh: vi.fn(async () => {
+          markStarted();
+          await blocked;
+          return {
+            feed: { ...source, lastUpdated: 3 },
+            items: source.items,
+            collectionItems: [],
+            providerRequestCount: 0,
+            warnings: [],
+          };
+        }),
+      }) as unknown as SourceRegistry);
+      const refresh = plugin.manualRefreshSourceById(source.feedId!);
+      await started;
+      if (terminalState === "deleted") {
+        plugin.settings.feeds = [];
+      } else {
+        plugin.settings.feeds[0].initialImportProgress = {
+          status: "stopped",
+          pagesFetched: 1,
+          itemsImported: 1,
+        };
+      }
+      release();
+      await refresh;
+      expect(events.at(-2)).toMatchObject({
+        status: "progress",
+        stage: "completed",
+        details: {
+          total: 1,
+          succeeded: 0,
+          failed: 0,
+          newItems: 0,
+          elapsedMs: expect.any(Number),
+        },
+      });
+      expect(events.at(-1)).toMatchObject({
+        status: "aborted",
+        stage: "completed",
+      });
+    }
+  });
+
+  it("records complete batch facts before a mixed success and abort terminal", async () => {
+    const completed = createFeed({ feedId: "completed-source", items: [] });
+    const removed = createFeed({ feedId: "removed-source", items: [] });
+    const plugin = createPluginWithSettings([completed, removed]);
+    const events = recordRefreshJournal(plugin);
+    let releaseRemoved!: () => void;
+    let markRemovedStarted!: () => void;
+    const removedStarted = new Promise<void>((resolve) => {
+      markRemovedStarted = resolve;
+    });
+    const removedBlocked = new Promise<void>((resolve) => {
+      releaseRemoved = resolve;
+    });
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (refresh: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (feed) => {
+      if (feed.feedId === "removed-source") {
+        markRemovedStarted();
+        await removedBlocked;
+      }
+      return {
+        ...feed,
+        items: feed.feedId === "completed-source"
+          ? [createItem({ guid: "new-completed-item", feedUrl: feed.url })]
+          : [],
+        lastUpdated: 2,
+      };
+    });
+
+    const refresh = plugin.manualRefreshAllSources();
+    await removedStarted;
+    plugin.settings.feeds = [completed];
+    releaseRemoved();
+    await refresh;
+
+    expect(events.at(-2)).toMatchObject({
+      status: "progress",
+      stage: "completed",
+      details: {
+        total: 2,
+        succeeded: 1,
+        failed: 0,
+        newItems: 1,
+        elapsedMs: expect.any(Number),
+      },
+    });
+    expect(events.at(-1)).toMatchObject({
+      status: "aborted",
+      stage: "completed",
+    });
+  });
+
+  it.each(["validation", "view"] as const)(
+    "keeps published success counts when post-publication %s fails",
+    async (failure) => {
+      const source = createFeed({ feedId: `post-publish-${failure}`, items: [] });
+      const plugin = createPluginWithSettings([source]);
+      const events = recordRefreshJournal(plugin);
+      plugin.feedParser.refreshFeed.mockResolvedValue({
+        ...source,
+        items: [createItem({ guid: `published-${failure}`, feedUrl: source.url })],
+        lastUpdated: 42,
+      });
+      if (failure === "validation") {
+        plugin.validateSavedArticles.mockRejectedValue(
+          new Error("validation observer failed"),
+        );
+      } else {
+        vi.spyOn(
+          plugin as unknown as RssDashboardPlugin,
+          "refreshDashboardViews",
+        ).mockRejectedValue(new Error("view observer failed"));
+      }
+
+      await plugin.manualRefreshSourceById(source.feedId!);
+
+      expect(plugin.settings.feeds[0].lastUpdated).toBe(42);
+      expect(events.at(-1)).toMatchObject({
+        status: "succeeded",
+        stage: "completed",
+        details: {
+          total: 1,
+          succeeded: 1,
+          failed: 0,
+          newItems: 1,
+          elapsedMs: expect.any(Number),
+        },
+      });
+    },
+  );
+
+  it.each(["getter-throws", "begin-throws", "invalid-scope", "terminal-rejects"] as const)(
+    "keeps refresh behavior unchanged when the journal %s",
+    async (failureMode) => {
+      const source = createFeed({ feedId: `journal-${failureMode}` });
+      const plugin = createPluginWithSettings([source]);
+      const refreshed = { ...source, lastUpdated: 42 };
+      plugin.feedParser.refreshFeed.mockResolvedValue(refreshed);
+      const ledger = {
+        getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+        recordAttempt: vi.fn().mockResolvedValue(undefined),
+        recordError: vi.fn().mockResolvedValue(undefined),
+      };
+      const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+      plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+      plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+      const refreshViews = vi.spyOn(
+        plugin as unknown as RssDashboardPlugin,
+        "refreshDashboardViews",
+      ).mockResolvedValue(undefined);
+      const rejected = Promise.reject(new Error("journal rejected"));
+      void rejected.catch(() => undefined);
+      plugin.getOperationJournalPort = () => {
+        if (failureMode === "getter-throws") throw new Error("journal getter");
+        return {
+          begin: () => {
+            if (failureMode === "begin-throws") throw new Error("journal begin");
+            if (failureMode === "invalid-scope") return {} as OperationJournalScope;
+            return {
+              operationId: "refresh-test",
+              progress: async () => undefined,
+              succeed: () => rejected,
+              fail: () => rejected,
+              abort: () => rejected,
+            };
+          },
+          attach: () => {
+            throw new Error("unused");
+          },
+        };
+      };
+
+      await expect(
+        plugin.manualRefreshSourceById(source.feedId!),
+      ).resolves.toBeUndefined();
+
+      expect(plugin.feedParser.refreshFeed).toHaveBeenCalledOnce();
+      expect(ledger.recordAttempt).toHaveBeenCalledOnce();
+      expect(collectFeedRefresh).toHaveBeenCalledOnce();
+      expect(plugin.settings.feeds[0].lastUpdated).toBe(42);
+      expect(await plugin.app.vault.adapter.exists("data.json")).toBe(true);
+      expect(refreshViews).toHaveBeenCalledOnce();
+      expect(getNoticeMessages(consoleLogSpy)).toContain("已刷新：Feed A");
+    },
+  );
+
   it("reports the exact enabled-X request estimate and caps before any provider call", async () => {
     const account = createFeed({
       feedId: "x-account-openai",
@@ -577,15 +1382,16 @@ describe("refreshFeeds() pipeline behavior", () => {
         "ai-apps",
       ]),
     }));
-    plugin.refreshFeedsWithinSession = vi.fn().mockResolvedValue(undefined);
+    plugin.runRefresh = vi.fn().mockResolvedValue(undefined);
 
     await plugin.refreshOnOpenIfNeeded();
     await flushMicrotasks();
 
-    expect(plugin.refreshFeedsWithinSession).toHaveBeenCalledWith([
-      account,
-      topic,
-    ]);
+    expect(plugin.runRefresh).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [account, topic],
+    });
   });
 
   it("contains a missing TikHub key to the X source while RSS completes", async () => {
@@ -680,6 +1486,7 @@ describe("refreshFeeds() pipeline behavior", () => {
     plugin.settings.startupRefreshDelaySeconds = 0;
 
     const startup = plugin.refreshOnOpenIfNeeded();
+    await flushMicrotasks();
     expect(plugin.isMultiFeedRefreshActive).toBe(true);
     const single = plugin.manualRefreshSourceById("x-account-openai");
     const all = plugin.manualRefreshAllSources();
@@ -843,6 +1650,69 @@ describe("refreshFeeds() pipeline behavior", () => {
       fetchedAt: expect.any(Date),
     });
     expect(ledger.recordError).not.toHaveBeenCalled();
+  });
+
+  it("collects the complete X import batch while retaining the adapter cache snapshot", async () => {
+    const config = {
+      kind: "x-account" as const,
+      id: "x-account-openai",
+      handle: "openai",
+      includeReplies: false,
+      includeReposts: false,
+      folder: "X",
+      topics: [],
+    };
+    const source = createFeed({
+      feedId: config.id,
+      sourceKind: config.kind,
+      sourceConfig: config,
+      title: "@openai",
+      url: "tikhub://x-account/openai",
+      items: [createItem({ guid: "old", feedUrl: "tikhub://x-account/openai" })],
+    });
+    const completeBatch = ["3", "2", "1"].map((guid) => createItem({
+      guid,
+      link: `https://x.com/openai/status/${guid}`,
+      feedTitle: "@openai",
+      feedUrl: source.url,
+    }));
+    const retained = { ...source, items: [completeBatch[0]], lastUpdated: 2 };
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = { ...plugin.settings.tikhub, enabled: true };
+    const refresh = vi.fn(async (_config: FeedSourceConfig, context: { feed?: Feed }) => {
+      expect(context.feed).toEqual({
+        ...source,
+        items: source.items.map((item) => ({
+          ...item,
+          rssDashboardSourceId: source.feedId,
+        })),
+      });
+      expect(context.feed).not.toBe(source);
+      expect(source.items[0].rssDashboardSourceId).toBeUndefined();
+      return {
+        feed: retained,
+        items: retained.items,
+        collectionItems: completeBatch,
+        providerRequestCount: 2,
+        warnings: [],
+      };
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({ refresh }) as unknown as SourceRegistry);
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+
+    await plugin.refreshFeeds([source]);
+
+    expect(collectFeedRefresh).toHaveBeenCalledWith({
+      feed: retained,
+      previousItems: source.items.map((item) => ({
+        ...item,
+        rssDashboardSourceId: source.feedId,
+      })),
+      refreshedItems: completeBatch,
+      fetchedAt: expect.any(Date),
+    });
+    expect(plugin.settings.feeds[0].items.map((entry) => entry.guid)).toEqual(["3"]);
   });
 
   it("records parser errors without touching collection persistence", async () => {
@@ -1342,6 +2212,383 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(notices).toContain("已刷新：Feed B");
   });
 
+  it("publishes a completed single-source refresh only after an earlier subscription candidate commits", async () => {
+    const source = createActiveXImportFeed("x-serialized-single");
+    const originalItem = source.items[0];
+    const refreshedItem = createItem({
+      guid: "refreshed-single",
+      feedUrl: source.url,
+      feedTitle: source.title,
+    });
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let markCandidateStarted!: () => void;
+    let releaseCandidate!: () => void;
+    const candidateStarted = new Promise<void>((resolve) => {
+      markCandidateStarted = resolve;
+    });
+    const candidateBlocked = new Promise<void>((resolve) => {
+      releaseCandidate = resolve;
+    });
+    (
+      plugin as unknown as {
+        persistSubscriptionSettingsCandidate(
+          candidate: unknown,
+          publish: () => void,
+        ): Promise<void>;
+      }
+    ).persistSubscriptionSettingsCandidate = vi.fn(async (_candidate, publish) => {
+      markCandidateStarted();
+      await candidateBlocked;
+      publish();
+    });
+    let markNetworkReturned!: () => void;
+    const networkReturned = new Promise<void>((resolve) => {
+      markNetworkReturned = resolve;
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: vi.fn(async () => {
+        markNetworkReturned();
+        return {
+          feed: {
+            ...source,
+            items: [originalItem, refreshedItem],
+            lastUpdated: 777,
+            initialImportProgress: {
+              status: "completed",
+              pagesFetched: 2,
+              itemsImported: 2,
+            },
+          },
+          items: [originalItem, refreshedItem],
+          collectionItems: [refreshedItem],
+          providerRequestCount: 1,
+          warnings: [],
+        };
+      }),
+    }) as unknown as SourceRegistry);
+    const saveUnlocked = vi.spyOn(
+      plugin as unknown as {
+        saveSettingsUnlocked(options?: unknown): Promise<void>;
+      },
+      "saveSettingsUnlocked",
+    );
+
+    const subscriptionMutation = plugin
+      .getSubscriptionService()
+      .setPaused(source.feedId!, false);
+    await candidateStarted;
+    const refresh = plugin.refreshSelectedFeed(source);
+    await networkReturned;
+    await flushMicrotasks();
+
+    expect(plugin.settings.feeds[0].items).toEqual([originalItem]);
+    expect(plugin.settings.feeds[0].lastUpdated).toBe(1);
+    expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("running");
+    expect(saveUnlocked).not.toHaveBeenCalled();
+
+    releaseCandidate();
+    await subscriptionMutation;
+    await refresh;
+
+    expect(plugin.settings.feeds[0].items.map((item) => item.guid)).toEqual([
+      "guid-1",
+      "refreshed-single",
+    ]);
+    expect(plugin.settings.feeds[0].lastUpdated).toBe(777);
+    expect(plugin.settings.feeds[0].initialImportProgress).toEqual({
+      status: "completed",
+      pagesFetched: 2,
+      itemsImported: 2,
+    });
+    expect(plugin.settings.lastRefreshTimestamp).toBeGreaterThan(0);
+    expect(saveUnlocked).toHaveBeenCalledOnce();
+  });
+
+  it("publishes a completed batch once after an earlier subscription candidate commits", async () => {
+    const sourceA = createFeed({
+      feedId: "serialized-batch-a",
+      url: "https://example.com/serialized-a.xml",
+      lastUpdated: 10,
+    });
+    const sourceB = createFeed({
+      feedId: "serialized-batch-b",
+      title: "Feed B",
+      url: "https://example.com/serialized-b.xml",
+      lastUpdated: 20,
+      items: [
+        createItem({
+          guid: "batch-b-old",
+          feedTitle: "Feed B",
+          feedUrl: "https://example.com/serialized-b.xml",
+        }),
+      ],
+    });
+    const plugin = createPluginWithSettings([sourceA, sourceB]);
+    let markCandidateStarted!: () => void;
+    let releaseCandidate!: () => void;
+    const candidateStarted = new Promise<void>((resolve) => {
+      markCandidateStarted = resolve;
+    });
+    const candidateBlocked = new Promise<void>((resolve) => {
+      releaseCandidate = resolve;
+    });
+    (
+      plugin as unknown as {
+        persistSubscriptionSettingsCandidate(
+          candidate: unknown,
+          publish: () => void,
+        ): Promise<void>;
+      }
+    ).persistSubscriptionSettingsCandidate = vi.fn(async (_candidate, publish) => {
+      markCandidateStarted();
+      await candidateBlocked;
+      publish();
+    });
+    let returnedCount = 0;
+    let markBothReturned!: () => void;
+    const bothReturned = new Promise<void>((resolve) => {
+      markBothReturned = resolve;
+    });
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (operation: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (feed: Feed) => {
+      returnedCount += 1;
+      if (returnedCount === 2) markBothReturned();
+      return {
+        ...feed,
+        lastUpdated: feed.feedId === sourceA.feedId ? 110 : 220,
+        items: [
+          ...feed.items,
+          createItem({
+            guid: `${feed.feedId}-new`,
+            feedTitle: feed.title,
+            feedUrl: feed.url,
+          }),
+        ],
+      };
+    });
+    const saveUnlocked = vi.spyOn(
+      plugin as unknown as {
+        saveSettingsUnlocked(options?: unknown): Promise<void>;
+      },
+      "saveSettingsUnlocked",
+    );
+
+    const subscriptionMutation = plugin
+      .getSubscriptionService()
+      .setPaused(sourceA.feedId!, false);
+    await candidateStarted;
+    const refresh = plugin.refreshFeeds();
+    await bothReturned;
+    await flushMicrotasks();
+
+    expect(plugin.settings.feeds.map((feed) => feed.lastUpdated)).toEqual([10, 20]);
+    expect(plugin.settings.feeds.map((feed) => feed.items.length)).toEqual([1, 1]);
+    expect(saveUnlocked).not.toHaveBeenCalled();
+
+    releaseCandidate();
+    await subscriptionMutation;
+    await refresh;
+
+    expect(plugin.settings.feeds.map((feed) => feed.lastUpdated)).toEqual([
+      110,
+      220,
+    ]);
+    expect(plugin.settings.feeds.map((feed) => feed.items.length)).toEqual([2, 2]);
+    expect(saveUnlocked).toHaveBeenCalledOnce();
+  });
+
+  it("lets a later subscription mutation retain history from a refresh publication that owns the queue first", async () => {
+    const source = createFeed({
+      feedId: "refresh-first",
+      url: "https://example.com/refresh-first.xml",
+    });
+    const plugin = createPluginWithSettings([source]);
+    const refreshedItem = createItem({
+      guid: "refresh-first-new",
+      feedUrl: source.url,
+    });
+    plugin.feedParser.refreshFeed.mockResolvedValue({
+      ...source,
+      items: [...source.items, refreshedItem],
+      lastUpdated: 909,
+    });
+    const internals = plugin as unknown as {
+      saveSettingsUnlocked(options?: unknown): Promise<void>;
+    };
+    const originalSaveUnlocked = internals.saveSettingsUnlocked.bind(plugin);
+    let markRefreshSaveStarted!: () => void;
+    let releaseRefreshSave!: () => void;
+    const refreshSaveStarted = new Promise<void>((resolve) => {
+      markRefreshSaveStarted = resolve;
+    });
+    const refreshSaveBlocked = new Promise<void>((resolve) => {
+      releaseRefreshSave = resolve;
+    });
+    vi.spyOn(internals, "saveSettingsUnlocked").mockImplementation(async (options) => {
+      markRefreshSaveStarted();
+      await refreshSaveBlocked;
+      await originalSaveUnlocked(options);
+    });
+
+    const refresh = plugin.refreshSelectedFeed(source);
+    await refreshSaveStarted;
+    const subscriptionMutation = plugin
+      .getSubscriptionService()
+      .setPaused(source.feedId!, false);
+    let subscriptionSettled = false;
+    void subscriptionMutation.finally(() => {
+      subscriptionSettled = true;
+    });
+    await flushMicrotasks();
+
+    expect(subscriptionSettled).toBe(false);
+
+    releaseRefreshSave();
+    await refresh;
+    await subscriptionMutation;
+
+    expect(plugin.settings.feeds[0].items.map((item) => item.guid)).toEqual([
+      "guid-1",
+      "refresh-first-new",
+    ]);
+    expect(plugin.settings.feeds[0].lastUpdated).toBe(909);
+  });
+
+  it.each([
+    ["paused", async (plugin: TestPlugin, source: Feed) => {
+      await plugin.getSubscriptionService().setPaused(source.feedId!, true);
+    }],
+    ["deleted", async (plugin: TestPlugin, source: Feed) => {
+      await plugin.getSubscriptionService().remove(source.feedId!, {
+        purgeCollection: false,
+      });
+    }],
+  ] as const)(
+    "does not publish a completed refresh after the source becomes %s",
+    async (_state, mutateSource) => {
+      const source = createFeed({
+        feedId: `late-${_state}`,
+        url: `https://example.com/late-${_state}.xml`,
+        lastUpdated: 40,
+      });
+      const plugin = createPluginWithSettings([source]);
+      let markNetworkStarted!: () => void;
+      let releaseNetwork!: () => void;
+      const networkStarted = new Promise<void>((resolve) => {
+        markNetworkStarted = resolve;
+      });
+      const networkBlocked = new Promise<void>((resolve) => {
+        releaseNetwork = resolve;
+      });
+      (plugin.feedParser.refreshFeed as unknown as {
+        mockImplementation: (operation: () => Promise<Feed>) => void;
+      }).mockImplementation(async () => {
+        markNetworkStarted();
+        await networkBlocked;
+        return {
+          ...source,
+          items: [
+            ...source.items,
+            createItem({ guid: `late-${_state}-new`, feedUrl: source.url }),
+          ],
+          lastUpdated: 404,
+        };
+      });
+      const saveUnlocked = vi.spyOn(
+        plugin as unknown as {
+          saveSettingsUnlocked(options?: unknown): Promise<void>;
+        },
+        "saveSettingsUnlocked",
+      );
+      const initialRefreshTimestamp = plugin.settings.lastRefreshTimestamp;
+
+      const refresh = plugin.refreshSelectedFeed(source);
+      await networkStarted;
+      await mutateSource(plugin, source);
+      releaseNetwork();
+      await refresh;
+
+      if (_state === "paused") {
+        expect(plugin.settings.feeds).toHaveLength(1);
+        expect(plugin.settings.feeds[0].subscriptionStatus).toBe("paused");
+        expect(plugin.settings.feeds[0].items).toHaveLength(1);
+        expect(plugin.settings.feeds[0].lastUpdated).toBe(40);
+      } else {
+        expect(plugin.settings.feeds).toEqual([]);
+      }
+      expect(plugin.settings.lastRefreshTimestamp).toBe(initialRefreshTimestamp);
+      expect(saveUnlocked).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not merge a completed refresh after the source identity changes while publication waits", async () => {
+    const source = createFeed({
+      feedId: "identity-switch",
+      url: "https://example.com/identity-old.xml",
+      lastUpdated: 50,
+    });
+    const plugin = createPluginWithSettings([source]);
+    const internals = plugin as unknown as {
+      enqueueSettingsOperation<T>(operation: () => Promise<T>): Promise<T>;
+      saveSettingsUnlocked(options?: unknown): Promise<void>;
+    };
+    let markMutationStarted!: () => void;
+    let releaseMutation!: () => void;
+    const mutationStarted = new Promise<void>((resolve) => {
+      markMutationStarted = resolve;
+    });
+    const mutationBlocked = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    const identityMutation = internals.enqueueSettingsOperation(async () => {
+      markMutationStarted();
+      await mutationBlocked;
+      plugin.settings.feeds[0].url = "https://example.com/identity-new.xml";
+      await internals.saveSettingsUnlocked();
+    });
+    let markNetworkReturned!: () => void;
+    const networkReturned = new Promise<void>((resolve) => {
+      markNetworkReturned = resolve;
+    });
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (operation: () => Promise<Feed>) => void;
+    }).mockImplementation(async () => {
+      markNetworkReturned();
+      return {
+        ...source,
+        items: [
+          ...source.items,
+          createItem({ guid: "identity-stale", feedUrl: source.url }),
+        ],
+        lastUpdated: 505,
+      };
+    });
+    const initialRefreshTimestamp = plugin.settings.lastRefreshTimestamp;
+
+    await mutationStarted;
+    const refresh = plugin.refreshSelectedFeed(source);
+    await networkReturned;
+    await flushMicrotasks();
+    expect(plugin.settings.feeds[0].items).toHaveLength(1);
+
+    releaseMutation();
+    await identityMutation;
+    await refresh;
+
+    expect(plugin.settings.feeds[0].url).toBe(
+      "https://example.com/identity-new.xml",
+    );
+    expect(plugin.settings.feeds[0].items).toHaveLength(1);
+    expect(plugin.settings.feeds[0].lastUpdated).toBe(50);
+    expect(plugin.settings.lastRefreshTimestamp).toBe(initialRefreshTimestamp);
+  });
+
   it("times out a stalled feed without blocking the rest of a multi-feed refresh", async () => {
     vi.useFakeTimers();
     const feedA = createFeed({
@@ -1420,6 +2667,663 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(plugin.feedParser.refreshAllFeeds).not.toHaveBeenCalled();
     expect(plugin.saveData).not.toHaveBeenCalled();
     expect(getNoticeMessages(consoleLogSpy)).toEqual([]);
+  });
+
+  it("excludes paused subscriptions from automatic and manual refresh without deleting them", async () => {
+    const paused = createFeed({
+      feedId: "paused-source",
+      subscriptionStatus: "paused",
+    });
+    const active = createFeed({
+      feedId: "active-source",
+      title: "Active",
+      url: "https://example.com/active.xml",
+    });
+    const plugin = createPluginWithSettings([paused, active]);
+    plugin.feedParser.refreshFeed.mockResolvedValue({ ...active });
+
+    await plugin.refreshFeeds();
+
+    expect(plugin.settings.feeds).toHaveLength(2);
+    expect(plugin.feedParser.refreshFeed).toHaveBeenCalledTimes(1);
+    expect(plugin.feedParser.refreshFeed).toHaveBeenCalledWith(
+      expect.objectContaining({ feedId: "active-source" }),
+    );
+  });
+
+  it("excludes a paused subscription from Dashboard single-source refresh", async () => {
+    const paused = createFeed({
+      feedId: "paused-source",
+      subscriptionStatus: "paused",
+    });
+    const plugin = createPluginWithSettings([paused]);
+
+    await plugin.manualRefreshSourceById("paused-source");
+
+    expect(plugin.feedParser.refreshFeed).not.toHaveBeenCalled();
+    expect(plugin.feedParser.refreshAllFeeds).not.toHaveBeenCalled();
+    expect(plugin.saveData).not.toHaveBeenCalled();
+  });
+
+  it("does not let an ordinary feed refresh trim or replace a failed first-import checkpoint", async () => {
+    const checkpointItems = [
+      createItem({ guid: "checkpoint-new" }),
+      createItem({ guid: "checkpoint-old", pubDate: "2020-01-01T00:00:00.000Z" }),
+    ];
+    const failed = createFeed({
+      feedId: "failed-first-import",
+      sourceKind: "feed",
+      sourceConfig: { kind: "feed" },
+      items: checkpointItems,
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: {
+        status: "failed",
+        pagesFetched: 0,
+        itemsImported: 0,
+      },
+    });
+    const plugin = createPluginWithSettings([failed]);
+    plugin.feedParser.refreshFeed.mockResolvedValue({
+      ...failed,
+      items: [createItem({ guid: "replacement" })],
+      initialImportProgress: undefined,
+    });
+
+    await plugin.manualRefreshSourceById("failed-first-import");
+
+    expect(plugin.feedParser.refreshFeed).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds[0].items).toEqual(checkpointItems);
+    expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("failed");
+  });
+
+  it("aborts an in-flight X history run and rejects a late completed generation over stopped", async () => {
+    const source = createFeed({
+      feedId: "x-history",
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "x-history",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      url: "tikhub://x-account/openai",
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: {
+        status: "running",
+        pagesFetched: 1,
+        itemsImported: 1,
+        phase: "posts",
+        nextCursor: "next-page",
+      },
+    });
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let observedStopSignal: AbortSignal | undefined;
+    let markStarted!: () => void;
+    let finishLate!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const late = new Promise<void>((resolve) => { finishLate = resolve; });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: vi.fn(async (_config, context) => {
+        observedStopSignal = context.stopSignal;
+        markStarted();
+        await late;
+        return {
+          feed: {
+            ...source,
+            items: [
+              ...source.items,
+              createItem({ guid: "late-stopped-item", feedUrl: source.url }),
+            ],
+            lastUpdated: 999,
+            initialImportProgress: {
+              status: "completed",
+              pagesFetched: 9,
+              itemsImported: 9,
+            },
+          },
+          items: source.items,
+          collectionItems: [],
+          providerRequestCount: 1,
+          warnings: [],
+        };
+      }),
+    }) as unknown as SourceRegistry);
+
+    const refresh = plugin.refreshSelectedFeed(source);
+    await started;
+    await plugin.getSubscriptionService().stopInitialImport("x-history");
+
+    expect(observedStopSignal?.aborted).toBe(true);
+    expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("stopped");
+
+    finishLate();
+    await refresh;
+    expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("stopped");
+    expect(plugin.settings.feeds[0].items).toHaveLength(1);
+    expect(plugin.settings.feeds[0].lastUpdated).toBe(1);
+  });
+
+  it("registers the X history stop before refresh-state persistence can yield", async () => {
+    const source = createFeed({
+      feedId: "x-history-before-ledger",
+      sourceKind: "x-account",
+      sourceConfig: {
+        kind: "x-account",
+        id: "x-history-before-ledger",
+        handle: "openai",
+        includeReplies: false,
+        includeReposts: false,
+        folder: "X",
+        topics: [],
+      },
+      url: "tikhub://x-account/openai",
+      initialImportPolicy: { mode: "all-available" },
+      initialImportProgress: {
+        status: "running",
+        pagesFetched: 1,
+        itemsImported: 1,
+        phase: "posts",
+        nextCursor: "next-page",
+      },
+    });
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let releaseAttempt!: () => void;
+    const attemptBlocked = new Promise<void>((resolve) => {
+      releaseAttempt = resolve;
+    });
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn(async () => await attemptBlocked),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+    const paidRefresh = vi.fn().mockResolvedValue({
+      feed: source,
+      items: source.items,
+      collectionItems: [],
+      providerRequestCount: 1,
+      warnings: [],
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+
+    const refresh = plugin.refreshSelectedFeed(source);
+    await flushMicrotasks();
+    await plugin.getSubscriptionService().stopInitialImport(source.feedId!);
+    releaseAttempt();
+    await refresh;
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds[0].initialImportProgress?.status).toBe("stopped");
+  });
+
+  it("does not persist refresh completion when default removal deletes the source during the ledger gate", async () => {
+    const source = createActiveXImportFeed("x-history-default-delete");
+    const plugin = createPluginWithSettings([source]);
+    const initialRefreshTimestamp = plugin.settings.lastRefreshTimestamp;
+    const candidatePersistenceSpy = vi.spyOn(
+      plugin as unknown as {
+        persistSubscriptionSettingsCandidate(
+          candidate: unknown,
+          publish: () => void,
+        ): Promise<void>;
+      },
+      "persistSubscriptionSettingsCandidate",
+    );
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let markAttemptStarted!: () => void;
+    let releaseAttempt!: () => void;
+    const attemptStarted = new Promise<void>((resolve) => {
+      markAttemptStarted = resolve;
+    });
+    const attemptBlocked = new Promise<void>((resolve) => {
+      releaseAttempt = resolve;
+    });
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn(async () => {
+        markAttemptStarted();
+        await attemptBlocked;
+      }),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+    const paidRefresh = vi.fn().mockResolvedValue({
+      feed: source,
+      items: source.items,
+      collectionItems: source.items,
+      providerRequestCount: 1,
+      warnings: [],
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getCollectionService = vi.fn(() => ({
+      collectFeedRefresh,
+      removeSource: vi.fn(),
+    }));
+
+    const refresh = plugin.refreshSelectedFeed(source);
+    await attemptStarted;
+    await plugin.getSubscriptionService().remove(source.feedId!, {
+      purgeCollection: false,
+    });
+    releaseAttempt();
+    await refresh;
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.validateSavedArticles).not.toHaveBeenCalled();
+    expect(candidatePersistenceSpy).toHaveBeenCalledOnce();
+    expect(plugin.settings.lastRefreshTimestamp).toBe(initialRefreshTimestamp);
+    expect(plugin.settings.feeds).toEqual([]);
+  });
+
+  it("does not call the X provider when purge removal finishes before provider start", async () => {
+    const source = createActiveXImportFeed("x-history-purge-delete");
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const removeSource = vi.fn().mockResolvedValue({
+      days: [],
+      commit,
+      rollback: vi.fn().mockResolvedValue(undefined),
+    });
+    plugin.getCollectionService = vi.fn(() => ({
+      collectFeedRefresh,
+      removeSource,
+    }));
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn(async () => {
+        await plugin.getSubscriptionService().remove(source.feedId!, {
+          purgeCollection: true,
+          confirmation: createConfirmedCollectionPurge(source.feedId!),
+        });
+      }),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+    const paidRefresh = vi.fn().mockResolvedValue({
+      feed: source,
+      items: source.items,
+      collectionItems: source.items,
+      providerRequestCount: 1,
+      warnings: [],
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+
+    await plugin.refreshSelectedFeed(source);
+
+    expect(removeSource).toHaveBeenCalledWith(source.feedId);
+    expect(commit).toHaveBeenCalledOnce();
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds).toEqual([]);
+  });
+
+  it.each([
+    { label: "default", purgeCollection: false },
+    { label: "purge", purgeCollection: true },
+  ])(
+    "blocks a queue-delayed $label removal before the refresh registers its X controller",
+    async ({ purgeCollection }) => {
+      const source = createActiveXImportFeed(
+        `x-history-queued-${purgeCollection ? "purge" : "default"}`,
+      );
+      const plugin = createPluginWithSettings([source]);
+      plugin.settings.tikhub = {
+        ...plugin.settings.tikhub,
+        enabled: true,
+        connectionId: "11111111-1111-4111-8111-111111111111",
+      };
+      let markSaveStarted!: () => void;
+      let releaseSave!: () => void;
+      const saveStarted = new Promise<void>((resolve) => {
+        markSaveStarted = resolve;
+      });
+      const saveBlocked = new Promise<void>((resolve) => {
+        releaseSave = resolve;
+      });
+      (
+        plugin as unknown as {
+          persistSubscriptionSettingsCandidate(
+            candidate: unknown,
+            publish: () => void,
+          ): Promise<void>;
+        }
+      ).persistSubscriptionSettingsCandidate = vi.fn()
+        .mockImplementationOnce(async (_candidate, publish) => {
+          markSaveStarted();
+          await saveBlocked;
+          publish();
+        })
+        .mockImplementation(async (_candidate, publish) => { publish(); });
+      const paidRefresh = vi.fn().mockResolvedValue({
+        feed: source,
+        items: source.items,
+        collectionItems: source.items,
+        providerRequestCount: 1,
+        warnings: [],
+      });
+      plugin.createSourceRegistryForRun = vi.fn(() => ({
+        refresh: paidRefresh,
+      }) as unknown as SourceRegistry);
+      const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+      const commit = vi.fn().mockResolvedValue(undefined);
+      const removeSource = vi.fn().mockResolvedValue({
+        days: [],
+        commit,
+        rollback: vi.fn().mockResolvedValue(undefined),
+      });
+      plugin.getCollectionService = vi.fn(() => ({
+        collectFeedRefresh,
+        removeSource,
+      }));
+      const firstService = plugin.getSubscriptionService();
+      const removingService = plugin.getSubscriptionService();
+
+      const priorMutation = firstService.setPaused(source.feedId!, false);
+      await saveStarted;
+      const removal = removingService.remove(
+        source.feedId!,
+        purgeCollection
+          ? {
+              purgeCollection: true,
+              confirmation: createConfirmedCollectionPurge(source.feedId!),
+            }
+          : { purgeCollection: false },
+      );
+      const refresh = plugin.refreshSelectedFeed(source);
+      await flushMicrotasks();
+
+      expect(paidRefresh).not.toHaveBeenCalled();
+      expect(collectFeedRefresh).not.toHaveBeenCalled();
+
+      releaseSave();
+      await priorMutation;
+      await removal;
+      await refresh;
+
+      expect(paidRefresh).not.toHaveBeenCalled();
+      expect(collectFeedRefresh).not.toHaveBeenCalled();
+      expect(removeSource).toHaveBeenCalledTimes(purgeCollection ? 1 : 0);
+      expect(commit).toHaveBeenCalledTimes(purgeCollection ? 1 : 0);
+      expect(plugin.settings.feeds).toEqual([]);
+    },
+  );
+
+  it("allows refresh again after a queue-delayed removal fails and clears its intent", async () => {
+    const source = createActiveXImportFeed("x-history-failed-removal");
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let markSaveStarted!: () => void;
+    let releaseSave!: () => void;
+    const saveStarted = new Promise<void>((resolve) => {
+      markSaveStarted = resolve;
+    });
+    const saveBlocked = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    (
+      plugin as unknown as {
+        persistSubscriptionSettingsCandidate(
+          candidate: unknown,
+          publish: () => void,
+        ): Promise<void>;
+      }
+    ).persistSubscriptionSettingsCandidate = vi.fn()
+      .mockImplementationOnce(async (_candidate, publish) => {
+        markSaveStarted();
+        await saveBlocked;
+        publish();
+      })
+      .mockRejectedValueOnce(new Error("removal save failed"))
+      .mockImplementation(async (_candidate, publish) => { publish(); });
+    const paidRefresh = vi.fn().mockResolvedValue({
+      feed: source,
+      items: source.items,
+      collectionItems: source.items,
+      providerRequestCount: 1,
+      warnings: [],
+    });
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getCollectionService = vi.fn(() => ({
+      collectFeedRefresh,
+      removeSource: vi.fn(),
+    }));
+    const firstService = plugin.getSubscriptionService();
+    const removingService = plugin.getSubscriptionService();
+
+    const priorMutation = firstService.setPaused(source.feedId!, false);
+    await saveStarted;
+    const removal = removingService.remove(source.feedId!, {
+      purgeCollection: false,
+    });
+    const blockedRefresh = plugin.refreshSelectedFeed(source);
+    await flushMicrotasks();
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+
+    releaseSave();
+    await priorMutation;
+    await expect(removal).rejects.toThrow("removal save failed");
+    await blockedRefresh;
+    expect(plugin.settings.feeds).toHaveLength(1);
+
+    await plugin.refreshSelectedFeed(plugin.settings.feeds[0]);
+
+    expect(paidRefresh).toHaveBeenCalledOnce();
+    expect(collectFeedRefresh).toHaveBeenCalledOnce();
+    expect(plugin.settings.feeds).toHaveLength(1);
+  });
+
+  it("rechecks a cross-instance removal intent after the ledger before provider work", async () => {
+    const source = createActiveXImportFeed("x-history-ledger-removal-intent");
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    let markSaveStarted!: () => void;
+    let releaseSave!: () => void;
+    const saveStarted = new Promise<void>((resolve) => {
+      markSaveStarted = resolve;
+    });
+    const saveBlocked = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    (
+      plugin as unknown as {
+        persistSubscriptionSettingsCandidate(
+          candidate: unknown,
+          publish: () => void,
+        ): Promise<void>;
+      }
+    ).persistSubscriptionSettingsCandidate = vi.fn()
+      .mockImplementationOnce(async (_candidate, publish) => {
+        markSaveStarted();
+        await saveBlocked;
+        publish();
+      })
+      .mockImplementation(async (_candidate, publish) => { publish(); });
+    let markAttemptStarted!: () => void;
+    let releaseAttempt!: () => void;
+    const attemptStarted = new Promise<void>((resolve) => {
+      markAttemptStarted = resolve;
+    });
+    const attemptBlocked = new Promise<void>((resolve) => {
+      releaseAttempt = resolve;
+    });
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn(async () => {
+        markAttemptStarted();
+        await attemptBlocked;
+      }),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+    const paidRefresh = vi.fn();
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+    const collectFeedRefresh = vi.fn();
+    const collectionService = {
+      collectFeedRefresh,
+      removeSource: vi.fn().mockResolvedValue({
+        days: [],
+        commit: vi.fn().mockResolvedValue(undefined),
+        rollback: vi.fn().mockResolvedValue(undefined),
+      }),
+    };
+    plugin.getCollectionService = vi.fn(() => collectionService);
+    const queueOwner = plugin.getSubscriptionService();
+    const removingService = new SubscriptionService({
+      settings: plugin.settings,
+      getSettings: () => plugin.settings,
+      enqueueMutation: async (operation) => await (
+        plugin as unknown as {
+          enqueueSettingsOperation<T>(operation: () => Promise<T>): Promise<T>;
+        }
+      ).enqueueSettingsOperation(operation),
+      defaults: {
+        autoDeleteDuration: plugin.settings.defaultAutoDeleteDuration,
+        maxItems: plugin.settings.maxItems,
+      },
+      parseFeed: vi.fn(),
+      collectionService,
+      ensureFolder: vi.fn(),
+      saveSettings: async () => await plugin.saveSettings(),
+      saveSettingsCandidate: async (_candidate, publish) => { publish(); },
+    });
+
+    const priorMutation = queueOwner.setPaused(source.feedId!, false);
+    await saveStarted;
+    const refresh = plugin.refreshSelectedFeed(source);
+    await attemptStarted;
+    const removal = removingService.remove(source.feedId!, {
+      purgeCollection: false,
+    });
+    releaseAttempt();
+    await refresh;
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds).toHaveLength(1);
+
+    releaseSave();
+    await priorMutation;
+    await removal;
+    expect(plugin.settings.feeds).toEqual([]);
+  });
+
+  it("does not start an unpersisted active X initial-import snapshot", async () => {
+    const source = createActiveXImportFeed("x-history-unpersisted");
+    const plugin = createPluginWithSettings([]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    const paidRefresh = vi.fn();
+    const collectFeedRefresh = vi.fn();
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+
+    await plugin.refreshSelectedFeed(source);
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds).toEqual([]);
+  });
+
+  it("does not fall back to stale X input after a persisted source disappears at the ledger gate", async () => {
+    const source = createActiveXImportFeed("x-history-disappeared");
+    const plugin = createPluginWithSettings([source]);
+    plugin.settings.tikhub = {
+      ...plugin.settings.tikhub,
+      enabled: true,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+    };
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+      recordAttempt: vi.fn(async () => {
+        plugin.settings.feeds = [];
+      }),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+    const paidRefresh = vi.fn();
+    const collectFeedRefresh = vi.fn();
+    plugin.createSourceRegistryForRun = vi.fn(() => ({
+      refresh: paidRefresh,
+    }) as unknown as SourceRegistry);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+
+    await plugin.refreshSelectedFeed(source);
+
+    expect(paidRefresh).not.toHaveBeenCalled();
+    expect(collectFeedRefresh).not.toHaveBeenCalled();
+    expect(plugin.settings.feeds).toEqual([]);
+  });
+
+  it("keeps refreshing an unpersisted legacy RSS snapshot passed explicitly", async () => {
+    const source = createFeed({
+      feedId: undefined,
+      sourceKind: undefined,
+      sourceConfig: undefined,
+      initialImportPolicy: undefined,
+      initialImportProgress: undefined,
+    });
+    const plugin = createPluginWithSettings([]);
+    const refreshed = { ...source, lastUpdated: 2 };
+    plugin.feedParser.refreshFeed.mockResolvedValue(refreshed);
+    const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+    plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+
+    await plugin.refreshSelectedFeed(source);
+
+    expect(plugin.feedParser.refreshFeed).toHaveBeenCalledOnce();
+    expect(collectFeedRefresh).toHaveBeenCalledWith({
+      feed: refreshed,
+      previousItems: source.items,
+      refreshedItems: refreshed.items,
+      fetchedAt: expect.any(Date),
+    });
+    expect(plugin.settings.feeds).toEqual([]);
   });
 
   it("skips refresh when feedParser is not initialized yet", async () => {

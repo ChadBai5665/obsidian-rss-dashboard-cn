@@ -3,15 +3,13 @@ import type { AiOperation } from "./prompts/prompt-types";
 import type { ContentBasis } from "../collection/collected-item";
 import { normalizeConnectionId } from "../security/connection-id";
 
-const STABLE_ITEM_ID = /^[a-f0-9]{64}$/u;
-const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const OPERATIONS = new Set<AiOperation>([
+export const AI_ANALYSIS_OPERATIONS = Object.freeze([
   "summary",
   "translate-zh-cn",
   "core-points",
   "deep-analysis",
-]);
-const PROVIDER_KINDS = new Set<AiProviderKind>([
+] as const satisfies readonly AiOperation[]);
+export const AI_ANALYSIS_PROVIDER_KINDS = Object.freeze([
   "kimi",
   "deepseek",
   "qwen",
@@ -22,18 +20,27 @@ const PROVIDER_KINDS = new Set<AiProviderKind>([
   "minimax-global",
   "openai-compatible",
   "anthropic-compatible",
-]);
-const CONTENT_BASES = new Set<ContentBasis>([
+] as const satisfies readonly AiProviderKind[]);
+export const AI_ANALYSIS_CONTENT_BASES = Object.freeze([
   "feed",
   "full-text",
+  "youtube-transcript",
   "title-description",
   "x-post",
   "linked-page",
-]);
-const MAX_METADATA_CHARACTERS = 20_000;
-const MAX_SOURCE_URL_CHARACTERS = 8_192;
-const MAX_ANALYSIS_TEXT_CHARACTERS = 1_000_000;
-const MAX_INPUT_CHARACTER_COUNT = 1_000_000;
+] as const satisfies readonly ContentBasis[]);
+export const MAX_AI_ANALYSIS_METADATA_CHARACTERS = 20_000;
+export const MAX_AI_ANALYSIS_SOURCE_URL_CHARACTERS = 8_192;
+export const MAX_AI_ANALYSIS_TEXT_CHARACTERS = 1_000_000;
+export const MAX_AI_ANALYSIS_INPUT_CHARACTER_COUNT = 1_000_000;
+
+const STABLE_ITEM_ID = /^[a-f0-9]{64}$/u;
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const OPERATIONS: ReadonlySet<AiOperation> = new Set(AI_ANALYSIS_OPERATIONS);
+const PROVIDER_KINDS: ReadonlySet<AiProviderKind> =
+  new Set(AI_ANALYSIS_PROVIDER_KINDS);
+const CONTENT_BASES: ReadonlySet<ContentBasis> =
+  new Set(AI_ANALYSIS_CONTENT_BASES);
 
 export interface AiAnalysisResult {
   schemaVersion: 1;
@@ -83,25 +90,25 @@ export function snapshotAiAnalysisResult(value: unknown): AiAnalysisResult {
     !CANONICAL_UUID.test(id) ||
     typeof itemId !== "string" ||
     !STABLE_ITEM_ID.test(itemId) ||
-    (sourceUrl !== undefined && !validSourceUrl(sourceUrl)) ||
+    (sourceUrl !== undefined && !isValidAiAnalysisSourceUrl(sourceUrl)) ||
     typeof operation !== "string" ||
     !OPERATIONS.has(operation as AiOperation) ||
     typeof createdAt !== "string" ||
-    !isCanonicalUtcTimestamp(createdAt) ||
+    !isCanonicalAiAnalysisTimestamp(createdAt) ||
     typeof connectionId !== "string" ||
     normalizeConnectionId(connectionId) !== connectionId ||
-    !safeText(connectionName, MAX_METADATA_CHARACTERS) ||
+    !safeAnalysisText(connectionName, MAX_AI_ANALYSIS_METADATA_CHARACTERS) ||
     typeof providerKind !== "string" ||
     !PROVIDER_KINDS.has(providerKind as AiProviderKind) ||
-    !safeText(model, MAX_METADATA_CHARACTERS) ||
+    !safeAnalysisText(model, MAX_AI_ANALYSIS_METADATA_CHARACTERS) ||
     typeof contentBasis !== "string" ||
     !CONTENT_BASES.has(contentBasis as ContentBasis) ||
     typeof inputCharacterCount !== "number" ||
     !Number.isSafeInteger(inputCharacterCount) ||
     inputCharacterCount < 0 ||
-    inputCharacterCount > MAX_INPUT_CHARACTER_COUNT ||
+    inputCharacterCount > MAX_AI_ANALYSIS_INPUT_CHARACTER_COUNT ||
     typeof inputTruncated !== "boolean" ||
-    !safeText(text, MAX_ANALYSIS_TEXT_CHARACTERS)
+    !safeAnalysisText(text, MAX_AI_ANALYSIS_TEXT_CHARACTERS)
   ) {
     throw new Error("Invalid AI analysis result");
   }
@@ -124,7 +131,7 @@ export function snapshotAiAnalysisResult(value: unknown): AiAnalysisResult {
   };
 }
 
-function isCanonicalUtcTimestamp(value: string): boolean {
+export function isCanonicalAiAnalysisTimestamp(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) {
     return false;
   }
@@ -132,13 +139,13 @@ function isCanonicalUtcTimestamp(value: string): boolean {
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 
-function validSourceUrl(value: unknown): value is string {
+export function isValidAiAnalysisSourceUrl(value: unknown): value is string {
   if (
     typeof value !== "string" ||
     !value ||
-    value.length > MAX_SOURCE_URL_CHARACTERS ||
+    value.length > MAX_AI_ANALYSIS_SOURCE_URL_CHARACTERS ||
     /\s/u.test(value) ||
-    hasDangerousControlOrInvalidUnicode(value) ||
+    hasDangerousAiAnalysisText(value) ||
     value.includes("\\")
   ) {
     return false;
@@ -163,7 +170,7 @@ function validSourceUrl(value: unknown): value is string {
     !fullyDecoded ||
     /\s/u.test(decodedPath) ||
     decodedPath.includes("\\") ||
-    hasDangerousControlOrInvalidUnicode(decodedPath) ||
+    hasDangerousAiAnalysisText(decodedPath) ||
     decodedPath.split("/").some((segment) => segment === "." || segment === "..")
   ) {
     return false;
@@ -181,17 +188,20 @@ function validSourceUrl(value: unknown): value is string {
   }
 }
 
-function safeText(value: unknown, maxCharacters: number): value is string {
+export function safeAnalysisText(
+  value: unknown,
+  maxCharacters: number,
+): value is string {
   return (
     typeof value === "string" &&
     value.length > 0 &&
     value.length <= maxCharacters &&
     Boolean(value.trim()) &&
-    !hasDangerousControlOrInvalidUnicode(value)
+    !hasDangerousAiAnalysisText(value)
   );
 }
 
-function hasDangerousControlOrInvalidUnicode(value: string): boolean {
+export function hasDangerousAiAnalysisText(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const codeUnit = value.charCodeAt(index);
     if (

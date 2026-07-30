@@ -26,8 +26,11 @@ class InMemoryAdapter {
   failRename = false;
   failRenameAfterMove = false;
   injectForeignBeforeContentClaim = false;
-  injectForeignBeforeClaimSourceProcess = false;
+  injectForeignBeforeClaimSourceCopy = false;
+  processRequiresExisting = false;
   replaceWriteOnFirstExists = false;
+  replaceReadOnList = false;
+  readonly unreadable = new Set<string>();
   injectedForeignPath?: string;
   private copyBarrier?: () => Promise<void>;
 
@@ -59,6 +62,19 @@ class InMemoryAdapter {
     this.directories.add(path);
   }
 
+  async createFolder(path: string): Promise<object> {
+    this.operations.push(`createFolder:${path}`);
+    const parent = parentPath(path);
+    if (parent && !this.directories.has(parent)) {
+      throw new Error(`Missing parent directory: ${parent}`);
+    }
+    if (this.files.has(path) || this.directories.has(path)) {
+      throw new Error(`Path already exists: ${path}`);
+    }
+    this.directories.add(path);
+    return { path };
+  }
+
   async write(path: string, content: string): Promise<void> {
     this.operations.push(`write:${path}`);
     if (this.failWrite) throw new Error("Injected write failure");
@@ -76,6 +92,7 @@ class InMemoryAdapter {
 
   async read(path: string): Promise<string> {
     this.operations.push(`read:${path}`);
+    if (this.unreadable.has(path)) throw new Error(`Unreadable file: ${path}`);
     const content = this.files.get(path);
     if (content === undefined) throw new Error(`Missing file: ${path}`);
     return content;
@@ -94,6 +111,10 @@ class InMemoryAdapter {
       this.injectForeignBeforeContentClaim = false;
       this.injectedForeignPath = to;
       this.files.set(to, "foreign bytes that must survive");
+    }
+    if (this.injectForeignBeforeClaimSourceCopy && to === CLAIM_SOURCE_PATH) {
+      this.injectForeignBeforeClaimSourceCopy = false;
+      this.files.set(to, "foreign claim-source race bytes");
     }
     if (this.files.has(to) || this.directories.has(to)) {
       throw new Error(`Destination exists: ${to}`);
@@ -126,6 +147,23 @@ class InMemoryAdapter {
     this.files.delete(path);
   }
 
+  async rmdir(path: string, recursive: boolean): Promise<void> {
+    this.operations.push(`rmdir:${path}:${String(recursive)}`);
+    const prefix = `${path}/`;
+    const hasChildren = [...this.files.keys(), ...this.directories]
+      .some((candidate) => candidate.startsWith(prefix));
+    if (hasChildren && !recursive) throw new Error(`Directory is not empty: ${path}`);
+    if (recursive) {
+      for (const candidate of [...this.files.keys()]) {
+        if (candidate.startsWith(prefix)) this.files.delete(candidate);
+      }
+      for (const candidate of [...this.directories]) {
+        if (candidate.startsWith(prefix)) this.directories.delete(candidate);
+      }
+    }
+    this.directories.delete(path);
+  }
+
   async process(
     path: string,
     update: (content: string) => string,
@@ -135,9 +173,8 @@ class InMemoryAdapter {
     if (parent && !this.directories.has(parent)) {
       throw new Error(`Missing parent directory: ${parent}`);
     }
-    if (this.injectForeignBeforeClaimSourceProcess) {
-      this.injectForeignBeforeClaimSourceProcess = false;
-      this.files.set(path, "foreign process-race bytes");
+    if (this.processRequiresExisting && !this.files.has(path)) {
+      throw new Error(`Process requires an existing file: ${path}`);
     }
     const current = this.files.get(path) ?? "";
     const next = update(current);
@@ -146,6 +183,13 @@ class InMemoryAdapter {
   }
 
   async list(path: string): Promise<{ files: string[]; folders: string[] }> {
+    this.operations.push(`list:${path}`);
+    if (this.replaceReadOnList) {
+      this.replaceReadOnList = false;
+      this.read = async () => {
+        throw new Error("Late replacement must not be called");
+      };
+    }
     const prefix = `${path}/`;
     return {
       files: [...this.files.keys()].filter(
@@ -191,9 +235,17 @@ function analysis(
   };
 }
 
+function analysisPath(value: AiAnalysisResult, suffix = ""): string {
+  const timestamp = value.createdAt.replace(/[-:.Z]/gu, "");
+  return `${DATA_ROOT}/analysis/${value.itemId}/${timestamp}-${value.operation}${suffix}.md`;
+}
+
 function repository(
   adapter: InMemoryAdapter,
-  vault = { adapter } as unknown as Vault,
+  vault = {
+    adapter,
+    createFolder: adapter.createFolder.bind(adapter),
+  } as unknown as Vault,
 ): AnalysisRepository {
   let sequence = 0;
   return new AnalysisRepository(vault, DATA_ROOT, {
@@ -210,6 +262,248 @@ function temporaryFiles(adapter: InMemoryAdapter): string[] {
 }
 
 describe("AnalysisRepository", () => {
+  it("lists only valid immutable artifacts in the exact item directory and filters by operation", async () => {
+    const adapter = new InMemoryAdapter();
+    const target = repository(adapter);
+    const directory = `${DATA_ROOT}/analysis/${ITEM_ID}`;
+    const older = analysis({
+      createdAt: "2026-07-21T12:34:55.789Z",
+      text: "older",
+    });
+    const newerSummary = analysis({
+      id: "69a10bdf-6d36-4388-bbe4-219da9c3ea46",
+      createdAt: "2026-07-21T12:34:57.789Z",
+      text: "newer-summary",
+    });
+    const newerAnalysis = analysis({
+      id: "c56a4180-65aa-42ec-a945-5fd21dec0538",
+      operation: "deep-analysis",
+      createdAt: "2026-07-21T12:34:57.789Z",
+      text: "newer-analysis",
+    });
+    const olderPath = `${directory}/20260721T123455789-summary.md`;
+    const summaryPath = `${directory}/20260721T123457789-summary.md`;
+    const analysisPath = `${directory}/20260721T123457789-deep-analysis.md`;
+    adapter.files.set(olderPath, renderAnalysisMarkdown(older));
+    adapter.files.set(summaryPath, renderAnalysisMarkdown(newerSummary));
+    adapter.files.set(analysisPath, renderAnalysisMarkdown(newerAnalysis));
+    adapter.files.set(`${directory}/invalid.md`, "not an artifact");
+    adapter.files.set(`${directory}/ignored.md.tmp-claim`, "temporary");
+    adapter.files.set(`${directory}/ignored.md.backup`, "backup");
+    adapter.files.set(`${directory}/ignored.txt`, "other");
+    adapter.files.set(
+      `${DATA_ROOT}/analysis/${"c".repeat(64)}/20260721T123459789-summary.md`,
+      renderAnalysisMarkdown(analysis({
+        itemId: "c".repeat(64),
+        createdAt: "2026-07-21T12:34:59.789Z",
+      })),
+    );
+    adapter.unreadable.add(olderPath);
+
+    const listed = await target.list(ITEM_ID);
+    const summaries = await target.list(ITEM_ID, "summary");
+    const latest = await target.latest(ITEM_ID, "deep-analysis");
+
+    expect(listed.map(({ path }) => path)).toEqual([analysisPath, summaryPath]);
+    expect(summaries.map(({ path }) => path)).toEqual([summaryPath]);
+    expect(latest?.path).toBe(analysisPath);
+    expect(Object.isFrozen(listed)).toBe(true);
+    expect(Object.isFrozen(listed[0])).toBe(true);
+    expect(Object.isFrozen(listed[0]?.record)).toBe(true);
+    expect(adapter.operations.filter((entry) => entry.startsWith("list:")))
+      .toEqual([
+        `list:${directory}`,
+        `list:${directory}`,
+        `list:${directory}`,
+      ]);
+    expect(adapter.operations.some((entry) => entry.includes(`${"c".repeat(64)}/`)))
+      .toBe(false);
+    expect(adapter.operations.some((entry) =>
+      /write:|remove:|rename:|copy:|process:|mkdir:/u.test(entry))).toBe(false);
+  });
+
+  it("reads only exact repository artifact paths and returns null for invalid, unreadable, or mismatched files", async () => {
+    const adapter = new InMemoryAdapter();
+    const target = repository(adapter);
+    adapter.files.set(BASE_PATH, renderAnalysisMarkdown(analysis()));
+
+    await expect(target.read(BASE_PATH)).resolves.toEqual({
+      path: BASE_PATH,
+      record: analysis(),
+    });
+    const readsAfterValid = adapter.operations.length;
+    for (const path of [
+      `/${BASE_PATH}`,
+      `C:/${BASE_PATH}`,
+      BASE_PATH.replace("/", "\\"),
+      `${BASE_PATH}\0`,
+      `${DATA_ROOT}/analysis/${ITEM_ID}/../${BASE_PATH.split("/").pop()}`,
+      `Notes/${BASE_PATH.split("/").pop()}`,
+    ]) {
+      await expect(target.read(path)).resolves.toBeNull();
+    }
+    expect(adapter.operations).toHaveLength(readsAfterValid);
+
+    adapter.files.set(BASE_PATH, renderAnalysisMarkdown(analysis({
+      itemId: "c".repeat(64),
+    })));
+    await expect(target.read(BASE_PATH)).resolves.toBeNull();
+    adapter.unreadable.add(BASE_PATH);
+    await expect(target.read(BASE_PATH)).resolves.toBeNull();
+  });
+
+  it("bounds enumeration and reads while skipping oversized artifacts independently", async () => {
+    const adapter = new InMemoryAdapter();
+    const target = repository(adapter);
+    const directory = `${DATA_ROOT}/analysis/${ITEM_ID}`;
+    for (let index = 0; index < 300; index += 1) {
+      const collision = index === 0 ? "" : `-${index + 1}`;
+      adapter.files.set(
+        `${directory}/20260721T123456789-summary${collision}.md`,
+        renderAnalysisMarkdown(analysis({
+          id: index % 2 === 0
+            ? RESULT_ID
+            : "69a10bdf-6d36-4388-bbe4-219da9c3ea46",
+          text: `result-${index}`,
+        })),
+      );
+    }
+    adapter.files.set(
+      `${directory}/20260721T123457789-summary.md`,
+      "x".repeat(1_100_001),
+    );
+
+    const listed = await target.list(ITEM_ID);
+
+    expect(listed.length).toBeLessThanOrEqual(256);
+    expect(adapter.operations.filter((entry) => entry.startsWith("read:")).length)
+      .toBeLessThanOrEqual(256);
+    expect(listed.every(({ record }) => record.text.startsWith("result-"))).toBe(true);
+  });
+
+  it("keeps the newest 256 canonical paths before bounded reads", async () => {
+    const adapter = new InMemoryAdapter();
+    const target = repository(adapter);
+    const start = Date.parse("2026-07-21T12:00:00.000Z");
+    let expectedLatestPath = "";
+    for (let index = 0; index < 300; index += 1) {
+      const value = analysis({
+        id: index % 2 === 0
+          ? RESULT_ID
+          : "69a10bdf-6d36-4388-bbe4-219da9c3ea46",
+        createdAt: new Date(start + index).toISOString(),
+        text: `result-${index}`,
+      });
+      const path = analysisPath(value);
+      adapter.files.set(path, renderAnalysisMarkdown(value));
+      if (index === 299) expectedLatestPath = path;
+    }
+
+    const listed = await target.list(ITEM_ID);
+    const latest = await target.latest(ITEM_ID, "summary");
+
+    expect(listed).toHaveLength(256);
+    expect(listed[0]?.path).toBe(expectedLatestPath);
+    expect(listed[0]?.record.text).toBe("result-299");
+    expect(latest?.path).toBe(expectedLatestPath);
+    expect(adapter.operations.filter((entry) => entry.startsWith("read:")).length)
+      .toBeLessThanOrEqual(512);
+  });
+
+  it("filters canonical paths by operation before the 256-read cap", async () => {
+    const adapter = new InMemoryAdapter();
+    const target = repository(adapter);
+    const start = Date.parse("2026-07-21T12:00:00.000Z");
+    for (let index = 0; index < 300; index += 1) {
+      const value = analysis({
+        createdAt: new Date(start + index).toISOString(),
+        text: `summary-${index}`,
+      });
+      adapter.files.set(analysisPath(value), renderAnalysisMarkdown(value));
+    }
+    const expected = analysis({
+      operation: "deep-analysis",
+      createdAt: new Date(start + 300).toISOString(),
+      text: "wanted-deep-analysis",
+    });
+    const expectedPath = analysisPath(expected);
+    adapter.files.set(expectedPath, renderAnalysisMarkdown(expected));
+
+    const listed = await target.list(ITEM_ID, "deep-analysis");
+    const latest = await target.latest(ITEM_ID, "deep-analysis");
+
+    expect(listed.map(({ path }) => path)).toEqual([expectedPath]);
+    expect(latest?.path).toBe(expectedPath);
+    expect(adapter.operations.filter((entry) => entry.startsWith("read:")).length)
+      .toBe(2);
+  });
+
+  it("binds read-only adapter methods before enumeration and does not require write capabilities", async () => {
+    const adapter = new InMemoryAdapter();
+    adapter.files.set(BASE_PATH, renderAnalysisMarkdown(analysis()));
+    const readOnly: {
+      read(path: string): Promise<string>;
+      list(path: string): Promise<{ files: string[]; folders: string[] }>;
+    } = {
+      read: adapter.read.bind(adapter),
+      list: async (path) => {
+        const listing = await adapter.list(path);
+        readOnly.read = async () => {
+          throw new Error("Late replacement must not be called");
+        };
+        return listing;
+      },
+    };
+    const target = repository(adapter, { adapter: readOnly } as unknown as Vault);
+
+    await expect(target.list(ITEM_ID)).resolves.toHaveLength(1);
+    await expect(target.read(BASE_PATH)).resolves.toBeNull();
+  });
+
+  it("fails closed on hostile list results without invoking accessors", async () => {
+    const adapter = new InMemoryAdapter();
+    let getterCalled = false;
+    const hostile = {
+      read: adapter.read.bind(adapter),
+      list: async () => {
+        const result = {};
+        Object.defineProperty(result, "files", {
+          get() {
+            getterCalled = true;
+            return [BASE_PATH];
+          },
+        });
+        return result;
+      },
+    };
+    const target = repository(adapter, { adapter: hostile } as unknown as Vault);
+
+    await expect(target.list(ITEM_ID)).resolves.toEqual([]);
+    expect(getterCalled).toBe(false);
+    expect(adapter.operations).toEqual([]);
+  });
+
+  it("rejects hostile query inputs before adapter access", async () => {
+    const adapter = new InMemoryAdapter();
+    let coercionCalled = false;
+    const hostile = {};
+    Object.defineProperty(hostile, "toString", {
+      get() {
+        coercionCalled = true;
+        return () => ITEM_ID;
+      },
+    });
+    const target = repository(adapter);
+
+    await expect(target.list(hostile as unknown as string)).resolves.toEqual([]);
+    await expect(target.latest(
+      hostile as unknown as string,
+      "summary",
+    )).resolves.toBeNull();
+    expect(coercionCalled).toBe(false);
+    expect(adapter.operations).toEqual([]);
+  });
+
   it("binds a valid saved artifact to the expected result before running a consumer", async () => {
     const adapter = new InMemoryAdapter();
     const target = repository(adapter);
@@ -222,6 +516,36 @@ describe("AnalysisRepository", () => {
 
     expect(consume).toHaveBeenCalledTimes(1);
     expect(consume).toHaveBeenCalledWith(expected);
+  });
+
+  it("bootstraps storage when adapter process cannot create a missing file", async () => {
+    const adapter = new InMemoryAdapter();
+    adapter.processRequiresExisting = true;
+
+    await expect(repository(adapter).save(analysis())).resolves.toBe(BASE_PATH);
+
+    expect(adapter.files.get(BASE_PATH)).toContain("摘要正文");
+    expect(adapter.files.get(CLAIM_SOURCE_PATH)).toBe(
+      "rss-dashboard-cn-analysis-claim-source-v1",
+    );
+    expect([...adapter.directories].some((path) =>
+      path.includes(".claim-bootstrap-"))).toBe(false);
+  });
+
+  it("preserves a pre-existing bootstrap directory and foreign source", async () => {
+    const adapter = new InMemoryAdapter();
+    adapter.directories.add(DATA_ROOT);
+    adapter.directories.add(`${DATA_ROOT}/analysis`);
+    const bootstrapDirectory =
+      `${DATA_ROOT}/analysis/.claim-bootstrap-test-0-abcdefghijklmnop-0`;
+    const foreignSource = `${bootstrapDirectory}/source`;
+    adapter.directories.add(bootstrapDirectory);
+    adapter.files.set(foreignSource, "foreign bootstrap bytes");
+
+    await expect(repository(adapter).save(analysis())).resolves.toBe(BASE_PATH);
+
+    expect(adapter.files.get(foreignSource)).toBe("foreign bootstrap bytes");
+    expect(adapter.directories.has(bootstrapDirectory)).toBe(true);
   });
 
   it("fails closed before the consumer when the artifact is missing, moved, replaced, or outside its controlled path", async () => {
@@ -274,6 +598,13 @@ describe("AnalysisRepository", () => {
     for (const operation of adapter.operations.filter((entry) => entry.startsWith("write:"))) {
       const path = operation.slice("write:".length);
       const writeIndex = adapter.operations.indexOf(operation);
+      if (path.includes("/.claim-bootstrap-") && path.endsWith("/source")) {
+        const directory = path.slice(0, path.lastIndexOf("/"));
+        expect(adapter.operations.slice(0, writeIndex)).toContain(
+          `createFolder:${directory}`,
+        );
+        continue;
+      }
       expect(
         adapter.operations
           .slice(0, writeIndex)
@@ -302,7 +633,10 @@ describe("AnalysisRepository", () => {
 
   it("serializes same-process writes across repository instances", async () => {
     const adapter = new InMemoryAdapter();
-    const vault = { adapter } as unknown as Vault;
+    const vault = {
+      adapter,
+      createFolder: adapter.createFolder.bind(adapter),
+    } as unknown as Vault;
     const first = repository(adapter, vault);
     const second = repository(adapter, vault);
 
@@ -362,12 +696,18 @@ describe("AnalysisRepository", () => {
     const secondAdapter = new InMemoryAdapter(storage);
     const fixedSuffix = "same-transaction-abcdefghijkl";
     const first = new AnalysisRepository(
-      { adapter: firstAdapter } as unknown as Vault,
+      {
+        adapter: firstAdapter,
+        createFolder: firstAdapter.createFolder.bind(firstAdapter),
+      } as unknown as Vault,
       DATA_ROOT,
       { randomSuffix: () => fixedSuffix },
     );
     const second = new AnalysisRepository(
-      { adapter: secondAdapter } as unknown as Vault,
+      {
+        adapter: secondAdapter,
+        createFolder: secondAdapter.createFolder.bind(secondAdapter),
+      } as unknown as Vault,
       DATA_ROOT,
       { randomSuffix: () => fixedSuffix },
     );
@@ -437,14 +777,14 @@ describe("AnalysisRepository", () => {
     expect(finalFiles(adapter)).toEqual([]);
   });
 
-  it("preserves foreign bytes that win the absent-to-process bootstrap race", async () => {
+  it("preserves foreign bytes that win the claim-source bootstrap race", async () => {
     const adapter = new InMemoryAdapter();
-    adapter.injectForeignBeforeClaimSourceProcess = true;
+    adapter.injectForeignBeforeClaimSourceCopy = true;
 
     await expect(repository(adapter).save(analysis())).rejects.toThrow(
       "claim source",
     );
-    expect(adapter.files.get(CLAIM_SOURCE_PATH)).toBe("foreign process-race bytes");
+    expect(adapter.files.get(CLAIM_SOURCE_PATH)).toBe("foreign claim-source race bytes");
     expect(finalFiles(adapter)).toEqual([]);
   });
 
@@ -498,6 +838,9 @@ describe("AnalysisRepository", () => {
 
   it("rejects an incomplete temporary write before it can be renamed", async () => {
     const adapter = new InMemoryAdapter();
+    adapter.directories.add(DATA_ROOT);
+    adapter.directories.add(`${DATA_ROOT}/analysis`);
+    adapter.files.set(CLAIM_SOURCE_PATH, "rss-dashboard-cn-analysis-claim-source-v1");
     adapter.corruptWriteOnce = true;
 
     await expect(repository(adapter).save(analysis())).rejects.toThrow(
@@ -570,12 +913,15 @@ describe("AnalysisRepository", () => {
     expect(adapter.operations).toEqual([]);
   });
 
-  it.each(["exists", "mkdir", "write", "read", "copy", "remove", "rename", "process"])(
+  it.each(["exists", "mkdir", "write", "read", "copy", "remove", "rmdir", "rename"])(
     "validates and binds adapter.%s before any storage operation",
     async (method) => {
       const adapter = new InMemoryAdapter();
       Object.defineProperty(adapter, method, { value: undefined });
-      const vault = { adapter } as unknown as Vault;
+      const vault = {
+        adapter,
+        createFolder: adapter.createFolder.bind(adapter),
+      } as unknown as Vault;
 
       await expect(repository(adapter, vault).save(analysis())).rejects.toThrow(
         "complete atomic storage support",
@@ -586,9 +932,24 @@ describe("AnalysisRepository", () => {
     },
   );
 
-  it("rejects an unsafe temporary suffix before any storage operation", async () => {
+  it("validates and binds vault.createFolder before any storage operation", async () => {
     const adapter = new InMemoryAdapter();
     const vault = { adapter } as unknown as Vault;
+
+    await expect(repository(adapter, vault).save(analysis())).rejects.toThrow(
+      "complete atomic storage support",
+    );
+    expect(adapter.operations).toEqual([]);
+    expect(adapter.directories.size).toBe(0);
+    expect(adapter.files.size).toBe(0);
+  });
+
+  it("rejects an unsafe temporary suffix before any storage operation", async () => {
+    const adapter = new InMemoryAdapter();
+    const vault = {
+      adapter,
+      createFolder: adapter.createFolder.bind(adapter),
+    } as unknown as Vault;
     const target = new AnalysisRepository(vault, DATA_ROOT, {
       randomSuffix: () => "../../unsafe",
     });

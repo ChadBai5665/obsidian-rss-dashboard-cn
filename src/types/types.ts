@@ -1,6 +1,10 @@
 import type { Locale, TranslationKey } from "../i18n/types";
 import type { SourceConfig, SourceKind } from "../sources/source-config";
 import type { AiSettings } from "../ai/ai-types";
+import type {
+  InitialImportPolicy,
+  InitialImportProgress,
+} from "../sources/initial-import-policy";
 
 export interface FeedItem {
   /** Stable collection identity once the item has entered the collection layer. */
@@ -113,6 +117,9 @@ export interface Feed {
    * Cleared (set to undefined) on the next successful fetch.
    */
   lastFetchError?: string;
+  initialImportPolicy?: InitialImportPolicy;
+  initialImportProgress?: InitialImportProgress;
+  subscriptionStatus?: "active" | "paused";
 }
 
 export type FeedRefreshStatus =
@@ -216,9 +223,16 @@ export type PodcastTheme =
   | "gruvbox"
   | "tokyonight";
 
+export type YouTubeTranscriptBrowserAuth =
+  | "none"
+  | "chrome"
+  | "safari"
+  | "firefox";
+
 export interface MediaSettings {
   autoTagVideos: boolean;
   rememberPlaybackProgress: boolean;
+  youtubeTranscriptBrowserAuth?: YouTubeTranscriptBrowserAuth;
   defaultTwitterFolder: string;
   defaultMastodonFolder: string;
   defaultYouTubeFolder: string;
@@ -444,6 +458,7 @@ export interface CollectionSettings {
 
 export interface TikHubSettings {
   enabled: boolean;
+  youtubeTranscriptFallbackEnabled: boolean;
   connectionId: string;
   // The explicit official origins document supported defaults; custom HTTPS origins remain allowed.
   // eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
@@ -627,6 +642,7 @@ export const DEFAULT_SETTINGS: RssDashboardSettings = {
   },
   tikhub: {
     enabled: false,
+    youtubeTranscriptFallbackEnabled: false,
     connectionId: "",
     baseUrl: "https://api.tikhub.io",
     timeoutMs: 20_000,
@@ -682,6 +698,7 @@ export const DEFAULT_SETTINGS: RssDashboardSettings = {
   media: {
     autoTagVideos: true,
     rememberPlaybackProgress: true,
+    youtubeTranscriptBrowserAuth: "none",
     defaultTwitterFolder: "Twitter",
     defaultMastodonFolder: "Mastodon",
     defaultYouTubeFolder: "Videos",

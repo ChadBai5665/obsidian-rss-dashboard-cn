@@ -25,6 +25,12 @@ interface PreparedRewrite {
   after: string;
 }
 
+export interface RemovedCollectionDay {
+  localDate: string;
+  previousItems: CollectedItem[];
+  remainingItems: CollectedItem[];
+}
+
 interface QuarantineJournal {
   schemaVersion: 1;
   stage: "prepared" | "committed";
@@ -59,6 +65,7 @@ const SOURCE_TYPES = new Set([
 const CONTENT_BASES = new Set([
   "feed",
   "full-text",
+  "youtube-transcript",
   "title-description",
   "x-post",
   "linked-page",
@@ -185,6 +192,159 @@ export class CollectionRepository {
     return false;
   }
 
+  async removeBySourceId(sourceId: string): Promise<RemovedCollectionDay[]> {
+    if (!sourceId.trim()) throw new Error("Invalid collection source id");
+    return await this.withRootAccessLock(async () =>
+      await this.removeBySourceIdUnlocked(sourceId),
+    );
+  }
+
+  private async removeBySourceIdUnlocked(
+    sourceId: string,
+  ): Promise<RemovedCollectionDay[]> {
+    await this.loadIndex();
+    const dates = await this.collectionDates();
+    const itemsByDate = new Map<string, CollectedItem[]>();
+    const rewrites: PreparedRewrite[] = [];
+    const affected: RemovedCollectionDay[] = [];
+
+    for (const localDate of dates) {
+      const path = this.dailyPath(localDate);
+      const parsed = await this.readCollection(path);
+      const remainingItems = parsed.items.filter(
+        (item) => item.sourceId !== sourceId,
+      );
+      itemsByDate.set(localDate, remainingItems);
+      if (remainingItems.length === parsed.items.length) continue;
+      rewrites.push({
+        path,
+        before: serializeCollection(parsed.items),
+        after: serializeCollection(remainingItems),
+      });
+      affected.push({
+        localDate,
+        previousItems: parsed.items,
+        remainingItems,
+      });
+    }
+
+    if (affected.length === 0) return [];
+
+    const nextIndex = EMPTY_INDEX();
+    for (const localDate of dates) {
+      for (const item of itemsByDate.get(localDate) ?? []) {
+        updateIndexEntry(nextIndex, item.id, localDate);
+      }
+    }
+
+    const completed: PreparedRewrite[] = [];
+    try {
+      for (const rewrite of rewrites) {
+        await this.atomicWrite(rewrite.path, rewrite.after);
+        completed.push(rewrite);
+      }
+      await this.writeIndex(nextIndex);
+    } catch (removeError) {
+      const rollbackErrors: unknown[] = [];
+      for (const rewrite of completed.reverse()) {
+        try {
+          await this.atomicWrite(rewrite.path, rewrite.before);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+      }
+      if (rollbackErrors.length > 0) {
+        throw combinedError(
+          "Source removal failed and rollback was incomplete",
+          removeError,
+          rollbackErrors,
+        );
+      }
+      throw removeError;
+    }
+
+    return affected;
+  }
+
+  async restoreRemovedSource(days: RemovedCollectionDay[]): Promise<void> {
+    if (days.length === 0) return;
+    await this.withRootAccessLock(async () => {
+      const uniqueDates = new Set<string>();
+      for (const day of days) {
+        assertLocalDate(day.localDate);
+        if (uniqueDates.has(day.localDate)) {
+          throw new Error("Invalid source removal receipt");
+        }
+        uniqueDates.add(day.localDate);
+      }
+
+      await this.loadIndex();
+      const dates = await this.collectionDates();
+      const restorationByDate = new Map(days.map((day) => [day.localDate, day]));
+      const itemsByDate = new Map<string, CollectedItem[]>();
+      const rewrites: PreparedRewrite[] = [];
+
+      for (const localDate of dates) {
+        const path = this.dailyPath(localDate);
+        const parsed = await this.readCollection(path);
+        const receipt = restorationByDate.get(localDate);
+        if (!receipt) {
+          itemsByDate.set(localDate, parsed.items);
+          continue;
+        }
+        if (
+          serializeCollection(parsed.items) !==
+          serializeCollection(receipt.remainingItems)
+        ) {
+          throw new Error("Source removal receipt no longer owns collection generation");
+        }
+        itemsByDate.set(localDate, receipt.previousItems);
+        rewrites.push({
+          path,
+          before: serializeCollection(parsed.items),
+          after: serializeCollection(receipt.previousItems),
+        });
+      }
+
+      if (rewrites.length !== days.length) {
+        throw new Error("Source removal receipt is incomplete");
+      }
+
+      const restoredIndex = EMPTY_INDEX();
+      for (const localDate of dates) {
+        for (const item of itemsByDate.get(localDate) ?? []) {
+          updateIndexEntry(restoredIndex, item.id, localDate);
+        }
+      }
+
+      const completed: PreparedRewrite[] = [];
+      try {
+        for (const rewrite of rewrites) {
+          await this.atomicWrite(rewrite.path, rewrite.after);
+          completed.push(rewrite);
+        }
+        await this.writeIndex(restoredIndex);
+      } catch (restoreError) {
+        const rollbackErrors: unknown[] = [];
+        for (const rewrite of completed.reverse()) {
+          try {
+            await this.atomicWrite(rewrite.path, rewrite.before);
+          } catch (rollbackError) {
+            rollbackErrors.push(rollbackError);
+          }
+        }
+        if (rollbackErrors.length > 0) {
+          throw combinedError(
+            "Source restoration failed and rollback was incomplete",
+            restoreError,
+            rollbackErrors,
+          );
+        }
+        throw restoreError;
+      }
+    });
+  }
+
   async listByDate(localDate: string): Promise<CollectedItem[]> {
     return await this.withRootAccessLock(async () =>
       await this.listByDateUnlocked(localDate),
@@ -266,15 +426,20 @@ export class CollectionRepository {
    * Callers must write the content file first: metadata never claims a cache
    * that has not reached storage.
    */
-  async updateContentMetadata(id: string, contentPath: string): Promise<void> {
+  async updateContentMetadata(
+    id: string,
+    contentPath: string,
+    contentBasis: "full-text" | "youtube-transcript" = "full-text",
+  ): Promise<void> {
     await this.withRootAccessLock(async () =>
-      await this.updateContentMetadataUnlocked(id, contentPath),
+      await this.updateContentMetadataUnlocked(id, contentPath, contentBasis),
     );
   }
 
   private async updateContentMetadataUnlocked(
     id: string,
     contentPath: string,
+    contentBasis: "full-text" | "youtube-transcript",
   ): Promise<void> {
     assertStableContentReference(id, contentPath, this.dataRoot);
     await this.loadIndex();
@@ -288,13 +453,13 @@ export class CollectionRepository {
       const updated = parsed.items.map((item) => {
         if (item.id !== id) return item;
         if (
-          item.contentBasis === "full-text" &&
+          item.contentBasis === contentBasis &&
           item.contentPath === contentPath
         ) {
           return item;
         }
         changed = true;
-        return { ...item, contentBasis: "full-text" as const, contentPath };
+        return { ...item, contentBasis, contentPath };
       });
       if (changed) {
         rewrites.push({
