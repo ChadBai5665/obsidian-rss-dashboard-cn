@@ -104,9 +104,19 @@ type DashboardRestorableMode = Exclude<
 
 interface DashboardReaderSnapshot {
   readonly itemId: string;
-  readonly article: FeedItem;
+  readonly article: DashboardReaderItemSnapshot;
   readonly contentContext?: ReaderContentContext;
-  readonly selectedArticle: FeedItem | null;
+  readonly selectedArticle: DashboardReaderItemSnapshot | null;
+}
+
+interface DashboardReaderItemSnapshot {
+  readonly article: FeedItem;
+  readonly guid: string;
+  readonly feedUrl: string;
+  readonly rssDashboardId?: string;
+  readonly rssDashboardSourceId?: string;
+  readonly owningFeedId?: string;
+  readonly owningFeedUrl?: string;
 }
 
 export class RssDashboardView extends ItemView {
@@ -1224,11 +1234,13 @@ export class RssDashboardView extends ItemView {
     this.previousReaderSnapshot = this.inlineArticle
       ? {
           itemId: this.inlineArticle.guid,
-          article: this.inlineArticle,
+          article: this.captureReaderItemSnapshot(this.inlineArticle),
           ...(this.inlineArticleContentContext === undefined
             ? {}
             : { contentContext: this.inlineArticleContentContext }),
-          selectedArticle: this.selectedArticle,
+          selectedArticle: this.selectedArticle
+            ? this.captureReaderItemSnapshot(this.selectedArticle)
+            : null,
         }
       : null;
     this.previousPrimaryMode = this.inlineArticle
@@ -1249,12 +1261,12 @@ export class RssDashboardView extends ItemView {
     ) {
       const snapshot = this.previousReaderSnapshot;
       this.inlineArticle =
-        this.findBackingArticleForDisplayItem(snapshot.article) ??
-        snapshot.article;
+        this.findBackingArticleForReaderSnapshot(snapshot.article) ??
+        snapshot.article.article;
       this.inlineArticleContentContext = snapshot.contentContext;
       this.selectedArticle = snapshot.selectedArticle
-        ? (this.findBackingArticleForDisplayItem(snapshot.selectedArticle) ??
-          snapshot.selectedArticle)
+        ? (this.findBackingArticleForReaderSnapshot(snapshot.selectedArticle) ??
+          snapshot.selectedArticle.article)
         : null;
     }
     this.previousReaderSnapshot = null;
@@ -3926,6 +3938,77 @@ export class RssDashboardView extends ItemView {
       pagination.totalPages,
       pageSize,
       filtered.length,
+    );
+  }
+
+  private captureReaderItemSnapshot(
+    article: FeedItem,
+  ): DashboardReaderItemSnapshot {
+    const owningFeed =
+      this.settings.feeds.find((feed) => feed.items.includes(article)) ??
+      (article.rssDashboardId
+        ? this.settings.feeds.find((feed) =>
+            feed.items.some(
+              (item) => item.rssDashboardId === article.rssDashboardId,
+            ),
+          )
+        : undefined) ??
+      (article.rssDashboardSourceId
+        ? this.settings.feeds.find(
+            (feed) =>
+              (feed.feedId ?? feed.url) === article.rssDashboardSourceId,
+          )
+        : undefined) ??
+      this.settings.feeds.find((feed) => feed.url === article.feedUrl);
+    return {
+      article,
+      guid: article.guid,
+      feedUrl: article.feedUrl,
+      ...(article.rssDashboardId === undefined
+        ? {}
+        : { rssDashboardId: article.rssDashboardId }),
+      ...(article.rssDashboardSourceId === undefined
+        ? {}
+        : { rssDashboardSourceId: article.rssDashboardSourceId }),
+      ...(owningFeed?.feedId === undefined
+        ? {}
+        : { owningFeedId: owningFeed.feedId }),
+      ...(owningFeed?.url === undefined
+        ? {}
+        : { owningFeedUrl: owningFeed.url }),
+    };
+  }
+
+  private findBackingArticleForReaderSnapshot(
+    snapshot: DashboardReaderItemSnapshot,
+  ): FeedItem | null {
+    if (snapshot.rssDashboardId !== undefined) {
+      for (const feed of this.settings.feeds) {
+        const stableMatch = feed.items.find(
+          (item) => item.rssDashboardId === snapshot.rssDashboardId,
+        );
+        if (stableMatch) return stableMatch;
+      }
+    }
+
+    const owningFeed = this.settings.feeds.find(
+      (feed) =>
+        (snapshot.owningFeedId !== undefined &&
+          feed.feedId === snapshot.owningFeedId) ||
+        (snapshot.rssDashboardSourceId !== undefined &&
+          (feed.feedId ?? feed.url) === snapshot.rssDashboardSourceId) ||
+        (snapshot.owningFeedUrl !== undefined &&
+          feed.url === snapshot.owningFeedUrl) ||
+        feed.url === snapshot.feedUrl,
+    );
+    return (
+      owningFeed?.items.find(
+        (item) =>
+          item.guid === snapshot.guid &&
+          (snapshot.rssDashboardId === undefined ||
+            item.rssDashboardId === undefined ||
+            item.rssDashboardId === snapshot.rssDashboardId),
+      ) ?? null
     );
   }
 

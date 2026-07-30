@@ -27,6 +27,7 @@ const LIVE_RELOAD_DELAY_MS = 150;
 const MAX_UI_OPERATIONS = 1_000;
 const MAX_UI_EVENTS = 5_000;
 const MAX_HEALTH_DATES = 30;
+const NARROW_PANEL_WIDTH_PX = 720;
 
 export class OperationJournalPanel {
   private readonly root = activeDocument.createElement("section");
@@ -43,6 +44,7 @@ export class OperationJournalPanel {
   private unsubscribe: (() => void) | null = null;
   private reloadTimer: number | null = null;
   private loadGeneration = 0;
+  private resizeObserver: ResizeObserver | null = null;
   private locale: Locale;
   private t: ReturnType<typeof createTranslator>;
 
@@ -61,6 +63,7 @@ export class OperationJournalPanel {
     if (this.disposed) return;
     this.host = host;
     if (this.root.parentElement !== host) host.appendChild(this.root);
+    this.observeWidth();
     if (this.unsubscribe === null) {
       try {
         const unsubscribe = this.options.subscribe(() => this.scheduleReload());
@@ -92,12 +95,13 @@ export class OperationJournalPanel {
       window.clearTimeout(this.reloadTimer);
       this.reloadTimer = null;
     }
-    try {
-      this.unsubscribe?.();
-    } catch {
-      // Cleanup must continue even if an injected unsubscribe is faulty.
-    }
+    const unsubscribe = this.unsubscribe;
     this.unsubscribe = null;
+    if (unsubscribe !== null) invokeSafely(unsubscribe);
+    const resizeObserver = this.resizeObserver;
+    this.resizeObserver = null;
+    if (resizeObserver !== null)
+      invokeSafely(() => resizeObserver.disconnect());
     this.root.remove();
   }
 
@@ -211,9 +215,7 @@ export class OperationJournalPanel {
       attr: { type: "button" },
     });
     exportButton.addEventListener("click", () => {
-      void Promise.resolve()
-        .then(() => this.options.exportSafe(this.days))
-        .catch(() => undefined);
+      invokeSafely(() => this.options.exportSafe(this.days));
     });
     const clearButton = actions.createEl("button", {
       cls: "rss-operation-journal-action rss-operation-journal-clear",
@@ -221,11 +223,7 @@ export class OperationJournalPanel {
       attr: { type: "button" },
     });
     clearButton.addEventListener("click", () => {
-      try {
-        this.options.requestClear();
-      } catch {
-        // The Dashboard remains usable when the injected clear action fails.
-      }
+      invokeSafely(() => this.options.requestClear());
     });
     const closeButton = actions.createEl("button", {
       cls: "rss-operation-journal-action rss-operation-journal-close",
@@ -233,12 +231,33 @@ export class OperationJournalPanel {
       attr: { type: "button" },
     });
     closeButton.addEventListener("click", () => {
-      try {
-        this.options.onClose();
-      } catch {
-        // A faulty owner callback must not escape the click event.
-      }
+      invokeSafely(() => this.options.onClose());
     });
+  }
+
+  private observeWidth(): void {
+    if (
+      this.resizeObserver !== null ||
+      typeof ResizeObserver === "undefined"
+    )
+      return;
+    try {
+      const observer = new ResizeObserver((entries) => {
+        if (this.disposed) return;
+        const entry = entries.find((candidate) => candidate.target === this.root);
+        if (entry === undefined) return;
+        this.root.classList.toggle(
+          "is-narrow",
+          entry.contentRect.width <= NARROW_PANEL_WIDTH_PX,
+        );
+      });
+      this.resizeObserver = observer;
+      observer.observe(this.root);
+    } catch {
+      const observer = this.resizeObserver;
+      this.resizeObserver = null;
+      if (observer !== null) invokeSafely(() => observer.disconnect());
+    }
   }
 
   private renderFilters(): void {
@@ -822,4 +841,14 @@ function safeDates(value: unknown, limit: number): readonly string[] {
       : [];
   });
   return Object.freeze(dates);
+}
+
+function invokeSafely(action: () => unknown): void {
+  let result: unknown;
+  try {
+    result = action();
+  } catch {
+    return;
+  }
+  void Promise.resolve(result).catch(() => undefined);
 }

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import {
@@ -277,11 +277,34 @@ function deferred<T>(): {
   return { promise, resolve };
 }
 
+function rejectingPromiseProbe(): {
+  readonly promise: Promise<void>;
+  handled(): boolean;
+} {
+  let handled = false;
+  const promise = Promise.resolve();
+  void Object.defineProperty(promise, "then", {
+    configurable: true,
+    value: (
+      _resolve: (value: unknown) => void,
+      reject: (reason: unknown) => void,
+    ) => {
+      handled = true;
+      queueMicrotask(() => reject(new Error("asynchronous boundary failure")));
+    },
+  });
+  return { promise, handled: () => handled };
+}
+
 describe("OperationJournalPanel", () => {
   beforeEach(() => {
     installObsidianDomPolyfills();
     vi.useRealTimers();
     document.body.empty();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("loads seven days, de-duplicates operations, and orders cards by start time", async () => {
@@ -467,6 +490,44 @@ describe("OperationJournalPanel", () => {
     ).not.toThrow();
     expect(() => panel.dispose()).not.toThrow();
     expect(root.querySelector(".rss-operation-journal")).toBeNull();
+  });
+
+  it("consumes rejecting promise-like clear, close, and unsubscribe results without delaying disposal", async () => {
+    const clearProbe = rejectingPromiseProbe();
+    const closeProbe = rejectingPromiseProbe();
+    const unsubscribeProbe = rejectingPromiseProbe();
+    const unsubscribe =
+      (() => unsubscribeProbe.promise) as unknown as () => void;
+    const requestClearPromise = () => clearProbe.promise;
+    const requestClear =
+      requestClearPromise as unknown as OperationJournalPanelOptions["requestClear"];
+    let panel!: OperationJournalPanel;
+    const harness = createHarness({
+      subscribe: () => unsubscribe,
+      requestClear,
+      onClose: (() => {
+        panel.dispose();
+        return closeProbe.promise;
+      }) as unknown as OperationJournalPanelOptions["onClose"],
+    });
+    panel = harness.panel;
+    const { root } = harness;
+    panel.open();
+    await settle();
+
+    root
+      .querySelector<HTMLButtonElement>(".rss-operation-journal-clear")
+      ?.click();
+    root
+      .querySelector<HTMLButtonElement>(".rss-operation-journal-close")
+      ?.click();
+
+    expect(root.querySelector(".rss-operation-journal")).toBeNull();
+    await settle();
+    await settle();
+    expect(clearProbe.handled()).toBe(true);
+    expect(closeProbe.handled()).toBe(true);
+    expect(unsubscribeProbe.handled()).toBe(true);
   });
 
   it("never presents seven-day cards while a 30-day request is pending and ignores stale completion", async () => {
@@ -669,7 +730,58 @@ describe("OperationJournalPanel", () => {
     expect(css).toContain("grid-template-columns: minmax(0, 1fr)");
     expect(css).toContain("overflow-wrap: anywhere");
     expect(css).toContain("@media (max-width: 720px)");
+    expect(css).toContain(
+      ".rss-operation-journal.is-narrow .rss-operation-journal-timeline-item",
+    );
     expect(css).not.toContain("!important");
+  });
+
+  it("tracks the panel width independently of the desktop viewport and disconnects its observer", async () => {
+    let callback!: ResizeObserverCallback;
+    let observer!: ResizeObserver;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    class CapturingResizeObserver {
+      constructor(next: ResizeObserverCallback) {
+        callback = next;
+        observer = this as unknown as ResizeObserver;
+      }
+      observe = observe;
+      unobserve = vi.fn();
+      disconnect = disconnect;
+    }
+    vi.stubGlobal("ResizeObserver", CapturingResizeObserver);
+    const { panel, root } = createHarness();
+    panel.open();
+    await settle();
+    const panelRoot = root.querySelector<HTMLElement>(
+      ".rss-operation-journal",
+    )!;
+
+    expect(observe).toHaveBeenCalledWith(panelRoot);
+    callback(
+      [{ target: panelRoot, contentRect: { width: 600 } } as ResizeObserverEntry],
+      observer,
+    );
+    expect(panelRoot.classList.contains("is-narrow")).toBe(true);
+    expect(
+      panelRoot
+        .querySelector(".rss-operation-journal-actions")
+        ?.closest(".rss-operation-journal.is-narrow"),
+    ).toBe(panelRoot);
+    expect(
+      panelRoot
+        .querySelector(".rss-operation-journal-timeline-item")
+        ?.closest(".rss-operation-journal.is-narrow"),
+    ).toBe(panelRoot);
+
+    callback(
+      [{ target: panelRoot, contentRect: { width: 721 } } as ResizeObserverEntry],
+      observer,
+    );
+    expect(panelRoot.classList.contains("is-narrow")).toBe(false);
+    panel.dispose();
+    expect(disconnect).toHaveBeenCalledTimes(1);
   });
 
   it("updates live locale without another load or subscription", async () => {

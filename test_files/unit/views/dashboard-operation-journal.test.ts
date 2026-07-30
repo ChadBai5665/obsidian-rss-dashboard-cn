@@ -217,6 +217,47 @@ describe("dashboard operation journal mode", () => {
     expect(view.selectedArticle?.guid).toBe("reader-item");
   });
 
+  it("restores the original source item when the current feed reuses its guid", () => {
+    const original = {
+      ...article(),
+      rssDashboardId: "a".repeat(64),
+      rssDashboardSourceId: "source-a",
+      title: "来源 A 的文章",
+      content: "source-a-content",
+      feedUrl: "https://source-a.example/feed",
+    };
+    const collision = {
+      ...article(),
+      rssDashboardId: "b".repeat(64),
+      rssDashboardSourceId: "source-b",
+      title: "来源 B 的同 GUID 文章",
+      content: "source-b-content",
+      feedUrl: "https://source-b.example/feed",
+    };
+    const sourceA = {
+      ...feed(original.feedUrl, [original]),
+      feedId: "source-a",
+    };
+    const sourceB = {
+      ...feed(collision.feedUrl, [collision]),
+      feedId: "source-b",
+    };
+    const { view } = createView(uiPort());
+    vi.spyOn(view, "render").mockImplementation(() => {});
+    view.settings.feeds = [sourceA, sourceB];
+    view.inlineArticle = original;
+    view.selectedArticle = original;
+    view.openOperationJournal();
+
+    view.handleFeedClick(sourceB);
+    view.closeOperationJournal();
+
+    expect(view.inlineArticle).toBe(original);
+    expect(view.inlineArticle?.title).toBe("来源 A 的文章");
+    expect(view.inlineArticle?.content).toBe("source-a-content");
+    expect(view.selectedArticle).toBe(original);
+  });
+
   it("keeps articles mode as a list after journal-side navigation", () => {
     const { view } = createView(uiPort());
     vi.spyOn(view, "render").mockImplementation(() => {});
