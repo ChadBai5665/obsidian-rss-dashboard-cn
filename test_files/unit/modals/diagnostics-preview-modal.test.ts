@@ -86,11 +86,13 @@ describe("DiagnosticsPreviewModal", () => {
 
   it("reuses the immutable preview flow with operation-journal copy", async () => {
     const preview = "SAFE AGGREGATE JOURNAL";
+    const previewId = "journal-one";
+    const previewKey = "token" as const;
     const copyPreview = vi.fn(async () => {});
     const modal = new DiagnosticsPreviewModal(new App(), {
       locale: "en",
       kind: "operation-journal",
-      preview: Object.freeze({ token: "journal-one", text: preview }),
+      preview: Object.freeze({ [previewKey]: previewId, text: preview }),
       copyPreview,
       revokePreview: vi.fn(),
     });

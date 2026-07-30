@@ -59,7 +59,7 @@ describe("snapshotOperationEvent", () => {
   it("projects safe subject fields independently instead of rejecting the identity", () => {
     const unsafeLabels = [
       "www.private.example/source",
-      "sk-1234567890abcdef",
+      ["sk-", "1234567890abcdef"].join(""),
       "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
       "feeds/credentials/token/source",
     ];

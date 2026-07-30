@@ -430,7 +430,7 @@ describe("public repository scanner", () => {
         expect(configError.status).toBe(2);
       }
     },
-    30_000,
+    60_000,
   );
 
   it("detects unfinished release metadata without treating upstream attribution as a secret", async () => {

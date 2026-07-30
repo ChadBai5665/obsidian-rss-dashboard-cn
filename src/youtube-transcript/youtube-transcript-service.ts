@@ -1886,7 +1886,7 @@ function createNoopJournalScope(operationId: string): OperationJournalScope {
 
 function createLocalOperationId(): string {
   try {
-    const operationId = globalThis.crypto.randomUUID();
+    const operationId = activeWindow.crypto.randomUUID();
     if (OPERATION_ID.test(operationId)) return operationId;
   } catch {
     // Fall through to a process-local valid correlation ID.

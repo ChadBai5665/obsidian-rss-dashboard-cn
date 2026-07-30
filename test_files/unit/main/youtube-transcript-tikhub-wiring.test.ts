@@ -53,6 +53,7 @@ import {
   type RssDashboardSettings,
 } from "../../../src/types/types";
 import type { YouTubeTranscriptService } from "../../../src/youtube-transcript/youtube-transcript-service";
+import type { OperationJournalPort } from "../../../src/operation-journal/operation-journal-service";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 
 const ITEM_ID = "a".repeat(64);
@@ -60,6 +61,7 @@ const VIDEO_ID = "dQw4w9WgXcQ";
 const FIRST_CONNECTION_ID = "123e4567-e89b-42d3-a456-426614174000";
 const CURRENT_CONNECTION_ID = "223e4567-e89b-42d3-a456-426614174000";
 const JOB_ID = "323e4567-e89b-42d3-a456-426614174000";
+const OPERATION_ID = "423e4567-e89b-42d3-a456-426614174000";
 
 interface TranscriptRuntime {
   service: YouTubeTranscriptService;
@@ -81,6 +83,7 @@ interface TranscriptRuntime {
 
 interface ProviderOptions {
   createClient(settings: RssDashboardSettings["tikhub"]): TikHubClient;
+  operationJournal: OperationJournalPort;
 }
 
 function manifest(): PluginManifest {
@@ -565,6 +568,7 @@ describe("TikHub transcript runtime wiring", () => {
     const provider = tikhubProvider(runtime.service);
     const options = (provider as unknown as { options: ProviderOptions }).options;
     const createClient = vi.spyOn(options, "createClient");
+    const attachJournal = vi.spyOn(options.operationJournal, "attach");
     const fetchCaptions = vi.spyOn(TikHubClient.prototype, "fetchYouTubeCaptions")
       .mockResolvedValue(captionTracksResponse());
 
@@ -580,6 +584,7 @@ describe("TikHub transcript runtime wiring", () => {
     const tracks = await provider.listTracks(VIDEO_ID, undefined, {
       itemId: ITEM_ID,
       videoId: VIDEO_ID,
+      operationId: OPERATION_ID,
     });
 
     expect(secretState.reads).toEqual([CURRENT_CONNECTION_ID]);
@@ -596,6 +601,14 @@ describe("TikHub transcript runtime wiring", () => {
       apiKey: `synthetic-key-for-${CURRENT_CONNECTION_ID}`,
       videoId: VIDEO_ID,
     }));
+    expect(attachJournal).toHaveBeenCalledWith(
+      OPERATION_ID,
+      expect.objectContaining({
+        category: "transcript",
+        action: "retrieve",
+        subject: { itemId: ITEM_ID },
+      }),
+    );
     expect(tracks).toMatchObject({
       value: [{ source: "tikhub", languageCode: "en" }],
     });

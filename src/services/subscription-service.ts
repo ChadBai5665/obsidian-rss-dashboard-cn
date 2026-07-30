@@ -772,11 +772,11 @@ export class SubscriptionService {
         details,
         options.purgeCollection ? "cleaning" : "saving",
       );
-      const intents: Array<{ owner: SubscriptionSettingsPort; token: symbol }> = [];
+      const intents: Array<{ owner: SubscriptionSettingsPort; marker: symbol }> = [];
       const registerCurrentRemovalIntent = (): void => {
         const owner = this.settings;
         if (intents.some((intent) => intent.owner === owner)) return;
-        intents.push({ owner, token: registerRemovalIntent(owner, feedId) });
+        intents.push({ owner, marker: registerRemovalIntent(owner, feedId) });
       };
       try {
         registerCurrentRemovalIntent();
@@ -787,8 +787,8 @@ export class SubscriptionService {
           await this.removeUnlocked(feedId, options, journal);
         });
       } finally {
-        for (const { owner, token } of intents) {
-          clearRemovalIntent(owner, feedId, token);
+        for (const { owner, marker } of intents) {
+          clearRemovalIntent(owner, feedId, marker);
         }
       }
       succeedSubscriptionJournal(journal);

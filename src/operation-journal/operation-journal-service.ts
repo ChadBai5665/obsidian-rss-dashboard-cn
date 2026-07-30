@@ -436,10 +436,7 @@ function isValidOperationId(operationId: string): boolean {
 }
 
 function trustedFallbackOperationId(): string {
-  const candidates = [
-    () => globalThis.crypto.randomUUID(),
-    () => activeWindow.crypto.randomUUID(),
-  ];
+  const candidates = [() => activeWindow.crypto.randomUUID()];
   for (const candidate of candidates) {
     try {
       const operationId = candidate();

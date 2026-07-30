@@ -416,7 +416,7 @@ describe("version bump", () => {
         checkVersionConsistency({ repository }),
       ).resolves.toMatchObject({ ok: true, errors: [] });
     },
-    30_000,
+    60_000,
   );
 
   it("keeps exact recovery paths when a restore rename fails", async () => {

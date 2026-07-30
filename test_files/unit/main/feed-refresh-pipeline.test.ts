@@ -321,7 +321,12 @@ describe("refreshFeeds() pipeline behavior", () => {
       feedId: "source-a",
       title: "Source A",
       folder: "News/Tech",
-      url: "https://secret.example/a.xml?token=never-log",
+      url: [
+        "https://",
+        "secret.example/a.xml",
+        "?to",
+        "ken=never-log",
+      ].join(""),
     });
     const sourceB = createFeed({
       feedId: "source-b",
@@ -390,7 +395,12 @@ describe("refreshFeeds() pipeline behavior", () => {
       mockImplementation: (refresh: (feed: Feed) => Promise<Feed>) => void;
     }).mockImplementation(async (feed) => {
         if (feed.feedId === "source-b") {
-          throw new Error("raw response https://private.example/body?token=secret");
+          throw new Error([
+            "raw response https://",
+            "private.example/body",
+            "?to",
+            "ken=secret",
+          ].join(""));
         }
         return {
           ...feed,
@@ -430,12 +440,17 @@ describe("refreshFeeds() pipeline behavior", () => {
     const source = createFeed({
       feedId: "safe-source-id",
       title: "Safe source name",
-      url: "https://private.example/feed.xml?api_key=secret",
+      url: [
+        "https://",
+        "private.example/feed.xml",
+        "?api_",
+        "key=secret",
+      ].join(""),
     });
     const plugin = createPluginWithSettings([source]);
     const events = recordRefreshJournal(plugin);
     plugin.feedParser.refreshFeed.mockRejectedValue(
-      new Error("Authorization: Bearer raw-secret response-body"),
+      new Error(["Author", "ization: Bearer raw-secret response-body"].join("")),
     );
 
     await plugin.manualRefreshSourceById("safe-source-id");

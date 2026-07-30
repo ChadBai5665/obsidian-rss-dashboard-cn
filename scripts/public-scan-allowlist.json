@@ -317,56 +317,56 @@
   {
     "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
     "rule": "credential-url",
-    "line": 1005,
+    "line": 1772,
     "fingerprint": "sha256:4d2e5ef68db3d853eebe3983cdad472a48d205952c81953351f8702bef60d1a5",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
     "rule": "credential-value",
-    "line": 1005,
+    "line": 1772,
     "fingerprint": "sha256:e19e55222f0d13c1b5be8316c66a326c178e38393b15027140abe9044adefb14",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
     "rule": "credential-url",
-    "line": 1169,
+    "line": 1936,
     "fingerprint": "sha256:ecc323dd74e14e832dd1befb800cbeebb36193fc4827ae902560cdfd1d4f7c23",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
     "rule": "credential-value",
-    "line": 1169,
+    "line": 1936,
     "fingerprint": "sha256:4387d03415d55d6c5d9de428bfc314ee09f7c7e3fb2ac919b2414a8973f36231",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
     "rule": "credential-url",
-    "line": 2670,
+    "line": 3437,
     "fingerprint": "sha256:cf576975fd00db77635470d6ca7012d2b4cd905e30bd5cfa030c03a4c0001b9a",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
     "rule": "credential-url",
-    "line": 2825,
+    "line": 3592,
     "fingerprint": "sha256:cf576975fd00db77635470d6ca7012d2b4cd905e30bd5cfa030c03a4c0001b9a",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/main/feed-refresh-pipeline.test.ts",
     "rule": "credential-url",
-    "line": 3689,
+    "line": 4456,
     "fingerprint": "sha256:fafe96732b83901a5e132f5a460ecd27542c492358cbd67f2c04e044a693ab83",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
   {
     "path": "test_files/unit/main/plugin-lifecycle.test.ts",
     "rule": "credential-url",
-    "line": 1053,
+    "line": 1164,
     "fingerprint": "sha256:9723c9f9f566c1e511309d5c3bca23ddf796afa6609b0dcb53b7acdfe42e57d8",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
@@ -1227,7 +1227,7 @@
   {
     "path": "test_files/unit/settings/import-export-settings-tab.test.ts",
     "rule": "credential-value",
-    "line": 70,
+    "line": 82,
     "fingerprint": "sha256:cab76ef1a06a61501cdac45091c347c8245ffe1159f4dc756b40586a64612d7d",
     "reason": "Security test fixture intentionally exercises credential redaction behavior."
   },
@@ -1745,22 +1745,15 @@
   {
     "path": "src/services/subscription-service.ts",
     "rule": "credential-value",
-    "line": 290,
+    "line": 327,
     "fingerprint": "sha256:a3f883ebd96752409ba0e0c62b191424a6de6baa247f6f56dd65e9414c7f69a0",
     "reason": "Subscription removal coordination uses an in-memory symbol token, not a credential."
   },
   {
     "path": "src/services/subscription-service.ts",
     "rule": "credential-value",
-    "line": 600,
+    "line": 695,
     "fingerprint": "sha256:2740887049e1437ba2a02f0ac262b689bd2c1519ca20f25819769c7d786cfc55",
-    "reason": "Subscription removal coordination uses an in-memory symbol token, not a credential."
-  },
-  {
-    "path": "src/services/subscription-service.ts",
-    "rule": "credential-value",
-    "line": 667,
-    "fingerprint": "sha256:615c29015a29b61d68bef056c48fa198cd60e77866b26868eb204beca1241e7c",
     "reason": "Subscription removal coordination uses an in-memory symbol token, not a credential."
   },
   {
@@ -1962,98 +1955,98 @@
   {
     "path": "test_files/unit/ai/ai-operation-task-coordinator.test.ts",
     "rule": "credential-value",
-    "line": 30,
+    "line": 41,
     "fingerprint": "sha256:509f8b8b24b0367ed3f4a53c702168986e264e1aab22be6f59498edd5140c61e",
     "reason": "Security test fixture defines a synthetic credential canary for coordinator state, listener, and error isolation tests."
   },
   {
     "path": "test_files/unit/youtube-transcript/youtube-transcript-service.test.ts",
     "rule": "credential-value",
-    "line": 1113,
+    "line": 1201,
     "fingerprint": "sha256:84df8bb6416314ff32b77a002429f880273c6e458edc461e1e67bf889f1995f2",
     "reason": "Synthetic provider secret verifies fallback errors do not retain or leak credential values."
   },
   {
     "path": "src/youtube-transcript/tikhub-transcript-provider.ts",
     "rule": "credential-value",
-    "line": 351,
+    "line": 442,
     "fingerprint": "sha256:7e427fb1879b4c101dd0c37278eef22231f3520951cf6bf0869d34d380a96ea6",
     "reason": "Call-scoped resolved key session parameter for paid/free caption operation; never persisted/logged/projected."
   },
   {
     "path": "src/youtube-transcript/tikhub-transcript-provider.ts",
     "rule": "credential-value",
-    "line": 501,
+    "line": 719,
     "fingerprint": "sha256:7e427fb1879b4c101dd0c37278eef22231f3520951cf6bf0869d34d380a96ea6",
     "reason": "Same call-scoped session for bounded free result polling; never persisted/logged/projected."
   },
   {
     "path": "test_files/unit/youtube-transcript/tikhub-transcript-provider.test.ts",
     "rule": "credential-value",
-    "line": 529,
+    "line": 1224,
     "fingerprint": "sha256:f02c35339680aad13f67e0237f54c31495cc2c77125719ae3ae95a59905b2910",
     "reason": "Synthetic credential fixture verifies the paid track-list request receives only the operation-scoped resolved key."
   },
   {
     "path": "test_files/unit/youtube-transcript/tikhub-transcript-provider.test.ts",
     "rule": "credential-value",
-    "line": 632,
+    "line": 1327,
     "fingerprint": "sha256:6557453f68fece7ceabd32fa33611a60c2ee55602952986d70e0d0ac37bd9660",
     "reason": "Synthetic credential fixture verifies an explicit list operation re-resolves and forwards its own operation-scoped key."
   },
   {
     "path": "test_files/unit/youtube-transcript/tikhub-transcript-provider.test.ts",
     "rule": "credential-value",
-    "line": 637,
+    "line": 1332,
     "fingerprint": "sha256:6557453f68fece7ceabd32fa33611a60c2ee55602952986d70e0d0ac37bd9660",
     "reason": "Synthetic credential fixture verifies an explicit content operation independently re-resolves its operation-scoped key."
   },
   {
     "path": "test_files/unit/youtube-transcript/tikhub-transcript-provider.test.ts",
     "rule": "credential-value",
-    "line": 812,
+    "line": 1508,
     "fingerprint": "sha256:f02c35339680aad13f67e0237f54c31495cc2c77125719ae3ae95a59905b2910",
     "reason": "Synthetic credential fixture verifies bounded free result polling uses the operation-scoped key while issuing zero paid requests."
   },
   {
     "path": "test_files/unit/operation-journal/operation-event.test.ts",
     "rule": "credential-value",
-    "line": 154,
+    "line": 214,
     "fingerprint": "sha256:321f1d9af803fb0134f284223acc3bb5f92d92ee5989efcf8e335bc27073c6d5",
     "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
   },
   {
     "path": "test_files/unit/operation-journal/operation-event.test.ts",
     "rule": "credential-value",
-    "line": 155,
+    "line": 215,
     "fingerprint": "sha256:df2dbbac6679165641275f86693bd0c09522e27c19f8cc2484d3550e4c82c3bc",
     "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
   },
   {
     "path": "test_files/unit/operation-journal/operation-event.test.ts",
     "rule": "home-path",
-    "line": 198,
+    "line": 258,
     "fingerprint": "sha256:75de86a5f2985e23f9c768519f4a7a6afb66de7dedca7f7740d3d7f13c39764a",
     "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
   },
   {
     "path": "test_files/unit/operation-journal/operation-event.test.ts",
     "rule": "home-path",
-    "line": 227,
+    "line": 287,
     "fingerprint": "sha256:75de86a5f2985e23f9c768519f4a7a6afb66de7dedca7f7740d3d7f13c39764a",
     "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
   },
   {
     "path": "test_files/unit/operation-journal/operation-event.test.ts",
     "rule": "credential-value",
-    "line": 231,
+    "line": 291,
     "fingerprint": "sha256:33c4b434882e31ca68d9754e481ba1e3b8890ef20d8cbf92114458820bc0218c",
     "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
   },
   {
     "path": "test_files/unit/operation-journal/operation-event.test.ts",
     "rule": "credential-value",
-    "line": 232,
+    "line": 292,
     "fingerprint": "sha256:d604c2b136c8a3452477b2a02c8ae8aad41f7c7864e16d34e02b0328f90de6fa",
     "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
   }

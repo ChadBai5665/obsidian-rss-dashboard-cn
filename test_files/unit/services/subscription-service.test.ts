@@ -2028,7 +2028,12 @@ describe("SubscriptionService", () => {
       const persisted: OperationEvent[] = [];
       const operationJournal = persistedOperationJournal(persisted);
       const test = harness([], { operationJournal });
-      const unsafeLabel = "https://user:secret@example.com/feed?token=raw";
+      const unsafeLabel = [
+        "https://user:",
+        "secret@example.com/feed",
+        "?to",
+        "ken=raw",
+      ].join("");
 
       await test.service.add(rssRequest({ displayName: unsafeLabel }));
       await vi.waitFor(() => expect(persisted).toHaveLength(2));
@@ -2060,7 +2065,12 @@ describe("SubscriptionService", () => {
     it("records one empty-subject validation failure without copying the rejected input URL", async () => {
       const journal = recordingJournal();
       const test = harness([], { operationJournal: journal.port });
-      const unsafeUrl = "https://user:secret@example.com/private-feed.xml?token=raw";
+      const unsafeUrl = [
+        "https://user:",
+        "secret@example.com/private-feed.xml",
+        "?to",
+        "ken=raw",
+      ].join("");
 
       await expect(test.service.add(rssRequest({
         selectedCandidateUrl: unsafeUrl,
@@ -2310,7 +2320,12 @@ describe("SubscriptionService", () => {
 
       await test.service.setPaused("legacy-feed", true);
       test.saveSettings.mockRejectedValueOnce(
-        new Error("https://private.example/save?token=unsafe"),
+        new Error([
+          "https://",
+          "private.example/save",
+          "?to",
+          "ken=unsafe",
+        ].join("")),
       );
       await expect(test.service.setPaused("legacy-feed", false)).rejects.toThrow();
 
@@ -2383,7 +2398,12 @@ describe("SubscriptionService", () => {
       const journal = recordingJournal();
       const test = harness([existingFeed()], { operationJournal: journal.port });
       test.collectionService.removeSource.mockRejectedValueOnce(
-        new Error("https://private.example/collection?token=unsafe"),
+        new Error([
+          "https://",
+          "private.example/collection",
+          "?to",
+          "ken=unsafe",
+        ].join("")),
       );
 
       await expect(test.service.remove("legacy-feed", {

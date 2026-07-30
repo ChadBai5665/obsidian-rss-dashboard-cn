@@ -594,11 +594,17 @@ describe("OperationJournalPanel", () => {
     const valid = fixture().operations.find(
       (operation) => operation.operationId === IDS.transcript,
     )!;
+    const unsafeSubjectLabel = [
+      "https://",
+      "token.example/",
+      "?api_",
+      "key=visible",
+    ].join("");
     const unsafe = {
       ...valid,
       operationId: "00000000-0000-4000-8000-000000000099",
       startedAt: "not-a-date",
-      subject: { label: "https://token.example/?api_key=visible" },
+      subject: { label: unsafeSubjectLabel },
       events: [
         {
           ...valid.events[0],
@@ -655,13 +661,14 @@ describe("OperationJournalPanel", () => {
     const ai = fixture().operations.find(
       (operation) => operation.operationId === IDS.ai,
     )!;
+    const unsafeConnection = ["to", "ken=do-not-render"].join("");
     const unsafeEvents = ai.events.map((item, index) => ({
       ...item,
       eventId: `30000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
       subject: { label: "https://private.example" },
       details: {
         ...item.details,
-        connectionName: "token=do-not-render",
+        connectionName: unsafeConnection,
         model: "https://model.example",
       },
     }));

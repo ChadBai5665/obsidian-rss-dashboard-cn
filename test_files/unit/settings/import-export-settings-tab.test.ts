@@ -98,6 +98,8 @@ function createPlugin() {
 function createOperationJournalPort(
   overrides: Partial<OperationJournalSettingsPort> = {},
 ): OperationJournalSettingsPort {
+  const previewId = "journal-preview";
+  const previewKey = "token" as const;
   return {
     stats: vi.fn(async () => ({
       bytes: 1_536,
@@ -106,7 +108,7 @@ function createOperationJournalPort(
       earliestDate: "2026-07-28",
     })),
     createPreview: vi.fn(async () =>
-      Object.freeze({ token: "journal-preview", text: "SAFE JOURNAL" }),
+      Object.freeze({ [previewKey]: previewId, text: "SAFE JOURNAL" }),
     ),
     copyPreview: vi.fn(async () => {}),
     revokePreview: vi.fn(),

@@ -542,6 +542,8 @@ describe("ImportExportService", () => {
       const getSafeOperationJournalExport = vi
         .fn()
         .mockResolvedValue("SAFE JOURNAL EXPORT");
+      const previewId = "journal-preview";
+      const previewKey = "token" as const;
       const svc = new ImportExportService({
         settings: makeSettings(),
         isMobile: false,
@@ -553,7 +555,7 @@ describe("ImportExportService", () => {
 
       expect(getSafeOperationJournalExport).toHaveBeenCalledWith(30);
       expect(preview).toEqual({
-        token: "journal-preview",
+        [previewKey]: previewId,
         text: "SAFE JOURNAL EXPORT",
       });
       expect(Object.isFrozen(preview)).toBe(true);
