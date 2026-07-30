@@ -1059,8 +1059,12 @@ Do not bump `package.json`, `manifest.json`, `versions.json` or create a Git tag
 Target Vault:
 
 ```text
-/Users/chadbai/ChadMac/Chad.OPC/chad-claude-hub/
+$RSS_DASHBOARD_VAULT
 ```
+
+At execution time, set `RSS_DASHBOARD_VAULT` to the already user-approved
+current Vault path in the local shell. Do not write the personal absolute path
+into tracked files, reports, fixtures, or Git history.
 
 Before installation, record hashes/metadata for:
 
