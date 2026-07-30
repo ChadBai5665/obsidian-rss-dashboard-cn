@@ -8,6 +8,7 @@ import {
   createSafeOperationJournalExport,
   type SafeOperationJournalExport,
 } from "../../../src/operation-journal/safe-operation-journal-export";
+import type { OperationSummary } from "../../../src/operation-journal/operation-summary";
 
 const NOW = new Date("2026-07-30T03:00:00.000Z");
 const RAW_LOCAL_ID = "123e4567-e89b-12d3-a456-426614174000";
@@ -112,6 +113,35 @@ function buildExport(): string {
   });
 }
 
+function exportModel(model: string): SafeOperationJournalExport {
+  const event = localEvent({
+    eventId: "30000000-0000-4000-8000-000000000001",
+    operationId: "40000000-0000-4000-8000-000000000001",
+    occurredAt: "2026-07-30T02:50:00.000Z",
+    category: "ai",
+    action: "summary",
+    stage: "preparing",
+    status: "started",
+    subject: { itemId: "model-test-item" },
+    details: {
+      providerKind: "openai-compatible",
+      model,
+      contentBasis: "feed",
+    },
+  });
+  return JSON.parse(
+    createSafeOperationJournalExport({
+      generatedAt: NOW.toISOString(),
+      rangeDays: 7,
+      health: Object.freeze({
+        writeIncomplete: false,
+        maintenanceIncomplete: false,
+      }),
+      operations: aggregateOperationEvents([event], NOW),
+    }),
+  ) as SafeOperationJournalExport;
+}
+
 describe("createSafeOperationJournalExport", () => {
   it("removes local identity, labels, paths, job IDs, and private content canaries", () => {
     const exported = buildExport();
@@ -200,5 +230,91 @@ describe("createSafeOperationJournalExport", () => {
     });
     expect(exported.length).toBeLessThan(10_000);
     expect(buildExport()).toBe(exported);
+  });
+
+  it.each([
+    ["C:", "Users", "local", "models", "model.gguf"].join("/"),
+    ["C:", "Users", "local", "models", "model.gguf"].join("\\"),
+    "/opt/models/model.gguf",
+    "~/models/model.gguf",
+    "Users/local/models/model.gguf",
+    "vendor/model.safetensors",
+    "vendor/../model-v1",
+    "localhost/model-v1",
+    "models.example.com/model-v1",
+    "127.0.0.1/model-v1",
+    "CREDENTIAL_CANARY_81FA",
+    "PROMPT_CANARY_81FA",
+    "OUTPUT_CANARY_81FA",
+  ])("omits unsafe local, host, or private model value %s", (model) => {
+    const parsed = exportModel(model);
+
+    expect(parsed.operations[0]?.events[0]?.details).not.toHaveProperty(
+      "model",
+    );
+    expect(JSON.stringify(parsed)).not.toContain(model);
+  });
+
+  it.each([
+    "deepseek-chat",
+    "kimi-k2-0711-preview",
+    "MiniMax-M2.1",
+    "deepseek/deepseek-chat",
+    "moonshotai/kimi-k2",
+    "MiniMaxAI/MiniMax-M2.1",
+    "vendor/model-v1",
+  ])("retains a bounded provider model identifier %s", (model) => {
+    expect(exportModel(model).operations[0]?.events[0]?.details.model).toBe(
+      model,
+    );
+  });
+
+  it("rejects a forged URL model with a static non-leaking export error", () => {
+    const validEvent = localEvent({
+      eventId: "30000000-0000-4000-8000-000000000002",
+      operationId: "40000000-0000-4000-8000-000000000002",
+      occurredAt: "2026-07-30T02:50:00.000Z",
+      category: "ai",
+      action: "summary",
+      stage: "preparing",
+      status: "started",
+      subject: { itemId: "model-test-item" },
+      details: {
+        providerKind: "openai-compatible",
+        model: "vendor/model-v1",
+        contentBasis: "feed",
+      },
+    });
+    const [summary] = aggregateOperationEvents([validEvent], NOW);
+    const unsafeUrl = "https://private.invalid/model";
+    const forgedEvent = {
+      ...validEvent,
+      details: { ...validEvent.details, model: unsafeUrl },
+    } as OperationEvent;
+    const forgedSummary = {
+      ...summary,
+      events: [forgedEvent],
+    } as OperationSummary;
+
+    let thrown: unknown;
+    try {
+      createSafeOperationJournalExport({
+        generatedAt: NOW.toISOString(),
+        rangeDays: 7,
+        health: Object.freeze({
+          writeIncomplete: false,
+          maintenanceIncomplete: false,
+        }),
+        operations: [forgedSummary],
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toMatchObject({
+      name: "SafeOperationJournalExportError",
+      message: "Unable to create safe operation journal export.",
+    });
+    expect(JSON.stringify(thrown)).not.toContain(unsafeUrl);
   });
 });

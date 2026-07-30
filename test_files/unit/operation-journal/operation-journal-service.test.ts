@@ -66,6 +66,84 @@ async function nextMicrotask(): Promise<void> {
 }
 
 describe("OperationJournalService scopes", () => {
+  it("contains unsafe begin and attach identities in frozen no-op scopes", async () => {
+    const append = vi.fn(async () => ({ maintenanceIncomplete: false }));
+    const healthChanges: OperationJournalHealth[] = [];
+    const service = new OperationJournalService(createStore(append), {
+      createId: createIds(),
+      clock: () => new Date(NOW),
+      onHealthChange: (health) => healthChanges.push(health),
+    });
+
+    const unsafeBegin = service.begin({
+      category: "transcript",
+      action: "retrieve",
+      trigger: "manual",
+      subject: { itemId: "item-42", label: "https://unsafe.invalid/item" },
+      stage: "requested",
+      details: { contentBasis: "youtube-transcript" },
+    });
+    const unsafeAttach = service.attach(OPERATION_ID, {
+      category: "transcript",
+      action: "retrieve",
+      trigger: "system",
+      subject: {
+        itemId: "item-42",
+        label: ["Authorization", "Bearer UNSAFE_IDENTITY_CANARY_81FA"].join(
+          ": ",
+        ),
+      },
+    });
+
+    expect(unsafeBegin.operationId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+    expect(unsafeAttach.operationId).toBe(OPERATION_ID);
+    expect(Object.isFrozen(unsafeBegin)).toBe(true);
+    await expect(
+      unsafeBegin.progress("checking-cache", { provider: "cache" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      unsafeAttach.fail("completed", "no-transcript"),
+    ).resolves.toBeUndefined();
+
+    expect(append).not.toHaveBeenCalled();
+    expect(healthChanges).toHaveLength(2);
+    expect(service.getHealth()).toMatchObject({ writeIncomplete: true });
+    expect(JSON.stringify(service.getHealth())).not.toContain(
+      "UNSAFE_IDENTITY_CANARY_81FA",
+    );
+  });
+
+  it("contains a failing primary ID generator in a stable valid no-op scope", async () => {
+    const append = vi.fn(async () => ({ maintenanceIncomplete: false }));
+    const healthChanges: OperationJournalHealth[] = [];
+    const service = new OperationJournalService(createStore(append), {
+      createId: () => {
+        throw new Error("RAW_ID_FAILURE_CANARY_81FA");
+      },
+      clock: () => new Date(NOW),
+      onHealthChange: (health) => healthChanges.push(health),
+    });
+
+    const scope = beginTranscript(service);
+    const stableId = scope.operationId;
+
+    expect(stableId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+    await expect(
+      scope.progress("checking-cache", { provider: "cache" }),
+    ).resolves.toBeUndefined();
+    await expect(scope.abort("completed")).resolves.toBeUndefined();
+    expect(scope.operationId).toBe(stableId);
+    expect(append).not.toHaveBeenCalled();
+    expect(healthChanges).toHaveLength(1);
+    expect(JSON.stringify(service.getHealth())).not.toContain(
+      "RAW_ID_FAILURE_CANARY_81FA",
+    );
+  });
+
   it("returns a stable operation UUID immediately and preserves unawaited event order", async () => {
     const appended: OperationEvent[] = [];
     const service = new OperationJournalService(
@@ -337,5 +415,53 @@ describe("OperationJournalService failure isolation and live events", () => {
     expect(stats).toHaveBeenCalledWith(NOW);
     expect(prune).toHaveBeenCalledWith(NOW);
     expect(clear).toHaveBeenCalledTimes(1);
+  });
+
+  it("sanitizes read and stats failures into frozen fallbacks", async () => {
+    const rawFailure = "RAW_CONTROL_FAILURE_CANARY_81FA";
+    const readRange = vi.fn(async (): Promise<OperationJournalReadResult> => {
+      throw new Error(rawFailure);
+    });
+    const stats = vi.fn(async (): Promise<OperationJournalStats> => {
+      throw new Error(rawFailure);
+    });
+    const healthChanges: OperationJournalHealth[] = [];
+    const service = new OperationJournalService(
+      { ...createStore(), readRange, stats },
+      {
+        createId: createIds(),
+        clock: () => new Date(NOW),
+        onHealthChange: (health) => healthChanges.push(health),
+      },
+    );
+
+    const list = await service.list({ days: 7, now: NOW });
+    const journalStats = await service.stats(NOW);
+    const exported = await service.createSafeExport({ days: 30, now: NOW });
+
+    expect(list).toEqual({
+      operations: [],
+      incompleteDates: [],
+      corruptDates: [],
+      truncated: true,
+      health: {
+        writeIncomplete: false,
+        maintenanceIncomplete: true,
+        lastMaintenanceFailureAt: NOW.toISOString(),
+      },
+    });
+    expect(Object.isFrozen(list)).toBe(true);
+    expect(Object.isFrozen(list.operations)).toBe(true);
+    expect(journalStats).toEqual({ bytes: 0, days: 0, eventCount: 0 });
+    expect(Object.isFrozen(journalStats)).toBe(true);
+    expect(JSON.parse(exported)).toMatchObject({
+      schemaVersion: 1,
+      generatedAt: NOW.toISOString(),
+      rangeDays: 30,
+      operations: [],
+    });
+    expect(exported).not.toContain(rawFailure);
+    expect(JSON.stringify(service.getHealth())).not.toContain(rawFailure);
+    expect(healthChanges).toHaveLength(3);
   });
 });

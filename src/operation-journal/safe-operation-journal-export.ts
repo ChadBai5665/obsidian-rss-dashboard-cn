@@ -11,8 +11,28 @@ import {
 } from "./operation-summary";
 
 const MAX_SAFE_EXPORT_EVENTS = 20_000;
-const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$/u;
+const SAFE_MODEL_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const MODEL_FILE_EXTENSION =
+  /\.(?:bin|ckpt|ggml|gguf|json|model|onnx|pt|pth|safetensors)$/iu;
+const MODEL_PRIVATE_CANARY =
+  /(?:api[-_.]?key|access[-_.]?token|caption|credential|output|password|prompt|secret|transcript)/iu;
+const HOST_SHAPED_MODEL =
+  /^(?:localhost|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})(?::\d+)?(?:\/|$)/iu;
+const PATH_NAMESPACE = new Set([
+  "etc",
+  "home",
+  "mnt",
+  "model",
+  "models",
+  "opt",
+  "root",
+  "tmp",
+  "users",
+  "usr",
+  "var",
+  "volumes",
+]);
 
 export interface SafeOperationJournalEvent {
   readonly occurredAt: string;
@@ -200,7 +220,40 @@ function subjectHash(
 }
 
 function safeModel(value: string): string | undefined {
-  return SAFE_MODEL.test(value) && !value.includes("://") ? value : undefined;
+  if (
+    value.length === 0 ||
+    value.length > 129 ||
+    value.includes("\\") ||
+    value.includes("://") ||
+    value.startsWith("/") ||
+    value.startsWith("~") ||
+    /^[A-Za-z]:/u.test(value) ||
+    MODEL_FILE_EXTENSION.test(value) ||
+    MODEL_PRIVATE_CANARY.test(value) ||
+    HOST_SHAPED_MODEL.test(value)
+  ) {
+    return undefined;
+  }
+  const segments = value.split("/");
+  if (
+    segments.length > 2 ||
+    segments.some(
+      (segment) =>
+        segment === "." ||
+        segment === ".." ||
+        !SAFE_MODEL_SEGMENT.test(segment),
+    )
+  ) {
+    return undefined;
+  }
+  if (
+    segments.length === 2 &&
+    ((segments[0] ?? "").includes(".") ||
+      PATH_NAMESPACE.has((segments[0] ?? "").toLocaleLowerCase("en-US")))
+  ) {
+    return undefined;
+  }
+  return value;
 }
 
 function snapshotHealth(

@@ -84,12 +84,31 @@ interface HealthContext {
   maintenanceNotified: boolean;
 }
 
+interface OperationIdResult {
+  readonly operationId: string;
+  readonly usable: boolean;
+}
+
 const VALIDATION_ID = "00000000-0000-4000-8000-000000000000";
 const VALIDATION_TIME = "2000-01-01T00:00:00.000Z";
 const EMPTY_HEALTH: OperationJournalHealth = Object.freeze({
   writeIncomplete: false,
   maintenanceIncomplete: false,
 });
+const EMPTY_STATS: OperationJournalStats = Object.freeze({
+  bytes: 0,
+  days: 0,
+  eventCount: 0,
+});
+
+export class OperationJournalServiceError extends Error {
+  readonly code = "operation-journal-unavailable";
+
+  constructor() {
+    super("Operation journal unavailable.");
+    this.name = "OperationJournalServiceError";
+  }
+}
 
 export class OperationJournalService implements OperationJournalPort {
   private readonly createId: () => string;
@@ -109,27 +128,52 @@ export class OperationJournalService implements OperationJournalPort {
   }
 
   begin(input: OperationBeginInput): OperationJournalScope {
-    const identity = snapshotIdentity(input);
-    const operationId = this.createId();
-    const scope = this.createScope(operationId, identity);
-    void scope.enqueue("started", input.stage, input.details);
-    return scope.publicScope;
+    const id = this.createOperationId();
+    const context = createHealthContext();
+    if (!id.usable) {
+      this.recordWriteFailure(context);
+      return createNoopScope(id.operationId);
+    }
+    try {
+      const identity = snapshotIdentity(input, id.operationId);
+      const scope = this.createScope(id.operationId, identity);
+      void scope.enqueue("started", input.stage, input.details);
+      return scope.publicScope;
+    } catch {
+      this.recordWriteFailure(context);
+      return createNoopScope(id.operationId);
+    }
   }
 
   attach(
     operationId: string,
     input: OperationIdentityInput,
   ): OperationJournalScope {
-    const identity = snapshotIdentity(input, operationId);
-    return this.createScope(operationId, identity).publicScope;
+    const context = createHealthContext();
+    if (!isValidOperationId(operationId)) {
+      this.recordWriteFailure(context);
+      return createNoopScope(trustedFallbackOperationId());
+    }
+    try {
+      const identity = snapshotIdentity(input, operationId);
+      return this.createScope(operationId, identity).publicScope;
+    } catch {
+      this.recordWriteFailure(context);
+      return createNoopScope(operationId);
+    }
   }
 
   async list(input: {
     days: 7 | 30;
     now: Date;
   }): Promise<OperationJournalListResult> {
-    const result = await this.repository.readRange(input);
-    return snapshotListResult(result, input.now, this.health);
+    try {
+      const result = await this.repository.readRange(input);
+      return snapshotListResult(result, input.now, this.health);
+    } catch {
+      this.recordMaintenanceFailure(createHealthContext());
+      return emptyListResult(this.health);
+    }
   }
 
   subscribe(listener: (event: OperationEvent) => void): () => void {
@@ -143,8 +187,13 @@ export class OperationJournalService implements OperationJournalPort {
     return this.health;
   }
 
-  stats(now: Date): Promise<OperationJournalStats> {
-    return this.repository.stats(now);
+  async stats(now: Date): Promise<OperationJournalStats> {
+    try {
+      return await this.repository.stats(now);
+    } catch {
+      this.recordMaintenanceFailure(createHealthContext());
+      return EMPTY_STATS;
+    }
   }
 
   async prune(now: Date): Promise<void> {
@@ -170,12 +219,32 @@ export class OperationJournalService implements OperationJournalPort {
   }
 
   async createSafeExport(input: { days: 7 | 30; now: Date }): Promise<string> {
-    const result = await this.list(input);
-    return createSafeOperationJournalExport({
-      generatedAt: input.now.toISOString(),
-      rangeDays: input.days,
-      health: result.health,
-      operations: result.operations,
+    try {
+      const result = await this.list(input);
+      return createSafeOperationJournalExport({
+        generatedAt: input.now.toISOString(),
+        rangeDays: input.days,
+        health: result.health,
+        operations: result.operations,
+      });
+    } catch {
+      this.recordMaintenanceFailure(createHealthContext());
+      throw new OperationJournalServiceError();
+    }
+  }
+
+  private createOperationId(): OperationIdResult {
+    try {
+      const operationId = this.createId();
+      if (isValidOperationId(operationId)) {
+        return Object.freeze({ operationId, usable: true });
+      }
+    } catch {
+      // Fall back to a trusted UUID only for a non-persisting scope.
+    }
+    return Object.freeze({
+      operationId: trustedFallbackOperationId(),
+      usable: false,
     });
   }
 
@@ -190,10 +259,7 @@ export class OperationJournalService implements OperationJournalPort {
       details: OperationDetails,
     ): Promise<void>;
   } {
-    const context: HealthContext = {
-      writeNotified: false,
-      maintenanceNotified: false,
-    };
+    const context = createHealthContext();
     let tail = Promise.resolve();
     let terminal = false;
 
@@ -312,7 +378,7 @@ export class OperationJournalService implements OperationJournalPort {
 
 function snapshotIdentity(
   input: OperationIdentityInput,
-  operationId = VALIDATION_ID,
+  operationId: string,
 ): OperationIdentityInput {
   const stage = validationStage(input.category);
   const event = snapshotOperationEvent({
@@ -334,6 +400,58 @@ function snapshotIdentity(
     trigger: event.trigger,
     subject: event.subject,
   });
+}
+
+function isValidOperationId(operationId: string): boolean {
+  try {
+    snapshotOperationEvent({
+      schemaVersion: 1,
+      eventId: VALIDATION_ID,
+      operationId,
+      occurredAt: VALIDATION_TIME,
+      category: "transcript",
+      action: "retrieve",
+      trigger: "system",
+      subject: {},
+      stage: "requested",
+      status: "started",
+      details: {},
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function trustedFallbackOperationId(): string {
+  const candidates = [
+    () => globalThis.crypto.randomUUID(),
+    () => activeWindow.crypto.randomUUID(),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const operationId = candidate();
+      if (isValidOperationId(operationId)) return operationId;
+    } catch {
+      // Try the next bounded trusted source.
+    }
+  }
+  return VALIDATION_ID;
+}
+
+function createNoopScope(operationId: string): OperationJournalScope {
+  const resolved = (): Promise<void> => Promise.resolve();
+  return Object.freeze({
+    operationId,
+    progress: resolved,
+    succeed: resolved,
+    fail: resolved,
+    abort: resolved,
+  });
+}
+
+function createHealthContext(): HealthContext {
+  return { writeNotified: false, maintenanceNotified: false };
 }
 
 function validationStage(category: OperationCategory): OperationStage {
@@ -384,6 +502,18 @@ function snapshotListResult(
     incompleteDates: Object.freeze([...result.incompleteDates]),
     corruptDates: Object.freeze([...result.corruptDates]),
     truncated: result.truncated,
+    health,
+  });
+}
+
+function emptyListResult(
+  health: OperationJournalHealth,
+): OperationJournalListResult {
+  return Object.freeze({
+    operations: Object.freeze([]),
+    incompleteDates: Object.freeze([]),
+    corruptDates: Object.freeze([]),
+    truncated: true,
     health,
   });
 }
