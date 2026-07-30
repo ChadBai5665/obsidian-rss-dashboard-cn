@@ -4,6 +4,18 @@ import type {
   YouTubeTranscriptCachedItemContent,
 } from "../../../src/collection/content-repository";
 import {
+  OperationJournalService,
+  type OperationBeginInput,
+  type OperationIdentityInput,
+  type OperationJournalPort,
+  type OperationJournalScope,
+} from "../../../src/operation-journal/operation-journal-service";
+import type {
+  OperationDetails,
+  OperationErrorCode,
+  OperationStage,
+} from "../../../src/operation-journal/operation-event";
+import {
   YouTubeTranscriptService,
   YouTubeTranscriptServiceError,
   type TranscriptCacheRepository,
@@ -341,6 +353,68 @@ class FakeMetadataRepository implements TranscriptMetadataRepository {
   }
 }
 
+interface RecordedJournalEvent {
+  readonly operationId: string;
+  readonly status: "started" | "progress" | "succeeded" | "failed" | "aborted";
+  readonly stage: OperationStage;
+  readonly details: OperationDetails;
+}
+
+class RecordingOperationJournal implements OperationJournalPort {
+  readonly begins: OperationBeginInput[] = [];
+  readonly events: RecordedJournalEvent[] = [];
+  private sequence = 0;
+
+  begin(input: OperationBeginInput): OperationJournalScope {
+    const operationId = this.nextOperationId();
+    this.begins.push(input);
+    this.events.push({
+      operationId,
+      status: "started",
+      stage: input.stage,
+      details: input.details,
+    });
+    return this.scope(operationId);
+  }
+
+  attach(
+    operationId: string,
+    _input: OperationIdentityInput,
+  ): OperationJournalScope {
+    return this.scope(operationId);
+  }
+
+  private nextOperationId(): string {
+    this.sequence += 1;
+    return `00000000-0000-4000-8000-${String(this.sequence).padStart(12, "0")}`;
+  }
+
+  private scope(operationId: string): OperationJournalScope {
+    const record = (
+      status: RecordedJournalEvent["status"],
+      stage: OperationStage,
+      details: OperationDetails,
+    ): Promise<void> => {
+      this.events.push({ operationId, status, stage, details });
+      return Promise.resolve();
+    };
+    return Object.freeze({
+      operationId,
+      progress: (stage: OperationStage, details: OperationDetails) =>
+        record("progress", stage, details),
+      succeed: (stage: OperationStage, details: OperationDetails) =>
+        record("succeeded", stage, details),
+      fail: (
+        stage: OperationStage,
+        errorCode: OperationErrorCode,
+        details: OperationDetails = {},
+      ) => record("failed", stage, { ...details, errorCode }),
+      abort: (stage: OperationStage) =>
+        record("aborted", stage, { errorCode: "aborted" }),
+    });
+  }
+}
+
 function createService(options: {
   innerTube?: TranscriptProvider;
   tikHub?: FakeOptionalProvider;
@@ -351,6 +425,7 @@ function createService(options: {
   clock?: () => Date;
   choiceTtlMs?: number;
   maxPendingChoiceSets?: number;
+  operationJournal?: OperationJournalPort;
 } = {}): {
   service: YouTubeTranscriptService;
   innerTube: TranscriptProvider;
@@ -390,6 +465,7 @@ function createService(options: {
       clock: options.clock ?? (() => new Date("2026-07-28T06:00:00.000Z")),
       choiceTtlMs: options.choiceTtlMs,
       maxPendingChoiceSets: options.maxPendingChoiceSets,
+      operationJournal: options.operationJournal,
     }),
     innerTube,
     tikHub,
@@ -864,10 +940,13 @@ describe("YouTubeTranscriptService", () => {
       videoId: VIDEO_ID,
     })).resolves.toBe(true);
 
-    expect(hasPendingContinuation).toHaveBeenCalledWith({
-      itemId: ITEM_ID,
-      videoId: VIDEO_ID,
-    });
+    expect(hasPendingContinuation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        operationId: expect.any(String),
+      }),
+    );
     expect(listTracks).not.toHaveBeenCalled();
   });
 
@@ -917,7 +996,11 @@ describe("YouTubeTranscriptService", () => {
     expect(onPersisted).toHaveBeenCalledWith(
       selected,
       expect.objectContaining({ provider: "tikhub" }),
-      { itemId: ITEM_ID, videoId: VIDEO_ID },
+      expect.objectContaining({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        operationId: expect.any(String),
+      }),
       token,
     );
     expect(listTracks).not.toHaveBeenCalled();
@@ -1206,6 +1289,7 @@ describe("YouTubeTranscriptService", () => {
     expect(observed[0].context).toEqual({
       itemId: ITEM_ID,
       videoId: VIDEO_ID,
+      operationId: expect.any(String),
     });
     expect(observed[1].context).toBe(observed[0].context);
     expect(observed[2].context).toBe(observed[0].context);
@@ -1243,10 +1327,13 @@ describe("YouTubeTranscriptService", () => {
 
     expect(mutations).toEqual([false, false]);
     expect(observed).toEqual([
-      { itemId: ITEM_ID, videoId: VIDEO_ID },
-      { itemId: ITEM_ID, videoId: VIDEO_ID },
-      { itemId: ITEM_ID, videoId: VIDEO_ID },
+      expect.objectContaining({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+      expect.objectContaining({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+      expect.objectContaining({ itemId: ITEM_ID, videoId: VIDEO_ID }),
     ]);
+    expect(new Set(observed.map(({ operationId }) => operationId)).size).toBe(
+      1,
+    );
     expect(content.value).toMatchObject({ itemId: ITEM_ID, videoId: VIDEO_ID });
   });
 
@@ -1305,9 +1392,16 @@ describe("YouTubeTranscriptService", () => {
       status: "ready",
       content: { itemId: ITEM_ID, videoId: VIDEO_ID },
     });
-    expect(listContexts).toEqual([{ itemId: ITEM_ID, videoId: VIDEO_ID }]);
-    expect(fetchContexts).toEqual([{ itemId: ITEM_ID, videoId: VIDEO_ID }]);
-    expect(persistContexts).toEqual([{ itemId: ITEM_ID, videoId: VIDEO_ID }]);
+    expect(listContexts).toEqual([
+      expect.objectContaining({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+    ]);
+    expect(fetchContexts).toEqual([
+      expect.objectContaining({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+    ]);
+    expect(persistContexts).toEqual([
+      expect.objectContaining({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+    ]);
+    expect(listContexts[0].operationId).toBe(fetchContexts[0].operationId);
     expect(fetchContexts[0]).toBe(persistContexts[0]);
     expect(Object.isFrozen(fetchContexts[0])).toBe(true);
   });
@@ -4104,5 +4198,511 @@ describe("YouTubeTranscriptService", () => {
     expect(() => createService({ maxPendingChoiceSets: 1_000 })).toThrow(
       "Invalid pending choice capacity",
     );
+  });
+
+  describe("operation journal timeline", () => {
+    it("records one cache-hit timeline and succeeds only after metadata repair", async () => {
+      const journal = new RecordingOperationJournal();
+      const content = new FakeContentRepository(cached());
+      const metadata = new FakeMetadataRepository();
+      const { service } = createService({
+        content,
+        metadata,
+        operationJournal: journal,
+      });
+
+      await expect(
+        service.get({
+          itemId: ITEM_ID,
+          videoId: VIDEO_ID,
+          subjectLabel: "Local video title",
+        }),
+      ).resolves.toMatchObject({ status: "ready", source: "cache" });
+
+      expect(metadata.updates).toHaveLength(1);
+      expect(journal.begins).toEqual([
+        {
+          category: "transcript",
+          action: "retrieve",
+          trigger: "manual",
+          subject: { itemId: ITEM_ID, label: "Local video title" },
+          stage: "requested",
+          details: { contentBasis: "youtube-transcript" },
+        },
+      ]);
+      expect(
+        journal.events.map(({ status, stage, details }) => ({
+          status,
+          stage,
+          details,
+        })),
+      ).toEqual([
+        {
+          status: "started",
+          stage: "requested",
+          details: { contentBasis: "youtube-transcript" },
+        },
+        {
+          status: "progress",
+          stage: "checking-cache",
+          details: { provider: "cache" },
+        },
+        {
+          status: "succeeded",
+          stage: "completed",
+          details: {
+            provider: "cache",
+            contentBasis: "youtube-transcript",
+          },
+        },
+      ]);
+    });
+
+    it("records cache miss, provider attempt, saving, and fresh success", async () => {
+      const journal = new RecordingOperationJournal();
+      const { service } = createService({ operationJournal: journal });
+
+      await expect(
+        service.get({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+      ).resolves.toMatchObject({
+        status: "ready",
+        source: "fresh",
+        content: { provider: "innertube" },
+      });
+
+      expect(
+        journal.events.map(({ status, stage, details }) => ({
+          status,
+          stage,
+          details,
+        })),
+      ).toEqual([
+        {
+          status: "started",
+          stage: "requested",
+          details: { contentBasis: "youtube-transcript" },
+        },
+        {
+          status: "progress",
+          stage: "checking-cache",
+          details: { provider: "cache" },
+        },
+        {
+          status: "progress",
+          stage: "trying-provider",
+          details: { provider: "innertube" },
+        },
+        {
+          status: "progress",
+          stage: "saving",
+          details: { provider: "innertube" },
+        },
+        {
+          status: "succeeded",
+          stage: "completed",
+          details: {
+            provider: "innertube",
+            contentBasis: "youtube-transcript",
+          },
+        },
+      ]);
+    });
+
+    it("records each provider failure with a standard code before final failure", async () => {
+      const journal = new RecordingOperationJournal();
+      const { service } = createService({
+        innerTube: new FakeProvider(new YouTubeTranscriptError("no-captions")),
+        tikHub: new FakeOptionalProvider(
+          true,
+          new YouTubeTranscriptError(
+            "tikhub-rate-limited",
+            FREE_OPERATION_EVIDENCE,
+          ),
+        ),
+        ytDlp: new FakeOptionalProvider(
+          true,
+          new YouTubeTranscriptError("timeout"),
+        ),
+        operationJournal: journal,
+      });
+
+      await expect(
+        service.get({ itemId: ITEM_ID, videoId: VIDEO_ID }),
+      ).rejects.toMatchObject({ code: "tikhub-rate-limited" });
+
+      expect(
+        journal.events.filter(({ stage }) => stage === "trying-provider"),
+      ).toEqual([
+        expect.objectContaining({
+          status: "progress",
+          details: { provider: "innertube" },
+        }),
+        expect.objectContaining({
+          status: "progress",
+          details: { provider: "innertube", errorCode: "no-transcript" },
+        }),
+        expect.objectContaining({
+          status: "progress",
+          details: { provider: "tikhub" },
+        }),
+        expect.objectContaining({
+          status: "progress",
+          details: { provider: "tikhub", errorCode: "rate-limited" },
+        }),
+        expect.objectContaining({
+          status: "progress",
+          details: { provider: "yt-dlp" },
+        }),
+        expect.objectContaining({
+          status: "progress",
+          details: { provider: "yt-dlp", errorCode: "timeout" },
+        }),
+        expect.objectContaining({
+          status: "failed",
+          details: { errorCode: "rate-limited" },
+        }),
+      ]);
+      expect(
+        new Set(journal.events.map(({ operationId }) => operationId)).size,
+      ).toBe(1);
+    });
+
+    it("continues a selected track on the original operation ID", async () => {
+      const journal = new RecordingOperationJournal();
+      const contexts: TranscriptProviderOperationContext[] = [];
+      const tracks = [
+        track({ languageName: "English A" }),
+        track({
+          languageName: "English B",
+          url: "https://www.youtube.com/api/timedtext?lang=en-B",
+        }),
+      ];
+      const innerTube: TranscriptProvider = {
+        async listTracks(_videoId, _signal, context) {
+          contexts.push(context);
+          return tracks;
+        },
+        async fetchTrack(selectedTrack, _signal, context) {
+          contexts.push(context);
+          return transcript(selectedTrack);
+        },
+      };
+      const { service } = createService({
+        innerTube,
+        operationJournal: journal,
+      });
+
+      const choice = await service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+      });
+      if (choice.status !== "selection-required") {
+        throw new Error("expected choices");
+      }
+      expect(journal.events.some(({ status }) => status === "succeeded")).toBe(
+        false,
+      );
+
+      await expect(
+        service.get({
+          itemId: ITEM_ID,
+          videoId: VIDEO_ID,
+          trackId: choice.tracks[0].id,
+        }),
+      ).resolves.toMatchObject({ status: "ready" });
+
+      expect(journal.begins).toHaveLength(1);
+      expect(new Set(contexts.map(({ operationId }) => operationId))).toEqual(
+        new Set([journal.events[0].operationId]),
+      );
+      expect(
+        new Set(journal.events.map(({ operationId }) => operationId)).size,
+      ).toBe(1);
+      expect(journal.events.at(-1)).toMatchObject({
+        status: "succeeded",
+        stage: "completed",
+        details: { provider: "innertube" },
+      });
+    });
+
+    it("creates one timeline for two subscribers to the same SharedWork", async () => {
+      const journal = new RecordingOperationJournal();
+      let releaseList!: () => void;
+      let markListStarted!: () => void;
+      const listStarted = new Promise<void>((resolve) => {
+        markListStarted = resolve;
+      });
+      const innerTube: TranscriptProvider = {
+        async listTracks() {
+          markListStarted();
+          await new Promise<void>((resolve) => {
+            releaseList = resolve;
+          });
+          return [track()];
+        },
+        async fetchTrack(selectedTrack) {
+          return transcript(selectedTrack);
+        },
+      };
+      const { service } = createService({
+        innerTube,
+        operationJournal: journal,
+      });
+
+      const first = service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+      });
+      await listStarted;
+      const second = service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+      });
+      releaseList();
+
+      await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+      expect(journal.begins).toHaveLength(1);
+      expect(
+        new Set(journal.events.map(({ operationId }) => operationId)).size,
+      ).toBe(1);
+      expect(
+        journal.events.filter(({ status }) => status === "succeeded"),
+      ).toHaveLength(1);
+    });
+
+    it("records abort only when the final SharedWork subscriber cancels", async () => {
+      const journal = new RecordingOperationJournal();
+      const innerTube: TranscriptProvider = {
+        async listTracks(_videoId, signal) {
+          return await new Promise<YouTubeCaptionTrack[]>(
+            (_resolve, reject) => {
+              signal?.addEventListener(
+                "abort",
+                () => reject(new YouTubeTranscriptError("aborted")),
+                { once: true },
+              );
+            },
+          );
+        },
+        async fetchTrack(): Promise<never> {
+          throw new Error("unreachable");
+        },
+      };
+      const { service } = createService({
+        innerTube,
+        operationJournal: journal,
+      });
+      const firstController = new AbortController();
+      const secondController = new AbortController();
+      const first = service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        signal: firstController.signal,
+      });
+      const second = service.get({
+        itemId: ITEM_ID,
+        videoId: VIDEO_ID,
+        refresh: true,
+        signal: secondController.signal,
+      });
+
+      firstController.abort();
+      await expect(first).rejects.toMatchObject({ code: "aborted" });
+      expect(
+        journal.events.filter(({ status }) => status === "aborted"),
+      ).toHaveLength(0);
+
+      secondController.abort();
+      await expect(second).rejects.toMatchObject({ code: "aborted" });
+      expect(
+        journal.events.filter(({ status }) => status === "aborted"),
+      ).toEqual([
+        expect.objectContaining({
+          stage: "trying-provider",
+          details: { errorCode: "aborted" },
+        }),
+      ]);
+    });
+
+    it("records local persistence failure at saving instead of as provider failure", async () => {
+      const journal = new RecordingOperationJournal();
+      const { service } = createService({
+        content: new FailingWriteContentRepository(),
+        operationJournal: journal,
+      });
+
+      await expect(
+        service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+      ).rejects.toMatchObject({ code: "temporarily-unavailable" });
+
+      expect(journal.events.at(-1)).toMatchObject({
+        status: "failed",
+        stage: "saving",
+        details: { errorCode: "cache-save-failed" },
+      });
+      expect(journal.events).not.toContainEqual(
+        expect.objectContaining({
+          status: "progress",
+          stage: "trying-provider",
+          details: expect.objectContaining({ errorCode: "provider-failure" }),
+        }),
+      );
+    });
+
+    it("warns about metadata repair failure but preserves durable-cache success", async () => {
+      const journal = new RecordingOperationJournal();
+      const metadata = new FakeMetadataRepository();
+      metadata.failuresRemaining = 1;
+      const { service, content } = createService({
+        metadata,
+        operationJournal: journal,
+      });
+
+      await expect(
+        service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+      ).resolves.toMatchObject({ status: "ready", source: "fresh" });
+
+      expect(content.writes).toHaveLength(1);
+      expect(journal.events.slice(-2)).toEqual([
+        expect.objectContaining({
+          status: "progress",
+          stage: "saving",
+          details: {
+            provider: "innertube",
+            errorCode: "cache-save-failed",
+          },
+        }),
+        expect.objectContaining({
+          status: "succeeded",
+          stage: "completed",
+          details: {
+            provider: "innertube",
+            contentBasis: "youtube-transcript",
+          },
+        }),
+      ]);
+    });
+
+    it.each(["begin", "scope"] as const)(
+      "contains operation journal %s failures without changing transcript results",
+      async (failurePoint) => {
+        const scope: OperationJournalScope = {
+          operationId: "00000000-0000-4000-8000-000000000099",
+          progress: () => {
+            throw new Error("journal progress failed");
+          },
+          succeed: () => Promise.reject(new Error("journal terminal failed")),
+          fail: () => Promise.reject(new Error("journal terminal failed")),
+          abort: () => Promise.reject(new Error("journal terminal failed")),
+        };
+        const operationJournal: OperationJournalPort = {
+          begin: () => {
+            if (failurePoint === "begin")
+              throw new Error("journal begin failed");
+            return scope;
+          },
+          attach: () => scope,
+        };
+        const { service } = createService({ operationJournal });
+
+        await expect(
+          service.get({ itemId: ITEM_ID, videoId: VIDEO_ID, refresh: true }),
+        ).resolves.toMatchObject({ status: "ready" });
+
+        const failed = createService({
+          providers: [
+            {
+              source: "innertube",
+              provider: new FakeProvider(
+                new YouTubeTranscriptError("login-required"),
+              ),
+            },
+          ],
+          operationJournal,
+        });
+        await expect(
+          failed.service.get({
+            itemId: ITEM_ID,
+            videoId: VIDEO_ID,
+            refresh: true,
+          }),
+        ).rejects.toMatchObject({ code: "login-required" });
+      },
+    );
+
+    it("lets an unsafe optional subject label degrade to Task 3's no-op scope", async () => {
+      const append = vi.fn(async () => ({ maintenanceIncomplete: false }));
+      const operationJournal = new OperationJournalService(
+        {
+          append,
+          readRange: async () => ({
+            events: [],
+            incompleteDates: [],
+            corruptDates: [],
+            truncated: false,
+          }),
+          stats: async () => ({ bytes: 0, days: 0, eventCount: 0 }),
+          prune: async () => undefined,
+          clear: async () => undefined,
+        },
+        {
+          createId: () => "00000000-0000-4000-8000-000000000077",
+          clock: () => new Date("2026-07-28T06:00:00.000Z"),
+        },
+      );
+      const { service } = createService({ operationJournal });
+
+      await expect(
+        service.get({
+          itemId: ITEM_ID,
+          videoId: VIDEO_ID,
+          refresh: true,
+          subjectLabel: "https://private.example/video-title",
+        }),
+      ).resolves.toMatchObject({ status: "ready" });
+
+      expect(operationJournal.getHealth()).toMatchObject({
+        writeIncomplete: true,
+      });
+      expect(append).not.toHaveBeenCalled();
+    });
+
+    it("keeps transcript text and all URLs out of journal event details", async () => {
+      const transcriptCanary = "PRIVATE_TRANSCRIPT_CANARY_7F21";
+      const captionCanary = "caption-url-canary-7f21";
+      const sourceCanary = "source-url-canary-7f21";
+      const journal = new RecordingOperationJournal();
+      const selected = track({
+        url: `https://captions.example/${captionCanary}`,
+      });
+      const { service } = createService({
+        innerTube: new FakeProvider(
+          [selected],
+          transcript(selected, { text: transcriptCanary }),
+        ),
+        operationJournal: journal,
+      });
+
+      await expect(
+        service.get({
+          itemId: ITEM_ID,
+          videoId: VIDEO_ID,
+          refresh: true,
+          sourceUrl: `https://youtube.example/watch/${sourceCanary}`,
+        }),
+      ).resolves.toMatchObject({ status: "ready" });
+
+      const serializedDetails = JSON.stringify(
+        journal.events.map(({ details }) => details),
+      );
+      expect(serializedDetails).not.toContain(transcriptCanary);
+      expect(serializedDetails).not.toContain(captionCanary);
+      expect(serializedDetails).not.toContain(sourceCanary);
+      expect(serializedDetails).not.toContain("https://");
+    });
   });
 });

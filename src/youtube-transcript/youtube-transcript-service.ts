@@ -2,6 +2,15 @@ import type {
   CachedItemContent,
   YouTubeTranscriptCachedItemContent,
 } from "../collection/content-repository";
+import type {
+  OperationJournalPort,
+  OperationJournalScope,
+} from "../operation-journal/operation-journal-service";
+import type {
+  OperationDetails,
+  OperationErrorCode,
+  OperationStage,
+} from "../operation-journal/operation-event";
 import {
   assertYouTubeVideoId,
   snapshotTranscriptProviderOperationResult,
@@ -60,6 +69,7 @@ export interface YouTubeTranscriptServiceOptions {
   clock: () => Date;
   choiceTtlMs?: number;
   maxPendingChoiceSets?: number;
+  operationJournal?: OperationJournalPort;
 }
 
 interface LegacyYouTubeTranscriptServiceOptions {
@@ -70,6 +80,7 @@ interface LegacyYouTubeTranscriptServiceOptions {
   clock: () => Date;
   choiceTtlMs?: number;
   maxPendingChoiceSets?: number;
+  operationJournal?: OperationJournalPort;
 }
 
 export interface YouTubeTranscriptRequest {
@@ -81,6 +92,7 @@ export interface YouTubeTranscriptRequest {
   trackId?: string;
   signal?: AbortSignal;
   onProgress?: (progress: YouTubeTranscriptProgress) => void;
+  subjectLabel?: string;
 }
 
 export interface YouTubeTranscriptCacheRequest {
@@ -166,6 +178,7 @@ interface RegisteredChoice {
   failures: readonly YouTubeTranscriptProviderFailure[];
   usage: YouTubeTranscriptUsage;
   tikhubPaidRequestPossiblySent: boolean;
+  timeline: TranscriptOperationTimeline;
 }
 
 interface PendingChoiceSet {
@@ -184,9 +197,18 @@ interface SelectionAtStart {
 interface SharedWork {
   controller: AbortController;
   promise: Promise<YouTubeTranscriptServiceResult>;
+  operationId: string;
+  timeline: TranscriptOperationTimeline;
   subscribers: number;
   settled: boolean;
   onAllCancelled: () => void;
+}
+
+interface TranscriptOperationTimeline {
+  readonly operationId: string;
+  readonly scope: OperationJournalScope;
+  stage: OperationStage;
+  terminal: boolean;
 }
 
 interface RankedTrack {
@@ -290,12 +312,14 @@ export class YouTubeTranscriptService {
     return await this.subscribeToWork(
       workKey,
       request.signal,
-      async (sharedSignal) =>
+      request,
+      async (sharedSignal, timeline) =>
         await this.getInternal(
           { ...request, signal: sharedSignal },
           resourceKey,
           operationGeneration,
           selectionAtStart,
+          timeline,
         ),
       () => {
         const pending = this.pendingChoices.get(resourceKey);
@@ -317,6 +341,7 @@ export class YouTubeTranscriptService {
           );
         }
       },
+      selectionAtStart?.registered.timeline,
     );
   }
 
@@ -376,7 +401,7 @@ export class YouTubeTranscriptService {
     if (!registration?.provider.hasPendingContinuation) return false;
     try {
       const pending = await registration.provider.hasPendingContinuation(
-        providerOperationContext(request),
+        providerOperationContext(request, createLocalOperationId()),
       );
       assertNotAborted(request.signal);
       return pending === true;
@@ -400,11 +425,14 @@ export class YouTubeTranscriptService {
     return await this.subscribeToWork(
       workKey,
       request.signal,
-      async (sharedSignal) => await this.continuePendingInternal(
-        { ...request, signal: sharedSignal },
-        resourceKey,
-        operationGeneration,
-      ),
+      request,
+      async (sharedSignal, timeline) =>
+        await this.continuePendingInternal(
+          { ...request, signal: sharedSignal },
+          resourceKey,
+          operationGeneration,
+          timeline,
+        ),
       () => this.clearGeneration(resourceKey, operationGeneration),
       () => this.beginGeneration(resourceKey, operationGeneration, true),
     ) as YouTubeTranscriptServiceResult & { status: "ready" };
@@ -414,6 +442,7 @@ export class YouTubeTranscriptService {
     request: YouTubeTranscriptContinuationRequest,
     key: string,
     operationGeneration: symbol,
+    timeline: TranscriptOperationTimeline,
   ): Promise<YouTubeTranscriptServiceResult & { status: "ready" }> {
     const state: ProviderChainState = {
       failures: [],
@@ -428,11 +457,14 @@ export class YouTubeTranscriptService {
     if (!registration?.provider.continuePending) {
       throw new YouTubeTranscriptServiceError("tikhub-job-expired");
     }
-    const context = providerOperationContext(request);
+    const context = providerOperationContext(request, timeline.operationId);
     try {
       assertNotAborted(request.signal);
       this.assertCurrentGeneration(key, operationGeneration);
       emitProgress(request, "trying-tikhub", state);
+      recordTimelineProgress(timeline, "trying-provider", {
+        provider: "tikhub",
+      });
       let settled: {
         value: TranscriptProviderContinuation;
         persistenceToken?: unknown;
@@ -464,24 +496,32 @@ export class YouTubeTranscriptService {
       assertProviderTrack(continuation.track, "tikhub");
       assertProviderTranscript(request, continuation.transcript, "tikhub");
       emitProgress(request, "saving", state);
+      recordTimelineProgress(timeline, "saving", { provider: "tikhub" });
       const content = createCachedTranscript(
         request,
         continuation.transcript,
         this.options.clock,
       );
+      let metadataRepaired = true;
       await this.options.contentRepository.transaction(
         context.itemId,
         async (transaction) => {
           assertNotAborted(request.signal);
           this.assertCurrentGeneration(key, operationGeneration);
           const path = await transaction.write(content);
-          await this.repairMetadata(context.itemId, path);
+          metadataRepaired = await this.repairMetadata(context.itemId, path);
           assertNotAborted(request.signal);
           this.assertCurrentGeneration(key, operationGeneration);
         },
       );
       assertNotAborted(request.signal);
       this.assertCurrentGeneration(key, operationGeneration);
+      if (!metadataRepaired) {
+        recordTimelineProgress(timeline, "saving", {
+          provider: "tikhub",
+          errorCode: "cache-save-failed",
+        });
+      }
       try {
         await registration.provider.onPersisted?.(
           continuation.track,
@@ -515,6 +555,7 @@ export class YouTubeTranscriptService {
     this.disposed = true;
     for (const [key, work] of this.inFlight) {
       this.inFlight.delete(key);
+      recordTimelineAbort(work.timeline);
       work.onAllCancelled();
       work.controller.abort();
     }
@@ -549,9 +590,11 @@ export class YouTubeTranscriptService {
     key: string,
     operationGeneration: symbol,
     selectionAtStart: SelectionAtStart | undefined,
+    timeline: TranscriptOperationTimeline,
   ): Promise<YouTubeTranscriptServiceResult> {
     const context = providerOperationContext(
       selectionAtStart?.registered.context ?? request,
+      timeline.operationId,
     );
     const state: ProviderChainState = selectionAtStart === undefined
       ? {
@@ -571,6 +614,9 @@ export class YouTubeTranscriptService {
 
       if (!request.refresh && request.trackId === undefined) {
         emitProgress(request, "checking-cache", state);
+        recordTimelineProgress(timeline, "checking-cache", {
+          provider: "cache",
+        });
         const cachedResult = await this.options.contentRepository.transaction(
           request.itemId,
           async (transaction) => {
@@ -578,7 +624,16 @@ export class YouTubeTranscriptService {
             const cached = await transaction.read();
             assertNotAborted(request.signal);
             if (!isMatchingTranscriptCache(cached, request)) return null;
-            await this.repairMetadata(request.itemId, transaction.pathFor());
+            const metadataRepaired = await this.repairMetadata(
+              request.itemId,
+              transaction.pathFor(),
+            );
+            if (!metadataRepaired) {
+              recordTimelineProgress(timeline, "saving", {
+                provider: "cache",
+                errorCode: "cache-save-failed",
+              });
+            }
             return {
               status: "ready",
               source: "cache",
@@ -601,6 +656,9 @@ export class YouTubeTranscriptService {
         const { registration, providerIndex, track: selectedTrack } =
           selectionAtStart.registered;
         emitProgress(request, stageForSource(registration.source), state);
+        recordTimelineProgress(timeline, "trying-provider", {
+          provider: registration.source,
+        });
         try {
           const result = await this.fetchAndPersist(
             request,
@@ -610,6 +668,7 @@ export class YouTubeTranscriptService {
             selectedTrack,
             state,
             context,
+            timeline,
           );
           this.deletePendingChoiceSet(key, selectionAtStart.pendingGeneration);
           this.clearGeneration(key, operationGeneration);
@@ -626,6 +685,7 @@ export class YouTubeTranscriptService {
           }
           const failure = error.failure;
           addFailure(state, registration.source, failure.code);
+          recordProviderFailure(timeline, registration.source, failure.code);
           if (failure.code === "aborted") {
             throw chainFailure(state, failure.code);
           }
@@ -643,6 +703,7 @@ export class YouTubeTranscriptService {
             providerIndex + 1,
             state,
             context,
+            timeline,
           );
           if (result.status === "ready") {
             this.deletePendingChoiceSet(
@@ -663,6 +724,7 @@ export class YouTubeTranscriptService {
         0,
         state,
         context,
+        timeline,
       );
       if (result.status === "ready") {
         this.clearGeneration(key, operationGeneration);
@@ -684,6 +746,7 @@ export class YouTubeTranscriptService {
     startIndex: number,
     state: ProviderChainState,
     context: TranscriptProviderOperationContext,
+    timeline: TranscriptOperationTimeline,
   ): Promise<YouTubeTranscriptServiceResult> {
     for (let index = startIndex; index < this.providers.length; index += 1) {
       const registration = this.providers[index];
@@ -698,12 +761,28 @@ export class YouTubeTranscriptService {
           assertNotAborted(request.signal);
           this.assertCurrentGeneration(key, operationGeneration);
           addFailure(state, registration.source, "temporarily-unavailable");
+          recordTimelineProgress(timeline, "trying-provider", {
+            provider: registration.source,
+          });
+          recordProviderFailure(
+            timeline,
+            registration.source,
+            "temporarily-unavailable",
+          );
           continue;
         }
         assertNotAborted(request.signal);
         this.assertCurrentGeneration(key, operationGeneration);
         if (!available) {
           addFailure(state, registration.source, "fallback-unavailable");
+          recordTimelineProgress(timeline, "trying-provider", {
+            provider: registration.source,
+          });
+          recordProviderFailure(
+            timeline,
+            registration.source,
+            "fallback-unavailable",
+          );
           continue;
         }
       }
@@ -717,6 +796,7 @@ export class YouTubeTranscriptService {
           index,
           state,
           context,
+          timeline,
         );
       } catch (error) {
         if (!(error instanceof TranscriptProviderStageError)) {
@@ -730,6 +810,7 @@ export class YouTubeTranscriptService {
         }
         const failure = error.failure;
         addFailure(state, registration.source, failure.code);
+        recordProviderFailure(timeline, registration.source, failure.code);
         if (failure.code === "aborted") {
           throw chainFailure(state, failure.code);
         }
@@ -753,10 +834,14 @@ export class YouTubeTranscriptService {
     providerIndex: number,
     state: ProviderChainState,
     context: TranscriptProviderOperationContext,
+    timeline: TranscriptOperationTimeline,
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
     emitProgress(request, stageForSource(registration.source), state);
+    recordTimelineProgress(timeline, "trying-provider", {
+      provider: registration.source,
+    });
     let settledList: { value: YouTubeCaptionTrack[] };
     try {
       const listResult = await registration.provider.listTracks(
@@ -800,6 +885,7 @@ export class YouTubeTranscriptService {
         selected,
         state,
         context,
+        timeline,
       );
     }
     return await this.fetchAndPersist(
@@ -810,6 +896,7 @@ export class YouTubeTranscriptService {
       selected[0],
       state,
       context,
+      timeline,
     );
   }
 
@@ -821,6 +908,7 @@ export class YouTubeTranscriptService {
     selectedTrack: YouTubeCaptionTrack,
     state: ProviderChainState,
     context: TranscriptProviderOperationContext,
+    timeline: TranscriptOperationTimeline,
   ): Promise<YouTubeTranscriptServiceResult> {
     this.assertCurrentGeneration(key, operationGeneration);
     let settledFetch: {
@@ -864,24 +952,34 @@ export class YouTubeTranscriptService {
       throw providerStageError(error);
     }
     emitProgress(request, "saving", state);
+    recordTimelineProgress(timeline, "saving", {
+      provider: registration.source,
+    });
     const content = createCachedTranscript(
       { ...request, itemId: context.itemId, videoId: context.videoId },
       transcript,
       this.options.clock,
     );
+    let metadataRepaired = true;
     await this.options.contentRepository.transaction(
       context.itemId,
       async (transaction) => {
         assertNotAborted(request.signal);
         this.assertCurrentGeneration(key, operationGeneration);
         const path = await transaction.write(content);
-        await this.repairMetadata(context.itemId, path);
+        metadataRepaired = await this.repairMetadata(context.itemId, path);
         assertNotAborted(request.signal);
         this.assertCurrentGeneration(key, operationGeneration);
       },
     );
     assertNotAborted(request.signal);
     this.assertCurrentGeneration(key, operationGeneration);
+    if (!metadataRepaired) {
+      recordTimelineProgress(timeline, "saving", {
+        provider: registration.source,
+        errorCode: "cache-save-failed",
+      });
+    }
     if (registration.provider.onPersisted) {
       try {
         await registration.provider.onPersisted(
@@ -910,10 +1008,14 @@ export class YouTubeTranscriptService {
     tracks: readonly YouTubeCaptionTrack[],
     state: ProviderChainState,
     context: TranscriptProviderOperationContext,
+    timeline: TranscriptOperationTimeline,
   ): YouTubeTranscriptServiceResult {
     this.assertCurrentGeneration(key, operationGeneration);
     const registered = new Map<string, RegisteredChoice>();
-    const choiceContext = providerOperationContext(context);
+    const choiceContext = providerOperationContext(
+      context,
+      timeline.operationId,
+    );
     const choices = tracks.map((candidate) => {
       const id = `track-${++this.choiceSequence}`;
       registered.set(id, {
@@ -925,6 +1027,7 @@ export class YouTubeTranscriptService {
         usage: freezeUsage(state.tikhubPaidRequests),
         tikhubPaidRequestPossiblySent:
           state.tikhubPaidRequestPossiblySent,
+        timeline,
       });
       return Object.freeze({
         id,
@@ -961,29 +1064,39 @@ export class YouTubeTranscriptService {
   private async repairMetadata(
     itemId: string,
     contentPath: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       await this.options.metadataRepository.updateContentMetadata(
         itemId,
         contentPath,
         "youtube-transcript",
       );
+      return true;
     } catch {
       // The durable cache remains authoritative. A later cache read retries.
+      return false;
     }
   }
 
   private async subscribeToWork(
     key: string,
     callerSignal: AbortSignal | undefined,
-    operation: (signal: AbortSignal) => Promise<YouTubeTranscriptServiceResult>,
+    request: { readonly itemId: string; readonly subjectLabel?: string },
+    operation: (
+      signal: AbortSignal,
+      timeline: TranscriptOperationTimeline,
+    ) => Promise<YouTubeTranscriptServiceResult>,
     onAllCancelled: () => void,
     onStart: () => void,
+    existingTimeline?: TranscriptOperationTimeline,
   ): Promise<YouTubeTranscriptServiceResult> {
     assertNotAborted(callerSignal);
     let work = this.inFlight.get(key);
     if (!work) {
       onStart();
+      const timeline =
+        existingTimeline ??
+        beginTranscriptTimeline(this.options.operationJournal, request);
       const controller = new AbortController();
       let resolveWork!: (value: YouTubeTranscriptServiceResult) => void;
       let rejectWork!: (reason: unknown) => void;
@@ -996,12 +1109,28 @@ export class YouTubeTranscriptService {
       work = {
         controller,
         promise,
+        operationId: timeline.operationId,
+        timeline,
         subscribers: 0,
         settled: false,
         onAllCancelled,
       };
       this.inFlight.set(key, work);
-      void operation(controller.signal).then(resolveWork, rejectWork);
+      void operation(controller.signal, timeline).then(
+        (result) => {
+          if (result.status === "ready") {
+            recordTimelineSuccess(
+              timeline,
+              result.source === "cache" ? "cache" : result.content.provider,
+            );
+          }
+          resolveWork(result);
+        },
+        (error: unknown) => {
+          recordTimelineFailure(timeline, error);
+          rejectWork(error);
+        },
+      );
       const created = work;
       void created.promise.then(
         () => this.settleWork(key, created),
@@ -1026,6 +1155,7 @@ export class YouTubeTranscriptService {
         work.subscribers = Math.max(0, work.subscribers - 1);
         if (cancelled && work.subscribers === 0 && !work.settled) {
           if (this.inFlight.get(key) === work) this.inFlight.delete(key);
+          recordTimelineAbort(work.timeline);
           work.onAllCancelled();
           work.controller.abort();
           return true;
@@ -1569,12 +1699,196 @@ function freezeUsage(
   return Object.freeze({ tikhubPaidRequests });
 }
 
+let localOperationSequence = 0;
+const OPERATION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+function beginTranscriptTimeline(
+  journal: OperationJournalPort | undefined,
+  request: { readonly itemId: string; readonly subjectLabel?: string },
+): TranscriptOperationTimeline {
+  let scope: OperationJournalScope | undefined;
+  if (journal) {
+    try {
+      scope = journal.begin({
+        category: "transcript",
+        action: "retrieve",
+        trigger: "manual",
+        subject: {
+          itemId: request.itemId,
+          ...(request.subjectLabel === undefined
+            ? {}
+            : { label: request.subjectLabel }),
+        },
+        stage: "requested",
+        details: { contentBasis: "youtube-transcript" },
+      });
+    } catch {
+      // Operation history is optional and cannot alter transcript retrieval.
+    }
+  }
+  const safeScope = isUsableJournalScope(scope)
+    ? scope
+    : createNoopJournalScope(createLocalOperationId());
+  return {
+    operationId: safeScope.operationId,
+    scope: safeScope,
+    stage: "requested",
+    terminal: false,
+  };
+}
+
+function isUsableJournalScope(
+  scope: OperationJournalScope | undefined,
+): scope is OperationJournalScope {
+  try {
+    return Boolean(
+      scope &&
+      OPERATION_ID.test(scope.operationId) &&
+      typeof scope.progress === "function" &&
+      typeof scope.succeed === "function" &&
+      typeof scope.fail === "function" &&
+      typeof scope.abort === "function",
+    );
+  } catch {
+    return false;
+  }
+}
+
+function createNoopJournalScope(operationId: string): OperationJournalScope {
+  const resolved = (): Promise<void> => Promise.resolve();
+  return Object.freeze({
+    operationId,
+    progress: resolved,
+    succeed: resolved,
+    fail: resolved,
+    abort: resolved,
+  });
+}
+
+function createLocalOperationId(): string {
+  try {
+    const operationId = globalThis.crypto.randomUUID();
+    if (OPERATION_ID.test(operationId)) return operationId;
+  } catch {
+    // Fall through to a process-local valid correlation ID.
+  }
+  localOperationSequence = (localOperationSequence + 1) % 0xffffffffffff;
+  return `00000000-0000-4000-8000-${localOperationSequence
+    .toString(16)
+    .padStart(12, "0")}`;
+}
+
+function recordTimelineProgress(
+  timeline: TranscriptOperationTimeline,
+  stage: OperationStage,
+  details: OperationDetails,
+): void {
+  if (timeline.terminal) return;
+  timeline.stage = stage;
+  safelyRecord(() => timeline.scope.progress(stage, details));
+}
+
+function recordTimelineSuccess(
+  timeline: TranscriptOperationTimeline,
+  provider: "cache" | YouTubeTranscriptProvider,
+): void {
+  if (timeline.terminal) return;
+  timeline.terminal = true;
+  timeline.stage = "completed";
+  safelyRecord(() =>
+    timeline.scope.succeed("completed", {
+      provider,
+      contentBasis: "youtube-transcript",
+    }),
+  );
+}
+
+function recordProviderFailure(
+  timeline: TranscriptOperationTimeline,
+  provider: YouTubeTranscriptProvider,
+  code: YouTubeTranscriptServiceErrorCode,
+): void {
+  recordTimelineProgress(timeline, "trying-provider", {
+    provider,
+    errorCode: operationErrorCode(code),
+  });
+}
+
+function recordTimelineFailure(
+  timeline: TranscriptOperationTimeline,
+  error: unknown,
+): void {
+  if (timeline.terminal) return;
+  const serviceError = normalizeProviderError(error);
+  if (serviceError.code === "aborted") {
+    recordTimelineAbort(timeline);
+    return;
+  }
+  timeline.terminal = true;
+  const errorCode =
+    timeline.stage === "saving"
+      ? "cache-save-failed"
+      : operationErrorCode(serviceError.code);
+  safelyRecord(() => timeline.scope.fail(timeline.stage, errorCode));
+}
+
+function recordTimelineAbort(timeline: TranscriptOperationTimeline): void {
+  if (timeline.terminal) return;
+  timeline.terminal = true;
+  safelyRecord(() => timeline.scope.abort(timeline.stage));
+}
+
+function safelyRecord(operation: () => Promise<void>): void {
+  try {
+    void operation().catch(() => undefined);
+  } catch {
+    // Operation history is optional and cannot alter transcript retrieval.
+  }
+}
+
+function operationErrorCode(
+  code: YouTubeTranscriptServiceErrorCode,
+): OperationErrorCode {
+  switch (code) {
+    case "invalid-video-id":
+      return "invalid-request";
+    case "no-captions":
+      return "no-transcript";
+    case "timeout":
+      return "timeout";
+    case "tikhub-missing-key":
+      return "missing-key";
+    case "tikhub-invalid-key":
+      return "invalid-key";
+    case "tikhub-insufficient-balance":
+      return "insufficient-balance";
+    case "tikhub-budget-unavailable":
+      return "budget-exhausted";
+    case "tikhub-rate-limited":
+      return "rate-limited";
+    case "tikhub-malformed-response":
+      return "malformed-response";
+    case "aborted":
+      return "aborted";
+    case "video-unavailable":
+    case "login-required":
+    case "temporarily-unavailable":
+    case "tikhub-processing":
+    case "tikhub-job-expired":
+    case "fallback-unavailable":
+      return "transcript-unavailable";
+  }
+}
+
 function providerOperationContext(
   identity: Pick<TranscriptProviderOperationContext, "itemId" | "videoId">,
+  operationId: string,
 ): TranscriptProviderOperationContext {
   return Object.freeze({
     itemId: identity.itemId,
     videoId: identity.videoId,
+    operationId,
   });
 }
 

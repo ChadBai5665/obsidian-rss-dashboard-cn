@@ -119,6 +119,7 @@ export interface TranscriptProviderRegistration {
 export interface TranscriptProviderOperationContext {
   readonly itemId: string;
   readonly videoId: string;
+  readonly operationId: string;
 }
 
 export interface TranscriptProviderContinuation {
