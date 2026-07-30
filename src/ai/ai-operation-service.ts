@@ -91,6 +91,17 @@ export interface AiOperationResult {
   text: string;
 }
 
+export interface AiOperationPreparedMetadata {
+  readonly connectionName: string;
+  readonly providerKind: AiProviderKind;
+  readonly model: string;
+  readonly contentBasis: ContentBasis;
+}
+
+export type AiOperationPreparedHandler = (
+  metadata: Readonly<AiOperationPreparedMetadata>,
+) => void;
+
 export interface AiOperationRunInput {
   operation: AiOperation;
   item: CollectedItem;
@@ -98,6 +109,7 @@ export interface AiOperationRunInput {
   fetchFullText: boolean;
   signal?: AbortSignal;
   onTextDelta?: TextDeltaHandler;
+  onPrepared?: AiOperationPreparedHandler;
 }
 
 export interface AiPreparedOperationRunInput {
@@ -162,6 +174,7 @@ export class AiOperationService {
       selectedContent,
       effectiveConnection.maxInputCharacters,
     );
+    notifyPrepared(request.onPrepared, effectiveConnection, prompt.contentBasis);
     const text = await this.generateText(
       provider,
       prompt,
@@ -290,6 +303,7 @@ interface RunInputSnapshot {
   fetchFullText: boolean;
   signal?: AbortSignal;
   onTextDelta?: TextDeltaHandler;
+  onPrepared?: AiOperationPreparedHandler;
 }
 
 interface PreparedRunInputSnapshot {
@@ -322,6 +336,7 @@ function snapshotRunInput(input: AiOperationRunInput): RunInputSnapshot {
     (signal !== undefined && readTrustedAbortState(signal) === undefined)
   ) throw new AiOperationError("invalid-request");
   const onTextDelta = snapshotOptionalTextDelta(record);
+  const onPrepared = snapshotOptionalPrepared(record);
   return {
     operation: operation as AiOperation,
     item: item as CollectedItem,
@@ -329,6 +344,7 @@ function snapshotRunInput(input: AiOperationRunInput): RunInputSnapshot {
     fetchFullText,
     ...(signal === undefined ? {} : { signal: signal as AbortSignal }),
     ...(onTextDelta ? { onTextDelta } : {}),
+    ...(onPrepared ? { onPrepared } : {}),
   };
 }
 
@@ -583,5 +599,47 @@ function snapshotOptionalTextDelta(
   } catch (error) {
     if (error instanceof AiOperationError) throw error;
     throw new AiOperationError("invalid-request");
+  }
+}
+
+function snapshotOptionalPrepared(
+  record: Record<string, unknown> | undefined,
+): AiOperationPreparedHandler | undefined {
+  if (!record) throw new AiOperationError("invalid-request");
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, "onPrepared");
+    if (!descriptor) {
+      if (Reflect.has(record, "onPrepared")) {
+        throw new AiOperationError("invalid-request");
+      }
+      return undefined;
+    }
+    if (!("value" in descriptor) || typeof descriptor.value !== "function") {
+      throw new AiOperationError("invalid-request");
+    }
+    return descriptor.value as AiOperationPreparedHandler;
+  } catch (error) {
+    if (error instanceof AiOperationError) throw error;
+    throw new AiOperationError("invalid-request");
+  }
+}
+
+function notifyPrepared(
+  observer: AiOperationPreparedHandler | undefined,
+  connection: AiConnection,
+  contentBasis: ContentBasis,
+): void {
+  if (!observer) return;
+  const metadata: Readonly<AiOperationPreparedMetadata> = Object.freeze({
+    connectionName: connection.name,
+    providerKind: connection.providerKind,
+    model: connection.model,
+    contentBasis,
+  });
+  try {
+    const outcome = Reflect.apply(observer, undefined, [metadata]) as unknown;
+    consumeCallbackRejection(outcome);
+  } catch {
+    // Optional observers cannot change provider execution or business results.
   }
 }

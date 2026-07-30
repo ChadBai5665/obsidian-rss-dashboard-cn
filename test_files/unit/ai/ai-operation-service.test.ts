@@ -252,6 +252,68 @@ describe("manual AI operation service", () => {
     });
   });
 
+  it("reports one frozen prepared snapshot with resolved connection metadata and the actual content basis before generation", async () => {
+    const observed: unknown[] = [];
+    const order: string[] = [];
+    const generate = vi.fn(async () => {
+      order.push("generate");
+      return { text: "模型结果" };
+    });
+    const test = harness({
+      aiSettings: {
+        connections: [connection({
+          name: "Kimi",
+          providerKind: "kimi",
+          baseUrl: "https://api.moonshot.cn/v1",
+          model: "",
+        })],
+      },
+      selectedContent: selected({ basis: "full-text" }),
+      providerFactory: vi.fn(async () => ({ generate })),
+    });
+
+    const result = await test.service.run(runInput({
+      onPrepared: ((metadata: unknown) => {
+        order.push("prepared");
+        observed.push(metadata);
+      }) as never,
+    }));
+
+    expect(order).toEqual(["prepared", "generate"]);
+    expect(observed).toEqual([{
+      connectionName: "Kimi",
+      providerKind: "kimi",
+      model: "kimi-latest",
+      contentBasis: "full-text",
+    }]);
+    expect(Object.isFrozen(observed[0])).toBe(true);
+    expect(Object.keys(observed[0] as object).sort()).toEqual([
+      "connectionName",
+      "contentBasis",
+      "model",
+      "providerKind",
+    ]);
+    expect(JSON.stringify(observed)).not.toContain("来源正文");
+    expect(JSON.stringify(observed)).not.toContain("https://");
+    expect(result.contentBasis).toBe("full-text");
+  });
+
+  it("isolates a synchronous prepared observer failure from provider generation", async () => {
+    const observer = vi.fn(() => {
+      throw new Error("external-secret raw-observer-error");
+    });
+    const test = harness();
+
+    const result = await test.service.run(runInput({
+      onPrepared: observer as never,
+    }));
+
+    expect(observer).toHaveBeenCalledTimes(1);
+    expect(test.generate).toHaveBeenCalledTimes(1);
+    expect(result.text).toBe("模型结果");
+    expect(JSON.stringify(result)).not.toContain("external-secret");
+  });
+
   it("uses the resolved Kimi model for the provider request and result provenance", async () => {
     const providerFactory = vi.fn(async () => ({
       generate: vi.fn(async () => ({ text: "模型结果" })),

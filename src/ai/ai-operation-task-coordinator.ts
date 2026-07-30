@@ -29,6 +29,17 @@ import type {
   ContentBasis,
   SourceType,
 } from "../collection/collected-item";
+import {
+  snapshotOperationEvent,
+  type AiOperationDetails,
+  type OperationDetails,
+  type OperationErrorCode,
+  type OperationStage,
+} from "../operation-journal/operation-event";
+import type {
+  OperationBeginInput,
+  OperationJournalPort,
+} from "../operation-journal/operation-journal-service";
 import { normalizeConnectionId } from "../security/connection-id";
 
 export type AiTaskStatus =
@@ -67,6 +78,7 @@ export interface AiOperationTaskCoordinatorDependencies {
   repository: Pick<AnalysisRepository, "latest" | "save">;
   createResultId?: () => string;
   now?: () => string;
+  operationJournal?: OperationJournalPort;
 }
 
 type TaskListener = (state: AiTaskSnapshot) => void;
@@ -104,6 +116,29 @@ interface TaskRecord {
   active: boolean;
   saveStarted: boolean;
   sawDelta: boolean;
+  receivedFirstDelta: boolean;
+  journalTimeline?: AiOperationJournalTimeline;
+}
+
+interface AiOperationJournalTimeline {
+  scope?: SafeOperationJournalScope;
+  details: Readonly<AiOperationDetails>;
+  stage: OperationStage;
+  started: boolean;
+  prepared: boolean;
+  terminal: boolean;
+}
+
+interface SafeOperationJournalScope {
+  readonly operationId: string;
+  readonly progress: (stage: OperationStage, details: OperationDetails) => unknown;
+  readonly succeed: (stage: OperationStage, details: OperationDetails) => unknown;
+  readonly fail: (
+    stage: OperationStage,
+    errorCode: OperationErrorCode,
+    details?: OperationDetails,
+  ) => unknown;
+  readonly abort: (stage: OperationStage) => unknown;
 }
 
 const STABLE_ITEM_ID = /^[a-f0-9]{64}$/u;
@@ -150,6 +185,10 @@ const PUBLIC_ERROR_CODES: ReadonlySet<string> = new Set([
   "invalid-operation",
   "selection-failed",
 ]);
+const OPERATION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const JOURNAL_VALIDATION_ID = "00000000-0000-4000-8000-000000000000";
+const JOURNAL_VALIDATION_TIME = "2000-01-01T00:00:00.000Z";
 
 /**
  * Owns one durable generation task per canonical item and operation. UI
@@ -168,6 +207,9 @@ export class AiOperationTaskCoordinator {
   private readonly saveAnalysis: (result: unknown) => Promise<string>;
   private readonly createResultId: () => string;
   private readonly now: () => string;
+  private readonly beginOperationJournal?: (
+    input: OperationBeginInput,
+  ) => unknown;
   private shuttingDown = false;
   private shutdownPromise?: Promise<void>;
 
@@ -180,6 +222,8 @@ export class AiOperationTaskCoordinator {
     const save = dataMethod(repository, "save");
     const createResultId = ownData(root, "createResultId");
     const now = ownData(root, "now");
+    const operationJournal = ownData(root, "operationJournal");
+    const beginOperationJournal = dataMethod(operationJournal, "begin");
     if (
       !root ||
       !run ||
@@ -201,6 +245,10 @@ export class AiOperationTaskCoordinator {
     this.createResultId = (createResultId as (() => string) | undefined) ??
       defaultResultId;
     this.now = (now as (() => string) | undefined) ?? defaultNow;
+    if (beginOperationJournal) {
+      this.beginOperationJournal = (input) =>
+        Reflect.apply(beginOperationJournal, operationJournal, [input]);
+    }
   }
 
   loadLatest(
@@ -332,6 +380,7 @@ export class AiOperationTaskCoordinator {
       active: false,
       saveStarted: false,
       sawDelta: false,
+      receivedFirstDelta: false,
     };
     this.tasks.set(key, task);
     return task;
@@ -364,6 +413,14 @@ export class AiOperationTaskCoordinator {
       active: true,
       saveStarted: false,
       sawDelta: false,
+      receivedFirstDelta: false,
+      journalTimeline: {
+        details: Object.freeze({}),
+        stage: "preparing",
+        started: false,
+        prepared: false,
+        terminal: false,
+      },
     };
     this.tasks.set(task.internalKey, task);
     this.notify(task);
@@ -434,6 +491,7 @@ export class AiOperationTaskCoordinator {
         connectionId: request.connectionId,
         fetchFullText: request.fetchFullText,
         signal: task.controller?.signal,
+        onPrepared: (metadata) => this.receivePrepared(task, metadata),
         onTextDelta: (delta) => this.receiveDelta(task, delta),
       });
     } catch (error) {
@@ -456,6 +514,13 @@ export class AiOperationTaskCoordinator {
       return;
     }
     if (!this.isCurrentActive(task)) return;
+
+    this.receivePrepared(task, {
+      connectionName: analysis.connectionName,
+      providerKind: analysis.providerKind,
+      model: analysis.model,
+      contentBasis: analysis.contentBasis,
+    });
     if (!task.sawDelta) {
       this.updateActive(task, {
         status: "generating",
@@ -466,6 +531,7 @@ export class AiOperationTaskCoordinator {
         contentBasis: analysis.contentBasis,
       });
     }
+    this.recordJournalProgress(task, "saving", task.journalTimeline?.details ?? {});
     this.updateActive(task, {
       status: "saving",
       text: analysis.text,
@@ -483,15 +549,16 @@ export class AiOperationTaskCoordinator {
       artifactPath = await this.saveAnalysis(analysis);
     } catch {
       if (this.isCurrentActive(task)) {
-        this.failTask(task, "provider-failure", false);
+        this.failTask(task, "provider-failure", false, "cache-save-failed");
       }
       return;
     }
     if (!this.isCurrentActive(task)) return;
     if (!safeArtifactPath(artifactPath, analysis)) {
-      this.failTask(task, "invalid-request", false);
+      this.failTask(task, "invalid-request", false, "cache-save-failed");
       return;
     }
+    this.recordJournalSuccess(task, artifactPath);
     this.completeTask(task, createSnapshot({
       itemId: task.itemId,
       operation: task.operation,
@@ -574,6 +641,95 @@ export class AiOperationTaskCoordinator {
     }
   }
 
+  private receivePrepared(task: TaskRecord, value: unknown): void {
+    if (!this.isCurrentActive(task)) return;
+    const timeline = task.journalTimeline;
+    if (!timeline || timeline.terminal || timeline.prepared) return;
+    const details = snapshotAiOperationJournalDetails(task.operation, value);
+    if (!details) return;
+    timeline.details = details;
+    timeline.prepared = true;
+    this.ensureJournalStarted(task, details);
+    this.recordJournalProgress(task, "generating", details);
+  }
+
+  private ensureJournalStarted(
+    task: TaskRecord,
+    details: Readonly<AiOperationDetails>,
+  ): void {
+    const timeline = task.journalTimeline;
+    if (!timeline || timeline.started) return;
+    timeline.started = true;
+    if (!this.beginOperationJournal) return;
+    let scope: unknown;
+    try {
+      scope = this.beginOperationJournal({
+        category: "ai",
+        action: task.operation,
+        trigger: "manual",
+        subject: { itemId: task.itemId },
+        stage: "preparing",
+        details,
+      });
+    } catch {
+      return;
+    }
+    timeline.scope = snapshotJournalScope(scope);
+  }
+
+  private recordJournalProgress(
+    task: TaskRecord,
+    stage: OperationStage,
+    details: Readonly<AiOperationDetails>,
+  ): void {
+    const timeline = task.journalTimeline;
+    if (!timeline || timeline.terminal) return;
+    this.ensureJournalStarted(task, details);
+    timeline.stage = stage;
+    const scope = timeline.scope;
+    if (scope) safelyRecordJournal(() => scope.progress(stage, details));
+  }
+
+  private recordJournalFailure(
+    task: TaskRecord,
+    errorCode: OperationErrorCode,
+  ): void {
+    const timeline = task.journalTimeline;
+    if (!timeline || timeline.terminal) return;
+    this.ensureJournalStarted(task, timeline.details);
+    timeline.terminal = true;
+    const scope = timeline.scope;
+    if (scope) {
+      safelyRecordJournal(() =>
+        scope.fail(timeline.stage, errorCode, timeline.details));
+    }
+  }
+
+  private recordJournalAbort(task: TaskRecord): void {
+    const timeline = task.journalTimeline;
+    if (!timeline || timeline.terminal) return;
+    this.ensureJournalStarted(task, timeline.details);
+    timeline.terminal = true;
+    const scope = timeline.scope;
+    if (scope) safelyRecordJournal(() => scope.abort(timeline.stage));
+  }
+
+  private recordJournalSuccess(task: TaskRecord, artifactPath: string): void {
+    const timeline = task.journalTimeline;
+    if (!timeline || timeline.terminal) return;
+    this.ensureJournalStarted(task, timeline.details);
+    const completedDetails = projectAiOperationJournalDetails(task.operation, {
+      ...timeline.details,
+      artifactPath,
+    }) ?? timeline.details;
+    timeline.terminal = true;
+    timeline.stage = "completed";
+    const scope = timeline.scope;
+    if (scope) {
+      safelyRecordJournal(() => scope.succeed("completed", completedDetails));
+    }
+  }
+
   private receiveDelta(task: TaskRecord, value: unknown): void {
     if (!this.isCurrentActive(task)) return;
     if (typeof value !== "string" || value.length === 0) {
@@ -587,6 +743,14 @@ export class AiOperationTaskCoordinator {
     ) {
       this.failTask(task, "invalid-request", true);
       return;
+    }
+    if (!task.receivedFirstDelta) {
+      task.receivedFirstDelta = true;
+      this.recordJournalProgress(
+        task,
+        "streaming",
+        task.journalTimeline?.details ?? {},
+      );
     }
     task.sawDelta = true;
     this.updateActive(task, {
@@ -651,9 +815,11 @@ export class AiOperationTaskCoordinator {
     task: TaskRecord,
     errorCode: AiOperationErrorCode,
     abort: boolean,
+    journalErrorCode: OperationErrorCode = errorCode,
   ): void {
     if (!this.isCurrentActive(task)) return;
     if (abort && !task.controller?.signal.aborted) task.controller?.abort();
+    this.recordJournalFailure(task, journalErrorCode);
     task.active = false;
     task.snapshot = createFailureSnapshot(task, errorCode);
     this.notify(task);
@@ -666,6 +832,7 @@ export class AiOperationTaskCoordinator {
     // only truthful terminal state is its actual durable outcome.
     if (task.saveStarted) return;
     if (!task.controller?.signal.aborted) task.controller?.abort();
+    this.recordJournalAbort(task);
     task.active = false;
     task.snapshot = createFailureSnapshot(task, "aborted", "aborted");
     if (notify && this.isCurrent(task)) this.notify(task);
@@ -990,6 +1157,109 @@ function createSnapshot(input: {
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.errorCode ? { errorCode: input.errorCode } : {}),
   });
+}
+
+function snapshotAiOperationJournalDetails(
+  operation: AiOperation,
+  value: unknown,
+): Readonly<AiOperationDetails> | undefined {
+  const record = exactDataRecord(value, [
+    "connectionName",
+    "providerKind",
+    "model",
+    "contentBasis",
+  ]);
+  if (!record) return undefined;
+  return projectAiOperationJournalDetails(operation, {
+    connectionName: ownData(record, "connectionName") as string,
+    providerKind: ownData(record, "providerKind") as AiProviderKind,
+    model: ownData(record, "model") as string,
+    contentBasis: ownData(record, "contentBasis") as ContentBasis,
+  });
+}
+
+function projectAiOperationJournalDetails(
+  operation: AiOperation,
+  details: OperationDetails,
+): Readonly<AiOperationDetails> | undefined {
+  try {
+    return snapshotOperationEvent({
+      schemaVersion: 1,
+      eventId: JOURNAL_VALIDATION_ID,
+      operationId: JOURNAL_VALIDATION_ID,
+      occurredAt: JOURNAL_VALIDATION_TIME,
+      category: "ai",
+      action: operation,
+      trigger: "manual",
+      stage: "preparing",
+      status: "started",
+      subject: {},
+      details,
+    }).details as Readonly<AiOperationDetails>;
+  } catch {
+    return undefined;
+  }
+}
+
+function snapshotJournalScope(value: unknown): SafeOperationJournalScope | undefined {
+  const operationId = ownObjectData(value, "operationId");
+  const progress = dataMethod(value, "progress");
+  const succeed = dataMethod(value, "succeed");
+  const fail = dataMethod(value, "fail");
+  const abort = dataMethod(value, "abort");
+  if (
+    typeof operationId !== "string" ||
+    !OPERATION_ID.test(operationId) ||
+    !progress ||
+    !succeed ||
+    !fail ||
+    !abort
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    operationId,
+    progress: (stage: OperationStage, details: OperationDetails) =>
+      Reflect.apply(progress, value, [stage, details]),
+    succeed: (stage: OperationStage, details: OperationDetails) =>
+      Reflect.apply(succeed, value, [stage, details]),
+    fail: (
+      stage: OperationStage,
+      errorCode: OperationErrorCode,
+      details?: OperationDetails,
+    ) => Reflect.apply(fail, value, [stage, errorCode, details]),
+    abort: (stage: OperationStage) => Reflect.apply(abort, value, [stage]),
+  });
+}
+
+function ownObjectData(value: unknown, key: string): unknown {
+  try {
+    if (typeof value !== "object" || value === null) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function safelyRecordJournal(operation: () => unknown): void {
+  try {
+    const outcome = operation();
+    if (
+      outcome === null ||
+      (typeof outcome !== "object" && typeof outcome !== "function")
+    ) {
+      return;
+    }
+    const assimilated = Promise.resolve(outcome);
+    void Promise.prototype.then.call(
+      assimilated,
+      undefined,
+      () => undefined,
+    );
+  } catch {
+    // Operation history is optional and cannot alter generation or persistence.
+  }
 }
 
 function safeArtifactPath(

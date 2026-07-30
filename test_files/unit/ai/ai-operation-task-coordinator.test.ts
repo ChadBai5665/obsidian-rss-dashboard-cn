@@ -19,6 +19,17 @@ import {
   MAX_AI_ANALYSIS_TEXT_CHARACTERS,
 } from "../../../src/ai/analysis-result";
 import type { CollectedItem } from "../../../src/collection/collected-item";
+import type {
+  OperationDetails,
+  OperationErrorCode,
+  OperationStage,
+} from "../../../src/operation-journal/operation-event";
+import type {
+  OperationBeginInput,
+  OperationIdentityInput,
+  OperationJournalPort,
+  OperationJournalScope,
+} from "../../../src/operation-journal/operation-journal-service";
 
 const ITEM_ID = "a".repeat(64);
 const OTHER_ITEM_ID = "b".repeat(64);
@@ -28,6 +39,82 @@ const NEXT_RESULT_ID = "44444444-4444-4444-8444-444444444444";
 const CREATED_AT = "2026-07-29T01:02:03.004Z";
 const NEXT_CREATED_AT = "2026-07-29T01:03:04.005Z";
 const API_KEY = "coordinator-external-secret";
+
+interface RecordedJournalEvent {
+  readonly operationId: string;
+  readonly status: "started" | "progress" | "succeeded" | "failed" | "aborted";
+  readonly stage: OperationStage;
+  readonly details: OperationDetails;
+  readonly errorCode?: OperationErrorCode;
+}
+
+class RecordingOperationJournal implements OperationJournalPort {
+  readonly begins: OperationBeginInput[] = [];
+  readonly attaches: Array<{
+    operationId: string;
+    input: OperationIdentityInput;
+  }> = [];
+  readonly events: RecordedJournalEvent[] = [];
+  private sequence = 0;
+
+  begin(input: OperationBeginInput): OperationJournalScope {
+    const operationId = this.nextOperationId();
+    this.begins.push(input);
+    this.events.push({
+      operationId,
+      status: "started",
+      stage: input.stage,
+      details: input.details,
+    });
+    return this.scope(operationId);
+  }
+
+  attach(
+    operationId: string,
+    input: OperationIdentityInput,
+  ): OperationJournalScope {
+    this.attaches.push({ operationId, input });
+    return this.scope(operationId);
+  }
+
+  private nextOperationId(): string {
+    this.sequence += 1;
+    return `90000000-0000-4000-8000-${String(this.sequence).padStart(12, "0")}`;
+  }
+
+  private scope(operationId: string): OperationJournalScope {
+    return Object.freeze({
+      operationId,
+      progress: async (stage: OperationStage, details: OperationDetails) => {
+        this.events.push({ operationId, status: "progress", stage, details });
+      },
+      succeed: async (stage: OperationStage, details: OperationDetails) => {
+        this.events.push({ operationId, status: "succeeded", stage, details });
+      },
+      fail: async (
+        stage: OperationStage,
+        errorCode: OperationErrorCode,
+        details: OperationDetails = {},
+      ) => {
+        this.events.push({
+          operationId,
+          status: "failed",
+          stage,
+          details,
+          errorCode,
+        });
+      },
+      abort: async (stage: OperationStage) => {
+        this.events.push({
+          operationId,
+          status: "aborted",
+          stage,
+          details: {},
+        });
+      },
+    });
+  }
+}
 
 function item(overrides: Partial<CollectedItem> = {}): CollectedItem {
   return {
@@ -148,6 +235,7 @@ function harness(options: {
   save?: (result: unknown) => Promise<string>;
   resultIds?: string[];
   timestamps?: string[];
+  operationJournal?: OperationJournalPort;
 } = {}) {
   const run = vi.fn(options.run ?? (async () => operationResult()));
   const latest = vi.fn(options.latest ?? (async () => null));
@@ -159,6 +247,9 @@ function harness(options: {
     repository: { latest, save },
     createResultId: () => ids.shift() ?? RESULT_ID,
     now: () => times.shift() ?? CREATED_AT,
+    ...(options.operationJournal
+      ? { operationJournal: options.operationJournal }
+      : {}),
   };
   const coordinator = new AiOperationTaskCoordinator(dependencies);
   return {
@@ -1010,5 +1101,392 @@ describe("persistent AI operation task coordinator", () => {
     });
     expect(JSON.stringify(completed)).not.toContain(API_KEY);
     expect(test.save).toHaveBeenCalledTimes(1);
+  });
+
+  it("journals one prepared timeline, one streaming transition, verified saving, and completion across dedupe and reconnect", async () => {
+    const journal = new RecordingOperationJournal();
+    const runGate = deferred<AiOperationResult>();
+    const saveGate = deferred<string>();
+    let request: AiOperationRunInput | undefined;
+    const test = harness({
+      operationJournal: journal,
+      run: async (input) => {
+        request = input;
+        input.onPrepared?.({
+          connectionName: "DeepSeek",
+          providerKind: "deepseek",
+          model: "deepseek-chat",
+          contentBasis: "feed",
+        });
+        input.onTextDelta?.("模型");
+        input.onTextDelta?.("结果");
+        return await runGate.promise;
+      },
+      save: async () => await saveGate.promise,
+    });
+
+    const first = test.coordinator.start(startInput());
+    const duplicate = test.coordinator.start(startInput());
+    const unsubscribe = test.coordinator.subscribe(
+      ITEM_ID,
+      "summary",
+      () => undefined,
+    );
+    unsubscribe();
+    test.coordinator.subscribe(ITEM_ID, "summary", () => undefined)();
+    await waitFor(() => request !== undefined, "service did not start");
+
+    expect(duplicate).toBe(first);
+    expect(journal.begins).toEqual([{
+      category: "ai",
+      action: "summary",
+      trigger: "manual",
+      subject: { itemId: ITEM_ID },
+      stage: "preparing",
+      details: {
+        connectionName: "DeepSeek",
+        providerKind: "deepseek",
+        model: "deepseek-chat",
+        contentBasis: "feed",
+      },
+    }]);
+    expect(journal.attaches).toEqual([]);
+    expect(journal.events.filter(({ stage }) => stage === "streaming"))
+      .toHaveLength(1);
+    expect(journal.events.map(({ status, stage }) => ({ status, stage })))
+      .toEqual([
+        { status: "started", stage: "preparing" },
+        { status: "progress", stage: "generating" },
+        { status: "progress", stage: "streaming" },
+      ]);
+
+    runGate.resolve(operationResult());
+    await waitFor(
+      () => snapshotNow(test.coordinator).status === "saving",
+      "coordinator never entered saving",
+    );
+    expect(journal.events.at(-1)).toMatchObject({
+      status: "progress",
+      stage: "saving",
+    });
+    expect(journal.events.some(({ status }) => status === "succeeded"))
+      .toBe(false);
+
+    saveGate.resolve(defaultArtifactPath());
+    const completed = await first;
+    await expect(duplicate).resolves.toBe(completed);
+    expect(journal.events.at(-1)).toEqual({
+      operationId: journal.events[0]?.operationId,
+      status: "succeeded",
+      stage: "completed",
+      details: {
+        connectionName: "DeepSeek",
+        providerKind: "deepseek",
+        model: "deepseek-chat",
+        contentBasis: "feed",
+        artifactPath: defaultArtifactPath(),
+      },
+    });
+    expect(new Set(journal.events.map(({ operationId }) => operationId)).size)
+      .toBe(1);
+  });
+
+  it("creates a new journal operation only for an explicit regeneration", async () => {
+    const journal = new RecordingOperationJournal();
+    let saveCount = 0;
+    const test = harness({
+      operationJournal: journal,
+      run: async (input) => {
+        input.onPrepared?.({
+          connectionName: "DeepSeek",
+          providerKind: "deepseek",
+          model: "deepseek-chat",
+          contentBasis: "feed",
+        });
+        return operationResult();
+      },
+      save: async () => {
+        saveCount += 1;
+        return defaultArtifactPath(
+          ITEM_ID,
+          "summary",
+          saveCount === 1 ? CREATED_AT : NEXT_CREATED_AT,
+        );
+      },
+      resultIds: [RESULT_ID, NEXT_RESULT_ID],
+      timestamps: [CREATED_AT, NEXT_CREATED_AT],
+    });
+
+    await test.coordinator.start(startInput());
+    await test.coordinator.start(startInput());
+    await test.coordinator.regenerate(startInput());
+
+    expect(journal.begins).toHaveLength(2);
+    expect(new Set(journal.events.map(({ operationId }) => operationId)).size)
+      .toBe(2);
+    expect(test.run).toHaveBeenCalledTimes(2);
+    expect(test.save).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["provider failure", new Error(`${API_KEY} raw-provider`), false,
+      "provider-failure", "preparing"],
+    ["missing API key", new AiOperationError("missing-key"), false,
+      "missing-key", "preparing"],
+    ["invalid API key", new AiOperationError("invalid-key"), false,
+      "invalid-key", "preparing"],
+    ["timeout", new AiOperationError("timeout"), true,
+      "timeout", "generating"],
+  ] as const)("maps %s to a closed journal failure", async (
+    _label,
+    error,
+    prepared,
+    expectedCode,
+    expectedStage,
+  ) => {
+    const journal = new RecordingOperationJournal();
+    const test = harness({
+      operationJournal: journal,
+      run: async (input) => {
+        if (prepared) {
+          input.onPrepared?.({
+            connectionName: "DeepSeek",
+            providerKind: "deepseek",
+            model: "deepseek-chat",
+            contentBasis: "feed",
+          });
+        }
+        throw error;
+      },
+    });
+
+    const failed = await test.coordinator.start(startInput());
+
+    expect(failed).toMatchObject({
+      status: "failed",
+      errorCode: expectedCode,
+    });
+    expect(journal.begins).toHaveLength(1);
+    expect(journal.events.at(-1)).toMatchObject({
+      status: "failed",
+      stage: expectedStage,
+      errorCode: expectedCode,
+    });
+    expect(JSON.stringify(journal.events)).not.toContain(API_KEY);
+    expect(test.save).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["repository throw", async () => {
+      throw new Error(`${API_KEY} raw-save-error`);
+    }, "provider-failure"],
+    ["invalid absolute path", async () =>
+      `/private/${API_KEY}/analysis/${ITEM_ID}/result.md`, "invalid-request"],
+  ] as const)("keeps %s terminal at saving with cache-save-failed", async (
+    _label,
+    save,
+    expectedUiCode,
+  ) => {
+    const journal = new RecordingOperationJournal();
+    const test = harness({
+      operationJournal: journal,
+      run: async (input) => {
+        input.onPrepared?.({
+          connectionName: "DeepSeek",
+          providerKind: "deepseek",
+          model: "deepseek-chat",
+          contentBasis: "feed",
+        });
+        return operationResult();
+      },
+      save,
+    });
+
+    const failed = await test.coordinator.start(startInput());
+
+    expect(failed).toMatchObject({
+      status: "failed",
+      errorCode: expectedUiCode,
+    });
+    expect(journal.events.at(-1)).toMatchObject({
+      status: "failed",
+      stage: "saving",
+      errorCode: "cache-save-failed",
+    });
+    expect(journal.events.some(({ status }) => status === "succeeded"))
+      .toBe(false);
+    expect(JSON.stringify(journal.events)).not.toContain(API_KEY);
+  });
+
+  it.each(["user abort", "plugin shutdown"] as const)(
+    "records %s as one aborted terminal",
+    async (mode) => {
+      const journal = new RecordingOperationJournal();
+      let request: AiOperationRunInput | undefined;
+      const test = harness({
+        operationJournal: journal,
+        run: async (input) => {
+          request = input;
+          return await new Promise<AiOperationResult>((_resolve, reject) => {
+            input.signal?.addEventListener("abort", () => {
+              reject(new AiOperationError("aborted"));
+            }, { once: true });
+          });
+        },
+      });
+      const pending = test.coordinator.start(startInput());
+      await waitFor(() => request !== undefined, "service did not start");
+
+      const shutdown = mode === "plugin shutdown"
+        ? test.coordinator.shutdown()
+        : undefined;
+      if (mode === "user abort") {
+        test.coordinator.abort(ITEM_ID, "summary");
+      }
+
+      const aborted = await pending;
+      await shutdown;
+      expect(aborted).toMatchObject({
+        status: "aborted",
+        errorCode: "aborted",
+      });
+      expect(journal.begins).toHaveLength(1);
+      expect(journal.events.filter(({ status }) => status === "aborted"))
+        .toHaveLength(1);
+      expect(journal.events.at(-1)).toMatchObject({
+        status: "aborted",
+        stage: "preparing",
+      });
+      expect(test.save).not.toHaveBeenCalled();
+    },
+  );
+
+  it("isolates synchronous, rejected, and invalid journal scopes from snapshots, persistence, and UI errors", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    const scopeId = "80000000-0000-4000-8000-000000000001";
+    const rejectedScope: OperationJournalScope = {
+      operationId: scopeId,
+      progress: () => Promise.reject(new Error(`${API_KEY} progress`)),
+      succeed: () => Promise.reject(new Error(`${API_KEY} succeed`)),
+      fail: () => Promise.reject(new Error(`${API_KEY} fail`)),
+      abort: () => Promise.reject(new Error(`${API_KEY} abort`)),
+    };
+    const journals: OperationJournalPort[] = [
+      {
+        begin: () => {
+          throw new Error(`${API_KEY} begin`);
+        },
+        attach: () => rejectedScope,
+      },
+      {
+        begin: () => rejectedScope,
+        attach: () => rejectedScope,
+      },
+      {
+        begin: () => ({
+          operationId: `${API_KEY}-invalid`,
+        }) as OperationJournalScope,
+        attach: () => rejectedScope,
+      },
+    ];
+
+    try {
+      for (const operationJournal of journals) {
+        const successful = harness({
+          operationJournal,
+          run: async (input) => {
+            input.onPrepared?.({
+              connectionName: "DeepSeek",
+              providerKind: "deepseek",
+              model: "deepseek-chat",
+              contentBasis: "feed",
+            });
+            return operationResult();
+          },
+        });
+        await expect(successful.coordinator.start(startInput())).resolves
+          .toMatchObject({ status: "complete", text: "模型结果" });
+        expect(successful.save).toHaveBeenCalledTimes(1);
+
+        const failing = harness({
+          operationJournal,
+          run: async (input) => {
+            input.onPrepared?.({
+              connectionName: "DeepSeek",
+              providerKind: "deepseek",
+              model: "deepseek-chat",
+              contentBasis: "feed",
+            });
+            throw new AiOperationError("invalid-key");
+          },
+        });
+        await expect(failing.coordinator.start(startInput())).resolves
+          .toMatchObject({ status: "failed", errorCode: "invalid-key" });
+        expect(failing.save).not.toHaveBeenCalled();
+      }
+      await flush();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("keeps prompts, source bodies, deltas, outputs, URLs, raw errors, secrets, and unverified paths out of journal data", async () => {
+    const journal = new RecordingOperationJournal();
+    const promptSentinel = "PRIVATE_PROMPT_SENTINEL";
+    const sourceSentinel = "PRIVATE_SOURCE_BODY_SENTINEL";
+    const deltaSentinel = "PRIVATE_DELTA_SENTINEL";
+    const outputSentinel = "PRIVATE_FINAL_OUTPUT_SENTINEL";
+    const test = harness({
+      operationJournal: journal,
+      run: async (input) => {
+        input.onPrepared?.({
+          connectionName: "DeepSeek",
+          providerKind: "deepseek",
+          model: "deepseek-chat",
+          contentBasis: "feed",
+        });
+        input.onTextDelta?.(deltaSentinel);
+        input.onTextDelta?.(outputSentinel);
+        return operationResult({ text: `${deltaSentinel}${outputSentinel}` });
+      },
+    });
+
+    const completed = await test.coordinator.start(startInput({
+      item: item({
+        excerpt: `${sourceSentinel} ${promptSentinel} ${API_KEY}`,
+        url: `https://example.com/${API_KEY}`,
+      }),
+    }));
+    const serialized = JSON.stringify({
+      begins: journal.begins,
+      events: journal.events,
+    });
+
+    expect(completed.status).toBe("complete");
+    expect(serialized).not.toContain(promptSentinel);
+    expect(serialized).not.toContain(sourceSentinel);
+    expect(serialized).not.toContain(deltaSentinel);
+    expect(serialized).not.toContain(outputSentinel);
+    expect(serialized).not.toContain("https://");
+    expect(serialized).not.toContain(API_KEY);
+    expect(journal.events.at(-1)).toMatchObject({
+      status: "succeeded",
+      details: { artifactPath: defaultArtifactPath() },
+    });
+
+    const failedJournal = new RecordingOperationJournal();
+    const failed = harness({
+      operationJournal: failedJournal,
+      run: async () => {
+        throw new Error(`PRIVATE_RAW_ERROR_SENTINEL ${API_KEY}`);
+      },
+    });
+    await failed.coordinator.start(startInput());
+    expect(JSON.stringify(failedJournal.events))
+      .not.toContain("PRIVATE_RAW_ERROR_SENTINEL");
+    expect(JSON.stringify(failedJournal.events)).not.toContain(API_KEY);
   });
 });
