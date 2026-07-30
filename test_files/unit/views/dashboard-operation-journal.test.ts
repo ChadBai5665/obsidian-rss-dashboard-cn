@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "obsidian";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
-import { DEFAULT_SETTINGS, type FeedItem } from "../../../src/types/types";
+import {
+  DEFAULT_SETTINGS,
+  type Feed,
+  type FeedItem,
+} from "../../../src/types/types";
 import type { OperationJournalUiPort } from "../../../src/components/operation-journal-panel";
 import { RssDashboardView } from "../../../src/views/dashboard-view";
 
@@ -46,7 +50,12 @@ type DashboardTestApi = {
     | { kind: "articles" }
     | { kind: "reader"; itemId: string };
   inlineArticle: FeedItem | null;
+  inlineArticleContentContext: { contentBasis: "feed" } | undefined;
+  selectedArticle: FeedItem | null;
   articleRenderer: { detachAiPanel(): void } | null;
+  handleFeedClick(feed: Feed): void;
+  refreshLocalization(): void;
+  settings: typeof DEFAULT_SETTINGS;
 };
 
 function article(): FeedItem {
@@ -67,6 +76,16 @@ function article(): FeedItem {
   };
 }
 
+function feed(url: string, items: FeedItem[] = []): Feed {
+  return {
+    title: url,
+    url,
+    folder: "",
+    items,
+    lastUpdated: 0,
+  };
+}
+
 function createView(ui?: OperationJournalUiPort): {
   view: DashboardTestApi;
   plugin: {
@@ -75,8 +94,13 @@ function createView(ui?: OperationJournalUiPort): {
   };
 } {
   const app = new App();
+  const reader = article();
   const plugin = {
-    settings: { ...DEFAULT_SETTINGS, locale: "zh-CN" },
+    settings: {
+      ...DEFAULT_SETTINGS,
+      locale: "zh-CN" as const,
+      feeds: [feed(reader.feedUrl, [reader]), feed("https://other.example/feed")],
+    },
     openAddSourceModal: vi.fn(),
     ...(ui ? { getOperationJournalUi: () => ui } : {}),
   };
@@ -170,6 +194,40 @@ describe("dashboard operation journal mode", () => {
     expect(ui.unsubscribe).toHaveBeenCalledTimes(1);
   });
 
+  it("restores the captured reader after a real feed navigation clears current reader state", async () => {
+    const ui = uiPort();
+    const { view } = createView(ui);
+    vi.spyOn(view, "render").mockImplementation(() => {});
+    const reader = article();
+    view.inlineArticle = reader;
+    view.inlineArticleContentContext = { contentBasis: "feed" };
+    view.selectedArticle = reader;
+    view.openOperationJournal();
+    view.renderOperationJournal(document.body.createDiv());
+    await Promise.resolve();
+
+    view.handleFeedClick(feed("https://other.example/feed"));
+    expect(view.inlineArticle).toBeNull();
+    expect(view.selectedArticle).toBeNull();
+    view.closeOperationJournal();
+
+    expect(view.primaryMode).toEqual({ kind: "reader", itemId: "reader-item" });
+    expect(view.inlineArticle?.guid).toBe("reader-item");
+    expect(view.inlineArticleContentContext).toEqual({ contentBasis: "feed" });
+    expect(view.selectedArticle?.guid).toBe("reader-item");
+  });
+
+  it("keeps articles mode as a list after journal-side navigation", () => {
+    const { view } = createView(uiPort());
+    vi.spyOn(view, "render").mockImplementation(() => {});
+    view.inlineArticle = null;
+    view.openOperationJournal();
+    view.handleFeedClick(feed("https://other.example/feed"));
+    view.closeOperationJournal();
+    expect(view.primaryMode).toEqual({ kind: "articles" });
+    expect(view.inlineArticle).toBeNull();
+  });
+
   it("disposes the panel on dashboard close", async () => {
     const ui = uiPort();
     const { view } = createView(ui);
@@ -180,6 +238,38 @@ describe("dashboard operation journal mode", () => {
 
     await view.onClose();
     expect(ui.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("survives an unsubscribe throw during dashboard close", async () => {
+    const ui = uiPort();
+    ui.subscribe.mockReturnValue(() => {
+      throw new Error("unsubscribe failed");
+    });
+    const { view } = createView(ui);
+    vi.spyOn(view, "render").mockImplementation(() => {});
+    view.openOperationJournal();
+    view.renderOperationJournal(document.body.createDiv());
+    await Promise.resolve();
+    await expect(view.onClose()).resolves.toBeUndefined();
+  });
+
+  it("refreshes the open panel locale without another subscription or load", async () => {
+    const ui = uiPort();
+    const { view, plugin } = createView(ui);
+    const content = document.body.createDiv();
+    vi.spyOn(view, "render").mockImplementation(() => {
+      content.empty();
+      view.renderOperationJournal(content);
+    });
+    view.openOperationJournal();
+    await Promise.resolve();
+    expect(content.textContent).toContain("运行记录");
+
+    plugin.settings.locale = "en";
+    view.refreshLocalization();
+    expect(content.textContent).toContain("Operation journal");
+    expect(ui.subscribe).toHaveBeenCalledTimes(1);
+    expect(ui.load).toHaveBeenCalledTimes(1);
   });
 
   it("shows a controlled unavailable state when Task 11 has not injected the facade", () => {

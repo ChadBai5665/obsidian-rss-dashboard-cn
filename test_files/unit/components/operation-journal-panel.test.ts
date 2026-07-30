@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import {
   OperationJournalPanel,
@@ -16,6 +17,18 @@ const IDS = {
   interrupted: "00000000-0000-4000-8000-000000000005",
 };
 
+const LABELS: Record<string, string> = {
+  [IDS.transcript]: "演讲字幕",
+  [IDS.ai]: "行业观察",
+  [IDS.refresh]: "全部来源",
+  [IDS.subscription]: "视频频道",
+  [IDS.interrupted]: "行业文件夹",
+};
+const FIXTURE_BASE_TIME = Date.now() + 60_000;
+const EVENT_TIMES = Array.from({ length: 8 }, (_, index) =>
+  new Date(FIXTURE_BASE_TIME + index * 60_000).toISOString(),
+);
+
 function event(
   operationId: string,
   index: number,
@@ -28,8 +41,8 @@ function event(
     schemaVersion: 1,
     eventId: `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
     operationId,
-    occurredAt: `2026-07-30T0${index}:00:00.000Z`,
-    subject: { label: `记录 ${index}` },
+    occurredAt: EVENT_TIMES[index],
+    subject: { label: LABELS[operationId] ?? `记录 ${index}` },
     ...input,
   };
 }
@@ -114,7 +127,7 @@ function fixture(): OperationJournalListResult {
       category: "ai",
       action: "summary",
       trigger: "manual",
-      stage: "saving",
+      stage: "completed",
       status: "succeeded",
       details: { artifactPath: "analysis/item.md", elapsedMs: 3_000 },
     }),
@@ -146,14 +159,17 @@ function fixture(): OperationJournalListResult {
     }),
   ];
   const interruptedEvents = [
-    event(IDS.interrupted, 7, {
-      category: "refresh",
-      action: "folder",
-      trigger: "schedule",
-      stage: "refreshing",
-      status: "progress",
-      details: { total: 3, succeeded: 1, failed: 0, newItems: 2 },
-    }),
+    {
+      ...event(IDS.interrupted, 7, {
+        category: "refresh",
+        action: "folder",
+        trigger: "schedule",
+        stage: "refreshing",
+        status: "progress",
+        details: { total: 3, succeeded: 1, failed: 0, newItems: 2 },
+      }),
+      occurredAt: "2000-01-01T00:00:00.000Z",
+    },
   ];
 
   const operations = [
@@ -250,6 +266,17 @@ async function settle(): Promise<void> {
   await Promise.resolve();
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 describe("OperationJournalPanel", () => {
   beforeEach(() => {
     installObsidianDomPolyfills();
@@ -268,11 +295,11 @@ describe("OperationJournalPanel", () => {
     ];
     expect(cards).toHaveLength(5);
     expect(cards.map((card) => card.dataset.operationId)).toEqual([
-      IDS.interrupted,
       IDS.subscription,
       IDS.refresh,
       IDS.ai,
       IDS.transcript,
+      IDS.interrupted,
     ]);
   });
 
@@ -293,13 +320,21 @@ describe("OperationJournalPanel", () => {
     transcript
       ?.querySelector<HTMLButtonElement>(".rss-operation-journal-expand")
       ?.click();
+    const expand = transcript?.querySelector<HTMLButtonElement>(
+      ".rss-operation-journal-expand",
+    );
+    const timeline = transcript?.querySelector<HTMLOListElement>(
+      ".rss-operation-journal-timeline",
+    );
+    expect(timeline?.id).toBe(`rss-operation-timeline-${IDS.transcript}`);
+    expect(expand?.getAttribute("aria-controls")).toBe(timeline?.id);
     expect(
       [
         ...(transcript?.querySelectorAll<HTMLElement>(
           ".rss-operation-journal-timeline-item",
         ) ?? []),
       ].map((item) => item.dataset.occurredAt),
-    ).toEqual(["2026-07-30T01:00:00.000Z", "2026-07-30T03:00:00.000Z"]);
+    ).toEqual([EVENT_TIMES[1], EVENT_TIMES[3]]);
   });
 
   it("renders category facts and visibly distinct operation states", async () => {
@@ -369,7 +404,7 @@ describe("OperationJournalPanel", () => {
 
     expect(
       root.querySelectorAll(".rss-operation-journal-warning"),
-    ).toHaveLength(4);
+    ).toHaveLength(5);
     expect(root.querySelectorAll(".rss-operation-journal-card")).toHaveLength(
       5,
     );
@@ -377,6 +412,276 @@ describe("OperationJournalPanel", () => {
     expect(root.textContent).toContain("部分记录已损坏");
     expect(root.textContent).toContain("记录较多，仅显示安全范围内的结果");
     expect(root.textContent).toContain("最近一次记录写入失败");
+    expect(root.textContent).toContain("最近一次记录维护未完成");
+  });
+
+  it("isolates synchronous and asynchronous UI port failures", async () => {
+    const subscribe = vi
+      .fn<OperationJournalPanelOptions["subscribe"]>()
+      .mockImplementationOnce(() => {
+        throw new Error("subscribe failed");
+      })
+      .mockReturnValue(() => {
+        throw new Error("unsubscribe failed");
+      });
+    const exportSafe = vi.fn(async () => {
+      throw new Error("export failed");
+    });
+    const requestClear = vi.fn(() => {
+      throw new Error("clear failed");
+    });
+    const onClose = vi.fn(() => {
+      throw new Error("close failed");
+    });
+    const { panel, root } = createHarness({
+      subscribe,
+      exportSafe,
+      requestClear,
+      onClose,
+    });
+
+    expect(() => panel.open()).not.toThrow();
+    await settle();
+    expect(root.querySelectorAll(".rss-operation-journal-card")).toHaveLength(
+      5,
+    );
+    expect(() => panel.open()).not.toThrow();
+    expect(subscribe).toHaveBeenCalledTimes(2);
+
+    expect(() =>
+      root
+        .querySelector<HTMLButtonElement>(".rss-operation-journal-action")
+        ?.click(),
+    ).not.toThrow();
+    await settle();
+    expect(exportSafe).toHaveBeenCalledWith(7);
+    expect(() =>
+      root
+        .querySelector<HTMLButtonElement>(".rss-operation-journal-clear")
+        ?.click(),
+    ).not.toThrow();
+    expect(() =>
+      root
+        .querySelector<HTMLButtonElement>(".rss-operation-journal-close")
+        ?.click(),
+    ).not.toThrow();
+    expect(() => panel.dispose()).not.toThrow();
+    expect(root.querySelector(".rss-operation-journal")).toBeNull();
+  });
+
+  it("never presents seven-day cards while a 30-day request is pending and ignores stale completion", async () => {
+    const lateSeven = deferred<OperationJournalListResult>();
+    const lateThirty = deferred<OperationJournalListResult>();
+    const latestThirty = deferred<OperationJournalListResult>();
+    let sevenCalls = 0;
+    let thirtyCalls = 0;
+    const load = vi.fn((days: 7 | 30) => {
+      if (days === 7) {
+        sevenCalls += 1;
+        return sevenCalls === 1 ? Promise.resolve(fixture()) : lateSeven.promise;
+      }
+      thirtyCalls += 1;
+      return thirtyCalls === 1 ? lateThirty.promise : latestThirty.promise;
+    });
+    const { panel, root } = createHarness({ load });
+    panel.open();
+    await settle();
+    expect(root.querySelectorAll(".rss-operation-journal-card")).toHaveLength(
+      5,
+    );
+    root.querySelector<HTMLButtonElement>("[data-days='30']")?.click();
+
+    expect(root.querySelector("[data-days='30']")?.getAttribute("aria-pressed"))
+      .toBe("true");
+    expect(root.querySelectorAll(".rss-operation-journal-card")).toHaveLength(
+      0,
+    );
+    expect(root.textContent).toContain("正在加载");
+
+    root.querySelector<HTMLButtonElement>("[data-days='7']")?.click();
+    root.querySelector<HTMLButtonElement>("[data-days='30']")?.click();
+    latestThirty.resolve(fixture());
+    await settle();
+    expect(root.querySelectorAll(".rss-operation-journal-card")).toHaveLength(
+      5,
+    );
+    lateSeven.resolve({
+      ...fixture(),
+      operations: [],
+    });
+    lateThirty.resolve({
+      ...fixture(),
+      operations: [],
+    });
+    await settle();
+    expect(root.querySelectorAll(".rss-operation-journal-card")).toHaveLength(
+      5,
+    );
+  });
+
+  it("ignores a late load completion after dispose", async () => {
+    const pending = deferred<OperationJournalListResult>();
+    const { panel, root } = createHarness({ load: () => pending.promise });
+    panel.open();
+    panel.dispose();
+    pending.resolve(fixture());
+    await settle();
+    expect(root.querySelector(".rss-operation-journal")).toBeNull();
+  });
+
+  it("projects untrusted facade results through strict event validation", async () => {
+    const valid = fixture().operations.find(
+      (operation) => operation.operationId === IDS.transcript,
+    )!;
+    const unsafe = {
+      ...valid,
+      operationId: "00000000-0000-4000-8000-000000000099",
+      startedAt: "not-a-date",
+      subject: { label: "https://token.example/?api_key=visible" },
+      events: [
+        {
+          ...valid.events[0],
+          eventId: "20000000-0000-4000-8000-000000000099",
+          occurredAt: "not-a-date",
+          subject: { label: "https://token.example" },
+        },
+      ],
+    };
+    const getterOperation = {};
+    Object.defineProperty(getterOperation, "events", {
+      enumerable: true,
+      get() {
+        throw new Error("events getter must not run");
+      },
+    });
+    const hostileHealth = {};
+    Object.defineProperty(hostileHealth, "writeIncomplete", {
+      enumerable: true,
+      get() {
+        throw new Error("health getter must not run");
+      },
+    });
+    const result = {
+      operations: [valid, unsafe, getterOperation, { events: 42 }, new Proxy({}, {
+        get() {
+          throw new Error("proxy get must not run");
+        },
+      })],
+      incompleteDates: new Proxy([], {
+        get() {
+          throw new Error("date proxy must not run");
+        },
+      }),
+      corruptDates: ["not-a-date", "2026-07-29"],
+      truncated: false,
+      health: hostileHealth,
+    } as unknown as OperationJournalListResult;
+    const { panel, root } = createHarness({ load: async () => result });
+
+    panel.open();
+    await settle();
+    expect(root.querySelectorAll(".rss-operation-journal-card")).toHaveLength(
+      1,
+    );
+    expect(root.textContent).toContain("演讲字幕");
+    expect(root.textContent).not.toContain("token.example");
+    expect(root.textContent).not.toContain("api_key");
+    expect(root.textContent).not.toContain("not-a-date");
+    expect(root.textContent).toContain("部分记录已损坏");
+  });
+
+  it("drops secret-shaped AI labels, connections, and models", async () => {
+    const ai = fixture().operations.find(
+      (operation) => operation.operationId === IDS.ai,
+    )!;
+    const unsafeEvents = ai.events.map((item, index) => ({
+      ...item,
+      eventId: `30000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      subject: { label: "https://private.example" },
+      details: {
+        ...item.details,
+        connectionName: "token=do-not-render",
+        model: "https://model.example",
+      },
+    }));
+    const result = {
+      ...fixture(),
+      operations: [{ ...ai, events: unsafeEvents }],
+    } as OperationJournalListResult;
+    const { panel, root } = createHarness({ load: async () => result });
+
+    panel.open();
+    await settle();
+    expect(root.querySelectorAll(".rss-operation-journal-card")).toHaveLength(
+      0,
+    );
+    expect(root.textContent).not.toContain("do-not-render");
+    expect(root.textContent).not.toContain("model.example");
+    expect(root.textContent).not.toContain("private.example");
+  });
+
+  it("does not report an AI artifact as saved before a completed success", async () => {
+    const saving = event(IDS.ai, 4, {
+      category: "ai",
+      action: "summary",
+      trigger: "manual",
+      stage: "saving",
+      status: "succeeded",
+      details: { artifactPath: "analysis/item.md", elapsedMs: 3_000 },
+    });
+    const { panel, root } = createHarness({
+      load: async () => ({
+        ...fixture(),
+        operations: [{ ...fixture().operations[0], events: [saving] }],
+      }),
+    });
+
+    panel.open();
+    await settle();
+    expect(root.textContent).toContain("保存结果：尚未保存");
+    expect(root.textContent).not.toContain("保存结果：已保存");
+  });
+
+  it("bounds oversized operation candidates and reports the safe display limit", async () => {
+    const valid = fixture().operations.find(
+      (operation) => operation.operationId === IDS.transcript,
+    )!;
+    const operations = Array.from({ length: 1_001 }, () => valid);
+    const { panel, root } = createHarness({
+      load: async () => ({ ...fixture(), operations, truncated: false }),
+    });
+    panel.open();
+    await settle();
+
+    expect(root.querySelectorAll(".rss-operation-journal-card")).toHaveLength(
+      1,
+    );
+    expect(root.textContent).toContain("仅显示安全范围内的结果");
+  });
+
+  it("keeps responsive controls on scoped wrapping and single-column hooks", () => {
+    const css = readFileSync(
+      "src/styles/operation-journal.css",
+      "utf8",
+    );
+    expect(css).toContain(".rss-operation-journal-primary-actions");
+    expect(css).toContain("flex-wrap: wrap");
+    expect(css).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(css).toContain("overflow-wrap: anywhere");
+    expect(css).toContain("@media (max-width: 720px)");
+    expect(css).not.toContain("!important");
+  });
+
+  it("updates live locale without another load or subscription", async () => {
+    const { panel, root, options } = createHarness();
+    panel.open();
+    await settle();
+    expect(root.textContent).toContain("运行记录");
+
+    panel.setLocale("en");
+    expect(root.textContent).toContain("Operation journal");
+    expect(options.load).toHaveBeenCalledTimes(1);
+    expect(options.subscribe).toHaveBeenCalledTimes(1);
   });
 
   it("debounces live reloads and disposes its subscription and pending timer", async () => {

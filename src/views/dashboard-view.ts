@@ -102,6 +102,13 @@ type DashboardRestorableMode = Exclude<
   { kind: "operation-journal" }
 >;
 
+interface DashboardReaderSnapshot {
+  readonly itemId: string;
+  readonly article: FeedItem;
+  readonly contentContext?: ReaderContentContext;
+  readonly selectedArticle: FeedItem | null;
+}
+
 export class RssDashboardView extends ItemView {
   private static readonly CARD_LAYOUT_RELAYOUT_DELAY_MS = 90;
   private static readonly CARD_LAYOUT_SAVE_DELAY_MS = 120;
@@ -187,6 +194,7 @@ export class RssDashboardView extends ItemView {
   private primaryMode: DashboardPrimaryMode = { kind: "articles" };
   private previousPrimaryMode: DashboardRestorableMode = { kind: "articles" };
   private operationJournalPanel: OperationJournalPanel | null = null;
+  private previousReaderSnapshot: DashboardReaderSnapshot | null = null;
 
   // ── Highlight match stats ─────────────────────────────────────────────────
   // Populated by computeHighlightMatchCounts() on every render cycle (before
@@ -1213,6 +1221,16 @@ export class RssDashboardView extends ItemView {
 
   public openOperationJournal(): void {
     if (this.primaryMode.kind === "operation-journal") return;
+    this.previousReaderSnapshot = this.inlineArticle
+      ? {
+          itemId: this.inlineArticle.guid,
+          article: this.inlineArticle,
+          ...(this.inlineArticleContentContext === undefined
+            ? {}
+            : { contentContext: this.inlineArticleContentContext }),
+          selectedArticle: this.selectedArticle,
+        }
+      : null;
     this.previousPrimaryMode = this.inlineArticle
       ? { kind: "reader", itemId: this.inlineArticle.guid }
       : { kind: "articles" };
@@ -1225,6 +1243,21 @@ export class RssDashboardView extends ItemView {
     this.operationJournalPanel?.dispose();
     this.operationJournalPanel = null;
     this.primaryMode = this.previousPrimaryMode;
+    if (
+      this.previousPrimaryMode.kind === "reader" &&
+      this.previousReaderSnapshot?.itemId === this.previousPrimaryMode.itemId
+    ) {
+      const snapshot = this.previousReaderSnapshot;
+      this.inlineArticle =
+        this.findBackingArticleForDisplayItem(snapshot.article) ??
+        snapshot.article;
+      this.inlineArticleContentContext = snapshot.contentContext;
+      this.selectedArticle = snapshot.selectedArticle
+        ? (this.findBackingArticleForDisplayItem(snapshot.selectedArticle) ??
+          snapshot.selectedArticle)
+        : null;
+    }
+    this.previousReaderSnapshot = null;
     this.render();
   }
 
@@ -1242,6 +1275,7 @@ export class RssDashboardView extends ItemView {
         onClose: () => this.closeOperationJournal(),
       });
     }
+    this.operationJournalPanel.setLocale(this.settings.locale ?? "zh-CN");
     this.operationJournalPanel.open(container);
     return true;
   }
@@ -4258,6 +4292,7 @@ export class RssDashboardView extends ItemView {
     this.articleRenderer = null;
     this.operationJournalPanel?.dispose();
     this.operationJournalPanel = null;
+    this.previousReaderSnapshot = null;
     this.closeMobileSidebarModal();
     this.lastViewportMobileSidebarMode = null;
 

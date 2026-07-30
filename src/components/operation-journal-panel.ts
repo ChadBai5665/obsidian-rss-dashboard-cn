@@ -3,8 +3,10 @@ import type {
   OperationEvent,
   OperationStatus,
 } from "../operation-journal/operation-event";
+import { snapshotOperationEvent } from "../operation-journal/operation-event";
 import type { OperationJournalListResult } from "../operation-journal/operation-journal-service";
 import type { OperationSummary } from "../operation-journal/operation-summary";
+import { aggregateOperationEvents } from "../operation-journal/operation-summary";
 
 export interface OperationJournalUiPort {
   load(days: 7 | 30): Promise<OperationJournalListResult>;
@@ -22,6 +24,9 @@ type CategoryFilter = "all" | OperationSummary["category"];
 type StatusFilter = "all" | "ongoing" | "succeeded" | "failed" | "interrupted";
 
 const LIVE_RELOAD_DELAY_MS = 150;
+const MAX_UI_OPERATIONS = 1_000;
+const MAX_UI_EVENTS = 5_000;
+const MAX_HEALTH_DATES = 30;
 
 export class OperationJournalPanel {
   private readonly root = activeDocument.createElement("section");
@@ -30,6 +35,7 @@ export class OperationJournalPanel {
   private category: CategoryFilter = "all";
   private status: StatusFilter = "all";
   private result: OperationJournalListResult | null = null;
+  private resultDays: 7 | 30 | null = null;
   private loading = false;
   private loadFailed = false;
   private opened = false;
@@ -37,14 +43,16 @@ export class OperationJournalPanel {
   private unsubscribe: (() => void) | null = null;
   private reloadTimer: number | null = null;
   private loadGeneration = 0;
-  private readonly t: ReturnType<typeof createTranslator>;
+  private locale: Locale;
+  private t: ReturnType<typeof createTranslator>;
 
   constructor(
     host: HTMLElement,
     private readonly options: OperationJournalPanelOptions,
   ) {
     this.host = host;
-    this.t = createTranslator(options.locale);
+    this.locale = options.locale;
+    this.t = createTranslator(this.locale);
     this.root.className = "rss-operation-journal";
     this.root.setAttribute("aria-label", this.t("operationJournal.title"));
   }
@@ -53,11 +61,27 @@ export class OperationJournalPanel {
     if (this.disposed) return;
     this.host = host;
     if (this.root.parentElement !== host) host.appendChild(this.root);
-    if (this.opened) return;
-    this.opened = true;
-    this.unsubscribe = this.options.subscribe(() => this.scheduleReload());
+    if (this.unsubscribe === null) {
+      try {
+        const unsubscribe = this.options.subscribe(() => this.scheduleReload());
+        if (typeof unsubscribe === "function") this.unsubscribe = unsubscribe;
+      } catch {
+        // Live updates are optional; a later idempotent open retries subscribe.
+      }
+    }
+    if (!this.opened) {
+      this.opened = true;
+      this.render();
+      void this.reload();
+    }
+  }
+
+  setLocale(locale: Locale): void {
+    if (this.disposed || this.locale === locale) return;
+    this.locale = locale;
+    this.t = createTranslator(locale);
+    this.root.setAttribute("aria-label", this.t("operationJournal.title"));
     this.render();
-    void this.reload();
   }
 
   dispose(): void {
@@ -68,7 +92,11 @@ export class OperationJournalPanel {
       window.clearTimeout(this.reloadTimer);
       this.reloadTimer = null;
     }
-    this.unsubscribe?.();
+    try {
+      this.unsubscribe?.();
+    } catch {
+      // Cleanup must continue even if an injected unsubscribe is faulty.
+    }
     this.unsubscribe = null;
     this.root.remove();
   }
@@ -84,17 +112,27 @@ export class OperationJournalPanel {
 
   private async reload(): Promise<void> {
     const generation = ++this.loadGeneration;
+    const requestedDays = this.days;
+    if (this.resultDays !== requestedDays) {
+      this.result = null;
+      this.resultDays = null;
+    }
     this.loading = true;
     this.loadFailed = false;
     this.render();
     try {
-      const result = await this.options.load(this.days);
+      const result = normalizeListResult(
+        await this.options.load(requestedDays),
+        new Date(),
+      );
       if (this.disposed || generation !== this.loadGeneration) return;
       this.result = result;
+      this.resultDays = requestedDays;
     } catch {
       if (this.disposed || generation !== this.loadGeneration) return;
       this.loadFailed = true;
       this.result = null;
+      this.resultDays = null;
     } finally {
       if (!this.disposed && generation === this.loadGeneration) {
         this.loading = false;
@@ -173,20 +211,34 @@ export class OperationJournalPanel {
       attr: { type: "button" },
     });
     exportButton.addEventListener("click", () => {
-      void this.options.exportSafe(this.days);
+      void Promise.resolve()
+        .then(() => this.options.exportSafe(this.days))
+        .catch(() => undefined);
     });
     const clearButton = actions.createEl("button", {
       cls: "rss-operation-journal-action rss-operation-journal-clear",
       text: this.t("operationJournal.clear"),
       attr: { type: "button" },
     });
-    clearButton.addEventListener("click", () => this.options.requestClear());
+    clearButton.addEventListener("click", () => {
+      try {
+        this.options.requestClear();
+      } catch {
+        // The Dashboard remains usable when the injected clear action fails.
+      }
+    });
     const closeButton = actions.createEl("button", {
       cls: "rss-operation-journal-action rss-operation-journal-close",
       text: this.t("operationJournal.close"),
       attr: { type: "button" },
     });
-    closeButton.addEventListener("click", () => this.options.onClose());
+    closeButton.addEventListener("click", () => {
+      try {
+        this.options.onClose();
+      } catch {
+        // A faulty owner callback must not escape the click event.
+      }
+    });
   }
 
   private renderFilters(): void {
@@ -293,7 +345,7 @@ export class OperationJournalPanel {
       warnings.push(this.t("operationJournal.warningTruncated"));
     if (this.result.health.writeIncomplete)
       warnings.push(this.t("operationJournal.warningWrite"));
-    else if (this.result.health.maintenanceIncomplete)
+    if (this.result.health.maintenanceIncomplete)
       warnings.push(this.t("operationJournal.warningMaintenance"));
     if (warnings.length === 0) return;
 
@@ -377,11 +429,18 @@ export class OperationJournalPanel {
     const expand = card.createEl("button", {
       cls: "rss-operation-journal-expand",
       text: this.t("operationJournal.showTimeline"),
-      attr: { type: "button", "aria-expanded": "false" },
+      attr: {
+        type: "button",
+        "aria-expanded": "false",
+        "aria-controls": `rss-operation-timeline-${operation.operationId}`,
+      },
     });
     const timeline = card.createEl("ol", {
       cls: "rss-operation-journal-timeline",
-      attr: { hidden: "" },
+      attr: {
+        hidden: "",
+        id: `rss-operation-timeline-${operation.operationId}`,
+      },
     });
     this.renderTimeline(timeline, operation.events);
     expand.addEventListener("click", () => {
@@ -562,18 +621,22 @@ export class OperationJournalPanel {
   }
 
   private aiSaveResult(operation: OperationSummary): string {
-    const saving = operation.events.filter((event) => event.stage === "saving");
-    if (saving.some((event) => event.status === "failed"))
-      return this.t("operationJournal.saveFailed");
     if (
-      saving.some(
+      operation.events.some(
         (event) =>
-          event.status === "succeeded" ||
-          ("artifactPath" in event.details &&
-            event.details.artifactPath !== undefined),
+          event.stage === "completed" &&
+          event.status === "succeeded" &&
+          "artifactPath" in event.details &&
+          event.details.artifactPath !== undefined,
       )
     )
       return this.t("operationJournal.saveSucceeded");
+    if (
+      operation.events.some(
+        (event) => event.stage === "saving" && event.status === "failed",
+      )
+    )
+      return this.t("operationJournal.saveFailed");
     return this.t("operationJournal.savePending");
   }
 
@@ -582,7 +645,7 @@ export class OperationJournalPanel {
   }
 
   private formatDate(value: string): string {
-    return new Intl.DateTimeFormat(this.options.locale, {
+    return new Intl.DateTimeFormat(this.locale, {
       month: "short",
       day: "numeric",
       hour: "2-digit",
@@ -591,7 +654,7 @@ export class OperationJournalPanel {
   }
 
   private formatTime(value: string): string {
-    return new Intl.DateTimeFormat(this.options.locale, {
+    return new Intl.DateTimeFormat(this.locale, {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
@@ -633,4 +696,130 @@ function countFact(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value)
     ? String(value)
     : "—";
+}
+
+function normalizeListResult(
+  value: unknown,
+  now: Date,
+): OperationJournalListResult {
+  const operationCandidates = boundedArray(
+    ownDataValue(value, "operations"),
+    MAX_UI_OPERATIONS,
+  );
+  const events: OperationEvent[] = [];
+  let eventLimitReached = false;
+  for (const operation of operationCandidates.values) {
+    const eventCandidates = boundedArray(
+      ownDataValue(operation, "events"),
+      MAX_UI_EVENTS - events.length,
+    );
+    if (eventCandidates.truncated) eventLimitReached = true;
+    for (const candidate of eventCandidates.values) {
+      if (events.length >= MAX_UI_EVENTS) {
+        eventLimitReached = true;
+        break;
+      }
+      try {
+        events.push(snapshotOperationEvent(candidate));
+      } catch {
+        // Invalid or secret-shaped event projections are dropped independently.
+      }
+    }
+    if (events.length >= MAX_UI_EVENTS) break;
+  }
+
+  let operations: readonly OperationSummary[] = [];
+  try {
+    operations = aggregateOperationEvents(events, now);
+  } catch {
+    // A hostile clock or invalid aggregate fails closed to an empty list.
+  }
+  const healthValue = ownDataValue(value, "health");
+  return Object.freeze({
+    operations,
+    incompleteDates: safeDates(
+      ownDataValue(value, "incompleteDates"),
+      MAX_HEALTH_DATES,
+    ),
+    corruptDates: safeDates(
+      ownDataValue(value, "corruptDates"),
+      MAX_HEALTH_DATES,
+    ),
+    truncated:
+      ownDataValue(value, "truncated") === true ||
+      operationCandidates.truncated ||
+      eventLimitReached,
+    health: Object.freeze({
+      writeIncomplete:
+        ownDataValue(healthValue, "writeIncomplete") === true,
+      maintenanceIncomplete:
+        ownDataValue(healthValue, "maintenanceIncomplete") === true,
+    }),
+  });
+}
+
+function ownDataValue(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null) return undefined;
+  try {
+    const prototype: unknown = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      descriptor === undefined ||
+      descriptor.enumerable !== true ||
+      !Object.prototype.hasOwnProperty.call(descriptor, "value")
+    ) {
+      return undefined;
+    }
+    const dataValue: unknown = descriptor.value;
+    return dataValue;
+  } catch {
+    return undefined;
+  }
+}
+
+function boundedArray(
+  value: unknown,
+  limit: number,
+): { readonly values: readonly unknown[]; readonly truncated: boolean } {
+  if (limit <= 0) return { values: [], truncated: true };
+  try {
+    if (!Array.isArray(value)) return { values: [], truncated: false };
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    const length: unknown = lengthDescriptor?.value;
+    if (
+      typeof length !== "number" ||
+      !Number.isSafeInteger(length) ||
+      length < 0
+    )
+      return { values: [], truncated: false };
+    const boundedLength = Math.min(length, limit);
+    const values: unknown[] = [];
+    for (let index = 0; index < boundedLength; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (
+        descriptor !== undefined &&
+        Object.prototype.hasOwnProperty.call(descriptor, "value")
+      ) {
+        const itemValue: unknown = descriptor.value;
+        values.push(itemValue);
+      }
+    }
+    return { values, truncated: length > limit };
+  } catch {
+    return { values: [], truncated: false };
+  }
+}
+
+function safeDates(value: unknown, limit: number): readonly string[] {
+  const dates = boundedArray(value, limit).values.flatMap((candidate) => {
+    if (typeof candidate !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(candidate))
+      return [];
+    const timestamp = Date.parse(`${candidate}T00:00:00.000Z`);
+    return Number.isFinite(timestamp) &&
+      new Date(timestamp).toISOString().slice(0, 10) === candidate
+      ? [candidate]
+      : [];
+  });
+  return Object.freeze(dates);
 }
