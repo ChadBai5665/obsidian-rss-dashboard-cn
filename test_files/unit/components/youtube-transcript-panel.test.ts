@@ -401,6 +401,70 @@ describe("YouTubeTranscriptPanel", () => {
     expect(container.textContent).toContain("Estimated 2 TikHub request(s) (about $0.016)");
   });
 
+  it("keeps confirmed usage visible while a free continuation is pending and localized", async () => {
+    const pending = deferred<YouTubeTranscriptServiceResult & { status: "ready" }>();
+    const { panel, container } = createPanel({
+      get: async () => {
+        throw new YouTubeTranscriptServiceError(
+          "tikhub-processing",
+          undefined,
+          [],
+          { tikhubPaidRequests: 2 },
+        );
+      },
+      continuePending: async () => pending.promise,
+    });
+
+    await panel.fetch();
+    container
+      .querySelector<HTMLButtonElement>(".rss-youtube-transcript-continue")
+      ?.click();
+
+    expect(state(container)).toBe("fetching");
+    expect(container.textContent).toContain(
+      "Estimated 2 TikHub request(s) (about $0.016)",
+    );
+
+    panel.refreshLocalization(createTranslator("zh-CN"), "zh-CN");
+
+    expect(state(container)).toBe("fetching");
+    expect(container.textContent).toContain("预计2次 TikHub 请求（约 $0.016）");
+
+    pending.resolve({
+      status: "ready",
+      source: "fresh",
+      content: transcript({ provider: "tikhub" }),
+      usage: { tikhubPaidRequests: 0 },
+    });
+    await vi.waitFor(() => expect(state(container)).toBe("complete-manual"));
+  });
+
+  it("keeps newly confirmed usage visible across pending progress updates", async () => {
+    const pending = deferred<YouTubeTranscriptServiceResult>();
+    const { panel, container } = createPanel({
+      get: async (request) => {
+        request.onProgress?.({
+          stage: "waiting-tikhub",
+          usage: { tikhubPaidRequests: 2 },
+        });
+        return pending.promise;
+      },
+    });
+
+    void panel.fetch();
+
+    expect(state(container)).toBe("fetching");
+    expect(container.textContent).toContain(
+      "Estimated 2 TikHub request(s) (about $0.016)",
+    );
+
+    panel.refreshLocalization(createTranslator("zh-CN"), "zh-CN");
+
+    expect(container.textContent).toContain("预计2次 TikHub 请求（约 $0.016）");
+    pending.reject(new YouTubeTranscriptServiceError("aborted"));
+    await vi.waitFor(() => expect(state(container)).toBe("aborted"));
+  });
+
   it.each([
     ["tikhub-processing", 1, false, "$0.008"],
     ["tikhub-processing", 2, false, "$0.016"],

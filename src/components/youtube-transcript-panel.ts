@@ -234,7 +234,13 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
     const controller = new AbortController();
     this.activeController = controller;
     const operation = ++this.operationSequence;
-    this.renderStatus("fetching", "transcript.status.waitingTikHub");
+    this.renderStatus(
+      "fetching",
+      "transcript.status.waitingTikHub",
+      false,
+      true,
+      this.confirmedTikHubUsage,
+    );
     if (!runtime.service.continuePending) {
       this.activeController = null;
       this.renderError(new YouTubeTranscriptServiceError("tikhub-job-expired"));
@@ -561,7 +567,13 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
       progress.usage.tikhubPaidRequests,
     );
     const key = progressKey(progress.stage);
-    this.renderStatus("fetching", key);
+    this.renderStatus(
+      "fetching",
+      key,
+      false,
+      true,
+      this.confirmedTikHubUsage,
+    );
   }
 
   private renderTikHubFailure(
@@ -640,7 +652,9 @@ export class YouTubeTranscriptPanel implements YouTubeTranscriptPanelController 
       : "rss-youtube-transcript-status";
     status.textContent = this.t(key);
     this.root.appendChild(status);
-    if (isError) this.appendFailureEvidence(confirmedUsage, possiblySent);
+    if (isError || confirmedUsage > 0 || possiblySent) {
+      this.appendFailureEvidence(confirmedUsage, possiblySent);
+    }
     if (isError && state !== "aborted") {
       const retry = this.actionButton(
         this.t("transcript.fetch"),
