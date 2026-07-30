@@ -226,7 +226,7 @@
   {
     "path": "test_files/unit/ai/analysis-repository.test.ts",
     "rule": "home-path",
-    "line": 300,
+    "line": 337,
     "fingerprint": "sha256:b5c459df9c348b634f283828479d875972374c2e76be5dda758d7729f42ca5db",
     "reason": "Security test fixture intentionally verifies rejection of a synthetic Windows drive path."
   },

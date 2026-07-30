@@ -26,9 +26,12 @@ type BoundAnalysisAdapter = Required<Pick<
   | "read"
   | "copy"
   | "remove"
+  | "rmdir"
   | "rename"
-  | "process"
->> & { identity: object };
+>> & {
+  identity: object;
+  createFolder: (path: string) => Promise<unknown>;
+};
 type BoundAnalysisReadAdapter = Required<Pick<DataAdapter, "read">> & {
   identity: object;
 };
@@ -180,7 +183,7 @@ export class AnalysisRepository {
       await this.ensureDirectory(adapter, this.dataRoot);
       await this.ensureDirectory(adapter, this.analysisDirectory);
       await this.ensureDirectory(adapter, this.itemDirectory(result.itemId));
-      await this.ensureClaimSource(adapter);
+      await this.ensureClaimSource(adapter, transactionId);
       return await this.saveExclusive(
         result,
         markdown,
@@ -221,14 +224,17 @@ export class AnalysisRepository {
   private atomicAdapter(): BoundAnalysisAdapter {
     const identity = this.vault.adapter as object;
     const adapter = identity as Partial<DataAdapter>;
+    const createFolder = typeof this.vault.createFolder === "function"
+      ? this.vault.createFolder.bind(this.vault)
+      : undefined;
     const exists = adapter.exists;
     const mkdir = adapter.mkdir;
     const write = adapter.write;
     const read = adapter.read;
     const copy = adapter.copy;
     const remove = adapter.remove;
+    const rmdir = adapter.rmdir;
     const rename = adapter.rename;
-    const process = adapter.process;
     if (
       typeof exists !== "function" ||
       typeof mkdir !== "function" ||
@@ -236,21 +242,23 @@ export class AnalysisRepository {
       typeof read !== "function" ||
       typeof copy !== "function" ||
       typeof remove !== "function" ||
+      typeof rmdir !== "function" ||
       typeof rename !== "function" ||
-      typeof process !== "function"
+      typeof createFolder !== "function"
     ) {
       throw new Error("AI analysis writes require complete atomic storage support");
     }
     return {
       identity,
+      createFolder,
       exists: exists.bind(identity),
       mkdir: mkdir.bind(identity),
       write: write.bind(identity),
       read: read.bind(identity),
       copy: copy.bind(identity),
       remove: remove.bind(identity),
+      rmdir: rmdir.bind(identity),
       rename: rename.bind(identity),
-      process: process.bind(identity),
     };
   }
 
@@ -303,7 +311,10 @@ export class AnalysisRepository {
       : null;
   }
 
-  private async ensureClaimSource(adapter: BoundAnalysisAdapter): Promise<void> {
+  private async ensureClaimSource(
+    adapter: BoundAnalysisAdapter,
+    transactionId: string,
+  ): Promise<void> {
     if (await adapter.exists(this.claimSourcePath, true)) {
       if (await this.fileEquals(adapter, this.claimSourcePath, CLAIM_SOURCE_CONTENT)) {
         return;
@@ -311,25 +322,70 @@ export class AnalysisRepository {
       throw new Error("AI analysis claim source conflicts with an existing file");
     }
 
-    let conflict = false;
-    // DataAdapter.process cannot distinguish a missing file from an empty file
-    // created in the exists-to-process window. A constant bootstrap value makes
-    // cooperating repository races byte-identical; non-empty foreign data is
-    // preserved and rejected.
-    const processed = await adapter.process(this.claimSourcePath, (current) => {
-      if (current && current !== CLAIM_SOURCE_CONTENT) {
-        conflict = true;
-        return current;
+    const bootstrap = await this.createClaimBootstrap(adapter, transactionId);
+    try {
+      try {
+        // DataAdapter.copy is the public exclusive-create primitive: it fails
+        // instead of overwriting when another writer already owns the target.
+        await adapter.copy(bootstrap.sourcePath, this.claimSourcePath);
+      } catch (error) {
+        if (await this.fileEquals(
+          adapter,
+          this.claimSourcePath,
+          CLAIM_SOURCE_CONTENT,
+        )) {
+          return;
+        }
+        if (await adapter.exists(this.claimSourcePath, true)) {
+          throw new Error("AI analysis claim source conflicts with an existing file");
+        }
+        throw error;
       }
-      return CLAIM_SOURCE_CONTENT;
-    });
-    if (
-      conflict ||
-      processed !== CLAIM_SOURCE_CONTENT ||
-      !(await this.fileEquals(adapter, this.claimSourcePath, CLAIM_SOURCE_CONTENT))
-    ) {
-      throw new Error("AI analysis claim source could not be initialized safely");
+      if (!(await this.fileEquals(
+        adapter,
+        this.claimSourcePath,
+        CLAIM_SOURCE_CONTENT,
+      ))) {
+        throw new Error("AI analysis claim source could not be initialized safely");
+      }
+    } finally {
+      await this.removeIfExact(adapter, bootstrap.sourcePath, CLAIM_SOURCE_CONTENT);
+      await this.removeEmptyDirectory(adapter, bootstrap.directoryPath);
     }
+  }
+
+  private async createClaimBootstrap(
+    adapter: BoundAnalysisAdapter,
+    transactionId: string,
+  ): Promise<{ directoryPath: string; sourcePath: string }> {
+    for (let attempt = 0; attempt < MAX_TEMP_ATTEMPTS; attempt += 1) {
+      const directoryPath = normalizePath(
+        `${this.analysisDirectory}/.claim-bootstrap-${transactionId}-${attempt}`,
+      );
+      try {
+        // Vault.createFolder throws when the path already exists, so a
+        // successful call proves this writer exclusively owns the bootstrap
+        // directory. DataAdapter.mkdir is intentionally idempotent and cannot
+        // provide that ownership guarantee.
+        await adapter.createFolder(directoryPath);
+      } catch (error) {
+        if (await adapter.exists(directoryPath, true)) continue;
+        throw error;
+      }
+      const sourcePath = normalizePath(`${directoryPath}/source`);
+      try {
+        await adapter.write(sourcePath, CLAIM_SOURCE_CONTENT);
+        if (!(await this.fileEquals(adapter, sourcePath, CLAIM_SOURCE_CONTENT))) {
+          throw new Error("AI analysis bootstrap source could not be verified");
+        }
+        return { directoryPath, sourcePath };
+      } catch (error) {
+        await this.removeIfExact(adapter, sourcePath, CLAIM_SOURCE_CONTENT);
+        await this.removeEmptyDirectory(adapter, directoryPath);
+        throw error;
+      }
+    }
+    throw new Error("Could not allocate an AI analysis bootstrap directory");
   }
 
   private async saveExclusive(
@@ -556,6 +612,17 @@ export class AnalysisRepository {
       }
     } catch {
       // Never replace the primary storage result with cleanup noise.
+    }
+  }
+
+  private async removeEmptyDirectory(
+    adapter: BoundAnalysisAdapter,
+    path: string,
+  ): Promise<void> {
+    try {
+      await adapter.rmdir(path, false);
+    } catch {
+      // Preserve ambiguous/non-empty directories rather than deleting recursively.
     }
   }
 
