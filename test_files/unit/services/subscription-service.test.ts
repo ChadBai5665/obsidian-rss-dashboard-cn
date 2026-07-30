@@ -241,6 +241,7 @@ function harness(
   options: {
     abortInitialImport?: (feedId: string) => void;
     operationJournal?: OperationJournalPort;
+    getOperationJournal?: () => OperationJournalPort | undefined;
   } = {},
 ) {
   const settings = {
@@ -293,6 +294,7 @@ function harness(
     createFeedId: () => "new-feed-id",
     abortInitialImport: options.abortInitialImport,
     operationJournal: options.operationJournal,
+    getOperationJournal: options.getOperationJournal,
   });
   return {
     service,
@@ -1959,6 +1961,42 @@ describe("SubscriptionService", () => {
   });
 
   describe("operation journal", () => {
+    it("prefers the journal resolved when queued mutation work begins", async () => {
+      const stale = recordingJournal();
+      const current = recordingJournal();
+      const getOperationJournal = vi.fn(() => current.port);
+      const test = harness([existingFeed()], {
+        operationJournal: stale.port,
+        getOperationJournal,
+      });
+
+      await test.service.setPaused("legacy-feed", true);
+
+      expect(stale.events).toEqual([]);
+      expect(current.events[0]).toMatchObject({
+        status: "started",
+        input: { category: "subscription", action: "pause" },
+      });
+      expect(getOperationJournal).toHaveBeenCalledOnce();
+    });
+
+    it("contains a hostile live journal getter without changing the mutation", async () => {
+      const stale = recordingJournal();
+      const test = harness([existingFeed()], {
+        operationJournal: stale.port,
+        getOperationJournal: () => {
+          throw new Error("private live journal getter failure");
+        },
+      });
+
+      await expect(test.service.setPaused("legacy-feed", true)).resolves
+        .toMatchObject({ subscriptionStatus: "paused" });
+
+      expect(stale.events).toEqual([]);
+      expect(test.settings.feeds[0].subscriptionStatus).toBe("paused");
+      expect(test.saveSettings).toHaveBeenCalledOnce();
+    });
+
     it("starts a successful add only after verified identity exists and closes after durable persistence", async () => {
       const journal = recordingJournal();
       const test = harness([], { operationJournal: journal.port });

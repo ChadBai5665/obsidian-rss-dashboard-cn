@@ -316,6 +316,38 @@ describe("production inline AI composition", () => {
     });
   });
 
+  it("preserves current A runtimes when an unrelated settings save rejects", async () => {
+    const test = harness();
+    const api = test.plugin as unknown as {
+      getOperationJournalPort(): unknown;
+      getYouTubeTranscriptRuntime(): {
+        service: { dispose(): void };
+      };
+    };
+    api.getOperationJournalPort();
+    const transcriptA = api.getYouTubeTranscriptRuntime();
+    const disposeA = vi.spyOn(transcriptA.service, "dispose");
+    const aiA = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    const shutdownA = vi.spyOn(
+      aiA.coordinator as { shutdown(): Promise<void> },
+      "shutdown",
+    );
+    const repository = (test.plugin as unknown as {
+      feedStorageRepository: { persistSettings(): Promise<unknown> };
+    }).feedStorageRepository;
+    vi.spyOn(repository, "persistSettings")
+      .mockRejectedValue(new Error("unrelated-save-failed"));
+
+    await expect(test.plugin.saveSettings()).rejects
+      .toThrow("unrelated-save-failed");
+
+    expect(disposeA).not.toHaveBeenCalled();
+    expect(shutdownA).not.toHaveBeenCalled();
+    expect(api.getYouTubeTranscriptRuntime().service).toBe(transcriptA.service);
+    expect(test.plugin.createAiPanelOptionsForItem(test.selected)?.coordinator)
+      .toBe(aiA.coordinator);
+  });
+
   it("keeps AI and transcript business construction available on the B no-op journal", async () => {
     const test = harness();
     const api = test.plugin as unknown as {

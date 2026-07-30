@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App, type PluginManifest } from "obsidian";
 import RssDashboardPlugin from "../../../main";
 import { DEFAULT_SETTINGS, type Feed } from "../../../src/types/types";
+import { OperationJournalService } from "../../../src/operation-journal/operation-journal-service";
 import type {
   OperationBeginInput,
   OperationJournalPort,
@@ -46,7 +47,47 @@ interface SubscriptionWiringApi {
     candidate: { feeds: Feed[] },
     publish: () => void,
   ): Promise<void>;
+  feedStorageRepository: {
+    persistSettings(): Promise<unknown>;
+  };
 }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function persistedResult() {
+  return {
+    metadataSaved: true,
+    shardWriteCount: 0,
+    shardDeleteCount: 0,
+  };
+}
+
+function prepareMutationPlugin() {
+  const plugin = new RssDashboardPlugin(App.createMock(), manifest());
+  plugin.settings = structuredClone(DEFAULT_SETTINGS);
+  plugin.settings.feeds = [persistedFeed()];
+  const api = plugin as unknown as SubscriptionWiringApi;
+  api.getCollectionService = vi.fn(() => ({
+    collectFeedRefresh: async () => [],
+    removeSource: async () => { throw new Error("unused"); },
+  }));
+  api.persistSubscriptionSettingsCandidate = vi.fn(
+    async (_candidate, publish) => publish(),
+  );
+  return { plugin, api };
+}
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("subscription operation journal composition", () => {
   it("passes the current optional journal port into each SubscriptionService without composing a runtime", async () => {
@@ -90,5 +131,57 @@ describe("subscription operation journal composition", () => {
         subject: { sourceId: "feed-1", label: "Persisted source" },
       }),
     ]);
+  });
+
+  it("resolves journal B only when a service queued during save B starts mutating", async () => {
+    const test = prepareMutationPlugin();
+    const journalA = test.api.getOperationJournalPort();
+    const pending = deferred<ReturnType<typeof persistedResult>>();
+    const persist = vi.spyOn(test.api.feedStorageRepository, "persistSettings")
+      .mockReturnValue(pending.promise);
+    const begin = vi.spyOn(OperationJournalService.prototype, "begin");
+    test.plugin.settings.collection.dataFolder = ".queued-subscription-b";
+    const saving = test.plugin.saveSettings();
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledOnce());
+    const service = test.api.getSubscriptionService();
+    const mutation = service.setPaused("feed-1", true);
+    await Promise.resolve();
+    expect(begin).not.toHaveBeenCalled();
+
+    pending.resolve(persistedResult());
+    await saving;
+    await mutation;
+
+    const journalB = test.api.getOperationJournalPort();
+    expect(journalB).not.toBe(journalA);
+    expect(begin.mock.instances).toEqual([journalB]);
+  });
+
+  it("resolves journal A after a queued save B rejects", async () => {
+    const test = prepareMutationPlugin();
+    const journalA = test.api.getOperationJournalPort();
+    const realGetPort = test.api.getOperationJournalPort.bind(test.api);
+    const getPort = vi.spyOn(test.api, "getOperationJournalPort")
+      .mockImplementation(() => realGetPort());
+    const pending = deferred<ReturnType<typeof persistedResult>>();
+    const persist = vi.spyOn(test.api.feedStorageRepository, "persistSettings")
+      .mockReturnValue(pending.promise);
+    const begin = vi.spyOn(OperationJournalService.prototype, "begin");
+    test.plugin.settings.collection.dataFolder = ".rejected-subscription-b";
+    const saving = test.plugin.saveSettings();
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledOnce());
+    const service = test.api.getSubscriptionService();
+    const mutation = service.setPaused("feed-1", true);
+    const callsBeforeRelease = getPort.mock.calls.length;
+
+    pending.reject(new Error("save-b-rejected"));
+    await expect(saving).rejects.toThrow("save-b-rejected");
+    await mutation;
+
+    expect(callsBeforeRelease).toBe(0);
+    expect(getPort.mock.calls.length).toBeGreaterThan(callsBeforeRelease);
+    expect(begin.mock.instances).toEqual([journalA]);
+    expect(test.plugin.settings.collection.dataFolder)
+      .toBe(".rss-dashboard-data");
   });
 });

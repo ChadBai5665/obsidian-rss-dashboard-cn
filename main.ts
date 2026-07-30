@@ -289,15 +289,44 @@ const UNAVAILABLE_OPERATION_JOURNAL_ID =
   "00000000-0000-4000-8000-000000000000";
 const SAFE_OPERATION_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const UNAVAILABLE_OPERATION_JOURNAL_CURSOR_LIMIT = 281_474_976_710_656;
+let unavailableOperationJournalCursor: number | null = null;
+
+function createFallbackUnavailableOperationJournalId(): string {
+  try {
+    if (unavailableOperationJournalCursor === null) {
+      let seed = 0;
+      try {
+        const now = Date.now();
+        if (Number.isSafeInteger(now) && now >= 0) {
+          seed = now % UNAVAILABLE_OPERATION_JOURNAL_CURSOR_LIMIT;
+        }
+      } catch {
+        // A missing clock starts the process-local cursor at zero.
+      }
+      unavailableOperationJournalCursor = seed;
+    }
+    unavailableOperationJournalCursor =
+      (unavailableOperationJournalCursor + 1) %
+        UNAVAILABLE_OPERATION_JOURNAL_CURSOR_LIMIT;
+    const operationId = `00000000-0000-4000-8000-${
+      unavailableOperationJournalCursor.toString(16).padStart(12, "0")
+    }`;
+    if (SAFE_OPERATION_ID.test(operationId)) return operationId;
+  } catch {
+    // Retain one fixed valid ID only as the final non-blocking fallback.
+  }
+  return UNAVAILABLE_OPERATION_JOURNAL_ID;
+}
 
 function createUnavailableOperationJournalId(): string {
   try {
     const operationId = activeWindow.crypto.randomUUID();
     if (SAFE_OPERATION_ID.test(operationId)) return operationId;
   } catch {
-    // A fixed valid fallback keeps unavailable journaling non-blocking.
+    // Use the process-local fallback sequence below.
   }
-  return UNAVAILABLE_OPERATION_JOURNAL_ID;
+  return createFallbackUnavailableOperationJournalId();
 }
 
 function createUnavailableOperationJournalScope(
@@ -1694,7 +1723,7 @@ export default class RssDashboardPlugin extends Plugin {
       abortInitialImport: (feedId) => {
         this.activeInitialImportControllers.get(feedId)?.abort();
       },
-      operationJournal: this.getOperationJournalPort(),
+      getOperationJournal: () => this.getOperationJournalPort(),
     });
   }
 
@@ -3301,38 +3330,101 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private restoreCommittedDataRootAuthorityAfterFailure(): void {
+    const aiRuntime = this.aiRuntime;
+    const transcriptRuntime = this.youtubeTranscriptRuntime;
+    const collectionService = this.collectionService;
+    const sourceRefreshLedger = this.sourceRefreshLedger;
+    const sourceRegistry = this.sourceRegistry;
+
+    let dataRoot: string | null = null;
     try {
-      const dataRoot = this.getCommittedOperationJournalDataRoot();
-      this.settings.collection.dataFolder = dataRoot;
-
-      const aiRuntime = this.aiRuntime;
-      if (
-        aiRuntime !== null &&
-        normalizePath(aiRuntime.dataRoot.replace(/[\\/]+$/u, "")) !== dataRoot
-      ) {
-        this.aiRuntime = null;
-        this.revokeAiRuntime(aiRuntime);
-      }
-
-      const transcriptRuntime = this.youtubeTranscriptRuntime;
-      if (
-        transcriptRuntime !== null &&
-        normalizePath(transcriptRuntime.dataRoot.replace(/[\\/]+$/u, "")) !==
-          dataRoot
-      ) {
-        this.youtubeTranscriptRuntime = null;
-        try {
-          transcriptRuntime.service.dispose();
-        } catch {
-          // Failed-root transcript authority remains detached even if cleanup fails.
-        }
-      }
-
-      this.collectionService = null;
-      this.sourceRefreshLedger = null;
-      this.sourceRegistry = null;
+      dataRoot = this.getCommittedOperationJournalDataRoot();
     } catch {
-      // Persistence failures remain authoritative even if cleanup is hostile.
+      // Missing committed authority fails every data-root cache closed below.
+    }
+    let operationJournal: OperationJournalPort | null = null;
+    if (dataRoot !== null) {
+      try {
+        operationJournal = this.getOperationJournalPort();
+      } catch {
+        // A journal identity that cannot be resolved is not safe to retain.
+      }
+    }
+
+    const matchesDataRoot = (candidate: unknown): boolean => {
+      if (dataRoot === null || typeof candidate !== "string") return false;
+      try {
+        return normalizePath(candidate.trim().replace(/[\\/]+$/u, "")) ===
+          dataRoot;
+      } catch {
+        return false;
+      }
+    };
+    const runtimeMatches = (
+      runtime: { dataRoot: string; operationJournal: OperationJournalPort },
+    ): boolean => {
+      if (operationJournal === null) return false;
+      try {
+        return matchesDataRoot(runtime.dataRoot) &&
+          runtime.operationJournal === operationJournal;
+      } catch {
+        return false;
+      }
+    };
+    const cacheMatches = (cache: { dataRoot: string }): boolean => {
+      try {
+        return matchesDataRoot(cache.dataRoot);
+      } catch {
+        return false;
+      }
+    };
+    const keepAiRuntime = aiRuntime !== null && runtimeMatches(aiRuntime);
+    const keepTranscriptRuntime = transcriptRuntime !== null &&
+      runtimeMatches(transcriptRuntime);
+    const keepCollectionService = collectionService !== null &&
+      cacheMatches(collectionService);
+    const keepSourceRefreshLedger = sourceRefreshLedger !== null &&
+      cacheMatches(sourceRefreshLedger);
+    let keepSourceRegistry = false;
+    if (sourceRegistry !== null && dataRoot !== null) {
+      try {
+        const signature = JSON.parse(sourceRegistry.signature) as {
+          dataFolder?: unknown;
+        };
+        keepSourceRegistry = matchesDataRoot(signature.dataFolder);
+      } catch {
+        // A malformed cached registry is detached below.
+      }
+    }
+
+    if (!keepAiRuntime) this.aiRuntime = null;
+    if (!keepTranscriptRuntime) this.youtubeTranscriptRuntime = null;
+    if (!keepCollectionService) this.collectionService = null;
+    if (!keepSourceRefreshLedger) this.sourceRefreshLedger = null;
+    if (!keepSourceRegistry) this.sourceRegistry = null;
+
+    if (dataRoot !== null) {
+      try {
+        this.settings.collection.dataFolder = dataRoot;
+      } catch {
+        // Cleanup below remains mandatory when settings restoration is hostile.
+      }
+    }
+
+    if (aiRuntime !== null && !keepAiRuntime) {
+      try {
+        this.revokeAiRuntime(aiRuntime);
+      } catch {
+        // Detached AI authority cannot block the remaining cleanup.
+      }
+    }
+
+    if (transcriptRuntime !== null && !keepTranscriptRuntime) {
+      try {
+        transcriptRuntime.service.dispose();
+      } catch {
+        // Detached transcript authority cannot restore the failed root.
+      }
     }
   }
 

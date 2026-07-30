@@ -39,7 +39,12 @@ interface JournalWiringApi {
       readCached(request: unknown): Promise<unknown>;
     };
   };
-  getSubscriptionService(): { dependencies: { operationJournal?: unknown } };
+  getSubscriptionService(): {
+    dependencies: {
+      operationJournal?: unknown;
+      getOperationJournal?: () => unknown;
+    };
+  };
   getSourceRefreshLedger(): unknown;
   getCollectionService(): unknown;
   initializeSettingsBackedServices(): void;
@@ -133,8 +138,9 @@ describe("operation journal runtime composition", () => {
       provider.options?.operationJournal !== undefined
     );
     expect(tikhub?.provider.options?.operationJournal).toBe(service);
-    expect(test.api.getSubscriptionService().dependencies.operationJournal)
-      .toBe(service);
+    const subscription = test.api.getSubscriptionService();
+    expect(subscription.dependencies.operationJournal).toBeUndefined();
+    expect(subscription.dependencies.getOperationJournal?.()).toBe(service);
     const begin = vi.spyOn(service, "begin");
     const refreshScope = test.api.beginRefreshJournalSafely({
       trigger: "manual",
@@ -465,11 +471,102 @@ describe("operation journal runtime composition", () => {
     test.api.getCollectionService();
     expect(authority.sourceRefreshLedger?.dataRoot).toBe(".rss-dashboard-data");
     expect(authority.collectionService?.dataRoot).toBe(".rss-dashboard-data");
-    expect(test.api.getSubscriptionService().dependencies.operationJournal)
+    expect(test.api.getSubscriptionService().dependencies.getOperationJournal?.())
       .toBe(previousService);
     const begin = vi.spyOn(previousService, "begin");
     test.api.beginRefreshJournalSafely({ trigger: "manual", action: "all" });
     expect(begin).toHaveBeenCalledTimes(1);
+  });
+
+  it("detaches every data-root authority even when settings restoration throws", () => {
+    const test = harness();
+    test.api.getOperationJournalPort();
+    test.plugin.settings.collection.dataFolder = ".hostile-settings-root";
+    Object.defineProperty(test.plugin.settings.collection, "dataFolder", {
+      configurable: true,
+      enumerable: true,
+      get: () => ".hostile-settings-root",
+      set: () => { throw new Error("settings assignment failed"); },
+    });
+    const dispose = vi.fn();
+    const authority = test.plugin as unknown as {
+      aiRuntime: { dataRoot: string } | null;
+      youtubeTranscriptRuntime: {
+        dataRoot: string;
+        service: { dispose(): void };
+      } | null;
+      collectionService: unknown;
+      sourceRefreshLedger: unknown;
+      sourceRegistry: unknown;
+      restoreCommittedDataRootAuthorityAfterFailure(): void;
+      revokeAiRuntime(runtime: unknown): void;
+    };
+    authority.aiRuntime = { dataRoot: ".hostile-settings-root" };
+    authority.youtubeTranscriptRuntime = {
+      dataRoot: ".hostile-settings-root",
+      service: { dispose },
+    };
+    authority.collectionService = {};
+    authority.sourceRefreshLedger = {};
+    authority.sourceRegistry = {};
+    vi.spyOn(authority, "revokeAiRuntime").mockImplementation(() => undefined);
+
+    authority.restoreCommittedDataRootAuthorityAfterFailure();
+
+    expect(authority.aiRuntime).toBeNull();
+    expect(authority.youtubeTranscriptRuntime).toBeNull();
+    expect(authority.collectionService).toBeNull();
+    expect(authority.sourceRefreshLedger).toBeNull();
+    expect(authority.sourceRegistry).toBeNull();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("continues transcript and cache deauthorization when AI cleanup throws", () => {
+    const test = harness();
+    const journalA = test.api.getOperationJournalPort();
+    test.plugin.settings.collection.dataFolder = ".hostile-cleanup-root";
+    const dispose = vi.fn(() => { throw new Error("dispose failed"); });
+    const authority = test.plugin as unknown as {
+      aiRuntime: { dataRoot: string } | null;
+      youtubeTranscriptRuntime: {
+        dataRoot: string;
+        service: { dispose(): void };
+      } | null;
+      collectionService: unknown;
+      sourceRefreshLedger: unknown;
+      sourceRegistry: unknown;
+      restoreCommittedDataRootAuthorityAfterFailure(): void;
+      revokeAiRuntime(runtime: unknown): void;
+    };
+    authority.aiRuntime = Object.defineProperty({}, "dataRoot", {
+      enumerable: true,
+      get: () => { throw new Error("AI root comparison failed"); },
+    }) as { dataRoot: string };
+    authority.youtubeTranscriptRuntime = {
+      dataRoot: ".hostile-cleanup-root",
+      service: { dispose },
+    };
+    authority.collectionService = {};
+    authority.sourceRefreshLedger = {};
+    authority.sourceRegistry = {};
+    vi.spyOn(authority, "revokeAiRuntime").mockImplementation(() => {
+      throw new Error("AI shutdown failed");
+    });
+
+    authority.restoreCommittedDataRootAuthorityAfterFailure();
+
+    expect(test.plugin.settings.collection.dataFolder)
+      .toBe(".rss-dashboard-data");
+    expect(authority.aiRuntime).toBeNull();
+    expect(authority.youtubeTranscriptRuntime).toBeNull();
+    expect(authority.collectionService).toBeNull();
+    expect(authority.sourceRefreshLedger).toBeNull();
+    expect(authority.sourceRegistry).toBeNull();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(test.api.getYouTubeTranscriptRuntime().service.options.operationJournal)
+      .toBe(journalA);
+    expect(test.api.getSubscriptionService().dependencies.getOperationJournal?.())
+      .toBe(journalA);
   });
 
   it("rolls back factory reset state and leaves local storage untouched on persistence failure", async () => {
@@ -575,7 +672,7 @@ describe("operation journal runtime composition", () => {
     await expect(attached.succeed("completed", {})).resolves.toBeUndefined();
     expect(test.api.getYouTubeTranscriptRuntime().service.options.operationJournal)
       .toBe(unavailable);
-    expect(test.api.getSubscriptionService().dependencies.operationJournal)
+    expect(test.api.getSubscriptionService().dependencies.getOperationJournal?.())
       .toBe(unavailable);
     expect(test.api.beginRefreshJournalSafely({
       trigger: "manual",
@@ -597,6 +694,52 @@ describe("operation journal runtime composition", () => {
       operationJournalRuntime: { dataRoot: string };
     }).operationJournalRuntime.dataRoot).toBe(".failed-activation-root");
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      label: "crypto throws",
+      installCryptoFailure: () => {
+        vi.spyOn(activeWindow.crypto, "randomUUID").mockImplementation(() => {
+          throw new Error("crypto unavailable");
+        });
+        vi.spyOn(Date, "now").mockImplementation(() => {
+          throw new Error("clock unavailable");
+        });
+      },
+    },
+    {
+      label: "crypto returns an invalid id",
+      installCryptoFailure: () => {
+        vi.spyOn(activeWindow.crypto, "randomUUID")
+          .mockImplementation(() => "invalid" as ReturnType<Crypto["randomUUID"]>);
+      },
+    },
+  ])("keeps unavailable begin IDs unique and path-free when $label", async ({
+    installCryptoFailure,
+  }) => {
+    const test = harness();
+    vi.spyOn(test.api, "getOperationJournalRuntime")
+      .mockImplementation(() => { throw new Error("runtime unavailable"); });
+    installCryptoFailure();
+    const port = test.api.getOperationJournalPort();
+
+    const scopes = Array.from({ length: 8 }, () =>
+      port.begin(transcriptBegin()));
+    const operationIds = scopes.map((scope) => scope.operationId);
+    expect(new Set(operationIds).size).toBe(operationIds.length);
+    expect(operationIds).toEqual(operationIds.map((operationId) =>
+      expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu,
+      )));
+    await Promise.all(scopes.map(async (scope) =>
+      await scope.succeed("completed", {})));
+    const durableId = "123e4567-e89b-42d3-a456-426614174000";
+    expect(port.attach(durableId, transcriptBegin()).operationId)
+      .toBe(durableId);
+    await expect(test.app.vault.adapter.exists(".rss-dashboard-data"))
+      .resolves.toBe(false);
+    expect(Object.keys(port).sort()).toEqual(["attach", "begin"]);
   });
 
   it("reloads journal health once when repository append fails", async () => {

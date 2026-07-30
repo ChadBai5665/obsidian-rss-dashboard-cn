@@ -263,6 +263,7 @@ export interface SubscriptionServiceDependencies {
   prepareFeed?: (feed: Feed) => Feed;
   abortInitialImport?: (feedId: string) => void;
   operationJournal?: OperationJournalPort;
+  getOperationJournal?: () => OperationJournalPort | undefined;
 }
 
 type SubscriptionJournalErrorCode = Extract<
@@ -1397,7 +1398,8 @@ export class SubscriptionService {
     journal.details = details;
     journal.stage = stage;
     try {
-      const port = this.dependencies.operationJournal;
+      const port = this.dependencies.getOperationJournal?.() ??
+        this.dependencies.operationJournal;
       if (!port || typeof port.begin !== "function") return;
       const scope = port.begin({
         category: "subscription",
