@@ -46,6 +46,9 @@ const OTHER_JOB_ID = "223e4567-e89b-12d3-a456-426614174000";
 const OPERATION_ID = "323e4567-e89b-42d3-a456-426614174000";
 const LEGACY_CONTINUATION_OPERATION_ID =
   "423e4567-e89b-42d3-a456-426614174000";
+const RACING_CONTINUATION_OPERATION_ID =
+  "523e4567-e89b-42d3-a456-426614174000";
+const OTHER_OPERATION_ID = "623e4567-e89b-42d3-a456-426614174000";
 const NOW = "2026-07-29T10:00:00.000Z";
 const EARLIER = "2026-07-29T09:55:00.000Z";
 const INVALID_LANGUAGE_CODES = [
@@ -96,10 +99,20 @@ class RecordingJournal implements OperationJournalPort {
     operationId: string;
     input: OperationIdentityInput;
   }> = [];
+  private beginIndex = 0;
+
+  constructor(
+    private readonly beginOperationIds: readonly string[] = [
+      LEGACY_CONTINUATION_OPERATION_ID,
+    ],
+  ) {}
 
   begin(input: OperationBeginInput): OperationJournalScope {
     this.begins.push(input);
-    const scope = this.scope(LEGACY_CONTINUATION_OPERATION_ID);
+    const operationId = this.beginOperationIds[this.beginIndex] ??
+      this.beginOperationIds.at(-1) ?? LEGACY_CONTINUATION_OPERATION_ID;
+    this.beginIndex += 1;
+    const scope = this.scope(operationId);
     this.events.push({
       operationId: scope.operationId,
       status: "started",
@@ -254,6 +267,13 @@ class FakeJobs implements TikHubCaptionJobStore {
     if (this.replaceFailure) throw this.replaceFailure;
     const current = this.records.get(identity.key);
     if (!current || !matchesJobIdentity(current, identity)) return false;
+    if (
+      current.schemaVersion === 2 &&
+      (replacement.schemaVersion !== 2 ||
+        replacement.operationId !== current.operationId)
+    ) {
+      return false;
+    }
     this.records.set(identity.key, { ...replacement });
     return true;
   }
@@ -509,6 +529,146 @@ function expectOperationEnvelope<T>(
 }
 
 describe("TikHubTranscriptProvider", () => {
+  it("resolves racing v1 continuation upgrades to one winner and closes the loser scope", async () => {
+    const jobs = new FakeJobs();
+    const legacy = jobRecord("content", {
+      createdAt: "2020-01-01T00:00:00.000Z",
+      lastCheckedAt: "2020-01-01T00:00:00.000Z",
+    });
+    putJob(jobs, legacy);
+    const journal = new RecordingJournal([
+      LEGACY_CONTINUATION_OPERATION_ID,
+      RACING_CONTINUATION_OPERATION_ID,
+    ]);
+    let releaseFirst!: () => void;
+    let announceFirst!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      announceFirst = resolve;
+    });
+    const firstRelease = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let replacementCount = 0;
+    jobs.beforeReplace = async () => {
+      replacementCount += 1;
+      if (replacementCount === 1) {
+        announceFirst();
+        await firstRelease;
+      }
+    };
+    const test = createHarness({
+      jobs,
+      operationJournal: journal,
+      client: new FakeCaptionClient([], [completedContentData()]),
+    });
+    const identity = { itemId: ITEM_ID, videoId: VIDEO_ID };
+
+    const first = test.provider.pendingContinuationOperationId(identity);
+    await firstEntered;
+    const second = test.provider.pendingContinuationOperationId(identity);
+    await expect(second).resolves.toBe(RACING_CONTINUATION_OPERATION_ID);
+    releaseFirst();
+    await expect(first).resolves.toBe(RACING_CONTINUATION_OPERATION_ID);
+
+    const durable = jobs.records.get(keyFor(legacy));
+    expect(durable).toMatchObject({
+      schemaVersion: 2,
+      operationId: RACING_CONTINUATION_OPERATION_ID,
+      createdAt: NOW,
+      lastCheckedAt: NOW,
+    });
+    expect(journal.events).toContainEqual(expect.objectContaining({
+      operationId: LEGACY_CONTINUATION_OPERATION_ID,
+      status: "aborted",
+    }));
+    expect(journal.events.some((event) =>
+      event.operationId === RACING_CONTINUATION_OPERATION_ID &&
+      event.status === "aborted"
+    )).toBe(false);
+
+    const winnerContext = {
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      operationId: RACING_CONTINUATION_OPERATION_ID,
+    };
+    await test.provider.continuePending(undefined, winnerContext);
+    const continuationEvents = journal.events.filter(({ stage }) =>
+      stage === "job-received" || stage === "polling"
+    );
+    expect(continuationEvents.length).toBeGreaterThan(0);
+    expect(continuationEvents.every(({ operationId }) =>
+      operationId === RACING_CONTINUATION_OPERATION_ID
+    )).toBe(true);
+    expect(test.client.paidInputs).toHaveLength(0);
+  });
+
+  it("upgrades a legacy direct-terminal job before its first free poll", async () => {
+    const events: string[] = [];
+    const jobs = new FakeJobs(events);
+    const legacy = jobRecord("tracks", {
+      createdAt: "2020-01-01T00:00:00.000Z",
+      lastCheckedAt: "2020-01-01T00:00:00.000Z",
+    });
+    putJob(jobs, legacy);
+    const test = createHarness({
+      jobs,
+      events,
+      client: new FakeCaptionClient([], [completedTracksData()], events),
+    });
+
+    await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT);
+
+    expect(jobs.records.get(keyFor(legacy))).toEqual({
+      ...legacy,
+      schemaVersion: 2,
+      operationId: OPERATION_ID,
+      createdAt: NOW,
+      lastCheckedAt: NOW,
+    });
+    expect(events.indexOf("replace-job")).toBeLessThan(events.indexOf("result"));
+    expect(test.client.paidInputs).toHaveLength(0);
+  });
+
+  it("starts legacy continuation elapsed time at the v2 upgrade origin", async () => {
+    const jobs = new FakeJobs();
+    const legacy = jobRecord("content", {
+      createdAt: "2020-01-01T00:00:00.000Z",
+      lastCheckedAt: "2020-01-01T00:00:00.000Z",
+    });
+    putJob(jobs, legacy);
+    const journal = new RecordingJournal();
+    let now = Date.parse(NOW);
+    const test = createHarness({
+      jobs,
+      operationJournal: journal,
+      clock: () => new Date(now),
+      delay: async () => {
+        now += 3_000;
+      },
+      client: new FakeCaptionClient([], [pendingData(), completedContentData()]),
+    });
+
+    await test.provider.pendingContinuationOperationId({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+    });
+    await test.provider.continuePending(undefined, {
+      ...CONTEXT,
+      operationId: LEGACY_CONTINUATION_OPERATION_ID,
+    });
+
+    const polls = journal.events.filter(({ stage, status }) =>
+      stage === "polling" && status === "progress"
+    );
+    expect(polls.map(({ details }) => details.elapsedMs)).toEqual([3_000, 6_000]);
+    expect(jobs.records.get(keyFor(legacy))).toMatchObject({
+      schemaVersion: 2,
+      operationId: LEGACY_CONTINUATION_OPERATION_ID,
+      createdAt: NOW,
+      lastCheckedAt: "2026-07-29T10:00:03.000Z",
+    });
+  });
+
   it("writes new processing jobs as v2 with the shared operation ID", async () => {
     const jobs = new FakeJobs();
     const test = createHarness({
@@ -568,6 +728,8 @@ describe("TikHubTranscriptProvider", () => {
       ...pending,
       schemaVersion: 2,
       operationId: LEGACY_CONTINUATION_OPERATION_ID,
+      createdAt: NOW,
+      lastCheckedAt: NOW,
     });
     expect(test.client.paidInputs).toHaveLength(0);
   });
@@ -744,7 +906,7 @@ describe("TikHubTranscriptProvider", () => {
       .toBe(true);
     expect(journal.events).toContainEqual(expect.objectContaining({
       operationId: OPERATION_ID,
-      stage: "completed",
+      stage: "saving",
       status: "progress",
       details: {
         provider: "tikhub",
@@ -754,6 +916,100 @@ describe("TikHubTranscriptProvider", () => {
     expect(JSON.stringify(journal.events)).not.toContain(
       "Completed from the free result endpoint.",
     );
+  });
+
+  it("uses the persistence token operation ID for final cleanup evidence", async () => {
+    const journal = new RecordingJournal();
+    const jobs = new FakeJobs();
+    const completed = jobRecord("content", {
+      schemaVersion: 2,
+      operationId: OPERATION_ID,
+    });
+    putJob(jobs, completed);
+    const test = createHarness({ jobs, operationJournal: journal });
+    const listed = await listedTrack();
+    const transcript: YouTubeTranscript = {
+      videoId: VIDEO_ID,
+      languageCode: "en",
+      languageName: "English",
+      isGenerated: false,
+      provider: "tikhub",
+      text: "Durably cached caption.",
+    };
+    const token = {
+      ...identityFor(completed),
+      operationId: OPERATION_ID,
+    };
+
+    await test.provider.onPersisted(
+      listed.track,
+      transcript,
+      { ...CONTEXT, operationId: OTHER_OPERATION_ID },
+      token,
+    );
+
+    expect(jobs.conditionalRemoves).toEqual([identityFor(completed)]);
+    expect(journal.events).toEqual([
+      expect.objectContaining({
+        operationId: OPERATION_ID,
+        stage: "saving",
+        status: "progress",
+      }),
+    ]);
+    expect(journal.attaches.some(({ operationId }) =>
+      operationId === OTHER_OPERATION_ID
+    )).toBe(false);
+  });
+
+  it("rejects malformed persistence-token operation identity without cleanup", async () => {
+    const listed = await listedTrack();
+    const jobs = new FakeJobs();
+    const completed = jobRecord("content", {
+      schemaVersion: 2,
+      operationId: OPERATION_ID,
+    });
+    putJob(jobs, completed);
+    const test = createHarness({ jobs });
+    const transcript: YouTubeTranscript = {
+      videoId: VIDEO_ID,
+      languageCode: "en",
+      languageName: "English",
+      isGenerated: false,
+      provider: "tikhub",
+      text: "Durably cached caption.",
+    };
+    const valid = { ...identityFor(completed), operationId: OPERATION_ID };
+    let getterCalled = false;
+    const accessor = { ...valid } as Record<string, unknown>;
+    Object.defineProperty(accessor, "operationId", {
+      enumerable: true,
+      get() {
+        getterCalled = true;
+        return OPERATION_ID;
+      },
+    });
+    const inherited = Object.create(valid) as Record<string, unknown>;
+    const invalid = [
+      identityFor(completed),
+      { ...valid, operationId: "not-a-uuid" },
+      { ...valid, operationId: OTHER_OPERATION_ID },
+      { ...valid, extra: true },
+      accessor,
+      inherited,
+    ];
+
+    for (const token of invalid) {
+      await expectCode(test.provider.onPersisted(
+        listed.track,
+        transcript,
+        CONTEXT,
+        token,
+      ), "tikhub-malformed-response");
+    }
+
+    expect(getterCalled).toBe(false);
+    expect(jobs.conditionalRemoves).toHaveLength(0);
+    expect(jobs.records.get(keyFor(completed))).toEqual(completed);
   });
 
   it("journals paid confirmation, durable job receipt, every free poll, and processing timeout", async () => {
@@ -1334,7 +1590,10 @@ describe("TikHubTranscriptProvider", () => {
       languageCode: "en",
       text: "Completed from the free result endpoint.",
     });
-    expect(continued.persistenceToken).toEqual(identityFor(pending));
+    expect(continued.persistenceToken).toEqual({
+      ...identityFor(pending),
+      operationId: OPERATION_ID,
+    });
     expect(client.paidInputs).toEqual([]);
     expect(client.resultInputs).toHaveLength(1);
   });
@@ -1617,7 +1876,10 @@ describe("TikHubTranscriptProvider", () => {
   it("removes only the exact content job after the service reports durable persistence", async () => {
     const listed = await listedTrack();
     const jobs = new FakeJobs();
-    const contentJob = jobRecord("content");
+    const contentJob = jobRecord("content", {
+      schemaVersion: 2,
+      operationId: OPERATION_ID,
+    });
     const tracksJob = jobRecord("tracks", { jobId: OTHER_JOB_ID });
     putJob(jobs, contentJob);
     putJob(jobs, tracksJob);
@@ -1635,7 +1897,7 @@ describe("TikHubTranscriptProvider", () => {
       listed.track,
       transcript,
       CONTEXT,
-      identityFor(contentJob),
+      { ...identityFor(contentJob), operationId: OPERATION_ID },
     );
 
     const contentKey = captionJobKey(ITEM_ID, VIDEO_ID, "content", "en");
@@ -1998,7 +2260,7 @@ describe("TikHubTranscriptProvider", () => {
         },
       });
       expect(client.paidInputs).toHaveLength(0);
-      expect(client.resultInputs).toHaveLength(1);
+      expect(client.resultInputs).toHaveLength(0);
       expect(jobs.replacements).toHaveLength(1);
       expect(jobs.records.get(keyFor(winner))).toEqual(winner);
     });
@@ -2023,11 +2285,15 @@ describe("TikHubTranscriptProvider", () => {
         await test.provider.fetchTrack(listed.value[0], undefined, CONTEXT),
         { tikhubPaidRequests: 0, paidRequestAttempted: false },
       );
-      expect(fetched.persistenceToken).toEqual(identityFor(contentJob));
+      expect(fetched.persistenceToken).toEqual({
+        ...identityFor(contentJob),
+        operationId: OPERATION_ID,
+      });
       expect(Object.keys(fetched.persistenceToken as object).sort()).toEqual([
         "connectionId",
         "jobId",
         "key",
+        "operationId",
       ]);
 
       await test.provider.onPersisted(

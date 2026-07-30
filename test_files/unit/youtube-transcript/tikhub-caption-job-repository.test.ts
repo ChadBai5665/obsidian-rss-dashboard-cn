@@ -268,6 +268,22 @@ describe("TikHubCaptionJobRepository", () => {
     );
   });
 
+  it("prevents a racing upgrade from replacing an established v2 operation identity", async () => {
+    const test = createRepository();
+    const winner = createV2Record();
+    const loser = createV2Record({
+      operationId: "423e4567-e89b-42d3-a456-426614174000",
+    });
+    await test.repository.write(winner);
+
+    await expect(
+      test.repository.replaceIfCurrent(identityFor(winner), loser),
+    ).resolves.toBe(false);
+    await expect(test.repository.read(identityFor(winner).key)).resolves.toEqual(
+      winner,
+    );
+  });
+
   it.each([
     ["unknown version", { ...createRecord(), schemaVersion: 3 }],
     ["missing v2 operation ID", { ...createRecord(), schemaVersion: 2 }],

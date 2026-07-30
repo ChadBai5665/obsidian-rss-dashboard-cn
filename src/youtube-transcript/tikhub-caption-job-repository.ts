@@ -186,6 +186,13 @@ export class TikHubCaptionJobRepository {
       const jobs = await this.readJobs();
       const current = jobs.get(projectedIdentity.key);
       if (!current || !matchesIdentity(current, projectedIdentity)) return false;
+      if (
+        current.schemaVersion === 2 &&
+        (projectedReplacement.schemaVersion !== 2 ||
+          projectedReplacement.operationId !== current.operationId)
+      ) {
+        return false;
+      }
       jobs.set(projectedIdentity.key, projectedReplacement);
       await this.atomicWrite(serializeJobs(jobs));
       return true;

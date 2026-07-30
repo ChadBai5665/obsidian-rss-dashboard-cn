@@ -84,6 +84,10 @@ export interface TikHubTranscriptProviderOptions {
 }
 
 type CaptionStage = "tracks" | "content";
+type TikHubCaptionJobRecordV2 = Extract<
+  TikHubCaptionJobRecord,
+  { schemaVersion: 2 }
+>;
 
 interface OperationIdentity {
   itemId: string;
@@ -248,22 +252,17 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
       identity.itemId,
     );
     if (!scope) return undefined;
-    const key = safeJobKey(identity, "content", job.languageCode);
-    const upgraded: TikHubCaptionJobRecord = {
-      ...job,
-      schemaVersion: 2,
-      operationId: scope.operationId,
-    };
-    let replaced: boolean;
     try {
-      replaced = await this.options.jobs.replaceIfCurrent(
-        jobIdentity(key, job),
-        upgraded,
+      const durable = await this.ensureOperationIdentity(
+        job,
+        scope.operationId,
       );
+      if (durable.operationId !== scope.operationId) closeScope(scope);
+      return durable.operationId;
     } catch {
+      closeScope(scope);
       return undefined;
     }
-    return replaced ? scope.operationId : undefined;
   }
 
   async continuePending(
@@ -404,19 +403,34 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
       expectedKey,
     );
     try {
-      const removed = await this.options.jobs.removeIfCurrent(cleanupIdentity);
+      const current = await this.options.jobs.read(cleanupIdentity.key);
+      if (
+        current !== null &&
+        current.jobId === cleanupIdentity.jobId &&
+        current.connectionId === cleanupIdentity.connectionId &&
+        (current.schemaVersion !== 2 ||
+          current.operationId !== cleanupIdentity.operationId)
+      ) {
+        throw stableError("tikhub-malformed-response");
+      }
+      const removed = await this.options.jobs.removeIfCurrent({
+        key: cleanupIdentity.key,
+        jobId: cleanupIdentity.jobId,
+        connectionId: cleanupIdentity.connectionId,
+      });
       if (removed) {
         recordProgress(
           attachOperationScope(
             this.options.operationJournal,
-            context.operationId,
+            cleanupIdentity.operationId,
             identity.itemId,
           ),
-          "completed",
+          "saving",
           { provider: "tikhub", contentBasis: "youtube-transcript" },
         );
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof YouTubeTranscriptError) throw error;
       throw stableError("tikhub-budget-unavailable");
     }
   }
@@ -451,28 +465,29 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
           FREE_OPERATION_EVIDENCE,
         );
       }
+      const durableJob = await this.ensureOperationIdentity(
+        currentJob,
+        identity.operationId,
+      );
       const journal = attachOperationScope(
         this.options.operationJournal,
-        currentJob.schemaVersion === 2
-          ? currentJob.operationId
-          : identity.operationId,
+        durableJob.operationId,
         identity.itemId,
       );
       recordProgress(journal, "job-received", {
         provider: "tikhub",
         confirmedPaidRequests: 0,
         possiblySent: false,
-        jobId: currentJob.jobId,
+        jobId: durableJob.jobId,
       });
       return await this.pollJob(
         key,
-        currentJob,
+        durableJob,
         stage,
         session,
         signal,
         FREE_OPERATION_EVIDENCE,
         journal,
-        identity.operationId,
       );
     }
 
@@ -614,25 +629,52 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
   private async ensureOperationIdentity(
     job: TikHubCaptionJobRecord,
     operationId: string,
-  ): Promise<TikHubCaptionJobRecord> {
+  ): Promise<TikHubCaptionJobRecordV2> {
     if (job.schemaVersion === 2) return job;
     const key = safeJobKey(job, job.stage, job.languageCode);
-    const upgraded: TikHubCaptionJobRecord = {
+    const timestamp = safeTimestamp(this.options.clock);
+    const upgraded: TikHubCaptionJobRecordV2 = {
       ...job,
       schemaVersion: 2,
       operationId,
+      createdAt: timestamp,
+      lastCheckedAt: timestamp,
     };
-    let replaced: boolean;
+    let replaced = false;
+    let replacementFailed = false;
     try {
       replaced = await this.options.jobs.replaceIfCurrent(
         jobIdentity(key, job),
         upgraded,
       );
     } catch {
+      replacementFailed = true;
+    }
+    if (replaced) return upgraded;
+
+    let current: TikHubCaptionJobRecord | null;
+    try {
+      current = await this.options.jobs.read(key);
+    } catch {
       throw stableError("tikhub-budget-unavailable");
     }
-    if (!replaced) throw stableError("tikhub-job-expired");
-    return upgraded;
+    if (
+      current?.schemaVersion === 2 &&
+      current.jobId === job.jobId &&
+      current.connectionId === job.connectionId &&
+      isExpectedJob(
+        current,
+        job,
+        job.stage,
+        job.languageCode,
+        job.connectionId,
+      )
+    ) {
+      return current;
+    }
+    throw stableError(
+      replacementFailed ? "tikhub-budget-unavailable" : "tikhub-job-expired",
+    );
   }
 
   private async pendingContentJob(
@@ -678,7 +720,6 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
     signal: AbortSignal | undefined,
     evidence: TranscriptProviderOperationEvidence,
     journal?: OperationJournalScope,
-    operationId?: string,
   ): Promise<StageOperationResult> {
     let job = { ...initialJob };
     for (let attempt = 0; attempt < this.maxPolls; attempt += 1) {
@@ -728,17 +769,10 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
         if (response.jobId !== job.jobId) {
           throw stableError("tikhub-malformed-response", evidence);
         }
-        const replacement: TikHubCaptionJobRecord = job.schemaVersion === 2
-          ? {
-              ...job,
-              lastCheckedAt: safeTimestamp(this.options.clock, evidence),
-            }
-          : {
-              ...job,
-              schemaVersion: 2,
-              operationId: operationId ?? journal?.operationId ?? "",
-              lastCheckedAt: safeTimestamp(this.options.clock, evidence),
-            };
+        const replacement: TikHubCaptionJobRecord = {
+          ...job,
+          lastCheckedAt: safeTimestamp(this.options.clock, evidence),
+        };
         let replaced: boolean;
         try {
           replaced = await this.options.jobs.replaceIfCurrent(
@@ -1003,6 +1037,10 @@ function recordFailure(
   safelyRecord(() => scope?.fail(stage, journalErrorCode(code), details));
 }
 
+function closeScope(scope: OperationJournalScope): void {
+  safelyRecord(() => scope.abort("trying-provider"));
+}
+
 function safelyRecord(operation: () => Promise<void> | undefined): void {
   try {
     void operation()?.catch(() => undefined);
@@ -1177,36 +1215,49 @@ function jobIdentity(
 
 function persistenceToken(
   key: string,
-  job: Pick<TikHubCaptionJobRecord, "jobId" | "connectionId">,
-): TikHubCaptionJobIdentity {
-  return Object.freeze(jobIdentity(key, job));
+  job: TikHubCaptionJobRecord,
+): TikHubCaptionPersistenceToken {
+  if (job.schemaVersion !== 2) {
+    throw stableError("tikhub-malformed-response");
+  }
+  return Object.freeze({
+    ...jobIdentity(key, job),
+    operationId: job.operationId,
+  });
+}
+
+interface TikHubCaptionPersistenceToken extends TikHubCaptionJobIdentity {
+  readonly operationId: string;
 }
 
 function parsePersistenceToken(
   value: unknown,
   expectedKey: string,
-): TikHubCaptionJobIdentity {
+): TikHubCaptionPersistenceToken {
   try {
     if (
       !plainRecord(value) ||
       Object.getPrototypeOf(value) !== Object.prototype ||
-      !hasExactKeys(value, ["key", "jobId", "connectionId"])
+      !hasExactKeys(value, ["key", "jobId", "connectionId", "operationId"])
     ) {
       throw new Error("invalid persistence token");
     }
     const key = ownData(value, "key");
     const jobId = ownData(value, "jobId");
     const connectionId = ownData(value, "connectionId");
+    const operationId = ownData(value, "operationId");
     if (
       key !== expectedKey ||
       typeof jobId !== "string" ||
       !JOB_ID.test(jobId) ||
       typeof connectionId !== "string" ||
-      !isCanonicalConnectionId(connectionId)
+      !isCanonicalConnectionId(connectionId) ||
+      typeof operationId !== "string" ||
+      !OPERATION_ID.test(operationId)
     ) {
       throw new Error("invalid persistence token");
     }
-    return { key, jobId, connectionId };
+    return { key, jobId, connectionId, operationId };
   } catch {
     throw stableError("tikhub-malformed-response");
   }
