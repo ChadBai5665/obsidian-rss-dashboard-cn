@@ -536,4 +536,143 @@ describe("ImportExportService", () => {
       expect(copyTextToClipboard).not.toHaveBeenCalled();
     });
   });
+
+  describe("safe operation journal previews", () => {
+    it("creates a frozen preview from the safe-text port without copying", async () => {
+      const getSafeOperationJournalExport = vi
+        .fn()
+        .mockResolvedValue("SAFE JOURNAL EXPORT");
+      const svc = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        getSafeOperationJournalExport,
+        createDiagnosticsToken: () => "journal-preview",
+      });
+
+      const preview = await svc.createOperationJournalPreview(30);
+
+      expect(getSafeOperationJournalExport).toHaveBeenCalledWith(30);
+      expect(preview).toEqual({
+        token: "journal-preview",
+        text: "SAFE JOURNAL EXPORT",
+      });
+      expect(Object.isFrozen(preview)).toBe(true);
+      expect(copyTextToClipboard).not.toHaveBeenCalled();
+    });
+
+    it("atomically consumes the exact token and text before clipboard work", async () => {
+      let releaseClipboard!: () => void;
+      vi.mocked(copyTextToClipboard).mockImplementationOnce(
+        () =>
+          new Promise<"copied">((resolve) => {
+            releaseClipboard = () => resolve("copied");
+          }),
+      );
+      const svc = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        getSafeOperationJournalExport: async () => "SAFE JOURNAL EXPORT",
+        createDiagnosticsToken: () => "journal-preview",
+      });
+      const preview = await svc.createOperationJournalPreview(7);
+
+      const first = svc.copyOperationJournalPreview(
+        preview.token,
+        preview.text,
+      );
+      const second = svc.copyOperationJournalPreview(
+        preview.token,
+        preview.text,
+      );
+
+      expect(copyTextToClipboard).toHaveBeenCalledTimes(1);
+      releaseClipboard();
+      await Promise.all([first, second]);
+      expect(copyTextToClipboard).toHaveBeenCalledTimes(1);
+    });
+
+    it("fails closed for kind mismatch, changed text, unknown and expired tokens", async () => {
+      let now = 1_000;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      const tokens = ["journal-kind", "journal-text", "journal-expired"];
+      const svc = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        getSafeDiagnosticsInput: () => ({
+          pluginVersion: "0.1.0",
+          obsidianVersion: "1.8.7",
+          osName: "linux",
+          generatedAt: "2026-07-30T00:00:00.000Z",
+          sourceKinds: [],
+          statusCodes: [],
+          aggregateCounts: {},
+        }),
+        getSafeOperationJournalExport: async () => "SAFE JOURNAL EXPORT",
+        createDiagnosticsToken: () => tokens.shift()!,
+      });
+
+      const wrongKind = await svc.createOperationJournalPreview(7);
+      await svc.copySafeDiagnosticsPreview(wrongKind.token, wrongKind.text);
+
+      const changed = await svc.createOperationJournalPreview(7);
+      await svc.copyOperationJournalPreview(changed.token, `${changed.text}!`);
+      await svc.copyOperationJournalPreview("unknown", changed.text);
+
+      const expired = await svc.createOperationJournalPreview(30);
+      now += 5 * 60_000;
+      await svc.copyOperationJournalPreview(expired.token, expired.text);
+
+      expect(copyTextToClipboard).not.toHaveBeenCalled();
+    });
+
+    it("revokes on close and never inspects hostile token or text getters", async () => {
+      const svc = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        getSafeOperationJournalExport: async () => "SAFE JOURNAL EXPORT",
+        createDiagnosticsToken: () => "journal-preview",
+      });
+      const preview = await svc.createOperationJournalPreview(7);
+      svc.revokeOperationJournalPreview(preview.token);
+      await svc.copyOperationJournalPreview(preview.token, preview.text);
+
+      const getter = vi.fn(() => "journal-preview");
+      const hostile = Object.create(null) as Record<string, unknown>;
+      Object.defineProperty(hostile, "toString", { get: getter });
+      Object.defineProperty(hostile, Symbol.toPrimitive, { get: getter });
+      await svc.copyOperationJournalPreview(
+        hostile as unknown as string,
+        hostile as unknown as string,
+      );
+
+      expect(getter).not.toHaveBeenCalled();
+      expect(copyTextToClipboard).not.toHaveBeenCalled();
+    });
+
+    it("contains unavailable or hostile safe-text providers before token creation", async () => {
+      const createDiagnosticsToken = vi.fn(() => "must-not-exist");
+      const unavailable = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        createDiagnosticsToken,
+      });
+      await expect(
+        unavailable.createOperationJournalPreview(7),
+      ).rejects.toThrow("Operation journal export is unavailable.");
+
+      const hostile = new ImportExportService({
+        settings: makeSettings(),
+        isMobile: false,
+        getSafeOperationJournalExport: async () =>
+          ({ text: "not a trusted string" }) as unknown as string,
+        createDiagnosticsToken,
+      });
+      await expect(hostile.createOperationJournalPreview(7)).rejects.toThrow(
+        "Unable to create an operation journal preview.",
+      );
+
+      expect(createDiagnosticsToken).not.toHaveBeenCalled();
+      expect(copyTextToClipboard).not.toHaveBeenCalled();
+    });
+  });
 });

@@ -15,6 +15,8 @@ import { installObsidianDomPolyfills } from "../test-dom-polyfills";
 import type RssDashboardPlugin from "../../../main";
 import { ImportSuccessModal } from "../../../src/modals/import-success-modal";
 import { DiagnosticsPreviewModal } from "../../../src/modals/diagnostics-preview-modal";
+import { OperationJournalClearModal } from "../../../src/modals/operation-journal-clear-modal";
+import type { OperationJournalSettingsPort } from "../../../src/settings/tabs/import-export-settings-tab";
 
 type ObsidianHTMLElement = HTMLElement & {
   empty: () => void;
@@ -81,6 +83,27 @@ function createPlugin() {
     if (imported.locale) plugin.settings.locale = imported.locale;
   });
   return plugin;
+}
+
+function createOperationJournalPort(
+  overrides: Partial<OperationJournalSettingsPort> = {},
+): OperationJournalSettingsPort {
+  return {
+    stats: vi.fn(async () => ({
+      bytes: 1_536,
+      days: 3,
+      eventCount: 8,
+      earliestDate: "2026-07-28",
+    })),
+    createPreview: vi.fn(async () =>
+      Object.freeze({ token: "journal-preview", text: "SAFE JOURNAL" }),
+    ),
+    copyPreview: vi.fn(async () => {}),
+    revokePreview: vi.fn(),
+    clear: vi.fn(async () => {}),
+    openDashboard: vi.fn(async () => {}),
+    ...overrides,
+  };
 }
 
 beforeEach(() => {
@@ -345,6 +368,201 @@ describe("Auto Backup Helpers", () => {
       expect(modal.contentEl.querySelector("pre")?.textContent).toBe(
         '{"pluginVersion":"0.1.0"}',
       );
+    });
+
+    it("renders concise journal statistics and opens the top-level dashboard journal", async () => {
+      const containerEl = createContainerEl();
+      const plugin = createPlugin();
+      const port = createOperationJournalPort();
+
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+        port,
+      );
+      await flushPromises();
+
+      const journal = getSettingByName(containerEl, "Operation journal");
+      expect(journal.textContent).toContain("1.5 KB");
+      expect(journal.textContent).toContain("3 record days");
+      expect(journal.textContent).toContain("2026-07-28");
+
+      const view = Array.from(
+        journal.querySelectorAll<HTMLButtonElement>("button"),
+      ).find((candidate) => candidate.textContent === "View operation journal")!;
+      view.click();
+      await flushPromises();
+      expect(port.openDashboard).toHaveBeenCalledTimes(1);
+    });
+
+    it("previews the safe 30-day journal before a second explicit copy click", async () => {
+      const containerEl = createContainerEl();
+      const plugin = createPlugin();
+      const port = createOperationJournalPort();
+      const openSpy = vi
+        .spyOn(DiagnosticsPreviewModal.prototype, "open")
+        .mockImplementation(function openPreview() {
+          this.onOpen();
+          return this;
+        });
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+        port,
+      );
+
+      const exportButton = Array.from(
+        containerEl.querySelectorAll<HTMLButtonElement>("button"),
+      ).find(
+        (candidate) => candidate.textContent === "Export sanitized journal",
+      )!;
+      exportButton.click();
+      await flushPromises();
+
+      expect(port.createPreview).toHaveBeenCalledWith(30);
+      expect(port.copyPreview).not.toHaveBeenCalled();
+      const modal = openSpy.mock.instances[0] as DiagnosticsPreviewModal;
+      expect(modal.contentEl.querySelector("pre")?.textContent).toBe(
+        "SAFE JOURNAL",
+      );
+      const copy = Array.from(
+        modal.contentEl.querySelectorAll<HTMLButtonElement>("button"),
+      ).find(
+        (candidate) => candidate.textContent === "Copy sanitized journal",
+      )!;
+      copy.click();
+      await flushPromises();
+      expect(port.copyPreview).toHaveBeenCalledWith(
+        "journal-preview",
+        "SAFE JOURNAL",
+      );
+    });
+
+    it("offers a controlled unavailable state when no settings port exists", async () => {
+      const containerEl = createContainerEl();
+      const plugin = createPlugin();
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+      );
+      await flushPromises();
+
+      const journal = getSettingByName(containerEl, "Operation journal");
+      expect(journal.textContent).toContain(
+        "Operation journal controls are temporarily unavailable.",
+      );
+      expect(
+        Array.from(journal.querySelectorAll<HTMLButtonElement>("button")).every(
+          (control) => control.disabled,
+        ),
+      ).toBe(true);
+    });
+
+    it("accepts the optional plugin facade that Task 11 can compose", async () => {
+      const containerEl = createContainerEl();
+      const plugin = createPlugin();
+      const port = createOperationJournalPort();
+      const pluginWithFacade = {
+        ...plugin,
+        getOperationJournalSettings: vi.fn(() => port),
+      };
+
+      renderImportExportSettingsTab(
+        containerEl,
+        pluginWithFacade as unknown as RssDashboardPlugin,
+      );
+      await flushPromises();
+
+      expect(pluginWithFacade.getOperationJournalSettings).toHaveBeenCalledTimes(1);
+      expect(port.stats).toHaveBeenCalledTimes(1);
+      expect(
+        getSettingByName(containerEl, "Operation journal").textContent,
+      ).toContain("1.5 KB");
+    });
+
+    it("refreshes statistics after a successful clear", async () => {
+      const containerEl = createContainerEl();
+      const plugin = createPlugin();
+      const port = createOperationJournalPort();
+      const openSpy = vi
+        .spyOn(OperationJournalClearModal.prototype, "open")
+        .mockImplementation(function openClear() {
+          this.onOpen();
+          return this;
+        });
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+        port,
+      );
+      await flushPromises();
+
+      const clearButton = Array.from(
+        containerEl.querySelectorAll<HTMLButtonElement>("button"),
+      ).find((candidate) => candidate.textContent === "Clear journal")!;
+      clearButton.click();
+      const modal = openSpy.mock.instances[0] as OperationJournalClearModal;
+      const confirm = Array.from(
+        modal.contentEl.querySelectorAll<HTMLButtonElement>("button"),
+      ).find(
+        (candidate) => candidate.textContent === "Clear operation journal",
+      )!;
+      confirm.click();
+      await flushPromises();
+      await flushPromises();
+
+      expect(port.clear).toHaveBeenCalledTimes(1);
+      expect(port.stats).toHaveBeenCalledTimes(2);
+    });
+
+    it("ignores stale statistics after the tab is replaced", async () => {
+      let resolveOld!: (value: {
+        bytes: number;
+        days: number;
+        eventCount: number;
+        earliestDate?: string;
+      }) => void;
+      const oldStats = new Promise<{
+        bytes: number;
+        days: number;
+        eventCount: number;
+        earliestDate?: string;
+      }>((resolve) => {
+        resolveOld = resolve;
+      });
+      const containerEl = createContainerEl();
+      const plugin = createPlugin();
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+        createOperationJournalPort({ stats: vi.fn(() => oldStats) }),
+      );
+
+      containerEl.empty();
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+        createOperationJournalPort({
+          stats: vi.fn(async () => ({
+            bytes: 2_048,
+            days: 2,
+            eventCount: 4,
+            earliestDate: "2026-07-29",
+          })),
+        }),
+      );
+      await flushPromises();
+      resolveOld({
+        bytes: 999_999,
+        days: 99,
+        eventCount: 99,
+        earliestDate: "1900-01-01",
+      });
+      await flushPromises();
+
+      expect(containerEl.textContent).toContain("2 KB");
+      expect(containerEl.textContent).not.toContain("999,999");
+      expect(containerEl.textContent).not.toContain("1900-01-01");
     });
 
     it("delegates data.json mutation to the transactional plugin entrypoint", async () => {

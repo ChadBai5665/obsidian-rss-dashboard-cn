@@ -334,6 +334,18 @@ export const en = {
   "diagnostics.preview.desc": "Only the exact text below will be copied after you confirm.",
   "diagnostics.preview.cancel": "Cancel",
   "diagnostics.preview.copy": "Copy diagnostics",
+  "settings.operationJournal.title": "Operation journal",
+  "settings.operationJournal.loading": "Loading local statistics…",
+  "settings.operationJournal.unavailable":
+    "Operation journal controls are temporarily unavailable.",
+  "settings.operationJournal.stats":
+    "{bytes} · {days} record days · Earliest {earliest}",
+  "settings.operationJournal.noRecords": "None yet",
+  "settings.operationJournal.view": "View operation journal",
+  "settings.operationJournal.export": "Export sanitized journal",
+  "settings.operationJournal.clear": "Clear journal",
+  "settings.operationJournal.previewUnavailable":
+    "Unable to prepare a sanitized journal preview.",
   "settings.import.preferences": "User preferences file",
   "settings.import.preferencesDesc": "Import or export plugin preferences.",
   "settings.import.importPreferences": "Import usersettings.json",
@@ -1237,6 +1249,25 @@ export const en = {
   "operationJournal.title": "Operation journal",
   "operationJournal.subtitle": "A local timeline of background work and saved results.",
   "operationJournal.entry": "Operation journal",
+  "operationJournal.preview.title": "Review sanitized operation journal",
+  "operationJournal.preview.desc":
+    "This read-only preview is the exact safe text that will be copied after you confirm.",
+  "operationJournal.preview.cancel": "Cancel",
+  "operationJournal.preview.copy": "Copy sanitized journal",
+  "operationJournal.clearModal.title": "Clear operation journal?",
+  "operationJournal.clearModal.desc":
+    "Only local operation-journal records will be removed. These items will not be deleted:",
+  "operationJournal.clearModal.preserveConfiguration": "Configuration",
+  "operationJournal.clearModal.preserveKeys": "Keys",
+  "operationJournal.clearModal.preserveSubscriptions": "Subscriptions",
+  "operationJournal.clearModal.preserveTranscripts": "Transcripts",
+  "operationJournal.clearModal.preserveCollection": "Collection and history",
+  "operationJournal.clearModal.preserveAnalyses": "AI analyses",
+  "operationJournal.clearModal.preserveMarkdown": "Markdown files",
+  "operationJournal.clearModal.cancel": "Cancel",
+  "operationJournal.clearModal.confirm": "Clear operation journal",
+  "operationJournal.clearModal.failed":
+    "Nothing was cleared. Please try again.",
   "operationJournal.unavailable": "The operation journal service is temporarily unavailable.",
   "operationJournal.unavailableDetail": "The dashboard is ready. Reopen it after the local journal service has started.",
   "operationJournal.loadFailed": "Unable to load operation records right now.",
@@ -2043,6 +2074,10 @@ export const en = {
   "service.import.copyFailed": "Unable to copy {filename}",
   "service.diagnostics.copied": "Diagnostics copied to clipboard",
   "service.diagnostics.copyFailed": "Unable to copy diagnostics",
+  "service.operationJournal.copied":
+    "Sanitized operation journal copied to clipboard",
+  "service.operationJournal.copyFailed":
+    "Unable to copy sanitized operation journal",
   "service.media.youtubeChannelFailed": "Error fetching YouTube channel: {error}",
   "service.media.youtubeFeedFailed": "Error processing YouTube feed: {error}",
   "service.webViewer.openFailed": "Error opening URL in web viewer: {error}",

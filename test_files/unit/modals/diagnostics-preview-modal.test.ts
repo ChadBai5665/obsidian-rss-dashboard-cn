@@ -11,6 +11,10 @@ function button(modal: DiagnosticsPreviewModal, label: string): HTMLButtonElemen
   return match;
 }
 
+function flushPromises(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 beforeEach(() => {
   installObsidianDomPolyfills();
   document.body.empty();
@@ -78,5 +82,49 @@ describe("DiagnosticsPreviewModal", () => {
 
     expect(copyPreview).toHaveBeenCalledTimes(1);
     expect(copyPreview).toHaveBeenCalledWith("one", preview);
+  });
+
+  it("reuses the immutable preview flow with operation-journal copy", async () => {
+    const preview = "SAFE AGGREGATE JOURNAL";
+    const copyPreview = vi.fn(async () => {});
+    const modal = new DiagnosticsPreviewModal(new App(), {
+      locale: "en",
+      kind: "operation-journal",
+      preview: Object.freeze({ token: "journal-one", text: preview }),
+      copyPreview,
+      revokePreview: vi.fn(),
+    });
+    modal.open();
+
+    expect(modal.contentEl.textContent).toContain(
+      "Review sanitized operation journal",
+    );
+    const rendered = modal.contentEl.querySelector("pre");
+    expect(rendered?.textContent).toBe(preview);
+    expect(rendered?.hasAttribute("contenteditable")).toBe(false);
+    expect(copyPreview).not.toHaveBeenCalled();
+
+    button(modal, "Copy sanitized journal").click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(copyPreview).toHaveBeenCalledWith("journal-one", preview);
+  });
+
+  it("contains a rejected copy dependency and still closes safely", async () => {
+    const modal = new DiagnosticsPreviewModal(new App(), {
+      locale: "en",
+      preview: { token: "one", text: "SAFE" },
+      copyPreview: vi.fn(async () => {
+        throw new Error("clipboard dependency failed");
+      }),
+      revokePreview: vi.fn(),
+    });
+    const closeSpy = vi.spyOn(modal, "close");
+    modal.open();
+
+    button(modal, "Copy diagnostics").click();
+    await flushPromises();
+
+    expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 });
