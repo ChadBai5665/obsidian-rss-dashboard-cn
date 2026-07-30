@@ -106,6 +106,7 @@ import {
 import { isTimeoutFeedError } from "./src/services/feed-parser/feed-errors";
 import {
   bindFeedItemsToSourceIdentity,
+  createCanonicalFeedItemId,
   createSourceLocator,
   isStableItemId,
   resolveFeedItemStableId,
@@ -177,6 +178,15 @@ import {
   XTopicAdapter,
   XTopicRefreshError,
 } from "./src/sources/tikhub/x-topic-adapter";
+import type {
+  OperationJournalPort,
+  OperationJournalScope,
+} from "./src/operation-journal/operation-journal-service";
+import type {
+  OperationErrorCode,
+  OperationSubject,
+  RefreshOperationDetails,
+} from "./src/operation-journal/operation-event";
 
 export interface FeedRefreshResult {
   feed: Feed;
@@ -192,6 +202,33 @@ interface FeedRefreshPublication {
   result: FeedRefreshResult;
   sourceId: string;
   sourceIdentity: string;
+}
+
+type RefreshTrigger = "manual" | "startup" | "schedule";
+
+interface RefreshInvocation {
+  trigger: RefreshTrigger;
+  action: "all" | "failed" | "source" | "folder";
+  feeds?: readonly Feed[];
+  subject?: OperationSubject;
+}
+
+type FeedRefreshOutcome =
+  | {
+      status: "succeeded";
+      publication: FeedRefreshPublication;
+      newItems: number;
+    }
+  | {
+      status: "failed";
+      errorCode: OperationErrorCode;
+      timedOut: boolean;
+    }
+  | { status: "aborted" };
+
+interface RefreshBatchOutcome {
+  readonly outcomes: readonly FeedRefreshOutcome[];
+  readonly details: RefreshOperationDetails;
 }
 
 export interface FiltersUpdatedEventPayload {
@@ -573,6 +610,13 @@ class FeedRefreshPipelineError extends Error {
   }
 }
 
+class RefreshSettingsSaveError extends Error {
+  constructor() {
+    super("Refresh settings save failed.");
+    this.name = "RefreshSettingsSaveError";
+  }
+}
+
 class RefreshAttemptToken {
   private active = true;
   private readonly controller = new AbortController();
@@ -706,6 +750,56 @@ function toFeedRefreshPipelineError(error: unknown): FeedRefreshPipelineError {
   return isTimeoutFeedError(error)
     ? new FeedRefreshPipelineError("timed-out", "Source refresh timed out.")
     : new FeedRefreshPipelineError("refresh-failed", "Source refresh failed.");
+}
+
+function toRefreshOperationErrorCode(
+  failure: FeedRefreshPipelineError,
+): OperationErrorCode {
+  switch (failure.code) {
+    case "timed-out":
+      return "timeout";
+    case "collection-failed":
+      return "cache-save-failed";
+    case "invalid-source-config":
+      return "source-validation-failed";
+    case "missing-key":
+      return "missing-key";
+    case "invalid-key":
+      return "invalid-key";
+    case "budget-unavailable":
+      return "budget-exhausted";
+    case "tikhub-disabled":
+      return "tikhub-disabled";
+    case "refresh-failed":
+    case "state-failed":
+      return "source-refresh-failed";
+  }
+}
+
+function countNewRefreshItems(result: FeedRefreshResult): number {
+  const sourceId = result.feed.feedId ?? result.feed.url;
+  const sourceType = result.feed.sourceKind ?? "feed";
+  const stableIds = (items: readonly FeedItem[]): Set<string> => {
+    const ids = new Set<string>();
+    for (const item of items) {
+      try {
+        ids.add(
+          isStableItemId(item.rssDashboardId)
+            ? item.rssDashboardId
+            : createCanonicalFeedItemId({ sourceType, sourceId, item }),
+        );
+      } catch {
+        // Malformed identities are not guessed into the journal count.
+      }
+    }
+    return ids;
+  };
+  const previousIds = stableIds(result.previousItems);
+  let newItems = 0;
+  for (const itemId of stableIds(result.refreshedItems)) {
+    if (!previousIds.has(itemId)) newItems += 1;
+  }
+  return newItems;
 }
 
 const tikhubLedgerVaultIdentities = new WeakMap<object, string>();
@@ -1547,7 +1641,7 @@ export default class RssDashboardPlugin extends Plugin {
       if (intervalMs !== null) {
         this.registerInterval(
           window.setInterval(() => {
-            void this.refreshFeeds();
+            void this.runRefresh({ trigger: "schedule", action: "all" });
           }, intervalMs),
         );
       }
@@ -1568,15 +1662,10 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private async refreshOnOpenIfNeeded(): Promise<void> {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      await this.refreshOnOpenWithinSession();
-    } finally {
-      this.endRefreshSession();
-    }
+    await this.prepareStartupRefresh();
   }
 
-  private async refreshOnOpenWithinSession(): Promise<void> {
+  private async prepareStartupRefresh(): Promise<void> {
     const generation = this.automaticRefreshGeneration;
     if (!this.isAutomaticRefreshActive(generation)) {
       return;
@@ -1584,6 +1673,11 @@ export default class RssDashboardPlugin extends Plugin {
 
     const refreshableFeeds = this.getRefreshableFeeds(this.settings.feeds);
     if (refreshableFeeds.length === 0) {
+      await this.runRefresh({
+        trigger: "startup",
+        action: "all",
+        feeds: [],
+      });
       return;
     }
 
@@ -1600,6 +1694,11 @@ export default class RssDashboardPlugin extends Plugin {
       dueSourceIdSet.has(feed.feedId ?? feed.url),
     );
     if (dueFeeds.length === 0) {
+      await this.runRefresh({
+        trigger: "startup",
+        action: "all",
+        feeds: [],
+      });
       return;
     }
 
@@ -1614,7 +1713,11 @@ export default class RssDashboardPlugin extends Plugin {
         if (!this.isAutomaticRefreshActive(generation)) {
           return;
         }
-        void this.refreshFeeds(dueFeeds);
+        void this.runRefresh({
+          trigger: "startup",
+          action: "all",
+          feeds: dueFeeds,
+        });
       }, delay * 1000);
       if (!this.isAutomaticRefreshActive(generation)) {
         window.clearTimeout(timeoutId);
@@ -1627,7 +1730,11 @@ export default class RssDashboardPlugin extends Plugin {
     if (!this.isAutomaticRefreshActive(generation)) {
       return;
     }
-    await this.refreshFeedsWithinSession(dueFeeds);
+    await this.runRefresh({
+      trigger: "startup",
+      action: "all",
+      feeds: dueFeeds,
+    });
   }
 
   private isAutomaticRefreshActive(generation: number): boolean {
@@ -2729,28 +2836,73 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  async refreshFeeds(selectedFeeds?: Feed[]) {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      await this.refreshFeedsWithinSession(selectedFeeds);
-    } finally {
-      this.endRefreshSession();
-    }
+  async refreshFeeds(selectedFeeds?: Feed[]): Promise<void> {
+    const selected = selectedFeeds ? [...selectedFeeds] : undefined;
+    const single = selected?.length === 1 ? selected[0] : undefined;
+    await this.runRefresh({
+      trigger: "manual",
+      action: single ? "source" : "all",
+      ...(selected ? { feeds: selected } : {}),
+      ...(single ? { subject: this.refreshSubjectForFeed(single) } : {}),
+    });
   }
 
-  private async refreshFeedsWithinSession(selectedFeeds?: Feed[]) {
+  private async runRefresh(invocation: RefreshInvocation): Promise<void> {
+    const startedAt = Date.now();
+    if (!this.tryBeginRefreshSession()) {
+      const rejectedScope = this.beginRefreshJournalSafely(invocation);
+      this.failRefreshJournalSafely(
+        rejectedScope,
+        "refresh-failed",
+        this.emptyRefreshDetails(Date.now() - startedAt),
+      );
+      return;
+    }
+
+    const scope = this.beginRefreshJournalSafely(invocation);
+    let total = 0;
     try {
-      const candidateFeeds = selectedFeeds || this.settings.feeds;
+      if (invocation.trigger === "manual") {
+        this.cancelPendingStartupRefresh();
+      }
+
+      let candidateFeeds: readonly Feed[];
+      if (invocation.action === "failed") {
+        const failedSourceIds = new Set(
+          await this.getSourceRefreshLedger().getSourceIdsWithStatus("error"),
+        );
+        candidateFeeds = this.settings.feeds.filter((feed) =>
+          failedSourceIds.has(feed.feedId ?? feed.url)
+        );
+      } else {
+        candidateFeeds = invocation.feeds ?? this.settings.feeds;
+      }
+
       if (candidateFeeds.length === 0) {
+        if (invocation.action === "source") {
+          this.abortRefreshJournalSafely(scope);
+        } else {
+          this.succeedRefreshJournalSafely(
+            scope,
+            this.emptyRefreshDetails(Date.now() - startedAt),
+          );
+        }
         return;
       }
 
-      const feedsToRefresh = this.getRefreshableFeeds(candidateFeeds);
+      const feedsToRefresh = invocation.action === "source"
+        ? candidateFeeds.filter((feed) => !this.isDirectSourceRefreshBlocked(feed))
+        : this.getRefreshableFeeds(candidateFeeds);
+      total = feedsToRefresh.length;
       if (feedsToRefresh.length === 0) {
         this.notify(
-          selectedFeeds
+          invocation.feeds
             ? "plugin.refresh.allSelectedExcluded"
             : "plugin.refresh.allExcluded",
+        );
+        this.succeedRefreshJournalSafely(
+          scope,
+          this.emptyRefreshDetails(Date.now() - startedAt),
         );
         return;
       }
@@ -2759,86 +2911,81 @@ export default class RssDashboardPlugin extends Plugin {
         console.warn(
           "[RSS dashboard] Feed parser not initialized; skipping refresh.",
         );
+        this.failRefreshJournalSafely(scope, "refresh-failed", {
+          total,
+          succeeded: 0,
+          failed: total,
+          newItems: 0,
+          elapsedMs: Date.now() - startedAt,
+        });
         return;
       }
 
-      let feedNoticeText = "";
-      if (feedsToRefresh.length === 1) {
-        feedNoticeText = feedsToRefresh[0].title;
-      } else {
-        feedNoticeText = this.t("plugin.feedCount", {
-          count: feedsToRefresh.length,
-        });
-      }
-
+      const feedNoticeText = feedsToRefresh.length === 1
+        ? feedsToRefresh[0].title
+        : this.t("plugin.feedCount", { count: feedsToRefresh.length });
       this.notifyRefreshStart(feedsToRefresh, feedNoticeText);
       const sourceRegistry = this.takeSourceRegistryForRun();
-      if (feedsToRefresh.length === 1) {
-        await this.refreshSingleFeed(
-          feedsToRefresh[0],
-          feedNoticeText,
-          sourceRegistry,
-        );
-        return;
+      const outcomes = feedsToRefresh.length === 1
+        ? [await this.refreshSingleFeed(
+            feedsToRefresh[0],
+            feedNoticeText,
+            sourceRegistry,
+          )]
+        : await this.refreshFeedBatch(
+            feedsToRefresh,
+            feedNoticeText,
+            sourceRegistry,
+          );
+      if (feedsToRefresh.length === 1 && outcomes[0]?.status === "failed") {
+        console.error("[RSS dashboard] Refresh request failed.");
+        this.notify("plugin.refreshFailed");
       }
-
-      await this.refreshFeedBatch(
-        feedsToRefresh,
-        feedNoticeText,
-        sourceRegistry,
+      const batch = this.summarizeRefreshOutcomes(
+        outcomes,
+        total,
+        Date.now() - startedAt,
       );
-    } catch {
-      console.error("[RSS dashboard] Refresh request failed.");
-      this.notify("plugin.refreshFailed");
+      this.closeRefreshJournalSafely(scope, invocation, batch);
+    } catch (error) {
+      const errorCode: OperationErrorCode =
+        error instanceof RefreshSettingsSaveError
+          ? "settings-save-failed"
+          : "refresh-failed";
+      console.error(
+        invocation.action === "failed"
+          ? "[RSS dashboard] Failed-source refresh request failed."
+          : "[RSS dashboard] Refresh request failed.",
+      );
+      this.notify(
+        invocation.action === "failed"
+          ? "plugin.refresh.failedSourcesFailed"
+          : "plugin.refreshFailed",
+      );
+      this.failRefreshJournalSafely(scope, errorCode, {
+        total,
+        succeeded: 0,
+        failed: total,
+        newItems: 0,
+        elapsedMs: Date.now() - startedAt,
+      });
+    } finally {
+      this.endRefreshSession();
     }
   }
 
   async refreshFailedSources(): Promise<void> {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      await this.refreshFailedSourcesWithinSession();
-    } finally {
-      this.endRefreshSession();
-    }
-  }
-
-  private async refreshFailedSourcesWithinSession(): Promise<void> {
-    try {
-      const failedSourceIds = new Set(
-        await this.getSourceRefreshLedger().getSourceIdsWithStatus("error"),
-      );
-      const failedFeeds = this.getRefreshableFeeds(this.settings.feeds).filter(
-        (feed) => failedSourceIds.has(feed.feedId ?? feed.url),
-      );
-      if (failedFeeds.length > 0) {
-        await this.refreshFeedsWithinSession(failedFeeds);
-      }
-    } catch {
-      console.error("[RSS dashboard] Failed-source refresh request failed.");
-      this.notify("plugin.refresh.failedSourcesFailed");
-    }
+    await this.runRefresh({ trigger: "manual", action: "failed" });
   }
 
   /** Public manual entry point used by commands and dashboard controls. */
   public async manualRefreshAllSources(): Promise<void> {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      this.cancelPendingStartupRefresh();
-      await this.refreshFeedsWithinSession();
-    } finally {
-      this.endRefreshSession();
-    }
+    await this.runRefresh({ trigger: "manual", action: "all" });
   }
 
   /** Public manual entry point used by commands and dashboard controls. */
   public async manualRefreshFailedSources(): Promise<void> {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      this.cancelPendingStartupRefresh();
-      await this.refreshFailedSourcesWithinSession();
-    } finally {
-      this.endRefreshSession();
-    }
+    await this.runRefresh({ trigger: "manual", action: "failed" });
   }
 
   /** Public manual entry point used by collection source rows. */
@@ -2856,6 +3003,11 @@ export default class RssDashboardPlugin extends Plugin {
     );
     if (!feed) {
       this.notify("plugin.refresh.sourceGone");
+      await this.runRefresh({
+        trigger: "manual",
+        action: "source",
+        feeds: [],
+      });
       return;
     }
     await this.refreshSelectedFeed(feed);
@@ -2893,33 +3045,13 @@ export default class RssDashboardPlugin extends Plugin {
     }
   }
 
-  async refreshSelectedFeed(feed: Feed) {
-    if (!this.tryBeginRefreshSession()) return;
-    try {
-      this.cancelPendingStartupRefresh();
-      if (this.isDirectSourceRefreshBlocked(feed)) {
-        this.notify("plugin.refresh.allSelectedExcluded");
-        return;
-      }
-      if (!this.feedParser) {
-        console.warn(
-          "[RSS dashboard] Feed parser not initialized; skipping refresh.",
-        );
-        return;
-      }
-
-      this.notifyRefreshStart([feed], feed.title);
-      await this.refreshSingleFeed(
-        feed,
-        feed.title,
-        this.takeSourceRegistryForRun(),
-      );
-    } catch {
-      console.error("[RSS dashboard] Refresh request failed.");
-      this.notify("plugin.refreshFailed");
-    } finally {
-      this.endRefreshSession();
-    }
+  async refreshSelectedFeed(feed: Feed): Promise<void> {
+    await this.runRefresh({
+      trigger: "manual",
+      action: "source",
+      feeds: [feed],
+      subject: this.refreshSubjectForFeed(feed),
+    });
   }
 
   private tryBeginRefreshSession(): boolean {
@@ -2936,7 +3068,161 @@ export default class RssDashboardPlugin extends Plugin {
     this.isMultiFeedRefreshRunning = false;
   }
 
-  async refreshFeedsInFolder(folderPath: string) {
+  /** Task 11 composes the durable journal; refresh remains optional until then. */
+  private getOperationJournalPort(): OperationJournalPort | undefined {
+    return undefined;
+  }
+
+  private refreshSubjectForFeed(feed: Feed): OperationSubject {
+    const sourceId = feed.feedId?.trim();
+    const label = feed.title?.normalize("NFC").trim();
+    const safeSourceId = sourceId &&
+        /^[A-Za-z0-9._:-]{1,200}$/u.test(sourceId) &&
+        !/(?:api[ _-]?key|token|secret|password|cookie)/iu.test(sourceId)
+      ? sourceId
+      : undefined;
+    const safeLabel = label &&
+        !hasControlCharacters(label) &&
+        !/(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|authorization\s*:|bearer\s+|(?:api[ _-]?key|token|secret|password|cookie)\s*[:=])/iu
+          .test(label)
+      ? [...label].slice(0, 200).join("")
+      : undefined;
+    return {
+      ...(safeSourceId ? { sourceId: safeSourceId } : {}),
+      ...(safeLabel ? { label: safeLabel } : {}),
+    };
+  }
+
+  private beginRefreshJournalSafely(
+    invocation: RefreshInvocation,
+  ): OperationJournalScope | undefined {
+    try {
+      const port = this.getOperationJournalPort();
+      if (!port || typeof port.begin !== "function") return undefined;
+      const scope = port.begin({
+        category: "refresh",
+        action: invocation.action,
+        trigger: invocation.trigger,
+        stage: "preparing",
+        subject: invocation.subject ?? {},
+        details: {},
+      });
+      return this.isRefreshJournalScope(scope) ? scope : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private isRefreshJournalScope(value: unknown): value is OperationJournalScope {
+    if (!value || typeof value !== "object") return false;
+    const scope = value as Partial<OperationJournalScope>;
+    return (
+      typeof scope.progress === "function" &&
+      typeof scope.succeed === "function" &&
+      typeof scope.fail === "function" &&
+      typeof scope.abort === "function"
+    );
+  }
+
+  private invokeRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+    invoke: (scope: OperationJournalScope) => Promise<void>,
+  ): void {
+    if (!scope) return;
+    try {
+      void Promise.resolve(invoke(scope)).catch(() => undefined);
+    } catch {
+      // Journal failures never alter refresh behavior.
+    }
+  }
+
+  private succeedRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+    details: RefreshOperationDetails,
+  ): void {
+    this.invokeRefreshJournalSafely(
+      scope,
+      async (activeScope) => await activeScope.succeed("completed", details),
+    );
+  }
+
+  private failRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+    errorCode: OperationErrorCode,
+    details: RefreshOperationDetails,
+  ): void {
+    this.invokeRefreshJournalSafely(
+      scope,
+      async (activeScope) =>
+        await activeScope.fail("completed", errorCode, details),
+    );
+  }
+
+  private abortRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+  ): void {
+    this.invokeRefreshJournalSafely(
+      scope,
+      async (activeScope) => await activeScope.abort("completed"),
+    );
+  }
+
+  private emptyRefreshDetails(elapsedMs: number): RefreshOperationDetails {
+    return {
+      total: 0,
+      succeeded: 0,
+      failed: 0,
+      newItems: 0,
+      elapsedMs,
+    };
+  }
+
+  private summarizeRefreshOutcomes(
+    outcomes: readonly FeedRefreshOutcome[],
+    total: number,
+    elapsedMs: number,
+  ): RefreshBatchOutcome {
+    return {
+      outcomes,
+      details: {
+        total,
+        succeeded: outcomes.filter((outcome) => outcome.status === "succeeded")
+          .length,
+        failed: outcomes.filter((outcome) => outcome.status === "failed").length,
+        newItems: outcomes.reduce(
+          (count, outcome) =>
+            count + (outcome.status === "succeeded" ? outcome.newItems : 0),
+          0,
+        ),
+        elapsedMs,
+      },
+    };
+  }
+
+  private closeRefreshJournalSafely(
+    scope: OperationJournalScope | undefined,
+    invocation: RefreshInvocation,
+    batch: RefreshBatchOutcome,
+  ): void {
+    const failures = batch.outcomes.filter(
+      (outcome): outcome is Extract<FeedRefreshOutcome, { status: "failed" }> =>
+        outcome.status === "failed",
+    );
+    if (failures.length > 0) {
+      const errorCode = invocation.action === "source" && failures.length === 1
+        ? failures[0].errorCode
+        : "refresh-failed";
+      this.failRefreshJournalSafely(scope, errorCode, batch.details);
+      return;
+    }
+    if (batch.outcomes.some((outcome) => outcome.status === "aborted")) {
+      this.abortRefreshJournalSafely(scope);
+      return;
+    }
+    this.succeedRefreshJournalSafely(scope, batch.details);
+  }
+
+  async refreshFeedsInFolder(folderPath: string): Promise<void> {
     const feedsInFolder = this.settings.feeds.filter((feed) => {
       if (!feed.folder) return false;
       return (
@@ -2944,17 +3230,14 @@ export default class RssDashboardPlugin extends Plugin {
       );
     });
 
-    if (feedsInFolder.length > 0) {
-      if (!this.tryBeginRefreshSession()) return;
-      try {
-        this.cancelPendingStartupRefresh();
-        await this.refreshFeedsWithinSession(feedsInFolder);
-      } finally {
-        this.endRefreshSession();
-      }
-    } else {
+    if (feedsInFolder.length === 0) {
       this.notify("plugin.refresh.folderEmpty");
     }
+    await this.runRefresh({
+      trigger: "manual",
+      action: "folder",
+      feeds: feedsInFolder,
+    });
   }
 
   async updateArticle(
@@ -5122,7 +5405,7 @@ export default class RssDashboardPlugin extends Plugin {
       progress.status !== "completed";
   }
 
-  private getRefreshableFeeds(feeds: Feed[]): Feed[] {
+  private getRefreshableFeeds(feeds: readonly Feed[]): Feed[] {
     return feeds.filter((feed) => !this.isFeedExcludedFromRefresh(feed));
   }
 
@@ -5207,17 +5490,17 @@ export default class RssDashboardPlugin extends Plugin {
 
   private async publishRefreshResults(
     publications: FeedRefreshPublication[],
-  ): Promise<number> {
-    if (publications.length === 0) return 0;
+  ): Promise<ReadonlySet<string>> {
+    if (publications.length === 0) return new Set();
     return await this.enqueueSettingsOperation(async () => {
       const candidateFeeds = cloneRefreshData(this.settings.feeds);
-      let publishedCount = 0;
+      const publishedSourceIds = new Set<string>();
       for (const publication of publications) {
         if (this.mergeRefreshedFeed(candidateFeeds, publication)) {
-          publishedCount += 1;
+          publishedSourceIds.add(publication.sourceId);
         }
       }
-      if (publishedCount === 0) return 0;
+      if (publishedSourceIds.size === 0) return publishedSourceIds;
 
       const previousFeeds = this.settings.feeds;
       const previousRefreshTimestamp = this.settings.lastRefreshTimestamp;
@@ -5225,12 +5508,12 @@ export default class RssDashboardPlugin extends Plugin {
       this.settings.lastRefreshTimestamp = Date.now();
       try {
         await this.saveSettingsUnlocked();
-      } catch (error) {
+      } catch {
         this.settings.feeds = previousFeeds;
         this.settings.lastRefreshTimestamp = previousRefreshTimestamp;
-        throw error;
+        throw new RefreshSettingsSaveError();
       }
-      return publishedCount;
+      return publishedSourceIds;
     });
   }
 
@@ -5238,27 +5521,28 @@ export default class RssDashboardPlugin extends Plugin {
     feed: Feed,
     feedNoticeText: string,
     sourceRegistry: SourceRegistry,
-  ): Promise<void> {
-    const publication = await this.refreshFeedPipeline(feed, sourceRegistry);
-    if (!publication) return;
-    const publishedCount = await this.publishRefreshResults([publication]);
-    if (publishedCount === 0) return;
+  ): Promise<FeedRefreshOutcome> {
+    const outcome = await this.refreshFeedPipeline(feed, sourceRegistry);
+    if (outcome.status !== "succeeded") return outcome;
+    const publishedSourceIds = await this.publishRefreshResults([
+      outcome.publication,
+    ]);
+    if (!publishedSourceIds.has(outcome.publication.sourceId)) {
+      return { status: "aborted" };
+    }
 
     await this.validateSavedArticles({ suppressCollectionBroadcast: true });
     await this.refreshDashboardViews();
     this.notify("plugin.refreshed", { source: feedNoticeText });
+    return outcome;
   }
 
   private async refreshFeedBatch(
     feedsToRefresh: Feed[],
     feedNoticeText: string,
     sourceRegistry: SourceRegistry,
-  ): Promise<void> {
+  ): Promise<FeedRefreshOutcome[]> {
     this.activeRefreshState.clear();
-    const refreshSummary = {
-      failed: 0,
-      timedOut: 0,
-    };
 
     for (const feed of feedsToRefresh) {
       this.activeRefreshState.set(feed.url, {
@@ -5291,7 +5575,7 @@ export default class RssDashboardPlugin extends Plugin {
     };
 
     const backgroundPromises: Promise<void>[] = [];
-    const publications: FeedRefreshPublication[] = [];
+    const outcomes: FeedRefreshOutcome[] = [];
 
     const worker = async (): Promise<void> => {
       while (true) {
@@ -5306,11 +5590,10 @@ export default class RssDashboardPlugin extends Plugin {
 
         const refreshPromise = this.processRefreshBatchFeed(
           currentFeed,
-          refreshSummary,
           refreshView,
           sourceRegistry,
-        ).then((publication) => {
-          if (publication) publications.push(publication);
+        ).then((outcome) => {
+          outcomes.push(outcome);
         }).finally(() => {
           globalFetchSemaphore.release();
         });
@@ -5337,13 +5620,29 @@ export default class RssDashboardPlugin extends Plugin {
       await Promise.all(workers);
       await Promise.all(backgroundPromises);
 
-      const publishedCount = await this.publishRefreshResults(publications);
-      if (publishedCount === 0) return;
+      const publications = outcomes.flatMap((outcome) =>
+        outcome.status === "succeeded" ? [outcome.publication] : []
+      );
+      const publishedSourceIds = await this.publishRefreshResults(publications);
+      const finalizedOutcomes = outcomes.map((outcome): FeedRefreshOutcome =>
+        outcome.status === "succeeded" &&
+          !publishedSourceIds.has(outcome.publication.sourceId)
+          ? { status: "aborted" }
+          : outcome
+      );
+      if (publishedSourceIds.size === 0) return finalizedOutcomes;
       await this.validateSavedArticles({ suppressCollectionBroadcast: true });
       this.activeRefreshState.clear();
       await this.refreshDashboardViews();
 
-      const failureSuffix = this.buildRefreshFailureSummary(refreshSummary);
+      const failureSuffix = this.buildRefreshFailureSummary({
+        failed: finalizedOutcomes.filter(
+          (outcome) => outcome.status === "failed" && !outcome.timedOut,
+        ).length,
+        timedOut: finalizedOutcomes.filter(
+          (outcome) => outcome.status === "failed" && outcome.timedOut,
+        ).length,
+      });
       this.notify(
         failureSuffix
           ? "plugin.refreshedWithFailures"
@@ -5352,6 +5651,7 @@ export default class RssDashboardPlugin extends Plugin {
           ? { source: feedNoticeText, failures: failureSuffix }
           : { source: feedNoticeText },
       );
+      return finalizedOutcomes;
     } finally {
       this.activeRefreshState.clear();
     }
@@ -5378,28 +5678,20 @@ export default class RssDashboardPlugin extends Plugin {
 
   private async processRefreshBatchFeed(
     currentFeed: Feed,
-    refreshSummary: { failed: number; timedOut: number },
     refreshView: () => Promise<void>,
     sourceRegistry: SourceRegistry,
-  ): Promise<FeedRefreshPublication | null> {
+  ): Promise<FeedRefreshOutcome> {
     this.activeRefreshState.set(currentFeed.url, {
       status: "processing",
       startedAt: Date.now(),
     });
 
     try {
-      return await this.refreshFeedPipeline(currentFeed, sourceRegistry);
-    } catch (error) {
-      const isTimedOut =
-        error instanceof FeedRefreshPipelineError && error.code === "timed-out";
-      if (isTimedOut) {
-        refreshSummary.timedOut += 1;
-      } else {
-        refreshSummary.failed += 1;
+      const outcome = await this.refreshFeedPipeline(currentFeed, sourceRegistry);
+      if (outcome.status === "failed") {
+        console.error("[RSS dashboard] A source refresh failed.");
       }
-
-      console.error("[RSS dashboard] A source refresh failed.");
-      return null;
+      return outcome;
     } finally {
       this.activeRefreshState.delete(currentFeed.url);
 
@@ -5416,6 +5708,32 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private async refreshFeedPipeline(
+    feed: Feed,
+    sourceRegistry: SourceRegistry,
+  ): Promise<FeedRefreshOutcome> {
+    try {
+      const publication = await this.createRefreshPublication(
+        feed,
+        sourceRegistry,
+      );
+      return publication
+        ? {
+            status: "succeeded",
+            publication,
+            newItems: countNewRefreshItems(publication.result),
+          }
+        : { status: "aborted" };
+    } catch (error) {
+      const failure = toFeedRefreshPipelineError(error);
+      return {
+        status: "failed",
+        errorCode: toRefreshOperationErrorCode(failure),
+        timedOut: failure.code === "timed-out",
+      };
+    }
+  }
+
+  private async createRefreshPublication(
     feed: Feed,
     sourceRegistry: SourceRegistry,
   ): Promise<FeedRefreshPublication | null> {
@@ -5504,6 +5822,9 @@ export default class RssDashboardPlugin extends Plugin {
         );
         attempt.assertActive();
       } catch (error) {
+        if (initialImportController?.signal.aborted) {
+          return null;
+        }
         const failure = toFeedRefreshPipelineError(error);
         await this.recordRefreshErrorSafely(
           ledger,
@@ -5512,6 +5833,13 @@ export default class RssDashboardPlugin extends Plugin {
           failure,
         );
         throw failure;
+      }
+
+      if (
+        persistedAtStart !== undefined &&
+        !this.isRefreshPublicationCurrent(sourceId, sourceIdentity)
+      ) {
+        return null;
       }
 
       if (!this.settings.collection.enabled) {

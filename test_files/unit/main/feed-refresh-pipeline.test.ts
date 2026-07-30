@@ -18,6 +18,16 @@ import {
   SubscriptionService,
   createConfirmedCollectionPurge,
 } from "../../../src/services/subscription-service";
+import type {
+  OperationBeginInput,
+  OperationJournalPort,
+  OperationJournalScope,
+} from "../../../src/operation-journal/operation-journal-service";
+import type {
+  OperationDetails,
+  OperationErrorCode,
+  OperationStage,
+} from "../../../src/operation-journal/operation-event";
 
 let consoleLogSpy: ReturnType<typeof vi.spyOn>;
 
@@ -117,20 +127,71 @@ interface TestPlugin {
   saveData: ReturnType<typeof vi.fn>;
   feedParser: TestFeedParser;
   refreshFeeds: (selectedFeeds?: Feed[]) => Promise<void>;
-  refreshFeedsWithinSession: (selectedFeeds?: Feed[]) => Promise<void>;
+  runRefresh: (invocation: {
+    trigger: "manual" | "startup" | "schedule";
+    action: "all" | "failed" | "source" | "folder";
+    feeds?: readonly Feed[];
+  }) => Promise<void>;
   activeRefreshState: Map<string, unknown>;
   getActiveDashboardView: ReturnType<typeof vi.fn>;
   validateSavedArticles: ReturnType<typeof vi.fn>;
   getSourceRefreshLedger: ReturnType<typeof vi.fn>;
   getCollectionService: ReturnType<typeof vi.fn>;
   refreshFailedSources: () => Promise<void>;
+  manualRefreshFailedSources: () => Promise<void>;
   refreshSelectedFeed: (feed: Feed) => Promise<void>;
   manualRefreshAllSources: () => Promise<void>;
   manualRefreshSourceById: (sourceId: string) => Promise<void>;
   refreshOnOpenIfNeeded: () => Promise<void>;
+  refreshFeedsInFolder: (folderPath: string) => Promise<void>;
+  getOperationJournalPort: () => OperationJournalPort | undefined;
   saveSettings: (options?: { forceAllShards?: boolean; forceMetadata?: boolean }) => Promise<void>;
   createSourceRegistryForRun: () => SourceRegistry;
   getSubscriptionService: () => import("../../../src/services/subscription-service").SubscriptionService;
+}
+
+type RecordedRefreshEvent =
+  | { status: "started"; input: OperationBeginInput }
+  | {
+      status: "progress" | "succeeded";
+      stage: OperationStage;
+      details: OperationDetails;
+    }
+  | {
+      status: "failed";
+      stage: OperationStage;
+      errorCode: OperationErrorCode;
+      details?: OperationDetails;
+    }
+  | { status: "aborted"; stage: OperationStage };
+
+function recordRefreshJournal(plugin: TestPlugin): RecordedRefreshEvent[] {
+  const events: RecordedRefreshEvent[] = [];
+  const begin = (input: OperationBeginInput): OperationJournalScope => {
+    events.push({ status: "started", input });
+    return {
+      operationId: `refresh-${events.length}`,
+      progress: async (stage, details) => {
+        events.push({ status: "progress", stage, details });
+      },
+      succeed: async (stage, details) => {
+        events.push({ status: "succeeded", stage, details });
+      },
+      fail: async (stage, errorCode, details) => {
+        events.push({ status: "failed", stage, errorCode, details });
+      },
+      abort: async (stage) => {
+        events.push({ status: "aborted", stage });
+      },
+    };
+  };
+  plugin.getOperationJournalPort = () => ({
+    begin,
+    attach: () => {
+      throw new Error("refresh tests never attach journal scopes");
+    },
+  });
+  return events;
 }
 
 function createPluginWithSettings(feeds: Feed[]): TestPlugin {
@@ -200,6 +261,384 @@ beforeEach(() => {
 });
 
 describe("refreshFeeds() pipeline behavior", () => {
+  it("journals every user refresh entry as an explicit manual action", async () => {
+    const sourceA = createFeed({
+      feedId: "source-a",
+      title: "Source A",
+      folder: "News/Tech",
+      url: "https://secret.example/a.xml?token=never-log",
+    });
+    const sourceB = createFeed({
+      feedId: "source-b",
+      title: "Source B",
+      folder: "Other",
+      url: "https://example.com/b.xml",
+    });
+    const plugin = createPluginWithSettings([sourceA, sourceB]);
+    const events = recordRefreshJournal(plugin);
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (refresh: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (feed) => ({
+        ...feed,
+        lastUpdated: feed.lastUpdated + 1,
+      }));
+    plugin.getSourceRefreshLedger = vi.fn(() => ({
+      getSourceIdsWithStatus: vi.fn().mockResolvedValue(["source-b"]),
+      recordAttempt: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    await plugin.manualRefreshAllSources();
+    await plugin.manualRefreshFailedSources();
+    await plugin.manualRefreshSourceById("source-a");
+    await plugin.refreshFeedsInFolder("News");
+
+    const starts = events.filter(
+      (event): event is Extract<RecordedRefreshEvent, { status: "started" }> =>
+        event.status === "started",
+    );
+    expect(starts.map(({ input }) => [input.trigger, input.action])).toEqual([
+      ["manual", "all"],
+      ["manual", "failed"],
+      ["manual", "source"],
+      ["manual", "folder"],
+    ]);
+    expect(starts[2].input.subject).toEqual({
+      sourceId: "source-a",
+      label: "Source A",
+    });
+    expect(JSON.stringify(starts)).not.toContain("secret.example");
+    expect(JSON.stringify(starts)).not.toContain("never-log");
+    expect(starts[3].input.subject).toEqual({});
+  });
+
+  it("aggregates closed outcomes and counts only stable-identity additions", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-30T10:00:00.000Z"));
+    const unchanged = createItem({
+      guid: "same-guid",
+      link: "https://example.com/same?utm_source=old",
+    });
+    const sourceA = createFeed({
+      feedId: "source-a",
+      items: [unchanged],
+      url: "https://example.com/a.xml",
+    });
+    const sourceB = createFeed({
+      feedId: "source-b",
+      title: "Source B",
+      url: "https://example.com/b.xml",
+    });
+    const plugin = createPluginWithSettings([sourceA, sourceB]);
+    const events = recordRefreshJournal(plugin);
+    (plugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (refresh: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (feed) => {
+        if (feed.feedId === "source-b") {
+          throw new Error("raw response https://private.example/body?token=secret");
+        }
+        return {
+          ...feed,
+          items: [
+            { ...unchanged, link: "https://example.com/same?utm_source=new" },
+            createItem({
+              guid: "new-guid",
+              link: "https://example.com/new",
+              feedUrl: feed.url,
+            }),
+          ],
+          lastUpdated: 2,
+        };
+      });
+
+    const refresh = plugin.manualRefreshAllSources();
+    await vi.advanceTimersByTimeAsync(25);
+    await refresh;
+
+    const terminal = events.at(-1);
+    expect(terminal).toMatchObject({
+      status: "failed",
+      stage: "completed",
+      errorCode: "refresh-failed",
+      details: {
+        total: 2,
+        succeeded: 1,
+        failed: 1,
+        newItems: 1,
+        elapsedMs: expect.any(Number),
+      },
+    });
+    vi.useRealTimers();
+  });
+
+  it("uses only safe source identity and a standard code for single-source failure", async () => {
+    const source = createFeed({
+      feedId: "safe-source-id",
+      title: "Safe source name",
+      url: "https://private.example/feed.xml?api_key=secret",
+    });
+    const plugin = createPluginWithSettings([source]);
+    const events = recordRefreshJournal(plugin);
+    plugin.feedParser.refreshFeed.mockRejectedValue(
+      new Error("Authorization: Bearer raw-secret response-body"),
+    );
+
+    await plugin.manualRefreshSourceById("safe-source-id");
+
+    expect(events[0]).toMatchObject({
+      status: "started",
+      input: {
+        trigger: "manual",
+        action: "source",
+        subject: { sourceId: "safe-source-id", label: "Safe source name" },
+      },
+    });
+    expect(events.at(-1)).toMatchObject({
+      status: "failed",
+      stage: "completed",
+      errorCode: "source-refresh-failed",
+    });
+    const rendered = JSON.stringify(events);
+    expect(rendered).not.toContain("private.example");
+    expect(rendered).not.toContain("raw-secret");
+    expect(rendered).not.toContain("response-body");
+  });
+
+  it("closes empty, excluded, and occupied invocations without extra refresh work", async () => {
+    const emptyPlugin = createPluginWithSettings([]);
+    const emptyEvents = recordRefreshJournal(emptyPlugin);
+    await emptyPlugin.manualRefreshAllSources();
+    expect(emptyEvents).toHaveLength(2);
+    expect(emptyEvents.at(-1)).toMatchObject({
+      status: "succeeded",
+      details: { total: 0, succeeded: 0, failed: 0, newItems: 0 },
+    });
+
+    const excluded = createFeed({
+      feedId: "excluded",
+      excludeFromRefresh: true,
+    });
+    const excludedPlugin = createPluginWithSettings([excluded]);
+    const excludedEvents = recordRefreshJournal(excludedPlugin);
+    await excludedPlugin.manualRefreshAllSources();
+    expect(excludedEvents).toHaveLength(2);
+    expect(excludedEvents.at(-1)).toMatchObject({
+      status: "succeeded",
+      details: { total: 0, succeeded: 0, failed: 0, newItems: 0 },
+    });
+    expect(excludedPlugin.feedParser.refreshFeed).not.toHaveBeenCalled();
+
+    const source = createFeed({ feedId: "occupied" });
+    const occupiedPlugin = createPluginWithSettings([source]);
+    const occupiedEvents = recordRefreshJournal(occupiedPlugin);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (occupiedPlugin.feedParser.refreshFeed as unknown as {
+      mockImplementation: (refresh: (feed: Feed) => Promise<Feed>) => void;
+    }).mockImplementation(async (feed) => {
+        await blocked;
+        return { ...feed, lastUpdated: 2 };
+      });
+    const first = occupiedPlugin.manualRefreshAllSources();
+    await flushMicrotasks();
+    await occupiedPlugin.manualRefreshAllSources();
+
+    expect(occupiedPlugin.feedParser.refreshFeed).toHaveBeenCalledOnce();
+    expect(occupiedEvents).toHaveLength(3);
+    expect(occupiedEvents[1]).toMatchObject({
+      status: "started",
+      input: { trigger: "manual", action: "all" },
+    });
+    expect(occupiedEvents[2]).toMatchObject({
+      status: "failed",
+      stage: "completed",
+      errorCode: "refresh-failed",
+      details: { total: 0, succeeded: 0, failed: 0, newItems: 0 },
+    });
+    expect(getNoticeMessages(consoleLogSpy)).toContain(
+      "已有多来源刷新正在进行。",
+    );
+
+    occupiedPlugin.getOperationJournalPort = () => {
+      throw new Error("journal unavailable");
+    };
+    await occupiedPlugin.manualRefreshAllSources();
+    expect(occupiedPlugin.feedParser.refreshFeed).toHaveBeenCalledOnce();
+    expect(
+      getNoticeMessages(consoleLogSpy).filter(
+        (message) => message === "已有多来源刷新正在进行。",
+      ),
+    ).toHaveLength(2);
+    expect(occupiedEvents).toHaveLength(3);
+
+    release();
+    await first;
+    expect(occupiedEvents).toHaveLength(4);
+  });
+
+  it("distinguishes collection, settings, deletion, and stop terminal outcomes", async () => {
+    const collectionSource = createFeed({ feedId: "collection-failure" });
+    const collectionPlugin = createPluginWithSettings([collectionSource]);
+    const collectionEvents = recordRefreshJournal(collectionPlugin);
+    collectionPlugin.feedParser.refreshFeed.mockResolvedValue({
+      ...collectionSource,
+      lastUpdated: 2,
+    });
+    collectionPlugin.getCollectionService = vi.fn(() => ({
+      collectFeedRefresh: vi.fn().mockRejectedValue(new Error("disk path secret")),
+    }));
+    await collectionPlugin.manualRefreshSourceById("collection-failure");
+    expect(collectionEvents.at(-1)).toMatchObject({
+      status: "failed",
+      errorCode: "cache-save-failed",
+    });
+
+    const settingsSource = createFeed({ feedId: "settings-failure" });
+    const settingsPlugin = createPluginWithSettings([settingsSource]);
+    const settingsEvents = recordRefreshJournal(settingsPlugin);
+    settingsPlugin.feedParser.refreshFeed.mockResolvedValue({
+      ...settingsSource,
+      lastUpdated: 2,
+    });
+    vi.spyOn(
+      settingsPlugin as unknown as { saveSettingsUnlocked(): Promise<void> },
+      "saveSettingsUnlocked",
+    ).mockRejectedValue(new Error("settings write failed"));
+    await settingsPlugin.manualRefreshSourceById("settings-failure");
+    expect(settingsEvents.at(-1)).toMatchObject({
+      status: "failed",
+      errorCode: "settings-save-failed",
+    });
+
+    for (const terminalState of ["deleted", "stopped"] as const) {
+      const source = createFeed({
+        feedId: `source-${terminalState}`,
+        sourceKind: terminalState === "stopped" ? "x-account" : "feed",
+        sourceConfig: terminalState === "stopped"
+          ? {
+              kind: "x-account",
+              id: "source-stopped",
+              handle: "openai",
+              includeReplies: false,
+              includeReposts: false,
+              folder: "X",
+              topics: [],
+            }
+          : { kind: "feed" },
+        initialImportProgress: terminalState === "stopped"
+          ? { status: "running", pagesFetched: 1, itemsImported: 1 }
+          : undefined,
+        url: terminalState === "stopped"
+          ? "tikhub://x-account/openai"
+          : "https://example.com/deleted.xml",
+      });
+      const plugin = createPluginWithSettings([source]);
+      const events = recordRefreshJournal(plugin);
+      if (terminalState === "stopped") {
+        plugin.settings.tikhub = {
+          ...plugin.settings.tikhub,
+          enabled: true,
+          connectionId: "11111111-1111-4111-8111-111111111111",
+        };
+      }
+      let release!: () => void;
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      plugin.createSourceRegistryForRun = vi.fn(() => ({
+        refresh: vi.fn(async () => {
+          markStarted();
+          await blocked;
+          return {
+            feed: { ...source, lastUpdated: 3 },
+            items: source.items,
+            collectionItems: [],
+            providerRequestCount: 0,
+            warnings: [],
+          };
+        }),
+      }) as unknown as SourceRegistry);
+      const refresh = plugin.manualRefreshSourceById(source.feedId!);
+      await started;
+      if (terminalState === "deleted") {
+        plugin.settings.feeds = [];
+      } else {
+        plugin.settings.feeds[0].initialImportProgress = {
+          status: "stopped",
+          pagesFetched: 1,
+          itemsImported: 1,
+        };
+      }
+      release();
+      await refresh;
+      expect(events.at(-1)).toMatchObject({
+        status: "aborted",
+        stage: "completed",
+      });
+    }
+  });
+
+  it.each(["getter-throws", "begin-throws", "invalid-scope", "terminal-rejects"] as const)(
+    "keeps refresh behavior unchanged when the journal %s",
+    async (failureMode) => {
+      const source = createFeed({ feedId: `journal-${failureMode}` });
+      const plugin = createPluginWithSettings([source]);
+      const refreshed = { ...source, lastUpdated: 42 };
+      plugin.feedParser.refreshFeed.mockResolvedValue(refreshed);
+      const ledger = {
+        getSourceIdsWithStatus: vi.fn().mockResolvedValue([]),
+        recordAttempt: vi.fn().mockResolvedValue(undefined),
+        recordError: vi.fn().mockResolvedValue(undefined),
+      };
+      const collectFeedRefresh = vi.fn().mockResolvedValue([]);
+      plugin.getSourceRefreshLedger = vi.fn(() => ledger);
+      plugin.getCollectionService = vi.fn(() => ({ collectFeedRefresh }));
+      const refreshViews = vi.spyOn(
+        plugin as unknown as RssDashboardPlugin,
+        "refreshDashboardViews",
+      ).mockResolvedValue(undefined);
+      const rejected = Promise.reject(new Error("journal rejected"));
+      void rejected.catch(() => undefined);
+      plugin.getOperationJournalPort = () => {
+        if (failureMode === "getter-throws") throw new Error("journal getter");
+        return {
+          begin: () => {
+            if (failureMode === "begin-throws") throw new Error("journal begin");
+            if (failureMode === "invalid-scope") return {} as OperationJournalScope;
+            return {
+              operationId: "refresh-test",
+              progress: async () => undefined,
+              succeed: () => rejected,
+              fail: () => rejected,
+              abort: () => rejected,
+            };
+          },
+          attach: () => {
+            throw new Error("unused");
+          },
+        };
+      };
+
+      await expect(
+        plugin.manualRefreshSourceById(source.feedId!),
+      ).resolves.toBeUndefined();
+
+      expect(plugin.feedParser.refreshFeed).toHaveBeenCalledOnce();
+      expect(ledger.recordAttempt).toHaveBeenCalledOnce();
+      expect(collectFeedRefresh).toHaveBeenCalledOnce();
+      expect(plugin.settings.feeds[0].lastUpdated).toBe(42);
+      expect(await plugin.app.vault.adapter.exists("data.json")).toBe(true);
+      expect(refreshViews).toHaveBeenCalledOnce();
+      expect(getNoticeMessages(consoleLogSpy)).toContain("已刷新：Feed A");
+    },
+  );
+
   it("reports the exact enabled-X request estimate and caps before any provider call", async () => {
     const account = createFeed({
       feedId: "x-account-openai",
@@ -617,15 +1056,16 @@ describe("refreshFeeds() pipeline behavior", () => {
         "ai-apps",
       ]),
     }));
-    plugin.refreshFeedsWithinSession = vi.fn().mockResolvedValue(undefined);
+    plugin.runRefresh = vi.fn().mockResolvedValue(undefined);
 
     await plugin.refreshOnOpenIfNeeded();
     await flushMicrotasks();
 
-    expect(plugin.refreshFeedsWithinSession).toHaveBeenCalledWith([
-      account,
-      topic,
-    ]);
+    expect(plugin.runRefresh).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [account, topic],
+    });
   });
 
   it("contains a missing TikHub key to the X source while RSS completes", async () => {
@@ -720,6 +1160,7 @@ describe("refreshFeeds() pipeline behavior", () => {
     plugin.settings.startupRefreshDelaySeconds = 0;
 
     const startup = plugin.refreshOnOpenIfNeeded();
+    await flushMicrotasks();
     expect(plugin.isMultiFeedRefreshActive).toBe(true);
     const single = plugin.manualRefreshSourceById("x-account-openai");
     const all = plugin.manualRefreshAllSources();

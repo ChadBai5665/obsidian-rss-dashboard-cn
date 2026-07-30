@@ -21,6 +21,11 @@ import type {
   SubscriptionUpdateRequest,
   VerifiedSubscriptionRequest,
 } from "../../../src/services/subscription-service";
+import type {
+  OperationBeginInput,
+  OperationJournalPort,
+  OperationJournalScope,
+} from "../../../src/operation-journal/operation-journal-service";
 
 // Mock functions for FeedParser - must be declared before mocks
 const mockParseFeed = vi.fn<(url: string) => Promise<Feed>>();
@@ -464,13 +469,39 @@ type PluginPrivateAPI = {
   backgroundImportService: { startBackgroundImport: (feeds: Feed[]) => void };
   articleSaver: { fixSavedFilePaths: (...args: unknown[]) => Promise<unknown> };
   validateSavedArticles: () => Promise<void>;
-  refreshFeedsWithinSession: (feeds?: Feed[]) => Promise<void>;
+  runRefresh: (invocation: {
+    trigger: "manual" | "startup" | "schedule";
+    action: "all" | "failed" | "source" | "folder";
+    feeds?: readonly Feed[];
+  }) => Promise<void>;
+  getOperationJournalPort: () => OperationJournalPort | undefined;
   onArticleSaved: (item: FeedItem) => Promise<void>;
   ingestFeedsForBackgroundImport: (
     feeds: Array<{ title: string; url: string; folder: string }>,
     opts?: { mode?: string; folders?: unknown[] },
   ) => Promise<{ addedCount: number; skippedCount: number }>;
 };
+
+function recordRefreshStarts(
+  plugin: RssDashboardPlugin,
+): OperationBeginInput[] {
+  const starts: OperationBeginInput[] = [];
+  const scope: OperationJournalScope = {
+    operationId: "refresh-lifecycle",
+    progress: async () => undefined,
+    succeed: async () => undefined,
+    fail: async () => undefined,
+    abort: async () => undefined,
+  };
+  (plugin as unknown as PluginPrivateAPI).getOperationJournalPort = () => ({
+    begin: (input) => {
+      starts.push(input);
+      return scope;
+    },
+    attach: () => scope,
+  });
+  return starts;
+}
 
 async function createPluginInstance(app: MockApp): Promise<RssDashboardPlugin> {
   const manifest = createMockManifest();
@@ -853,6 +884,65 @@ describe("onload() initialization", () => {
     expect(plugin.registerInterval).toHaveBeenCalled();
   });
 
+  it("keeps a delayed daily-on-open refresh classified as startup", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 30, 9, 0, 0));
+    const sourceFeed = { ...sampleFeed, feedId: "startup-source" };
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "daily-on-open",
+      startupRefreshDelaySeconds: 15,
+      feeds: [sourceFeed],
+    });
+    mockRefreshAllFeeds.mockResolvedValue([{ ...sourceFeed, lastUpdated: 2 }]);
+    const starts = recordRefreshStarts(plugin);
+
+    await plugin.onload();
+    plugin.app.workspace.triggerLayoutReady();
+    await flushPromises();
+    expect(starts).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await flushPromises();
+
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({
+      category: "refresh",
+      trigger: "startup",
+      action: "all",
+      stage: "preparing",
+    });
+    vi.useRealTimers();
+  });
+
+  it("classifies the existing interval callback as schedule without adding timers", async () => {
+    vi.useFakeTimers();
+    const intervalSpy = vi.spyOn(window, "setInterval");
+    const sourceFeed = { ...sampleFeed, feedId: "scheduled-source" };
+    plugin.loadData = vi.fn().mockResolvedValue({
+      refreshMode: "interval",
+      refreshInterval: 15,
+      feeds: [sourceFeed],
+    });
+    mockRefreshAllFeeds.mockResolvedValue([{ ...sourceFeed, lastUpdated: 2 }]);
+    const starts = recordRefreshStarts(plugin);
+
+    await plugin.onload();
+    expect(intervalSpy).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+    await flushPromises();
+
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({
+      category: "refresh",
+      trigger: "schedule",
+      action: "all",
+      stage: "preparing",
+    });
+    expect(intervalSpy).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
   it("does not register auto refresh when refreshInterval is disabled", async () => {
     plugin.loadData = vi.fn().mockResolvedValue({
       refreshMode: "interval",
@@ -921,7 +1011,7 @@ describe("onload() initialization", () => {
       }),
     );
     const refreshSpy = vi
-      .spyOn(plugin, "refreshFeeds")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -933,7 +1023,11 @@ describe("onload() initialization", () => {
     await flushPromises();
     expect(refreshSpy).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(15_000);
-    expect(refreshSpy).toHaveBeenCalledWith([sourceFeed]);
+    expect(refreshSpy).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [sourceFeed],
+    });
     vi.useRealTimers();
   });
 
@@ -962,7 +1056,7 @@ describe("onload() initialization", () => {
       }),
     );
     const refreshSpy = vi
-      .spyOn(plugin, "refreshFeeds")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -971,7 +1065,13 @@ describe("onload() initialization", () => {
     await flushPromises();
     await vi.advanceTimersByTimeAsync(15_000);
 
-    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(refreshSpy).toHaveBeenCalledOnce();
+    expect(refreshSpy).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [],
+    });
+    expect(mockRefreshAllFeeds).not.toHaveBeenCalled();
     vi.useRealTimers();
   });
 
@@ -991,7 +1091,7 @@ describe("onload() initialization", () => {
       feeds: [{ ...sampleFeed, feedId: "feed-1" }],
     });
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -1022,9 +1122,10 @@ describe("onload() initialization", () => {
       startupRefreshDelaySeconds: 15,
       feeds: [{ ...sampleFeed, feedId: "feed-1" }],
     });
-    const refreshSpy = vi
-      .spyOn(plugin, "refreshFeeds")
-      .mockResolvedValue(undefined);
+    const refreshSpy = vi.spyOn(
+      plugin as unknown as PluginPrivateAPI,
+      "runRefresh",
+    );
 
     await plugin.onload();
     await flushPromises();
@@ -1060,7 +1161,7 @@ describe("onload() initialization", () => {
       feeds: [{ ...sampleFeed, feedId: "feed-1" }],
     });
     const refreshSpy = vi
-      .spyOn(plugin, "refreshFeeds")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -1088,7 +1189,7 @@ describe("onload() initialization", () => {
     const ledgerExists = vi.fn((path: string) => originalExists(path));
     adapter.exists = ledgerExists;
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -1106,7 +1207,11 @@ describe("onload() initialization", () => {
     expect(ledgerExists).toHaveBeenCalledWith(
       ".rss-dashboard-data/state/source-refresh.json",
     );
-    expect(refreshSpy).toHaveBeenCalledWith([sourceFeed]);
+    expect(refreshSpy).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [sourceFeed],
+    });
     vi.useRealTimers();
   });
 
@@ -1119,7 +1224,7 @@ describe("onload() initialization", () => {
       feeds: [sourceFeed],
     });
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -1161,7 +1266,7 @@ describe("onload() initialization", () => {
       }),
     );
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -1169,7 +1274,11 @@ describe("onload() initialization", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(refreshSpy).toHaveBeenCalledWith([errored]);
+    expect(refreshSpy).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [errored],
+    });
     vi.useRealTimers();
   });
 
@@ -1195,7 +1304,7 @@ describe("onload() initialization", () => {
       }),
     );
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -1203,7 +1312,11 @@ describe("onload() initialization", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(refreshSpy).toHaveBeenCalledWith([missing, yesterday]);
+    expect(refreshSpy).toHaveBeenCalledWith({
+      trigger: "startup",
+      action: "all",
+      feeds: [missing, yesterday],
+    });
     vi.useRealTimers();
   });
 
@@ -1228,7 +1341,7 @@ describe("onload() initialization", () => {
       }),
     );
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
@@ -1237,8 +1350,11 @@ describe("onload() initialization", () => {
     await flushPromises();
     await plugin.manualRefreshAllSources();
 
-    expect(refreshSpy).toHaveBeenCalledTimes(1);
-    expect(refreshSpy).toHaveBeenCalledWith();
+    expect(refreshSpy).toHaveBeenCalledTimes(2);
+    expect(refreshSpy).toHaveBeenNthCalledWith(2, {
+      trigger: "manual",
+      action: "all",
+    });
     vi.useRealTimers();
   });
 
@@ -1564,7 +1680,7 @@ describe("onload() initialization", () => {
       startupRefreshDelaySeconds: 0,
     });
     const refreshSpy = vi
-      .spyOn(plugin as unknown as PluginPrivateAPI, "refreshFeedsWithinSession")
+      .spyOn(plugin as unknown as PluginPrivateAPI, "runRefresh")
       .mockResolvedValue(undefined);
 
     await plugin.onload();
