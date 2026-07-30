@@ -163,6 +163,25 @@ beforeEach(() => {
 });
 
 describe("production inline AI composition", () => {
+  it("injects the shared operation journal service into the AI coordinator", async () => {
+    const test = harness();
+    mockGeneration();
+    const service = (test.plugin as unknown as {
+      getOperationJournalPort(): { begin(...args: unknown[]): unknown };
+    }).getOperationJournalPort();
+    const begin = vi.spyOn(service, "begin");
+    const options = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+
+    await options.coordinator.start(
+      options.createStartInput("summary", CONNECTION_ID),
+    );
+
+    expect(begin).toHaveBeenCalledWith(expect.objectContaining({
+      category: "ai",
+      action: "summary",
+    }));
+  });
+
   it("reuses one runtime per data root and reads no secret before a provider run", () => {
     const test = harness();
 

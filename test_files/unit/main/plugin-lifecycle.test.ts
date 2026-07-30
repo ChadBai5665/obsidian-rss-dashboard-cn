@@ -26,6 +26,7 @@ import type {
   OperationJournalPort,
   OperationJournalScope,
 } from "../../../src/operation-journal/operation-journal-service";
+import { OperationJournalService } from "../../../src/operation-journal/operation-journal-service";
 
 // Mock functions for FeedParser - must be declared before mocks
 const mockParseFeed = vi.fn<(url: string) => Promise<Feed>>();
@@ -802,6 +803,15 @@ describe("onload() initialization", () => {
     expect(
       (plugin.registerView as ReturnType<typeof vi.fn>).mock.calls.length,
     ).toBeGreaterThanOrEqual(4);
+  });
+
+  it("schedules one best-effort journal prune without blocking load", async () => {
+    const prune = vi.spyOn(OperationJournalService.prototype, "prune")
+      .mockRejectedValue(new Error("journal maintenance unavailable"));
+
+    await expect(plugin.onload()).resolves.toBeUndefined();
+
+    expect(prune).toHaveBeenCalledTimes(1);
   });
 
   it("registers ribbon icon", async () => {

@@ -10,6 +10,7 @@ import {
   type ObsidianProtocolData,
   apiVersion,
   requestUrl,
+  normalizePath,
 } from "obsidian";
 
 import { getSettingManager } from "./src/utils/settings-manager";
@@ -72,6 +73,8 @@ import { OpmlManager } from "./src/services/opml-manager";
 import { MediaService } from "./src/services/media-service";
 
 import { ImportOpmlModal } from "./src/modals/import-opml-modal";
+import { DiagnosticsPreviewModal } from "./src/modals/diagnostics-preview-modal";
+import { OperationJournalClearModal } from "./src/modals/operation-journal-clear-modal";
 import {
   AddSourceModal,
   type AddSourceModalOptions,
@@ -178,10 +181,15 @@ import {
   XTopicAdapter,
   XTopicRefreshError,
 } from "./src/sources/tikhub/x-topic-adapter";
-import type {
+import {
+  OperationJournalService,
+  type OperationJournalListResult,
   OperationJournalPort,
   OperationJournalScope,
 } from "./src/operation-journal/operation-journal-service";
+import { OperationJournalRepository } from "./src/operation-journal/operation-journal-repository";
+import type { OperationJournalUiPort } from "./src/components/operation-journal-panel";
+import type { OperationJournalSettingsPort } from "./src/settings/tabs/import-export-settings-tab";
 import {
   projectSafeOperationSubject,
   type OperationErrorCode,
@@ -257,6 +265,20 @@ interface AiRuntime {
   noteInserter: AnalysisNoteInserter;
   coordinator: AiOperationTaskCoordinator;
   generatedResults: Map<string, Readonly<AiAnalysisResult>>;
+}
+
+interface OperationJournalRuntime {
+  readonly dataRoot: string;
+  readonly service: OperationJournalService;
+  readonly lifecycle: { revoked: boolean };
+  clearFlight: Promise<void> | null;
+}
+
+interface OperationJournalUiSubscription {
+  readonly listener: () => void;
+  active: boolean;
+  runtime: OperationJournalRuntime | null;
+  unsubscribe: (() => void) | null;
 }
 
 const MAX_CURRENT_AI_INSERTION_RESULTS = 256;
@@ -976,6 +998,34 @@ export default class RssDashboardPlugin extends Plugin {
       }
     | null = null;
   private aiRuntime: AiRuntime | null = null;
+  private operationJournalRuntime: OperationJournalRuntime | null = null;
+  private readonly operationJournalUiSubscriptions =
+    new Set<OperationJournalUiSubscription>();
+  private readonly operationJournalUiFacade: OperationJournalUiPort =
+    Object.freeze({
+      load: async (days: 7 | 30) => await this.loadOperationJournal(days),
+      subscribe: (listener: () => void) =>
+        this.subscribeToOperationJournalUi(listener),
+      exportSafe: async (days: 7 | 30) =>
+        await this.previewSafeOperationJournal(days),
+      requestClear: () => this.requestOperationJournalClear(),
+    });
+  private readonly operationJournalSettingsFacade: OperationJournalSettingsPort =
+    Object.freeze({
+      stats: async () =>
+        await this.getOperationJournalRuntime().service.stats(new Date()),
+      createPreview: async (days: 7 | 30) =>
+        await this.importExportService.createOperationJournalPreview(days),
+      copyPreview: async (token: string, exactText: string) =>
+        await this.importExportService.copyOperationJournalPreview(
+          token,
+          exactText,
+        ),
+      revokePreview: (token: string) =>
+        this.importExportService.revokeOperationJournalPreview(token),
+      clear: async () => await this.clearOperationJournal(),
+      openDashboard: async () => await this.openOperationJournal(),
+    });
   private sourceRegistry:
     | { signature: string; registry: SourceRegistry }
     | null = null;
@@ -1101,6 +1151,11 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private initializeSettingsBackedServices(): void {
+    try {
+      this.getOperationJournalRuntime();
+    } catch {
+      // Invalid journal setup never blocks rebuilding unrelated services.
+    }
     this.feedParser = new FeedParser(
       this.settings.display,
       this.settings.availableTags,
@@ -1123,6 +1178,11 @@ export default class RssDashboardPlugin extends Plugin {
       importPublicSettingsBundle: (settings) =>
         this.applyPublicSettingsImport(settings),
       getLocale: () => this.settings.locale,
+      getSafeOperationJournalExport: async (days) =>
+        await this.getOperationJournalRuntime().service.createSafeExport({
+          days,
+          now: new Date(),
+        }),
       getSafeDiagnosticsInput: () => {
         const failedSources = this.settings.feeds.filter((feed) =>
           Boolean(feed.lastFetchError),
@@ -1485,6 +1545,7 @@ export default class RssDashboardPlugin extends Plugin {
       jobs: tikhubJobs,
       clock: () => new Date(),
       delay: waitForAbortableTranscriptPoll,
+      operationJournal: this.getOperationJournalPort(),
     });
     const ytDlp = Platform.isDesktopApp
       ? new YtDlpTranscriptProvider(transport, {
@@ -1521,6 +1582,7 @@ export default class RssDashboardPlugin extends Plugin {
       contentRepository,
       metadataRepository,
       clock: () => new Date(),
+      operationJournal: this.getOperationJournalPort(),
     });
     const previous = this.youtubeTranscriptRuntime;
     const candidate = { dataRoot, service, contentRepository };
@@ -2106,6 +2168,7 @@ export default class RssDashboardPlugin extends Plugin {
           return path;
         },
       },
+      operationJournal: this.getOperationJournalPort(),
     });
     const candidate: AiRuntime = {
       dataRoot,
@@ -2300,6 +2363,14 @@ export default class RssDashboardPlugin extends Plugin {
     }
 
     await this.loadSettings();
+    try {
+      const operationJournalRuntime = this.getOperationJournalRuntime();
+      void Promise.resolve(
+        operationJournalRuntime.service.prune(new Date()),
+      ).catch(() => undefined);
+    } catch {
+      // Journal maintenance is best-effort and cannot block plugin loading.
+    }
     this.commandTranslator = createTranslator(this.settings?.locale ?? "zh-CN");
     this.registerVaultMetadataChangeListeners();
 
@@ -3092,9 +3163,220 @@ export default class RssDashboardPlugin extends Plugin {
     this.isMultiFeedRefreshRunning = false;
   }
 
-  /** Task 11 composes the durable journal; refresh remains optional until then. */
-  private getOperationJournalPort(): OperationJournalPort | undefined {
-    return undefined;
+  private getOperationJournalRuntime(): OperationJournalRuntime {
+    const dataRoot = normalizePath(
+      this.settings.collection.dataFolder.trim().replace(/[\\/]+$/u, ""),
+    );
+    if (
+      this.operationJournalRuntime?.dataRoot === dataRoot &&
+      !this.operationJournalRuntime.lifecycle.revoked
+    ) {
+      return this.operationJournalRuntime;
+    }
+
+    const candidate: OperationJournalRuntime = {
+      dataRoot,
+      service: new OperationJournalService(
+        new OperationJournalRepository(this.app.vault, dataRoot),
+      ),
+      lifecycle: { revoked: false },
+      clearFlight: null,
+    };
+    const previous = this.operationJournalRuntime;
+    this.operationJournalRuntime = candidate;
+    if (previous) this.revokeOperationJournalRuntime(previous);
+    this.rebindOperationJournalUiSubscriptions(candidate);
+    return candidate;
+  }
+
+  private revokeOperationJournalRuntime(
+    runtime: OperationJournalRuntime,
+  ): void {
+    runtime.lifecycle.revoked = true;
+    for (const subscription of this.operationJournalUiSubscriptions) {
+      if (subscription.runtime !== runtime) continue;
+      this.releaseOperationJournalUiSubscription(subscription);
+    }
+  }
+
+  private rebindOperationJournalUiSubscriptions(
+    runtime: OperationJournalRuntime,
+  ): void {
+    for (const subscription of this.operationJournalUiSubscriptions) {
+      if (!subscription.active) continue;
+      this.bindOperationJournalUiSubscription(subscription, runtime);
+      this.invokeOperationJournalUiListener(subscription.listener);
+    }
+  }
+
+  private bindOperationJournalUiSubscription(
+    subscription: OperationJournalUiSubscription,
+    runtime: OperationJournalRuntime,
+  ): void {
+    this.releaseOperationJournalUiSubscription(subscription);
+    if (!subscription.active || runtime.lifecycle.revoked) return;
+    try {
+      const unsubscribe = runtime.service.subscribe(() => {
+        if (
+          !subscription.active ||
+          subscription.runtime !== runtime ||
+          runtime.lifecycle.revoked ||
+          this.operationJournalRuntime !== runtime
+        ) {
+          return;
+        }
+        this.invokeOperationJournalUiListener(subscription.listener);
+      });
+      if (typeof unsubscribe !== "function") return;
+      subscription.runtime = runtime;
+      subscription.unsubscribe = unsubscribe;
+    } catch {
+      subscription.runtime = null;
+      subscription.unsubscribe = null;
+    }
+  }
+
+  private releaseOperationJournalUiSubscription(
+    subscription: OperationJournalUiSubscription,
+  ): void {
+    const unsubscribe = subscription.unsubscribe;
+    subscription.unsubscribe = null;
+    subscription.runtime = null;
+    if (unsubscribe === null) return;
+    try {
+      const result = unsubscribe();
+      void Promise.resolve(result).catch(() => undefined);
+    } catch {
+      // A listener cleanup failure cannot retain authority to the active root.
+    }
+  }
+
+  private invokeOperationJournalUiListener(listener: () => void): void {
+    try {
+      const result = listener();
+      void Promise.resolve(result).catch(() => undefined);
+    } catch {
+      // UI observers never alter journal persistence or clearing.
+    }
+  }
+
+  private subscribeToOperationJournalUi(listener: () => void): () => void {
+    if (typeof listener !== "function") return () => undefined;
+    const subscription: OperationJournalUiSubscription = {
+      listener,
+      active: true,
+      runtime: null,
+      unsubscribe: null,
+    };
+    this.operationJournalUiSubscriptions.add(subscription);
+    try {
+      this.bindOperationJournalUiSubscription(
+        subscription,
+        this.getOperationJournalRuntime(),
+      );
+    } catch {
+      // The panel remains usable through bounded manual reload attempts.
+    }
+    return () => {
+      if (!subscription.active) return;
+      subscription.active = false;
+      this.operationJournalUiSubscriptions.delete(subscription);
+      this.releaseOperationJournalUiSubscription(subscription);
+    };
+  }
+
+  private async loadOperationJournal(
+    days: 7 | 30,
+  ): Promise<OperationJournalListResult> {
+    const runtime = this.getOperationJournalRuntime();
+    const result = await runtime.service.list({ days, now: new Date() });
+    if (
+      runtime.lifecycle.revoked ||
+      this.operationJournalRuntime !== runtime
+    ) {
+      return await this.getOperationJournalRuntime().service.list({
+        days,
+        now: new Date(),
+      });
+    }
+    return result;
+  }
+
+  private async previewSafeOperationJournal(days: 7 | 30): Promise<void> {
+    const preview = await this.importExportService
+      .createOperationJournalPreview(days);
+    new DiagnosticsPreviewModal(this.app, {
+      locale: this.settings.locale ?? "zh-CN",
+      kind: "operation-journal",
+      preview,
+      copyPreview: async (token, exactText) =>
+        await this.importExportService.copyOperationJournalPreview(
+          token,
+          exactText,
+        ),
+      revokePreview: (token) =>
+        this.importExportService.revokeOperationJournalPreview(token),
+    }).open();
+  }
+
+  private clearOperationJournal(): Promise<void> {
+    const runtime = this.getOperationJournalRuntime();
+    if (runtime.clearFlight !== null) return runtime.clearFlight;
+    const started = Promise.resolve().then(async () => {
+      if (
+        runtime.lifecycle.revoked ||
+        this.operationJournalRuntime !== runtime
+      ) {
+        throw new Error("Operation journal runtime changed.");
+      }
+      await runtime.service.clearOrThrow();
+      if (
+        runtime.lifecycle.revoked ||
+        this.operationJournalRuntime !== runtime
+      ) {
+        return;
+      }
+      for (const subscription of this.operationJournalUiSubscriptions) {
+        if (subscription.active && subscription.runtime === runtime) {
+          this.invokeOperationJournalUiListener(subscription.listener);
+        }
+      }
+    });
+    const flight = started.finally(() => {
+      if (runtime.clearFlight === flight) runtime.clearFlight = null;
+    });
+    runtime.clearFlight = flight;
+    return flight;
+  }
+
+  private requestOperationJournalClear(): void {
+    try {
+      new OperationJournalClearModal(this.app, {
+        locale: this.settings.locale ?? "zh-CN",
+        clear: async () => await this.clearOperationJournal(),
+        onCleared: () => undefined,
+      }).open();
+    } catch {
+      // Dashboard remains usable if the confirmation UI cannot be opened.
+    }
+  }
+
+  private getOperationJournalPort(): OperationJournalPort {
+    return this.getOperationJournalRuntime().service;
+  }
+
+  public getOperationJournalUi(): OperationJournalUiPort {
+    return this.operationJournalUiFacade;
+  }
+
+  public getOperationJournalSettings(): OperationJournalSettingsPort {
+    return this.operationJournalSettingsFacade;
+  }
+
+  public async openOperationJournal(): Promise<void> {
+    await this.activateView();
+    const view = await this.getActiveDashboardView();
+    view?.openOperationJournal();
   }
 
   private refreshSubjectForFeed(feed: Feed): OperationSubject {
@@ -6118,6 +6400,15 @@ export default class RssDashboardPlugin extends Plugin {
 
   onunload() {
     this.isUnloading = true;
+    if (this.operationJournalRuntime) {
+      this.revokeOperationJournalRuntime(this.operationJournalRuntime);
+      this.operationJournalRuntime = null;
+    }
+    for (const subscription of this.operationJournalUiSubscriptions) {
+      subscription.active = false;
+      this.releaseOperationJournalUiSubscription(subscription);
+    }
+    this.operationJournalUiSubscriptions.clear();
     if (this.aiRuntime) {
       this.revokeAiRuntime(this.aiRuntime);
       this.aiRuntime = null;
@@ -6125,6 +6416,7 @@ export default class RssDashboardPlugin extends Plugin {
     this.youtubeTranscriptRuntime?.service.dispose();
     this.youtubeTranscriptRuntime = null;
     this.importExportService?.revokeAllSafeDiagnosticsPreviews();
+    this.importExportService?.revokeAllOperationJournalPreviews();
     if (this.progressSaveDebounce !== null) {
       window.clearTimeout(this.progressSaveDebounce);
       this.progressSaveDebounce = null;
