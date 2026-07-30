@@ -357,6 +357,7 @@ export interface OperationJournalSettingsPort {
 }
 
 const settingsRenderGenerations = new WeakMap<object, number>();
+const operationJournalClearFlights = new WeakMap<object, Promise<void>>();
 
 function resolveOperationJournalSettings(
   plugin: RssDashboardPlugin,
@@ -391,6 +392,21 @@ function beginSettingsRender(
     settingsRenderGenerations.get(plugin) === renderGeneration &&
     containerEl.isConnected &&
     (ownedElement === undefined || containerEl.contains(ownedElement));
+}
+
+function clearOperationJournalOnce(
+  operationJournal: OperationJournalSettingsPort,
+): Promise<void> {
+  const existing = operationJournalClearFlights.get(operationJournal);
+  if (existing !== undefined) return existing;
+  const started = Promise.resolve().then(() => operationJournal.clear());
+  const flight = started.finally(() => {
+    if (operationJournalClearFlights.get(operationJournal) === flight) {
+      operationJournalClearFlights.delete(operationJournal);
+    }
+  });
+  operationJournalClearFlights.set(operationJournal, flight);
+  return flight;
 }
 
 function renderOperationJournalSettings(
@@ -511,7 +527,7 @@ function renderOperationJournalSettings(
           try {
             new OperationJournalClearModal(plugin.app, {
               locale: plugin.settings.locale ?? "zh-CN",
-              clear: () => operationJournal.clear(),
+              clear: () => clearOperationJournalOnce(operationJournal),
               onCleared: () => refreshJournalStats(),
             }).open();
           } catch {

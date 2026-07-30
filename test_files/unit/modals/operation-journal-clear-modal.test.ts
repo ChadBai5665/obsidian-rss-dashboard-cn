@@ -96,12 +96,13 @@ describe("OperationJournalClearModal", () => {
   });
 
   it("stays open on failure and never claims records were deleted", async () => {
+    const onCleared = vi.fn();
     const modal = new OperationJournalClearModal(new App(), {
       locale: "en",
       clear: vi.fn(async () => {
         throw new Error("PRIVATE_PATH_CANARY");
       }),
-      onCleared: vi.fn(),
+      onCleared,
     });
     const closeSpy = vi.spyOn(modal, "close");
     modal.open();
@@ -111,10 +112,11 @@ describe("OperationJournalClearModal", () => {
 
     expect(closeSpy).not.toHaveBeenCalled();
     expect(modal.contentEl.textContent).toContain(
-      "Nothing was cleared. Please try again.",
+      "Cleanup did not finish. Records may have partially changed. Check the operation journal and try again.",
     );
     expect(modal.contentEl.textContent).not.toContain("PRIVATE_PATH_CANARY");
     expect(modal.contentEl.textContent).not.toContain("Records cleared");
+    expect(onCleared).not.toHaveBeenCalled();
     expect(button(modal, "Clear operation journal").disabled).toBe(false);
   });
 
@@ -141,7 +143,7 @@ describe("OperationJournalClearModal", () => {
     expect(order).toEqual(["clear", "close", "refresh"]);
   });
 
-  it("does not refresh stale UI after the modal closes while clear is pending", async () => {
+  it("refreshes business state after pending clear succeeds even if the modal closed", async () => {
     const pending = deferred<void>();
     const onCleared = vi.fn();
     const modal = new OperationJournalClearModal(new App(), {
@@ -157,7 +159,7 @@ describe("OperationJournalClearModal", () => {
     await pending.promise;
     await flushPromises();
 
-    expect(onCleared).not.toHaveBeenCalled();
+    expect(onCleared).toHaveBeenCalledTimes(1);
     expect(modal.contentEl.childElementCount).toBe(0);
   });
 });

@@ -79,8 +79,7 @@ export class OperationJournalClearModal extends Modal {
       void Promise.resolve()
         .then(() => this.options.clear())
         .then(() => {
-          if (this.disposed || this.generation !== generation) return;
-          this.close();
+          if (!this.disposed && this.generation === generation) this.close();
           try {
             void Promise.resolve(this.options.onCleared()).catch(
               () => undefined,

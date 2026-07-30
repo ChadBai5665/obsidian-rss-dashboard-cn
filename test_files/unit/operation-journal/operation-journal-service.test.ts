@@ -417,6 +417,56 @@ describe("OperationJournalService failure isolation and live events", () => {
     expect(clear).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects a strict user clear with a sanitized error and updates health", async () => {
+    const clear = vi.fn(async () => {
+      throw new Error("PRIVATE_CLEAR_PATH_CANARY");
+    });
+    const healthChanges: OperationJournalHealth[] = [];
+    const service = new OperationJournalService(
+      { ...createStore(), clear },
+      {
+        createId: createIds(),
+        clock: () => new Date(NOW),
+        onHealthChange: (health) => healthChanges.push(health),
+      },
+    );
+
+    await expect(service.clearOrThrow()).rejects.toMatchObject({
+      name: "OperationJournalServiceError",
+      code: "operation-journal-unavailable",
+      message: "Operation journal unavailable.",
+    });
+
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(service.getHealth()).toEqual({
+      writeIncomplete: false,
+      maintenanceIncomplete: true,
+      lastMaintenanceFailureAt: NOW.toISOString(),
+    });
+    expect(healthChanges).toHaveLength(1);
+    expect(JSON.stringify(service.getHealth())).not.toContain(
+      "PRIVATE_CLEAR_PATH_CANARY",
+    );
+  });
+
+  it("keeps legacy clear best-effort when the repository rejects", async () => {
+    const clear = vi.fn(async () => {
+      throw new Error("legacy clear failure");
+    });
+    const service = new OperationJournalService(
+      { ...createStore(), clear },
+      { createId: createIds(), clock: () => new Date(NOW) },
+    );
+
+    await expect(service.clear()).resolves.toBeUndefined();
+
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(service.getHealth()).toMatchObject({
+      maintenanceIncomplete: true,
+      lastMaintenanceFailureAt: NOW.toISOString(),
+    });
+  });
+
   it("sanitizes read and stats failures into frozen fallbacks", async () => {
     const rawFailure = "RAW_CONTROL_FAILURE_CANARY_81FA";
     const readRange = vi.fn(async (): Promise<OperationJournalReadResult> => {

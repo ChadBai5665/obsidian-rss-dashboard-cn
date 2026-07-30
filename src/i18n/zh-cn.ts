@@ -1212,7 +1212,8 @@ export const zhCN = {
   "operationJournal.clearModal.preserveMarkdown": "Markdown 文件",
   "operationJournal.clearModal.cancel": "取消",
   "operationJournal.clearModal.confirm": "清空运行记录",
-  "operationJournal.clearModal.failed": "没有清空任何记录，请重试。",
+  "operationJournal.clearModal.failed":
+    "清理未完成，记录可能已部分变化。请检查运行记录后重试。",
   "operationJournal.unavailable": "运行记录服务暂不可用。",
   "operationJournal.unavailableDetail": "信息台仍可正常使用；本地记录服务启动后，请重新打开此页面。",
   "operationJournal.loadFailed": "暂时无法加载运行记录。",

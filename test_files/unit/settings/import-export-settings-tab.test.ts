@@ -27,6 +27,16 @@ function flushPromises(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function cloneSettings(): typeof DEFAULT_SETTINGS {
   const settings = JSON.parse(
     JSON.stringify(DEFAULT_SETTINGS),
@@ -512,6 +522,58 @@ describe("Auto Backup Helpers", () => {
       await flushPromises();
 
       expect(port.clear).toHaveBeenCalledTimes(1);
+      expect(port.stats).toHaveBeenCalledTimes(2);
+    });
+
+    it("shares one clear across concurrent modals and releases the lock after failure", async () => {
+      const first = deferred<void>();
+      const port = createOperationJournalPort({
+        clear: vi
+          .fn()
+          .mockImplementationOnce(() => first.promise)
+          .mockResolvedValueOnce(undefined),
+      });
+      const containerEl = createContainerEl();
+      const plugin = createPlugin();
+      const openSpy = vi
+        .spyOn(OperationJournalClearModal.prototype, "open")
+        .mockImplementation(function openClear() {
+          this.onOpen();
+          return this;
+        });
+      renderImportExportSettingsTab(
+        containerEl,
+        plugin as unknown as RssDashboardPlugin,
+        port,
+      );
+      await flushPromises();
+      const clearButton = Array.from(
+        containerEl.querySelectorAll<HTMLButtonElement>("button"),
+      ).find((candidate) => candidate.textContent === "Clear journal")!;
+
+      clearButton.click();
+      clearButton.click();
+      const firstModal = openSpy.mock.instances[0] as OperationJournalClearModal;
+      const secondModal = openSpy.mock.instances[1] as OperationJournalClearModal;
+      const confirm = (modal: OperationJournalClearModal) =>
+        Array.from(
+          modal.contentEl.querySelectorAll<HTMLButtonElement>("button"),
+        ).find(
+          (candidate) => candidate.textContent === "Clear operation journal",
+        )!;
+      confirm(firstModal).click();
+      confirm(secondModal).click();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(port.clear).toHaveBeenCalledTimes(1);
+      first.reject(new Error("partial clear"));
+      await flushPromises();
+      expect(port.stats).toHaveBeenCalledTimes(1);
+
+      confirm(firstModal).click();
+      await flushPromises();
+      expect(port.clear).toHaveBeenCalledTimes(2);
       expect(port.stats).toHaveBeenCalledTimes(2);
     });
 

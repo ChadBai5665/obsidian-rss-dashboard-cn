@@ -1267,7 +1267,7 @@ export const en = {
   "operationJournal.clearModal.cancel": "Cancel",
   "operationJournal.clearModal.confirm": "Clear operation journal",
   "operationJournal.clearModal.failed":
-    "Nothing was cleared. Please try again.",
+    "Cleanup did not finish. Records may have partially changed. Check the operation journal and try again.",
   "operationJournal.unavailable": "The operation journal service is temporarily unavailable.",
   "operationJournal.unavailableDetail": "The dashboard is ready. Reopen it after the local journal service has started.",
   "operationJournal.loadFailed": "Unable to load operation records right now.",

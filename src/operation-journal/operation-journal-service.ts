@@ -218,6 +218,18 @@ export class OperationJournalService implements OperationJournalPort {
     }
   }
 
+  async clearOrThrow(): Promise<void> {
+    try {
+      await this.repository.clear();
+    } catch {
+      this.recordMaintenanceFailure({
+        writeNotified: false,
+        maintenanceNotified: false,
+      });
+      throw new OperationJournalServiceError();
+    }
+  }
+
   async createSafeExport(input: { days: 7 | 30; now: Date }): Promise<string> {
     try {
       const result = await this.list(input);
