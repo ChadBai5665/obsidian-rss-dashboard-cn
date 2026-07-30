@@ -48,24 +48,71 @@ export function aggregateOperationEvents(
     })
     .sort(compareEvents);
   const seenEventIds = new Set<string>();
-  const byOperation = new Map<string, OperationEvent[]>();
+  const byOperation = new Map<string, OperationEventGroup>();
   for (const event of ordered) {
     if (seenEventIds.has(event.eventId)) continue;
     seenEventIds.add(event.eventId);
-    const operationEvents = byOperation.get(event.operationId);
-    if (operationEvents === undefined)
-      byOperation.set(event.operationId, [event]);
-    else operationEvents.push(event);
+    const operation = byOperation.get(event.operationId);
+    if (operation === undefined) {
+      byOperation.set(event.operationId, {
+        identity: identityOf(event),
+        events: [event],
+        conflicted: false,
+      });
+    } else if (!sameIdentity(operation.identity, event)) {
+      operation.conflicted = true;
+    } else {
+      operation.events.push(event);
+    }
   }
 
   return Object.freeze(
     [...byOperation.values()]
-      .map((operationEvents) => summarize(operationEvents, nowMs))
+      .filter((operation) => !operation.conflicted)
+      .map((operation) => summarize(operation.events, nowMs))
       .sort(
         (left, right) =>
           right.lastOccurredAt.localeCompare(left.lastOccurredAt) ||
           left.operationId.localeCompare(right.operationId),
       ),
+  );
+}
+
+interface OperationIdentity {
+  readonly category: OperationEvent["category"];
+  readonly action: OperationEvent["action"];
+  readonly trigger: OperationEvent["trigger"];
+  readonly itemId?: string;
+  readonly sourceId?: string;
+  readonly label?: string;
+}
+
+interface OperationEventGroup {
+  readonly identity: OperationIdentity;
+  readonly events: OperationEvent[];
+  conflicted: boolean;
+}
+
+function identityOf(event: OperationEvent): OperationIdentity {
+  return {
+    category: event.category,
+    action: event.action,
+    trigger: event.trigger,
+    ...event.subject,
+  };
+}
+
+function sameIdentity(
+  identity: OperationIdentity,
+  event: OperationEvent,
+): boolean {
+  return (
+    identity.category === event.category &&
+    identity.action === event.action &&
+    identity.trigger === event.trigger &&
+    identity.itemId === event.subject.itemId &&
+    identity.sourceId === event.subject.sourceId &&
+    identity.label === event.subject.label
   );
 }
 

@@ -334,10 +334,12 @@ const ERROR_CODES = new Set<OperationErrorCode>([
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const LOCAL_ID = /^[A-Za-z0-9._:-]{1,200}$/u;
-const ARTIFACT_PATH = /^analysis\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\.md$/u;
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const SENSITIVE_TEXT =
-  /(?:\b(?:https?|wss?|ftp):\/\/|\bwww\.|\bauthorization\s*:|\bbearer\s+[A-Za-z0-9._~+/-]+|\b(?:api[ _-]?key|access[ _-]?token|client[ _-]?secret|password|cookie)\s*[:=]|\bsk-[A-Za-z0-9_-]{8,})/iu;
+  /(?:\b[A-Za-z][A-Za-z0-9+.-]*:\/\/|\bwww\.|\bauthorization\s*:|\bbearer\s+[A-Za-z0-9._~+/-]+|\b(?:api[ _-]?key|access[ _-]?token|client[ _-]?secret|password|cookie|token)\s*[:=]\s*\S+|\bsk-[A-Za-z0-9_-]{8,}|\bAIza[A-Za-z0-9_-]{20,}|\bgh[pousr]_[A-Za-z0-9_]{20,}|\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b)/iu;
+const CREDENTIAL_PATH_SEGMENT =
+  /(?:^|\/)(?:\.?secrets?|credentials?|api[_-]?keys?|access[_-]?tokens?|tokens?|cookies?)(?:\/|$)/iu;
+const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/u;
 
 export class OperationEventParseError extends Error {
   constructor() {
@@ -555,7 +557,7 @@ function safeText(value: unknown): string {
     typeof value !== "string" ||
     value.length === 0 ||
     [...value].length > 200 ||
-    SENSITIVE_TEXT.test(value)
+    containsSensitiveText(value)
   ) {
     throw malformedEvent();
   }
@@ -565,12 +567,42 @@ function safeText(value: unknown): string {
 function artifactPath(value: unknown): string {
   if (
     typeof value !== "string" ||
+    value.length === 0 ||
     [...value].length > 200 ||
-    !ARTIFACT_PATH.test(value)
+    value.startsWith("/") ||
+    value.startsWith("\\") ||
+    value.startsWith("~") ||
+    /^[A-Za-z]:/u.test(value) ||
+    value.includes("\\") ||
+    hasControlCharacter(value) ||
+    URI_SCHEME.test(value) ||
+    containsSensitiveText(value)
+  ) {
+    throw malformedEvent();
+  }
+  const segments = value.split("/");
+  if (
+    !value.endsWith(".md") ||
+    !segments.includes("analysis") ||
+    segments.some(
+      (segment) => segment === "" || segment === "." || segment === "..",
+    )
   ) {
     throw malformedEvent();
   }
   return value;
+}
+
+function containsSensitiveText(value: string): boolean {
+  return SENSITIVE_TEXT.test(value) || CREDENTIAL_PATH_SEGMENT.test(value);
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return true;
+  }
+  return false;
 }
 
 function transcriptContentBasis(value: unknown): "youtube-transcript" {

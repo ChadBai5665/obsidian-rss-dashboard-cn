@@ -14,7 +14,9 @@ function event(input: {
   operationId?: string;
   category?: "transcript" | "ai" | "refresh" | "subscription";
   action?: string;
+  trigger?: "manual" | "startup" | "schedule" | "system";
   stage?: string;
+  subject?: Record<string, unknown>;
   details?: Record<string, unknown>;
 }): OperationEvent {
   return snapshotOperationEvent({
@@ -24,10 +26,10 @@ function event(input: {
     occurredAt: input.occurredAt,
     category: input.category ?? "transcript",
     action: input.action ?? "retrieve",
-    trigger: "manual",
+    trigger: input.trigger ?? "manual",
     stage: input.stage ?? "checking-cache",
     status: input.status ?? "progress",
-    subject: { itemId: "item-42", label: "Local title" },
+    subject: input.subject ?? { itemId: "item-42", label: "Local title" },
     details: input.details ?? { contentBasis: "youtube-transcript" },
   });
 }
@@ -192,5 +194,62 @@ describe("aggregateOperationEvents", () => {
 
     expect(summaries).toHaveLength(1);
     expect(summaries[0]?.operationId).toBe(OPERATION_ID);
+  });
+
+  it("fails closed per operationId when valid events disagree on identity", () => {
+    const validElsewhere = event({
+      eventId: "66666666-6666-4666-8666-666666666666",
+      operationId: "77777777-7777-4777-8777-777777777777",
+      occurredAt: "2026-07-30T01:00:00.000Z",
+      status: "succeeded",
+      stage: "completed",
+    });
+    const started = event({
+      eventId: "11111111-1111-4111-8111-111111111111",
+      occurredAt: "2026-07-30T01:00:00.000Z",
+      status: "started",
+    });
+    const conflicts = [
+      event({
+        eventId: "33333333-3333-4333-8333-333333333333",
+        occurredAt: "2026-07-30T01:01:00.000Z",
+        category: "ai",
+        action: "summary",
+        stage: "completed",
+        status: "succeeded",
+        details: {
+          connectionName: "Local AI",
+          providerKind: "openai",
+          model: "gpt-5.6",
+          contentBasis: "feed",
+        },
+      }),
+      event({
+        eventId: "44444444-4444-4444-8444-444444444444",
+        occurredAt: "2026-07-30T01:01:00.000Z",
+        trigger: "schedule",
+        stage: "completed",
+        status: "succeeded",
+      }),
+      event({
+        eventId: "55555555-5555-4555-8555-555555555555",
+        occurredAt: "2026-07-30T01:01:00.000Z",
+        subject: { itemId: "other-item", label: "Other title" },
+        stage: "completed",
+        status: "succeeded",
+      }),
+    ];
+
+    for (const conflict of conflicts) {
+      // A partially corrupt JSONL day must not turn this operation into a
+      // misleading hybrid; only this operation is omitted, not its neighbours.
+      const summaries = aggregateOperationEvents(
+        [validElsewhere, started, conflict],
+        new Date("2026-07-30T01:02:00.000Z"),
+      );
+
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0]?.operationId).toBe(validElsewhere.operationId);
+    }
   });
 });

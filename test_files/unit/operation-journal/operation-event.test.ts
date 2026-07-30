@@ -162,6 +162,112 @@ describe("snapshotOperationEvent", () => {
     }
   });
 
+  it("accepts repository-relative AI analysis artifacts under default and configured data roots", () => {
+    const artifacts = [
+      ".rss-dashboard-data/analysis/item-42/20260730T010203000-summary.md",
+      "自定义 数据/归档（本地）/analysis/项目 42/结果-摘要.md",
+    ];
+
+    for (const artifactPath of artifacts) {
+      expect(
+        snapshotOperationEvent(
+          eventWith({
+            category: "ai",
+            action: "summary",
+            stage: "saving",
+            subject: { itemId: "item-42", label: "中文显示标题" },
+            details: {
+              connectionName: "本地模型（测试）",
+              providerKind: "openai",
+              model: "gpt-5.6",
+              contentBasis: "feed",
+              artifactPath,
+            },
+          }),
+        ).details,
+      ).toMatchObject({ artifactPath });
+    }
+  });
+
+  it("rejects unsafe analysis artifact paths", () => {
+    for (const artifactPath of [
+      "/.rss-dashboard-data/analysis/item-42/result.md",
+      "C:\\Users\\chad\\analysis\\item-42\\result.md",
+      "../.rss-dashboard-data/analysis/item-42/result.md",
+      ".rss-dashboard-data/../analysis/item-42/result.md",
+      "file:///Users/chad/.secrets/api_key",
+      "obsidian://open?vault=private",
+      ".rss-dashboard-data/.secrets/analysis/item-42/result.md",
+      ".rss-dashboard-data/analysis/api_key/item-42/result.md",
+      ".rss-dashboard-data/analysis/item-42/result\u0000.md",
+      `.rss-dashboard-data/analysis/item-42/${"x".repeat(201)}.md`,
+    ]) {
+      expect(() =>
+        snapshotOperationEvent(
+          eventWith({
+            category: "ai",
+            action: "summary",
+            stage: "saving",
+            subject: { itemId: "item-42" },
+            details: {
+              connectionName: "本地模型",
+              providerKind: "openai",
+              model: "gpt-5.6",
+              contentBasis: "feed",
+              artifactPath,
+            },
+          }),
+        ),
+      ).toThrow();
+    }
+  });
+
+  it("rejects secrets from every free-text journal field while retaining ordinary Unicode labels", () => {
+    const unsafeValues = [
+      "file:///Users/chad/.secrets/api_key",
+      "obsidian://open?vault=private",
+      "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue",
+      "Authorization: Bearer credential",
+      "api_key=credential",
+    ];
+
+    for (const value of unsafeValues) {
+      expect(() =>
+        snapshotOperationEvent(
+          eventWith({ subject: { itemId: "item-42", label: value } }),
+        ),
+      ).toThrow();
+      expect(() =>
+        snapshotOperationEvent(
+          eventWith({
+            category: "ai",
+            action: "summary",
+            stage: "preparing",
+            subject: { itemId: "item-42", label: "正常中文标题" },
+            details: {
+              connectionName: value,
+              providerKind: "openai",
+              model: value,
+              contentBasis: "feed",
+            },
+          }),
+        ),
+      ).toThrow();
+      expect(() =>
+        snapshotOperationEvent(
+          eventWith({
+            category: "subscription",
+            action: "add",
+            stage: "validating",
+            subject: { sourceId: "source-42", label: value },
+            details: { sourceKind: "rss" },
+          }),
+        ),
+      ).toThrow();
+    }
+  });
+
   it("accepts each closed category with only its own safe details", () => {
     const events: readonly unknown[] = [
       validTranscriptEvent,
