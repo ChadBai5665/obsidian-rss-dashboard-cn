@@ -1,4 +1,14 @@
 import { isCanonicalConnectionId } from "../security/connection-id";
+import type {
+  OperationIdentityInput,
+  OperationJournalPort,
+  OperationJournalScope,
+} from "../operation-journal/operation-journal-service";
+import type {
+  OperationDetails,
+  OperationErrorCode,
+  OperationStage,
+} from "../operation-journal/operation-event";
 import { TikHubRequestBudgetError } from "../sources/tikhub/request-budget";
 import { TikHubRequestLedgerError } from "../sources/tikhub/request-ledger";
 import {
@@ -31,6 +41,7 @@ import {
   YouTubeTranscriptError,
   type TranscriptProviderOperationEvidence,
   type TranscriptProviderOperationContext,
+  type TranscriptProviderContinuationIdentity,
   type TranscriptProviderOperationResult,
   type YouTubeCaptionTrack,
   type YouTubeTranscript,
@@ -69,6 +80,7 @@ export interface TikHubTranscriptProviderOptions {
   delay: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   pollIntervalMs?: number;
   maxPolls?: number;
+  operationJournal?: OperationJournalPort;
 }
 
 type CaptionStage = "tracks" | "content";
@@ -76,6 +88,7 @@ type CaptionStage = "tracks" | "content";
 interface OperationIdentity {
   itemId: string;
   videoId: string;
+  operationId: string;
 }
 
 interface CurrentSession {
@@ -102,6 +115,8 @@ const ITEM_ID = /^[a-f0-9]{64}$/u;
 const JOB_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const OPERATION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const LOCATOR_PREFIX = "tikhub:";
 const MAX_LANGUAGE_NAME_LENGTH = 200;
 const DEFAULT_POLL_INTERVAL_MS = 3_000;
@@ -146,6 +161,8 @@ const CONTENT_JOB_FIELDS = [
   "lastCheckedAt",
   "status",
 ] as const;
+const TRACK_JOB_V2_FIELDS = [...TRACK_JOB_FIELDS, "operationId"] as const;
+const CONTENT_JOB_V2_FIELDS = [...CONTENT_JOB_FIELDS, "operationId"] as const;
 const LOCATOR_FIELDS = [
   "videoId",
   "languageCode",
@@ -218,6 +235,37 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
     return (await this.pendingContentJob(identity)) !== null;
   }
 
+  async pendingContinuationOperationId(
+    continuationIdentity: TranscriptProviderContinuationIdentity,
+  ): Promise<string | undefined> {
+    const identity = continuationOperationIdentity(continuationIdentity);
+    const job = await this.pendingContentJob(identity);
+    if (!job) return undefined;
+    if (job.schemaVersion === 2) return job.operationId;
+
+    const scope = beginContinuationScope(
+      this.options.operationJournal,
+      identity.itemId,
+    );
+    if (!scope) return undefined;
+    const key = safeJobKey(identity, "content", job.languageCode);
+    const upgraded: TikHubCaptionJobRecord = {
+      ...job,
+      schemaVersion: 2,
+      operationId: scope.operationId,
+    };
+    let replaced: boolean;
+    try {
+      replaced = await this.options.jobs.replaceIfCurrent(
+        jobIdentity(key, job),
+        upgraded,
+      );
+    } catch {
+      return undefined;
+    }
+    return replaced ? scope.operationId : undefined;
+  }
+
   async continuePending(
     signal: AbortSignal | undefined,
     context: TranscriptProviderOperationContext,
@@ -235,14 +283,32 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
     if (session.connectionId !== job.connectionId) {
       throw stableError("tikhub-job-expired");
     }
+    const resumedJob = await this.ensureOperationIdentity(
+      job,
+      identity.operationId,
+    );
     const key = safeJobKey(identity, "content", job.languageCode);
+    const journal = attachOperationScope(
+      this.options.operationJournal,
+      resumedJob.schemaVersion === 2
+        ? resumedJob.operationId
+        : identity.operationId,
+      identity.itemId,
+    );
+    recordProgress(journal, "job-received", {
+      provider: "tikhub",
+      confirmedPaidRequests: 0,
+      possiblySent: false,
+      jobId: resumedJob.jobId,
+    });
     const operation = await this.pollJob(
       key,
-      job,
+      resumedJob,
       "content",
       session,
       signal,
       FREE_OPERATION_EVIDENCE,
+      journal,
     );
     if (operation.response.kind !== "content") {
       throw stableError("tikhub-malformed-response", operation.evidence);
@@ -338,7 +404,18 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
       expectedKey,
     );
     try {
-      await this.options.jobs.removeIfCurrent(cleanupIdentity);
+      const removed = await this.options.jobs.removeIfCurrent(cleanupIdentity);
+      if (removed) {
+        recordProgress(
+          attachOperationScope(
+            this.options.operationJournal,
+            context.operationId,
+            identity.itemId,
+          ),
+          "completed",
+          { provider: "tikhub", contentBasis: "youtube-transcript" },
+        );
+      }
     } catch {
       throw stableError("tikhub-budget-unavailable");
     }
@@ -374,6 +451,19 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
           FREE_OPERATION_EVIDENCE,
         );
       }
+      const journal = attachOperationScope(
+        this.options.operationJournal,
+        currentJob.schemaVersion === 2
+          ? currentJob.operationId
+          : identity.operationId,
+        identity.itemId,
+      );
+      recordProgress(journal, "job-received", {
+        provider: "tikhub",
+        confirmedPaidRequests: 0,
+        possiblySent: false,
+        jobId: currentJob.jobId,
+      });
       return await this.pollJob(
         key,
         currentJob,
@@ -381,9 +471,21 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
         session,
         signal,
         FREE_OPERATION_EVIDENCE,
+        journal,
+        identity.operationId,
       );
     }
 
+    const journal = attachOperationScope(
+      this.options.operationJournal,
+      identity.operationId,
+      identity.itemId,
+    );
+    recordProgress(journal, "tikhub-request", {
+      provider: "tikhub",
+      confirmedPaidRequests: 0,
+      possiblySent: false,
+    });
     let result: TikHubResult<unknown>;
     try {
       result = stage === "tracks"
@@ -400,25 +502,55 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
             signal,
           });
     } catch (error) {
-      throw normalizeFailure(
+      const normalized = normalizeFailure(
         error,
         false,
         signal,
         FREE_OPERATION_EVIDENCE,
         true,
       );
+      const possiblySent = normalized.operationEvidence?.paidRequestAttempted === true;
+      recordFailure(journal, "tikhub-request", normalized.code, {
+        provider: "tikhub",
+        confirmedPaidRequests: possiblySent ? 1 : 0,
+        possiblySent,
+      });
+      throw normalized;
     }
-    assertNotAborted(signal, PAID_OPERATION_EVIDENCE);
-    const response = parseResponse(
-      resultData(result, PAID_OPERATION_EVIDENCE),
-      identity.videoId,
-      PAID_OPERATION_EVIDENCE,
-    );
-    if (response.kind !== "processing") {
-      if (response.kind === "pending") {
-        throw stableError("tikhub-malformed-response", PAID_OPERATION_EVIDENCE);
+    recordProgress(journal, "tikhub-request", {
+      provider: "tikhub",
+      confirmedPaidRequests: 1,
+      possiblySent: true,
+    });
+    let response: TikHubCaptionResponse;
+    try {
+      assertNotAborted(signal, PAID_OPERATION_EVIDENCE);
+      response = parseResponse(
+        resultData(result, PAID_OPERATION_EVIDENCE),
+        identity.videoId,
+        PAID_OPERATION_EVIDENCE,
+      );
+      if (response.kind !== "processing") {
+        if (response.kind === "pending") {
+          throw stableError("tikhub-malformed-response", PAID_OPERATION_EVIDENCE);
+        }
+        assertTerminalStage(response, stage, PAID_OPERATION_EVIDENCE);
       }
-      assertTerminalStage(response, stage, PAID_OPERATION_EVIDENCE);
+    } catch (error) {
+      const normalized = normalizeFailure(
+        error,
+        false,
+        signal,
+        PAID_OPERATION_EVIDENCE,
+      );
+      recordFailure(journal, "tikhub-request", normalized.code, {
+        provider: "tikhub",
+        confirmedPaidRequests: 1,
+        possiblySent: true,
+      });
+      throw normalized;
+    }
+    if (response.kind !== "processing") {
       return { response, evidence: PAID_OPERATION_EVIDENCE };
     }
 
@@ -427,7 +559,8 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
       PAID_OPERATION_EVIDENCE,
     );
     const record: TikHubCaptionJobRecord = {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      operationId: identity.operationId,
       itemId: identity.itemId,
       videoId: identity.videoId,
       stage,
@@ -443,11 +576,29 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
     try {
       created = await this.options.jobs.createIfAbsent(record);
     } catch {
+      recordFailure(journal, "job-received", "tikhub-budget-unavailable", {
+        provider: "tikhub",
+        confirmedPaidRequests: 1,
+        possiblySent: true,
+        jobId: record.jobId,
+      });
       throw stableError("tikhub-budget-unavailable", PAID_OPERATION_EVIDENCE);
     }
     if (!created) {
+      recordFailure(journal, "job-received", "tikhub-processing", {
+        provider: "tikhub",
+        confirmedPaidRequests: 1,
+        possiblySent: true,
+        jobId: record.jobId,
+      });
       throw stableError("tikhub-processing", PAID_OPERATION_EVIDENCE);
     }
+    recordProgress(journal, "job-received", {
+      provider: "tikhub",
+      confirmedPaidRequests: 1,
+      possiblySent: true,
+      jobId: record.jobId,
+    });
     assertNotAborted(signal, PAID_OPERATION_EVIDENCE);
     return await this.pollJob(
       key,
@@ -456,11 +607,36 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
       session,
       signal,
       PAID_OPERATION_EVIDENCE,
+      journal,
     );
   }
 
+  private async ensureOperationIdentity(
+    job: TikHubCaptionJobRecord,
+    operationId: string,
+  ): Promise<TikHubCaptionJobRecord> {
+    if (job.schemaVersion === 2) return job;
+    const key = safeJobKey(job, job.stage, job.languageCode);
+    const upgraded: TikHubCaptionJobRecord = {
+      ...job,
+      schemaVersion: 2,
+      operationId,
+    };
+    let replaced: boolean;
+    try {
+      replaced = await this.options.jobs.replaceIfCurrent(
+        jobIdentity(key, job),
+        upgraded,
+      );
+    } catch {
+      throw stableError("tikhub-budget-unavailable");
+    }
+    if (!replaced) throw stableError("tikhub-job-expired");
+    return upgraded;
+  }
+
   private async pendingContentJob(
-    identity: OperationIdentity,
+    identity: Pick<OperationIdentity, "itemId" | "videoId">,
   ): Promise<TikHubCaptionJobRecord | null> {
     let job: TikHubCaptionJobRecord | null;
     try {
@@ -501,16 +677,25 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
     session: CurrentSession,
     signal: AbortSignal | undefined,
     evidence: TranscriptProviderOperationEvidence,
+    journal?: OperationJournalScope,
+    operationId?: string,
   ): Promise<StageOperationResult> {
     let job = { ...initialJob };
     for (let attempt = 0; attempt < this.maxPolls; attempt += 1) {
       assertNotAborted(signal, evidence);
+      const pollNumber = attempt + 1;
       try {
         await this.options.delay(this.pollIntervalMs, signal);
       } catch (error) {
         throw normalizeFailure(error, false, signal, evidence);
       }
       assertNotAborted(signal, evidence);
+      recordProgress(journal, "polling", {
+        provider: "tikhub",
+        jobId: job.jobId,
+        pollNumber,
+        elapsedMs: elapsedSince(job.createdAt, this.options.clock),
+      });
 
       let result: TikHubResult<unknown>;
       try {
@@ -524,7 +709,16 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
         if (!signal?.aborted && isExpiredJobFailure(error)) {
           return await this.expireJob(key, job, evidence);
         }
-        throw normalizeFailure(error, true, signal, evidence);
+        const normalized = normalizeFailure(error, true, signal, evidence);
+        recordFailure(journal, "polling", normalized.code, {
+          provider: "tikhub",
+          confirmedPaidRequests: evidence.tikhubPaidRequests,
+          possiblySent: evidence.paidRequestAttempted,
+          jobId: job.jobId,
+          pollNumber,
+          elapsedMs: elapsedSince(job.createdAt, this.options.clock),
+        });
+        throw normalized;
       }
       assertNotAborted(signal, evidence);
       const data = resultData(result, evidence);
@@ -534,10 +728,17 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
         if (response.jobId !== job.jobId) {
           throw stableError("tikhub-malformed-response", evidence);
         }
-        const replacement = {
-          ...job,
-          lastCheckedAt: safeTimestamp(this.options.clock, evidence),
-        };
+        const replacement: TikHubCaptionJobRecord = job.schemaVersion === 2
+          ? {
+              ...job,
+              lastCheckedAt: safeTimestamp(this.options.clock, evidence),
+            }
+          : {
+              ...job,
+              schemaVersion: 2,
+              operationId: operationId ?? journal?.operationId ?? "",
+              lastCheckedAt: safeTimestamp(this.options.clock, evidence),
+            };
         let replaced: boolean;
         try {
           replaced = await this.options.jobs.replaceIfCurrent(
@@ -556,6 +757,14 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
       assertTerminalStage(response, stage, evidence);
       return { response, evidence, completedJob: job };
     }
+    recordFailure(journal, "polling", "tikhub-processing", {
+      provider: "tikhub",
+      confirmedPaidRequests: evidence.tikhubPaidRequests,
+      possiblySent: evidence.paidRequestAttempted,
+      jobId: job.jobId,
+      pollNumber: this.maxPolls,
+      elapsedMs: elapsedSince(job.createdAt, this.options.clock),
+    });
     throw stableError("tikhub-processing", evidence);
   }
 
@@ -666,22 +875,183 @@ function operationIdentity(
     throw stableError("invalid-video-id");
   }
   try {
-    if (!plainRecord(context)) throw new Error("invalid operation context");
+    if (
+      !plainRecord(context) ||
+      !hasExactKeys(context, ["itemId", "videoId", "operationId"])
+    ) {
+      throw new Error("invalid operation context");
+    }
     const contextVideoId = ownData(context, "videoId");
     const itemId = ownData(context, "itemId");
+    const operationId = ownData(context, "operationId");
     if (
       contextVideoId !== videoId ||
       typeof itemId !== "string" ||
-      !ITEM_ID.test(itemId)
+      !ITEM_ID.test(itemId) ||
+      typeof operationId !== "string" ||
+      !OPERATION_ID.test(operationId)
     ) {
       throw new Error("invalid operation context");
     }
     return {
       itemId,
       videoId,
+      operationId,
     };
   } catch {
     throw stableError("tikhub-malformed-response");
+  }
+}
+
+function continuationOperationIdentity(
+  value: TranscriptProviderContinuationIdentity,
+): Pick<OperationIdentity, "itemId" | "videoId"> {
+  try {
+    if (
+      !plainRecord(value) ||
+      !hasExactKeys(value, ["itemId", "videoId"])
+    ) {
+      throw new Error("invalid continuation identity");
+    }
+    const itemId = ownData(value, "itemId");
+    const videoId = ownData(value, "videoId");
+    if (
+      typeof itemId !== "string" ||
+      !ITEM_ID.test(itemId) ||
+      typeof videoId !== "string" ||
+      assertYouTubeVideoId(videoId) !== videoId
+    ) {
+      throw new Error("invalid continuation identity");
+    }
+    return { itemId, videoId };
+  } catch {
+    throw stableError("tikhub-malformed-response");
+  }
+}
+
+function journalIdentity(itemId: string): OperationIdentityInput {
+  return {
+    category: "transcript",
+    action: "retrieve",
+    trigger: "manual",
+    subject: { itemId },
+  };
+}
+
+function beginContinuationScope(
+  journal: OperationJournalPort | undefined,
+  itemId: string,
+): OperationJournalScope | undefined {
+  if (!journal) return undefined;
+  try {
+    const scope = journal.begin({
+      ...journalIdentity(itemId),
+      stage: "trying-provider",
+      details: { provider: "tikhub" },
+    });
+    return usableScope(scope) ? scope : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function attachOperationScope(
+  journal: OperationJournalPort | undefined,
+  operationId: string,
+  itemId: string,
+): OperationJournalScope | undefined {
+  if (!journal || !OPERATION_ID.test(operationId)) return undefined;
+  try {
+    const scope = journal.attach(operationId, journalIdentity(itemId));
+    return usableScope(scope) && scope.operationId === operationId
+      ? scope
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function usableScope(value: unknown): value is OperationJournalScope {
+  try {
+    if (!plainRecord(value)) return false;
+    const operationId = ownData(value, "operationId");
+    return typeof operationId === "string" &&
+      OPERATION_ID.test(operationId) &&
+      typeof ownData(value, "progress") === "function" &&
+      typeof ownData(value, "succeed") === "function" &&
+      typeof ownData(value, "fail") === "function" &&
+      typeof ownData(value, "abort") === "function";
+  } catch {
+    return false;
+  }
+}
+
+function recordProgress(
+  scope: OperationJournalScope | undefined,
+  stage: OperationStage,
+  details: OperationDetails,
+): void {
+  safelyRecord(() => scope?.progress(stage, details));
+}
+
+function recordFailure(
+  scope: OperationJournalScope | undefined,
+  stage: OperationStage,
+  code: YouTubeTranscriptErrorCode,
+  details: OperationDetails,
+): void {
+  safelyRecord(() => scope?.fail(stage, journalErrorCode(code), details));
+}
+
+function safelyRecord(operation: () => Promise<void> | undefined): void {
+  try {
+    void operation()?.catch(() => undefined);
+  } catch {
+    // Operation history is optional and cannot alter transcript retrieval.
+  }
+}
+
+function journalErrorCode(code: YouTubeTranscriptErrorCode): OperationErrorCode {
+  switch (code) {
+    case "invalid-video-id":
+      return "invalid-request";
+    case "no-captions":
+      return "no-transcript";
+    case "timeout":
+      return "timeout";
+    case "tikhub-missing-key":
+      return "missing-key";
+    case "tikhub-invalid-key":
+      return "invalid-key";
+    case "tikhub-insufficient-balance":
+      return "insufficient-balance";
+    case "tikhub-budget-unavailable":
+      return "budget-exhausted";
+    case "tikhub-rate-limited":
+      return "rate-limited";
+    case "tikhub-malformed-response":
+      return "malformed-response";
+    case "aborted":
+      return "aborted";
+    case "video-unavailable":
+    case "login-required":
+    case "temporarily-unavailable":
+    case "tikhub-processing":
+    case "tikhub-job-expired":
+      return "transcript-unavailable";
+  }
+}
+
+function elapsedSince(createdAt: string, clock: () => Date): number {
+  try {
+    const now = clock();
+    const started = Date.parse(createdAt);
+    if (!(now instanceof Date) || !Number.isFinite(now.getTime()) || !Number.isFinite(started)) {
+      return 0;
+    }
+    return Math.max(0, Math.floor(now.getTime() - started));
+  } catch {
+    return 0;
   }
 }
 
@@ -778,7 +1148,7 @@ function parseLocator(track: YouTubeCaptionTrack): LocatorProjection {
 }
 
 function safeJobKey(
-  identity: OperationIdentity,
+  identity: Pick<OperationIdentity, "itemId" | "videoId">,
   stage: CaptionStage,
   languageCode: string | undefined,
 ): string {
@@ -849,20 +1219,35 @@ function isExpiredJobFailure(error: unknown): boolean {
 
 function isExpectedJob(
   value: unknown,
-  identity: OperationIdentity,
+  identity: Pick<OperationIdentity, "itemId" | "videoId">,
   stage: CaptionStage,
   languageCode: string | undefined,
   connectionId: string,
 ): value is TikHubCaptionJobRecord {
   try {
     if (!plainRecord(value)) return false;
-    const fields = stage === "tracks" ? TRACK_JOB_FIELDS : CONTENT_JOB_FIELDS;
+    const schemaVersion = ownData(value, "schemaVersion");
+    const fields = stage === "tracks"
+      ? schemaVersion === 1
+        ? TRACK_JOB_FIELDS
+        : schemaVersion === 2
+          ? TRACK_JOB_V2_FIELDS
+          : undefined
+      : schemaVersion === 1
+        ? CONTENT_JOB_FIELDS
+        : schemaVersion === 2
+          ? CONTENT_JOB_V2_FIELDS
+          : undefined;
+    if (!fields) return false;
     if (!hasExactKeys(value, fields)) return false;
     const createdAt = ownData(value, "createdAt");
     const lastCheckedAt = ownData(value, "lastCheckedAt");
     const jobId = ownData(value, "jobId");
     return (
-      ownData(value, "schemaVersion") === 1 &&
+      (schemaVersion === 1 ||
+        (schemaVersion === 2 &&
+          typeof ownData(value, "operationId") === "string" &&
+          OPERATION_ID.test(ownData(value, "operationId") as string))) &&
       ownData(value, "itemId") === identity.itemId &&
       ownData(value, "videoId") === identity.videoId &&
       ownData(value, "stage") === stage &&

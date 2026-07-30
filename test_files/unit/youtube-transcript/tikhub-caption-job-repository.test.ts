@@ -17,6 +17,7 @@ const CONNECTION_ID = "d4eb3f58-b672-4f73-b9f3-9cd2f0e57a8d";
 const OTHER_CONNECTION_ID = "e4eb3f58-b672-4f73-b9f3-9cd2f0e57a8d";
 const JOB_ID = "123e4567-e89b-12d3-a456-426614174000";
 const OTHER_JOB_ID = "223e4567-e89b-12d3-a456-426614174000";
+const OPERATION_ID = "323e4567-e89b-42d3-a456-426614174000";
 const INVALID_LANGUAGE_CODES = [
   ["empty", ""],
   ["control", "en\u0000"],
@@ -164,6 +165,21 @@ function createRecord(
   return record;
 }
 
+function createV2Record(
+  overrides: Partial<TikHubCaptionJobRecord> = {},
+): TikHubCaptionJobRecord {
+  const record = {
+    ...createRecord(),
+    schemaVersion: 2,
+    operationId: OPERATION_ID,
+    ...overrides,
+  } as TikHubCaptionJobRecord;
+  if (record.stage === "tracks" && overrides.languageCode === undefined) {
+    delete record.languageCode;
+  }
+  return record;
+}
+
 function createRepository(
   adapter = new InMemoryAdapter(),
   vault = { adapter } as unknown as Vault,
@@ -207,6 +223,89 @@ function parentPath(path: string): string {
 }
 
 describe("TikHubCaptionJobRepository", () => {
+  it("reads legacy v1 jobs and round-trips strict v2 operation identity", async () => {
+    const test = createRepository();
+    const legacy = createRecord();
+    const current = createV2Record({
+      itemId: OTHER_ITEM_ID,
+      stage: "tracks",
+      languageCode: undefined,
+      jobId: OTHER_JOB_ID,
+    });
+
+    await test.repository.write(legacy);
+    await test.repository.write(current);
+
+    await expect(test.repository.read(identityFor(legacy).key)).resolves.toEqual(
+      legacy,
+    );
+    await expect(test.repository.read(identityFor(current).key)).resolves.toEqual(
+      current,
+    );
+  });
+
+  it("allows an exact CAS upgrade from v1 to v2 but rejects a different job identity", async () => {
+    const test = createRepository();
+    const legacy = createRecord();
+    const upgraded = createV2Record();
+    await test.repository.write(legacy);
+
+    await expect(
+      test.repository.replaceIfCurrent(identityFor(legacy), upgraded),
+    ).resolves.toBe(true);
+    await expect(test.repository.read(identityFor(upgraded).key)).resolves.toEqual(
+      upgraded,
+    );
+
+    await expect(
+      test.repository.replaceIfCurrent(
+        identityFor({ ...upgraded, jobId: OTHER_JOB_ID }),
+        { ...upgraded, jobId: OTHER_JOB_ID },
+      ),
+    ).resolves.toBe(false);
+    await expect(test.repository.read(identityFor(upgraded).key)).resolves.toEqual(
+      upgraded,
+    );
+  });
+
+  it.each([
+    ["unknown version", { ...createRecord(), schemaVersion: 3 }],
+    ["missing v2 operation ID", { ...createRecord(), schemaVersion: 2 }],
+    [
+      "invalid v2 operation ID",
+      { ...createRecord(), schemaVersion: 2, operationId: "not-a-uuid" },
+    ],
+    [
+      "extra v2 field",
+      { ...createV2Record(), providerPayload: "forbidden" },
+    ],
+  ])("rejects a strict-union violation: %s", async (_label, record) => {
+    const test = createRepository();
+
+    await expect(
+      test.repository.write(record as unknown as TikHubCaptionJobRecord),
+    ).rejects.toThrow();
+    expect(test.adapter.files.has(JOBS_PATH)).toBe(false);
+  });
+
+  it("rejects a v2 operation-ID getter without invoking it", async () => {
+    const test = createRepository();
+    const record = { ...createV2Record() } as Record<string, unknown>;
+    let getterCalled = false;
+    Object.defineProperty(record, "operationId", {
+      enumerable: true,
+      get() {
+        getterCalled = true;
+        return OPERATION_ID;
+      },
+    });
+
+    await expect(
+      test.repository.write(record as unknown as TikHubCaptionJobRecord),
+    ).rejects.toThrow();
+    expect(getterCalled).toBe(false);
+  });
+
   it("builds stable, stage-specific keys and rejects ambiguous identities", () => {
     expect(captionJobKey(ITEM_ID, VIDEO_ID, "tracks")).toBe(
       `${ITEM_ID}:${VIDEO_ID}:tracks`,

@@ -4,6 +4,17 @@ import { TikHubRequestLedgerError } from "../../../src/sources/tikhub/request-le
 import { TikHubClientError } from "../../../src/sources/tikhub/tikhub-client";
 import type { TikHubResult } from "../../../src/sources/tikhub/tikhub-types";
 import type { TikHubSettings } from "../../../src/types/types";
+import type {
+  OperationBeginInput,
+  OperationIdentityInput,
+  OperationJournalPort,
+  OperationJournalScope,
+} from "../../../src/operation-journal/operation-journal-service";
+import type {
+  OperationDetails,
+  OperationErrorCode,
+  OperationStage,
+} from "../../../src/operation-journal/operation-event";
 import {
   captionJobKey,
   TikHubCaptionJobAmbiguityError,
@@ -32,6 +43,9 @@ const CONNECTION_ID = "123e4567-e89b-42d3-a456-426614174000";
 const OTHER_CONNECTION_ID = "223e4567-e89b-42d3-a456-426614174000";
 const JOB_ID = "123e4567-e89b-12d3-a456-426614174000";
 const OTHER_JOB_ID = "223e4567-e89b-12d3-a456-426614174000";
+const OPERATION_ID = "323e4567-e89b-42d3-a456-426614174000";
+const LEGACY_CONTINUATION_OPERATION_ID =
+  "423e4567-e89b-42d3-a456-426614174000";
 const NOW = "2026-07-29T10:00:00.000Z";
 const EARLIER = "2026-07-29T09:55:00.000Z";
 const INVALID_LANGUAGE_CODES = [
@@ -51,6 +65,7 @@ const INVALID_LANGUAGE_CODES = [
 const CONTEXT: TranscriptProviderOperationContext = Object.freeze({
   itemId: ITEM_ID,
   videoId: VIDEO_ID,
+  operationId: OPERATION_ID,
 });
 const FREE_EVIDENCE: TranscriptProviderOperationEvidence = Object.freeze({
   tikhubPaidRequests: 0,
@@ -66,6 +81,67 @@ const AMBIGUOUS_OPERATION_EVIDENCE: TranscriptProviderOperationEvidence =
     paidRequestAttempted: true,
   });
 type ClientOutcome = TikHubResult<unknown> | Error;
+
+interface RecordedJournalEvent {
+  operationId: string;
+  status: "started" | "progress" | "succeeded" | "failed" | "aborted";
+  stage: OperationStage;
+  details: OperationDetails;
+}
+
+class RecordingJournal implements OperationJournalPort {
+  readonly events: RecordedJournalEvent[] = [];
+  readonly begins: OperationBeginInput[] = [];
+  readonly attaches: Array<{
+    operationId: string;
+    input: OperationIdentityInput;
+  }> = [];
+
+  begin(input: OperationBeginInput): OperationJournalScope {
+    this.begins.push(input);
+    const scope = this.scope(LEGACY_CONTINUATION_OPERATION_ID);
+    this.events.push({
+      operationId: scope.operationId,
+      status: "started",
+      stage: input.stage,
+      details: input.details,
+    });
+    return scope;
+  }
+
+  attach(
+    operationId: string,
+    input: OperationIdentityInput,
+  ): OperationJournalScope {
+    this.attaches.push({ operationId, input });
+    return this.scope(operationId);
+  }
+
+  private scope(operationId: string): OperationJournalScope {
+    const record = (
+      status: RecordedJournalEvent["status"],
+      stage: OperationStage,
+      details: OperationDetails,
+    ): Promise<void> => {
+      this.events.push({ operationId, status, stage, details });
+      return Promise.resolve();
+    };
+    return Object.freeze({
+      operationId,
+      progress: (stage: OperationStage, details: OperationDetails) =>
+        record("progress", stage, details),
+      succeed: (stage: OperationStage, details: OperationDetails) =>
+        record("succeeded", stage, details),
+      fail: (
+        stage: OperationStage,
+        errorCode: OperationErrorCode,
+        details: OperationDetails = {},
+      ) => record("failed", stage, { ...details, errorCode }),
+      abort: (stage: OperationStage) =>
+        record("aborted", stage, { errorCode: "aborted" }),
+    });
+  }
+}
 
 class FakeCaptionClient implements TikHubCaptionClient {
   readonly paidInputs: unknown[] = [];
@@ -205,6 +281,7 @@ interface HarnessOptions {
   delay?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   clock?: () => Date;
   events?: string[];
+  operationJournal?: OperationJournalPort;
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -238,6 +315,7 @@ function createHarness(options: HarnessOptions = {}) {
     delay,
     pollIntervalMs: 3_000,
     maxPolls: 10,
+    operationJournal: options.operationJournal,
   });
   return {
     provider,
@@ -431,6 +509,367 @@ function expectOperationEnvelope<T>(
 }
 
 describe("TikHubTranscriptProvider", () => {
+  it("writes new processing jobs as v2 with the shared operation ID", async () => {
+    const jobs = new FakeJobs();
+    const test = createHarness({
+      jobs,
+      client: new FakeCaptionClient(
+        [processingData()],
+        [completedTracksData()],
+      ),
+    });
+
+    await test.provider.listTracks(VIDEO_ID, undefined, CONTEXT);
+
+    expect(jobs.creates[0]).toMatchObject({
+      schemaVersion: 2,
+      operationId: OPERATION_ID,
+      jobId: JOB_ID,
+    });
+  });
+
+  it("returns a v2 pending continuation operation ID without changing the job", async () => {
+    const jobs = new FakeJobs();
+    const journal = new RecordingJournal();
+    const pending = jobRecord("content", {
+      schemaVersion: 2,
+      operationId: OPERATION_ID,
+    });
+    putJob(jobs, pending);
+    const test = createHarness({ jobs, operationJournal: journal });
+
+    await expect(test.provider.pendingContinuationOperationId({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+    })).resolves.toBe(OPERATION_ID);
+
+    expect(jobs.replacements).toHaveLength(0);
+    expect(journal.begins).toHaveLength(0);
+  });
+
+  it("begins one continuation scope and safely upgrades a legacy v1 job", async () => {
+    const jobs = new FakeJobs();
+    const journal = new RecordingJournal();
+    const pending = jobRecord("content");
+    putJob(jobs, pending);
+    const test = createHarness({ jobs, operationJournal: journal });
+    const identity = { itemId: ITEM_ID, videoId: VIDEO_ID };
+
+    await expect(
+      test.provider.pendingContinuationOperationId(identity),
+    ).resolves.toBe(LEGACY_CONTINUATION_OPERATION_ID);
+    await expect(
+      test.provider.pendingContinuationOperationId(identity),
+    ).resolves.toBe(LEGACY_CONTINUATION_OPERATION_ID);
+
+    expect(journal.begins).toHaveLength(1);
+    expect(jobs.replacements).toHaveLength(1);
+    expect(jobs.records.get(keyFor(pending))).toEqual({
+      ...pending,
+      schemaVersion: 2,
+      operationId: LEGACY_CONTINUATION_OPERATION_ID,
+    });
+    expect(test.client.paidInputs).toHaveLength(0);
+  });
+
+  it("journals a possible paid send timeout without inventing a job ID", async () => {
+    const journal = new RecordingJournal();
+    const test = createHarness({
+      operationJournal: journal,
+      client: new FakeCaptionClient([
+        new TikHubClientError(
+          "timeout",
+          "PRIVATE_TIMEOUT_RESPONSE_BODY",
+          undefined,
+          undefined,
+          true,
+        ),
+      ]),
+    });
+
+    await expect(
+      test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+    ).rejects.toMatchObject({ code: "timeout" });
+
+    expect(journal.events).toContainEqual(expect.objectContaining({
+      operationId: OPERATION_ID,
+      stage: "tikhub-request",
+      status: "failed",
+      details: expect.objectContaining({
+        confirmedPaidRequests: 1,
+        possiblySent: true,
+      }),
+    }));
+    expect(journal.events.some((event) => "jobId" in event.details)).toBe(false);
+    expect(JSON.stringify(journal.events)).not.toContain(
+      "PRIVATE_TIMEOUT_RESPONSE_BODY",
+    );
+  });
+
+  it("journals a pre-send paid failure as not possibly sent", async () => {
+    const journal = new RecordingJournal();
+    const test = createHarness({
+      operationJournal: journal,
+      client: new FakeCaptionClient([
+        new TikHubClientError(
+          "invalid-query",
+          "PRIVATE_PRE_SEND_ERROR",
+          undefined,
+          undefined,
+          false,
+        ),
+      ]),
+    });
+
+    await expect(
+      test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+    ).rejects.toMatchObject({ code: "tikhub-malformed-response" });
+
+    expect(journal.events).toContainEqual(expect.objectContaining({
+      operationId: OPERATION_ID,
+      stage: "tikhub-request",
+      status: "failed",
+      details: expect.objectContaining({
+        confirmedPaidRequests: 0,
+        possiblySent: false,
+      }),
+    }));
+    expect(JSON.stringify(journal.events)).not.toContain("PRIVATE_PRE_SEND_ERROR");
+  });
+
+  it("journals budget confirmation and a synchronous paid result without provider content", async () => {
+    const journal = new RecordingJournal();
+    const test = createHarness({
+      operationJournal: journal,
+      client: new FakeCaptionClient([tracksData([
+        {
+          language_code: "en",
+          language_name: "PRIVATE_PROVIDER_RESPONSE_BODY",
+        },
+      ])]),
+    });
+
+    await expect(
+      test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+    ).resolves.toMatchObject({ evidence: PAID_EVIDENCE });
+
+    expect(journal.events.filter(({ stage }) => stage === "tikhub-request"))
+      .toEqual([
+        expect.objectContaining({
+          status: "progress",
+          details: {
+            provider: "tikhub",
+            confirmedPaidRequests: 0,
+            possiblySent: false,
+          },
+        }),
+        expect.objectContaining({
+          status: "progress",
+          details: {
+            provider: "tikhub",
+            confirmedPaidRequests: 1,
+            possiblySent: true,
+          },
+        }),
+      ]);
+    const serialized = JSON.stringify(journal.events);
+    expect(serialized).not.toContain("PRIVATE_PROVIDER_RESPONSE_BODY");
+    expect(serialized).not.toContain("synthetic-caption-auth");
+    expect(serialized).not.toContain("https://");
+  });
+
+  it("journals a malformed paid result as failed without the response body", async () => {
+    const journal = new RecordingJournal();
+    const test = createHarness({
+      operationJournal: journal,
+      client: new FakeCaptionClient([
+        { data: { private_response_body: "PRIVATE_MALFORMED_RESULT" } },
+      ]),
+    });
+
+    await expect(
+      test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+    ).rejects.toMatchObject({ code: "tikhub-malformed-response" });
+
+    expect(journal.events).toContainEqual(expect.objectContaining({
+      operationId: OPERATION_ID,
+      stage: "tikhub-request",
+      status: "failed",
+      details: expect.objectContaining({
+        confirmedPaidRequests: 1,
+        possiblySent: true,
+        errorCode: "malformed-response",
+      }),
+    }));
+    expect(JSON.stringify(journal.events)).not.toContain(
+      "PRIVATE_MALFORMED_RESULT",
+    );
+  });
+
+  it("resumes, polls, and removes persisted content under one durable operation ID", async () => {
+    const journal = new RecordingJournal();
+    const jobs = new FakeJobs();
+    const pending = jobRecord("content", {
+      schemaVersion: 2,
+      operationId: OPERATION_ID,
+    });
+    putJob(jobs, pending);
+    const test = createHarness({
+      jobs,
+      operationJournal: journal,
+      client: new FakeCaptionClient([], [completedContentData()]),
+    });
+
+    await expect(test.provider.pendingContinuationOperationId({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+    })).resolves.toBe(OPERATION_ID);
+    const resumed = expectOperationEnvelope<{
+      track: YouTubeCaptionTrack;
+      transcript: YouTubeTranscript;
+    }>(
+      await test.provider.continuePending(undefined, CONTEXT),
+      FREE_EVIDENCE,
+    );
+    await test.provider.onPersisted(
+      resumed.value.track,
+      resumed.value.transcript,
+      CONTEXT,
+      resumed.persistenceToken,
+    );
+
+    expect(test.client.paidInputs).toHaveLength(0);
+    expect(jobs.records.has(keyFor(pending))).toBe(false);
+    expect(journal.events.every(({ operationId }) => operationId === OPERATION_ID))
+      .toBe(true);
+    expect(journal.events).toContainEqual(expect.objectContaining({
+      operationId: OPERATION_ID,
+      stage: "completed",
+      status: "progress",
+      details: {
+        provider: "tikhub",
+        contentBasis: "youtube-transcript",
+      },
+    }));
+    expect(JSON.stringify(journal.events)).not.toContain(
+      "Completed from the free result endpoint.",
+    );
+  });
+
+  it("journals paid confirmation, durable job receipt, every free poll, and processing timeout", async () => {
+    const journal = new RecordingJournal();
+    let now = Date.parse(NOW);
+    const test = createHarness({
+      operationJournal: journal,
+      clock: () => new Date(now),
+      delay: async () => {
+        now += 3_000;
+      },
+      client: new FakeCaptionClient(
+        [processingData()],
+        Array.from({ length: 10 }, () => pendingData()),
+      ),
+    });
+
+    await expect(
+      test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+    ).rejects.toMatchObject({ code: "tikhub-processing" });
+
+    expect(journal.events).toContainEqual(expect.objectContaining({
+      stage: "job-received",
+      status: "progress",
+      details: expect.objectContaining({
+        confirmedPaidRequests: 1,
+        possiblySent: true,
+        jobId: JOB_ID,
+      }),
+    }));
+    const polls = journal.events.filter(({ stage, status }) =>
+      stage === "polling" && status === "progress"
+    );
+    expect(polls.map(({ details }) => ({
+      pollNumber: "pollNumber" in details ? details.pollNumber : undefined,
+      elapsedMs: "elapsedMs" in details ? details.elapsedMs : undefined,
+    }))).toEqual(Array.from({ length: 10 }, (_unused, index) => ({
+      pollNumber: index + 1,
+      elapsedMs: (index + 1) * 3_000,
+    })));
+    expect(journal.events).toContainEqual(expect.objectContaining({
+      stage: "polling",
+      status: "failed",
+      details: expect.objectContaining({
+        confirmedPaidRequests: 1,
+        possiblySent: true,
+        errorCode: "transcript-unavailable",
+      }),
+    }));
+  });
+
+  it("journals the received job identity when local job persistence fails", async () => {
+    const journal = new RecordingJournal();
+    const jobs = new FakeJobs();
+    jobs.createFailure = new Error("PRIVATE_JOB_STORAGE_ERROR");
+    const test = createHarness({
+      jobs,
+      operationJournal: journal,
+      client: new FakeCaptionClient([processingData()]),
+    });
+
+    await expect(
+      test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+    ).rejects.toMatchObject({ code: "tikhub-budget-unavailable" });
+
+    expect(journal.events).toContainEqual(expect.objectContaining({
+      operationId: OPERATION_ID,
+      stage: "job-received",
+      status: "failed",
+      details: expect.objectContaining({
+        confirmedPaidRequests: 1,
+        possiblySent: true,
+        jobId: JOB_ID,
+        errorCode: "budget-exhausted",
+      }),
+    }));
+    expect(JSON.stringify(journal.events)).not.toContain(
+      "PRIVATE_JOB_STORAGE_ERROR",
+    );
+  });
+
+  it("journals a failed free poll without response or error content", async () => {
+    const journal = new RecordingJournal();
+    const jobs = new FakeJobs();
+    putJob(jobs, jobRecord("tracks", {
+      schemaVersion: 2,
+      operationId: OPERATION_ID,
+    }));
+    const test = createHarness({
+      jobs,
+      operationJournal: journal,
+      client: new FakeCaptionClient([], [
+        new TikHubClientError("timeout", "PRIVATE_FREE_POLL_RESPONSE"),
+      ]),
+    });
+
+    await expect(
+      test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+    ).rejects.toMatchObject({ code: "timeout" });
+
+    expect(journal.events).toContainEqual(expect.objectContaining({
+      operationId: OPERATION_ID,
+      stage: "polling",
+      status: "failed",
+      details: expect.objectContaining({
+        pollNumber: 1,
+        confirmedPaidRequests: 0,
+        possiblySent: false,
+        errorCode: "timeout",
+      }),
+    }));
+    expect(JSON.stringify(journal.events)).not.toContain(
+      "PRIVATE_FREE_POLL_RESPONSE",
+    );
+  });
+
   it.each([
     [false, true],
     [true, false],
@@ -735,7 +1174,8 @@ describe("TikHubTranscriptProvider", () => {
       "result",
     ]);
     expect(jobs.creates[0]).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
+      operationId: OPERATION_ID,
       itemId: ITEM_ID,
       videoId: VIDEO_ID,
       stage: "tracks",

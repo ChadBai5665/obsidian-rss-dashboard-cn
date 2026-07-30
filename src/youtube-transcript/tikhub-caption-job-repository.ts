@@ -3,7 +3,7 @@ import { isCanonicalConnectionId } from "../security/connection-id";
 import { isValidYouTubeVideoId } from "./transcript-types";
 import { isValidYouTubeCaptionLanguageCode } from "./youtube-caption-language-code";
 
-export interface TikHubCaptionJobRecord {
+export interface TikHubCaptionJobRecordV1 {
   schemaVersion: 1;
   itemId: string;
   videoId: string;
@@ -16,6 +16,13 @@ export interface TikHubCaptionJobRecord {
   lastCheckedAt: string;
   status: "processing";
 }
+
+export type TikHubCaptionJobRecord =
+  | TikHubCaptionJobRecordV1
+  | (Omit<TikHubCaptionJobRecordV1, "schemaVersion"> & {
+      schemaVersion: 2;
+      operationId: string;
+    });
 
 export interface TikHubCaptionJobIdentity {
   key: string;
@@ -33,6 +40,8 @@ export class TikHubCaptionJobAmbiguityError extends Error {
 const ITEM_ID = /^[a-f0-9]{64}$/u;
 const JOB_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const OPERATION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 const STORE_FIELDS = ["schemaVersion", "jobs"] as const;
 const IDENTITY_FIELDS = ["key", "jobId", "connectionId"] as const;
@@ -61,6 +70,8 @@ const CONTENT_JOB_FIELDS = [
   "lastCheckedAt",
   "status",
 ] as const;
+const TRACK_JOB_V2_FIELDS = [...TRACK_JOB_FIELDS, "operationId"] as const;
+const CONTENT_JOB_V2_FIELDS = [...CONTENT_JOB_FIELDS, "operationId"] as const;
 
 /** One mutation queue per physical Vault object and repository path. */
 const vaultMutationQueues = new WeakMap<object, Map<string, Promise<void>>>();
@@ -408,15 +419,24 @@ function projectRecord(value: unknown): TikHubCaptionJobRecord {
       throw invalidRecord();
     }
     const stage = stageValue;
+    const schemaVersion = ownData(record, "schemaVersion");
     const fields = stage === "tracks"
-      ? TRACK_JOB_FIELDS
+      ? schemaVersion === 1
+        ? TRACK_JOB_FIELDS
+        : schemaVersion === 2
+          ? TRACK_JOB_V2_FIELDS
+          : undefined
       : stage === "content"
-        ? CONTENT_JOB_FIELDS
+        ? schemaVersion === 1
+          ? CONTENT_JOB_FIELDS
+          : schemaVersion === 2
+            ? CONTENT_JOB_V2_FIELDS
+            : undefined
         : undefined;
     if (!fields || !hasExactDataFields(record, fields)) throw invalidRecord();
 
     const projected: TikHubCaptionJobRecord = {
-      schemaVersion: ownData(record, "schemaVersion") as 1,
+      schemaVersion: schemaVersion as 1 | 2,
       itemId: ownData(record, "itemId") as string,
       videoId: ownData(record, "videoId") as string,
       stage,
@@ -429,7 +449,10 @@ function projectRecord(value: unknown): TikHubCaptionJobRecord {
       createdAt: ownData(record, "createdAt") as string,
       lastCheckedAt: ownData(record, "lastCheckedAt") as string,
       status: ownData(record, "status") as "processing",
-    };
+      ...(schemaVersion === 2
+        ? { operationId: ownData(record, "operationId") as string }
+        : {}),
+    } as TikHubCaptionJobRecord;
     assertRecordValues(projected);
     return projected;
   } catch {
@@ -473,7 +496,7 @@ function matchesIdentity(
 
 function assertRecordValues(record: TikHubCaptionJobRecord): void {
   if (
-    record.schemaVersion !== 1 ||
+    (record.schemaVersion !== 1 && record.schemaVersion !== 2) ||
     typeof record.itemId !== "string" ||
     !ITEM_ID.test(record.itemId) ||
     typeof record.videoId !== "string" ||
@@ -486,6 +509,13 @@ function assertRecordValues(record: TikHubCaptionJobRecord): void {
     !isIsoTimestamp(record.lastCheckedAt) ||
     record.lastCheckedAt < record.createdAt ||
     record.status !== "processing"
+  ) {
+    throw invalidRecord();
+  }
+  if (
+    record.schemaVersion === 2 &&
+    (typeof record.operationId !== "string" ||
+      !OPERATION_ID.test(record.operationId))
   ) {
     throw invalidRecord();
   }
@@ -539,7 +569,8 @@ function cloneRecord(record: TikHubCaptionJobRecord): TikHubCaptionJobRecord {
     createdAt: record.createdAt,
     lastCheckedAt: record.lastCheckedAt,
     status: record.status,
-  };
+    ...(record.schemaVersion === 2 ? { operationId: record.operationId } : {}),
+  } as TikHubCaptionJobRecord;
 }
 
 function plainRecord(value: unknown): Record<string, unknown> | undefined {
