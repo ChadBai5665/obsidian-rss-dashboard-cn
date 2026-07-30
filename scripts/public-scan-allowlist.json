@@ -2014,5 +2014,47 @@
     "line": 812,
     "fingerprint": "sha256:f02c35339680aad13f67e0237f54c31495cc2c77125719ae3ae95a59905b2910",
     "reason": "Synthetic credential fixture verifies bounded free result polling uses the operation-scoped key while issuing zero paid requests."
+  },
+  {
+    "path": "test_files/unit/operation-journal/operation-event.test.ts",
+    "rule": "credential-value",
+    "line": 154,
+    "fingerprint": "sha256:321f1d9af803fb0134f284223acc3bb5f92d92ee5989efcf8e335bc27073c6d5",
+    "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
+  },
+  {
+    "path": "test_files/unit/operation-journal/operation-event.test.ts",
+    "rule": "credential-value",
+    "line": 155,
+    "fingerprint": "sha256:df2dbbac6679165641275f86693bd0c09522e27c19f8cc2484d3550e4c82c3bc",
+    "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
+  },
+  {
+    "path": "test_files/unit/operation-journal/operation-event.test.ts",
+    "rule": "home-path",
+    "line": 198,
+    "fingerprint": "sha256:75de86a5f2985e23f9c768519f4a7a6afb66de7dedca7f7740d3d7f13c39764a",
+    "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
+  },
+  {
+    "path": "test_files/unit/operation-journal/operation-event.test.ts",
+    "rule": "home-path",
+    "line": 227,
+    "fingerprint": "sha256:75de86a5f2985e23f9c768519f4a7a6afb66de7dedca7f7740d3d7f13c39764a",
+    "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
+  },
+  {
+    "path": "test_files/unit/operation-journal/operation-event.test.ts",
+    "rule": "credential-value",
+    "line": 231,
+    "fingerprint": "sha256:33c4b434882e31ca68d9754e481ba1e3b8890ef20d8cbf92114458820bc0218c",
+    "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
+  },
+  {
+    "path": "test_files/unit/operation-journal/operation-event.test.ts",
+    "rule": "credential-value",
+    "line": 232,
+    "fingerprint": "sha256:d604c2b136c8a3452477b2a02c8ae8aad41f7c7864e16d34e02b0328f90de6fa",
+    "reason": "Strict operation event projection test intentionally uses a synthetic unsafe value to verify rejection."
   }
 ]
