@@ -182,6 +182,78 @@ describe("production inline AI composition", () => {
     }));
   });
 
+  it("rebuilds pending-root transcript and AI runtimes with the committed journal identity", async () => {
+    const test = harness();
+    let releasePersist!: () => void;
+    const pendingPersist = new Promise<void>((resolve) => {
+      releasePersist = resolve;
+    });
+    const repository = (test.plugin as unknown as {
+      feedStorageRepository: {
+        persistSettings(): Promise<unknown>;
+      };
+    }).feedStorageRepository;
+    const persist = vi.spyOn(repository, "persistSettings")
+      .mockImplementation(async () => {
+        await pendingPersist;
+        return {
+          metadataSaved: true,
+          shardWriteCount: 0,
+          shardDeleteCount: 0,
+        };
+      });
+    const api = test.plugin as unknown as {
+      getOperationJournalPort(): unknown;
+      getYouTubeTranscriptRuntime(): {
+        service: {
+          dispose(): void;
+          options: { operationJournal?: unknown };
+        };
+      };
+      aiRuntime: {
+        operationJournal?: unknown;
+      };
+    };
+    const journalA = api.getOperationJournalPort();
+    test.settings.collection.dataFolder = ".rss-dashboard-data-next";
+    const saving = test.plugin.saveSettings();
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1));
+
+    const transcriptBeforeCommit = api.getYouTubeTranscriptRuntime();
+    const disposeOldTranscript = vi.spyOn(
+      transcriptBeforeCommit.service,
+      "dispose",
+    );
+    const aiBeforeCommit = test.plugin.createAiPanelOptionsForItem(
+      test.selected,
+    )!;
+    const shutdownOldAi = vi.spyOn(
+      aiBeforeCommit.coordinator as { shutdown(): Promise<void> },
+      "shutdown",
+    );
+    expect(transcriptBeforeCommit.service.options.operationJournal)
+      .toBe(journalA);
+    expect(api.aiRuntime.operationJournal).toBe(journalA);
+
+    releasePersist();
+    await saving;
+    const journalB = api.getOperationJournalPort();
+    expect(journalB).not.toBe(journalA);
+
+    const transcriptAfterCommit = api.getYouTubeTranscriptRuntime();
+    const aiAfterCommit = test.plugin.createAiPanelOptionsForItem(test.selected)!;
+    expect(transcriptAfterCommit.service).not.toBe(
+      transcriptBeforeCommit.service,
+    );
+    expect(transcriptAfterCommit.service.options.operationJournal)
+      .toBe(journalB);
+    expect(aiAfterCommit.coordinator).not.toBe(aiBeforeCommit.coordinator);
+    expect(api.aiRuntime.operationJournal).toBe(journalB);
+    expect(disposeOldTranscript).toHaveBeenCalledTimes(1);
+    expect(shutdownOldAi).toHaveBeenCalledTimes(1);
+  });
+
+
   it("reuses one runtime per data root and reads no secret before a provider run", () => {
     const test = harness();
 

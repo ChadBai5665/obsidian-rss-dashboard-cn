@@ -3,6 +3,7 @@ import { App, type PluginManifest } from "obsidian";
 import RssDashboardPlugin from "../../../main";
 import { OperationJournalClearModal } from "../../../src/modals/operation-journal-clear-modal";
 import { OperationJournalService } from "../../../src/operation-journal/operation-journal-service";
+import { OperationJournalRepository } from "../../../src/operation-journal/operation-journal-repository";
 import { DEFAULT_SETTINGS } from "../../../src/types/types";
 import type { OperationJournalUiPort } from "../../../src/components/operation-journal-panel";
 import type { OperationJournalSettingsPort } from "../../../src/settings/tabs/import-export-settings-tab";
@@ -33,6 +34,20 @@ interface JournalWiringApi {
   };
   getSubscriptionService(): { dependencies: { operationJournal?: unknown } };
   initializeSettingsBackedServices(): void;
+  commitSettingsCandidateUnlocked(
+    build: (previous: typeof DEFAULT_SETTINGS) => typeof DEFAULT_SETTINGS,
+  ): Promise<void>;
+  feedStorageRepository: {
+    persistSettings(): Promise<unknown>;
+    persistSettingsTransaction<T>(
+      previous: typeof DEFAULT_SETTINGS,
+      candidate: typeof DEFAULT_SETTINGS,
+      plan: unknown,
+      afterPersist: () => Promise<T>,
+      options?: unknown,
+    ): Promise<T>;
+  };
+  verifyImportedSettingsPersistence(): Promise<void>;
   beginRefreshJournalSafely(input: {
     trigger: "manual";
     action: "all";
@@ -54,6 +69,35 @@ function transcriptBegin() {
     subject: { itemId: "item-1" },
     stage: "requested" as const,
     details: { contentBasis: "youtube-transcript" as const },
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function emptyList() {
+  return Object.freeze({
+    operations: Object.freeze([]),
+    incompleteDates: Object.freeze([]),
+    corruptDates: Object.freeze([]),
+    truncated: false,
+    health: Object.freeze({
+      writeIncomplete: false,
+      maintenanceIncomplete: false,
+    }),
+  });
+}
+
+function persistedResult() {
+  return {
+    metadataSaved: true,
+    shardWriteCount: 0,
+    shardDeleteCount: 0,
   };
 }
 
@@ -128,8 +172,10 @@ describe("operation journal runtime composition", () => {
     expect(listener).toHaveBeenCalled();
     listener.mockClear();
 
+    vi.spyOn(test.api.feedStorageRepository, "persistSettings")
+      .mockResolvedValue(persistedResult());
     test.plugin.settings.collection.dataFolder = ".rss-dashboard-data-next";
-    test.api.initializeSettingsBackedServices();
+    await test.plugin.saveSettings();
     expect((test.plugin as unknown as {
       operationJournalRuntime: { dataRoot: string };
     }).operationJournalRuntime.dataRoot).toBe(".rss-dashboard-data-next");
@@ -305,6 +351,194 @@ describe("operation journal runtime composition", () => {
     await expect(test.app.vault.adapter.exists(
       ".rss-dashboard-data/state/operation-journal",
     )).resolves.toBe(true);
+  });
+
+  it("keeps the committed root during candidate publication rollback", async () => {
+    const test = harness();
+    test.api.initializeSettingsBackedServices();
+    const previousSettings = test.plugin.settings;
+    const previousService = test.api.getOperationJournalPort();
+    const ui = test.api.getOperationJournalUi();
+    const listener = vi.fn();
+    ui.subscribe(listener);
+    vi.spyOn(test.api, "verifyImportedSettingsPersistence")
+      .mockResolvedValue(undefined);
+    vi.spyOn(test.api.feedStorageRepository, "persistSettingsTransaction")
+      .mockImplementation(async (_previous, _candidate, _plan, afterPersist) =>
+        await afterPersist());
+    vi.spyOn(test.plugin, "refreshDashboardViews")
+      .mockRejectedValueOnce(new Error("candidate-view-failed"))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(test.api.commitSettingsCandidateUnlocked((previous) => {
+      const candidate = structuredClone(previous);
+      candidate.collection.dataFolder = ".candidate-journal-root";
+      return candidate;
+    })).rejects.toThrow("candidate-view-failed");
+
+    expect(test.plugin.settings).toBe(previousSettings);
+    expect(test.api.getOperationJournalPort()).toBe(previousService);
+    listener.mockClear();
+    const scope = previousService.begin(transcriptBegin());
+    await scope.succeed("completed", { contentBasis: "youtube-transcript" });
+    expect(listener).toHaveBeenCalled();
+    await expect(test.app.vault.adapter.exists(".candidate-journal-root"))
+      .resolves.toBe(false);
+  });
+
+  it("activates a changed root only after an ordinary settings save commits", async () => {
+    const test = harness();
+    const previousService = test.api.getOperationJournalPort();
+    vi.spyOn(test.api.feedStorageRepository, "persistSettings")
+      .mockResolvedValue(persistedResult());
+    test.plugin.settings.collection.dataFolder = ".saved-journal-root";
+
+    expect(test.api.getOperationJournalPort()).toBe(previousService);
+    await test.plugin.saveSettings();
+
+    expect(test.api.getOperationJournalPort()).not.toBe(previousService);
+    expect((test.plugin as unknown as {
+      operationJournalRuntime: { dataRoot: string };
+    }).operationJournalRuntime.dataRoot).toBe(".saved-journal-root");
+  });
+
+  it("keeps the committed root when ordinary settings save rejects", async () => {
+    const test = harness();
+    const previousService = test.api.getOperationJournalPort();
+    vi.spyOn(test.api.feedStorageRepository, "persistSettings")
+      .mockRejectedValue(new Error("settings-save-failed"));
+    test.plugin.settings.collection.dataFolder = ".rejected-journal-root";
+
+    await expect(test.plugin.saveSettings()).rejects
+      .toThrow("settings-save-failed");
+
+    expect(test.api.getOperationJournalPort()).toBe(previousService);
+    expect((test.plugin as unknown as {
+      operationJournalRuntime: { dataRoot: string };
+    }).operationJournalRuntime.dataRoot).toBe(".rss-dashboard-data");
+  });
+
+  it("keeps the committed root when factory reset persistence fails", async () => {
+    const test = harness();
+    test.plugin.settings.collection.dataFolder = ".pre-reset-journal-root";
+    const previousService = test.api.getOperationJournalPort();
+    vi.spyOn(test.api.feedStorageRepository, "persistSettings")
+      .mockRejectedValue(new Error("factory-reset-save-failed"));
+
+    await expect(test.plugin.performFactoryReset()).rejects
+      .toThrow("factory-reset-save-failed");
+
+    expect(test.api.getOperationJournalPort()).toBe(previousService);
+    expect((test.plugin as unknown as {
+      operationJournalRuntime: { dataRoot: string };
+    }).operationJournalRuntime.dataRoot).toBe(".pre-reset-journal-root");
+  });
+
+  it("reloads journal health once when repository append fails", async () => {
+    const test = harness();
+    const service = test.api.getOperationJournalPort();
+    vi.spyOn(OperationJournalRepository.prototype, "append")
+      .mockRejectedValue(new Error("append-failed"));
+    const listener = vi.fn();
+    test.api.getOperationJournalUi().subscribe(listener);
+
+    const scope = service.begin(transcriptBegin());
+    await scope.succeed("completed", { contentBasis: "youtube-transcript" });
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(service.getHealth()).toMatchObject({ writeIncomplete: true });
+  });
+
+  it("rejects a completed stale clear after the committed root changes", async () => {
+    const test = harness();
+    const serviceA = test.api.getOperationJournalPort();
+    const pending = deferred<void>();
+    vi.spyOn(serviceA, "clearOrThrow").mockReturnValue(pending.promise);
+    vi.spyOn(test.api.feedStorageRepository, "persistSettings")
+      .mockResolvedValue(persistedResult());
+    const listener = vi.fn();
+    test.api.getOperationJournalUi().subscribe(listener);
+
+    const clearA = test.api.getOperationJournalSettings().clear();
+    await Promise.resolve();
+    test.plugin.settings.collection.dataFolder = ".journal-root-b";
+    await test.plugin.saveSettings();
+    const serviceB = test.api.getOperationJournalPort();
+    const clearB = vi.spyOn(serviceB, "clearOrThrow")
+      .mockResolvedValue(undefined);
+    listener.mockClear();
+    pending.resolve();
+
+    await expect(clearA).rejects.toMatchObject({
+      code: "operation-journal-unavailable",
+    });
+    expect(clearB).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
+    await expect(test.api.getOperationJournalSettings().clear()).resolves
+      .toBeUndefined();
+    expect(clearB).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns only the stable C list across A to B to C root changes", async () => {
+    const test = harness();
+    vi.spyOn(test.api.feedStorageRepository, "persistSettings")
+      .mockResolvedValue(persistedResult());
+    const serviceA = test.api.getOperationJournalPort();
+    const listA = deferred<ReturnType<typeof emptyList>>();
+    vi.spyOn(serviceA, "list").mockReturnValue(listA.promise);
+
+    const loading = test.api.getOperationJournalUi().load(7);
+    test.plugin.settings.collection.dataFolder = ".journal-root-b";
+    await test.plugin.saveSettings();
+    const serviceB = test.api.getOperationJournalPort();
+    const listB = deferred<ReturnType<typeof emptyList>>();
+    const listBSpy = vi.spyOn(serviceB, "list").mockReturnValue(listB.promise);
+    listA.resolve(emptyList());
+    await vi.waitFor(() => expect(listBSpy).toHaveBeenCalledTimes(1));
+
+    test.plugin.settings.collection.dataFolder = ".journal-root-c";
+    await test.plugin.saveSettings();
+    const serviceC = test.api.getOperationJournalPort();
+    const resultC = emptyList();
+    const listCSpy = vi.spyOn(serviceC, "list").mockResolvedValue(resultC);
+    listB.resolve(emptyList());
+
+    await expect(loading).resolves.toBe(resultC);
+    expect(listCSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects with a fixed error when list roots churn beyond the bound", async () => {
+    const test = harness();
+    vi.spyOn(test.api.feedStorageRepository, "persistSettings")
+      .mockResolvedValue(persistedResult());
+    const serviceA = test.api.getOperationJournalPort();
+    const listA = deferred<ReturnType<typeof emptyList>>();
+    vi.spyOn(serviceA, "list").mockReturnValue(listA.promise);
+    const loading = test.api.getOperationJournalUi().load(7);
+
+    test.plugin.settings.collection.dataFolder = ".churn-b";
+    await test.plugin.saveSettings();
+    const serviceB = test.api.getOperationJournalPort();
+    const listB = deferred<ReturnType<typeof emptyList>>();
+    const listBSpy = vi.spyOn(serviceB, "list").mockReturnValue(listB.promise);
+    listA.resolve(emptyList());
+    await vi.waitFor(() => expect(listBSpy).toHaveBeenCalledTimes(1));
+
+    test.plugin.settings.collection.dataFolder = ".churn-c";
+    await test.plugin.saveSettings();
+    const serviceC = test.api.getOperationJournalPort();
+    const listC = deferred<ReturnType<typeof emptyList>>();
+    const listCSpy = vi.spyOn(serviceC, "list").mockReturnValue(listC.promise);
+    listB.resolve(emptyList());
+    await vi.waitFor(() => expect(listCSpy).toHaveBeenCalledTimes(1));
+
+    test.plugin.settings.collection.dataFolder = ".churn-d";
+    await test.plugin.saveSettings();
+    listC.resolve(emptyList());
+
+    await expect(loading).rejects.toMatchObject({
+      code: "operation-journal-unavailable",
+    });
   });
 
   it("keeps repository and paths outside both UI facades", () => {
