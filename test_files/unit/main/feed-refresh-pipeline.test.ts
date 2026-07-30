@@ -505,6 +505,77 @@ describe("refreshFeeds() pipeline behavior", () => {
     expect(appended[0]?.subject).not.toHaveProperty("label");
   });
 
+  it("does not execute an own feedId getter before explicit refresh journaling", async () => {
+    let getterRuns = 0;
+    const source = createFeed({
+      feedId: "replaced-by-hostile-getter",
+      title: "Safe own title",
+      subscriptionStatus: "paused",
+    });
+    Object.defineProperty(source, "feedId", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        getterRuns += 1;
+        throw new Error("must not run");
+      },
+    });
+    const plugin = createPluginWithSettings([source]);
+    const events = recordRefreshJournal(plugin);
+
+    await expect(plugin.refreshSelectedFeed(source)).resolves.toBeUndefined();
+
+    expect(getterRuns).toBe(0);
+    expect(events[0]).toMatchObject({
+      status: "started",
+      input: {
+        trigger: "manual",
+        action: "source",
+        subject: { label: "Safe own title" },
+      },
+    });
+    expect(
+      (events[0] as Extract<RecordedRefreshEvent, { status: "started" }>).input
+        .subject,
+    ).not.toHaveProperty("sourceId");
+  });
+
+  it("does not execute an inherited title getter before explicit refresh journaling", async () => {
+    let getterRuns = 0;
+    const source = createFeed({
+      feedId: "safe-own-source-id",
+      subscriptionStatus: "paused",
+    });
+    Reflect.deleteProperty(source, "title");
+    const hostilePrototype = {};
+    Object.defineProperty(hostilePrototype, "title", {
+      enumerable: true,
+      get() {
+        getterRuns += 1;
+        throw new Error("must not run");
+      },
+    });
+    Object.setPrototypeOf(source, hostilePrototype);
+    const plugin = createPluginWithSettings([source]);
+    const events = recordRefreshJournal(plugin);
+
+    await expect(plugin.refreshSelectedFeed(source)).resolves.toBeUndefined();
+
+    expect(getterRuns).toBe(0);
+    expect(events[0]).toMatchObject({
+      status: "started",
+      input: {
+        trigger: "manual",
+        action: "source",
+        subject: { sourceId: "safe-own-source-id" },
+      },
+    });
+    expect(
+      (events[0] as Extract<RecordedRefreshEvent, { status: "started" }>).input
+        .subject,
+    ).not.toHaveProperty("label");
+  });
+
   it.each(["attempt", "success"] as const)(
     "journals a dedicated refresh-state error when ledger %s persistence fails",
     async (failure) => {

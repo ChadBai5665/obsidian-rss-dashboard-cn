@@ -3097,12 +3097,24 @@ export default class RssDashboardPlugin extends Plugin {
   }
 
   private refreshSubjectForFeed(feed: Feed): OperationSubject {
-    const sourceId = feed.feedId?.trim();
-    const label = feed.title?.normalize("NFC").trim();
-    return projectSafeOperationSubject({
-      ...(sourceId ? { sourceId } : {}),
-      ...(label ? { label } : {}),
-    });
+    const subject: Record<string, unknown> = {};
+    for (const [feedKey, subjectKey] of [
+      ["feedId", "sourceId"],
+      ["title", "label"],
+    ] as const) {
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(feed, feedKey);
+        if (
+          descriptor?.enumerable === true &&
+          Object.prototype.hasOwnProperty.call(descriptor, "value")
+        ) {
+          subject[subjectKey] = descriptor.value;
+        }
+      } catch {
+        // Hostile descriptor access discards only this optional field.
+      }
+    }
+    return projectSafeOperationSubject(subject);
   }
 
   private beginRefreshJournalSafely(
