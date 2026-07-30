@@ -23,9 +23,11 @@ import type {
   OperationJournalPort,
   OperationJournalScope,
 } from "../../../src/operation-journal/operation-journal-service";
+import { OperationJournalService } from "../../../src/operation-journal/operation-journal-service";
 import type {
   OperationDetails,
   OperationErrorCode,
+  OperationEvent,
   OperationStage,
 } from "../../../src/operation-journal/operation-event";
 
@@ -209,6 +211,29 @@ function recordingJournal(): {
       },
     },
   };
+}
+
+function persistedOperationJournal(events: OperationEvent[]): OperationJournalService {
+  let nextId = 1;
+  return new OperationJournalService({
+    append: async (event) => {
+      events.push(event);
+      return { maintenanceIncomplete: false };
+    },
+    readRange: async () => ({
+      events: [...events],
+      incompleteDates: [],
+      corruptDates: [],
+      truncated: false,
+    }),
+    stats: async () => ({ bytes: 0, days: 1, eventCount: events.length }),
+    prune: async () => undefined,
+    clear: async () => undefined,
+  }, {
+    createId: () =>
+      `10000000-0000-4000-8000-${String(nextId++).padStart(12, "0")}`,
+    clock: () => new Date(NOW),
+  });
 }
 
 function harness(
@@ -1961,6 +1986,39 @@ describe("SubscriptionService", () => {
       ]);
     });
 
+    it("persists a safe add timeline through the real OperationJournalService", async () => {
+      const persisted: OperationEvent[] = [];
+      const operationJournal = persistedOperationJournal(persisted);
+      const test = harness([], { operationJournal });
+      const unsafeLabel = "https://user:secret@example.com/feed?token=raw";
+
+      await test.service.add(rssRequest({ displayName: unsafeLabel }));
+      await vi.waitFor(() => expect(persisted).toHaveLength(2));
+
+      expect(persisted.map((event) => event.status)).toEqual([
+        "started",
+        "succeeded",
+      ]);
+      expect(persisted.map((event) => event.operationId)).toEqual([
+        persisted[0]?.operationId,
+        persisted[0]?.operationId,
+      ]);
+      expect(persisted[0]).toMatchObject({
+        category: "subscription",
+        action: "add",
+        stage: "saving",
+        subject: { sourceId: "new-feed-id" },
+        details: { sourceKind: "rss" },
+      });
+      expect(persisted[0]?.subject).not.toHaveProperty("label");
+      expect(persisted[1]).toMatchObject({
+        stage: "completed",
+        details: { sourceKind: "rss" },
+      });
+      expect(JSON.stringify(persisted)).not.toContain(unsafeLabel);
+      expect(JSON.stringify(persisted)).not.toMatch(/https?:/u);
+    });
+
     it("records one empty-subject validation failure without copying the rejected input URL", async () => {
       const journal = recordingJournal();
       const test = harness([], { operationJournal: journal.port });
@@ -1991,6 +2049,29 @@ describe("SubscriptionService", () => {
       ]);
       expect(JSON.stringify(journal.events)).not.toContain(unsafeUrl);
       expect(JSON.stringify(journal.events)).not.toContain("token=raw");
+    });
+
+    it("preserves a hostile parse rejection identity and fails the journal closed", async () => {
+      const journal = recordingJournal();
+      const test = harness([], { operationJournal: journal.port });
+      const trapError = new Error("getPrototypeOf trap must not replace rejection");
+      const hostileReason = new Proxy({}, {
+        getPrototypeOf: () => { throw trapError; },
+      });
+      test.parseFeed.mockRejectedValueOnce(hostileReason);
+
+      const rejected = await test.service.add(rssRequest()).catch(
+        (reason: unknown) => reason,
+      );
+
+      expect(Object.is(rejected, hostileReason)).toBe(true);
+      expect(Object.is(rejected, trapError)).toBe(false);
+      expect(journal.events.at(-1)).toEqual({
+        status: "failed",
+        stage: "saving",
+        errorCode: "subscription-operation-failed",
+        details: { sourceKind: "rss" },
+      });
     });
 
     it.each([
@@ -2106,23 +2187,12 @@ describe("SubscriptionService", () => {
       });
     });
 
-    it("records update against the persisted identity with the newly verified source kind", async () => {
+    it("starts update from persisted facts and closes with the actual returned source kind", async () => {
       const journal = recordingJournal();
       const source = existingFeed();
       const test = harness([source], { operationJournal: journal.port });
-      const request = rssRequest({
-        verification: {
-          inputUrl: source.url,
-          siteUrl: "https://legacy.example/",
-          candidates: [{ url: source.url, title: "Legacy", format: "atom" }],
-          selected: { url: source.url, title: "Legacy", format: "atom" },
-          hasEntries: true,
-        },
-        selectedCandidateUrl: source.url,
-        displayName: "Edited title",
-      });
 
-      await test.service.update("legacy-feed", request);
+      await test.service.update("legacy-feed", youtubeRequest());
 
       expect(journal.events).toEqual([
         {
@@ -2133,15 +2203,67 @@ describe("SubscriptionService", () => {
             trigger: "manual",
             stage: "saving",
             subject: { sourceId: "legacy-feed", label: "Legacy" },
-            details: { sourceKind: "atom" },
+            details: {},
           },
         },
         {
           status: "succeeded",
           stage: "completed",
-          details: { sourceKind: "atom" },
+          details: { sourceKind: "youtube" },
         },
       ]);
+    });
+
+    it("preserves duplicate precedence over a later invalid update policy", async () => {
+      const duplicate = existingFeed({
+        feedId: "duplicate",
+        url: "https://duplicate.example/feed.xml",
+      });
+      const test = harness([existingFeed(), duplicate], {
+        operationJournal: recordingJournal().port,
+      });
+      const request = rssRequest({
+        verification: {
+          inputUrl: duplicate.url,
+          siteUrl: "https://duplicate.example/",
+          candidates: [{ url: duplicate.url, title: "Duplicate", format: "rss" }],
+          selected: { url: duplicate.url, title: "Duplicate", format: "rss" },
+          hasEntries: true,
+        },
+        selectedCandidateUrl: duplicate.url,
+        initialImportPolicy: { mode: "lookback-days", days: 0 } as never,
+      });
+
+      await expect(test.service.update("legacy-feed", request)).rejects
+        .toMatchObject({ code: "duplicate-subscription" });
+    });
+
+    it("does not read update request getters an extra time for journal projection", async () => {
+      const source = existingFeed();
+      const test = harness([source], { operationJournal: recordingJournal().port });
+      const request = rssRequest({
+        verification: {
+          inputUrl: source.url,
+          siteUrl: "https://legacy.example/",
+          candidates: [{ url: source.url, title: "Legacy", format: "rss" }],
+          selected: { url: source.url, title: "Legacy", format: "rss" },
+          hasEntries: true,
+        },
+        selectedCandidateUrl: source.url,
+      });
+      let policyReads = 0;
+      Object.defineProperty(request, "initialImportPolicy", {
+        enumerable: true,
+        configurable: true,
+        get: () => {
+          policyReads += 1;
+          return { mode: "lookback-days", days: 7 };
+        },
+      });
+
+      await test.service.update("legacy-feed", request);
+
+      expect(policyReads).toBe(1);
     });
 
     it("uses separate pause and resume actions and classifies settings save failure safely", async () => {
@@ -2283,14 +2405,33 @@ describe("SubscriptionService", () => {
         } satisfies OperationJournalPort,
       },
       {
-        label: "scope methods reject or throw",
+        label: "terminal throws synchronously",
         port: {
           begin: () => ({
             operationId: "hostile",
-            progress: async () => { throw new Error("progress rejected"); },
-            succeed: async () => { throw new Error("succeed rejected"); },
-            fail: async () => { throw new Error("fail rejected"); },
-            abort: async () => { throw new Error("abort rejected"); },
+            progress: async () => undefined,
+            succeed: () => { throw new Error("succeed threw"); },
+            fail: async () => undefined,
+            abort: async () => undefined,
+          }),
+          attach: () => { throw new Error("unused"); },
+        } satisfies OperationJournalPort,
+      },
+      {
+        label: "terminal rejects with a hostile reason",
+        port: {
+          begin: () => ({
+            operationId: "hostile",
+            progress: async () => undefined,
+            succeed: async () => {
+              throw new Proxy(new Error("hostile journal rejection"), {
+                getPrototypeOf: () => {
+                  throw new Error("hostile rejection reason inspected");
+                },
+              });
+            },
+            fail: async () => undefined,
+            abort: async () => undefined,
           }),
           attach: () => { throw new Error("unused"); },
         } satisfies OperationJournalPort,

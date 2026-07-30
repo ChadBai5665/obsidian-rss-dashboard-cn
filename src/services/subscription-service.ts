@@ -429,7 +429,7 @@ export class SubscriptionService {
         "update",
         feedId,
         async (journal) => await this.updateUnlocked(feedId, request, journal),
-        (feed) => subscriptionDetailsForUpdateRequest(feed, request),
+        subscriptionDetailsForFeed,
       ),
     );
   }
@@ -1346,15 +1346,15 @@ export class SubscriptionService {
     action: "update" | "pause" | "resume",
     feedId: string,
     operation: (journal: SubscriptionJournalState) => Promise<T>,
-    projectDetails: (
-      feed: Feed,
-    ) => Readonly<SubscriptionOperationDetails> = subscriptionDetailsForFeed,
+    projectResultDetails?: (
+      result: T,
+    ) => Readonly<SubscriptionOperationDetails>,
   ): Promise<T> {
     const journal = createSubscriptionJournalState(action);
     try {
       const feed = this.settings.feeds[this.feedIndex(feedId)];
       journal.subject = subscriptionSubjectForFeed(feed);
-      journal.details = projectDetails(feed);
+      journal.details = subscriptionDetailsForFeed(feed);
       this.beginSubscriptionJournal(
         journal,
         journal.subject,
@@ -1362,6 +1362,13 @@ export class SubscriptionService {
         "saving",
       );
       const result = await operation(journal);
+      if (projectResultDetails) {
+        try {
+          journal.details = projectResultDetails(result);
+        } catch {
+          // Terminal journal projection cannot change a committed mutation.
+        }
+      }
       succeedSubscriptionJournal(journal);
       return result;
     } catch (error) {
@@ -1479,18 +1486,6 @@ function subscriptionDetailsForFeed(
   return Object.freeze({});
 }
 
-function subscriptionDetailsForUpdateRequest(
-  feed: Feed,
-  request: SubscriptionUpdateRequest,
-): Readonly<SubscriptionOperationDetails> {
-  if (request.kind === "x-account" || request.kind === "x-account-options") {
-    return Object.freeze({ sourceKind: "x-account" });
-  }
-  if (request.kind === "feed-options") return subscriptionDetailsForFeed(feed);
-  const validated = validatedFeedSubscription(request);
-  return subscriptionDetailsForVerifiedFeed(request, validated.verified);
-}
-
 function ownDataValue(value: object, key: PropertyKey): unknown {
   try {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -1522,14 +1517,18 @@ function clearSubscriptionJournalFailure(
 function subscriptionJournalErrorCode(
   error: unknown,
 ): SubscriptionJournalErrorCode {
-  const code = error instanceof SubscriptionServiceError
-    ? ownDataValue(error, "code")
-    : undefined;
-  if (
-    typeof code === "string" &&
-    SUBSCRIPTION_SERVICE_ERROR_CODES.has(code as SubscriptionServiceErrorCode)
-  ) {
-    return code as SubscriptionServiceErrorCode;
+  try {
+    const code = error instanceof SubscriptionServiceError
+      ? ownDataValue(error, "code")
+      : undefined;
+    if (
+      typeof code === "string" &&
+      SUBSCRIPTION_SERVICE_ERROR_CODES.has(code as SubscriptionServiceErrorCode)
+    ) {
+      return code as SubscriptionServiceErrorCode;
+    }
+  } catch {
+    // Hostile rejection reasons fail closed without replacing the business error.
   }
   return "subscription-operation-failed";
 }
