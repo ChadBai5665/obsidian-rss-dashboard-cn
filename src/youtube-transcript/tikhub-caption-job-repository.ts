@@ -23,6 +23,13 @@ export interface TikHubCaptionJobIdentity {
   connectionId: string;
 }
 
+export class TikHubCaptionJobAmbiguityError extends Error {
+  constructor() {
+    super("Ambiguous TikHub caption content job.");
+    this.name = "TikHubCaptionJobAmbiguityError";
+  }
+}
+
 const ITEM_ID = /^[a-f0-9]{64}$/u;
 const JOB_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -107,6 +114,25 @@ export class TikHubCaptionJobRepository {
     return await this.withLock(async () => {
       const record = (await this.readJobs()).get(key);
       return record ? cloneRecord(record) : null;
+    });
+  }
+
+  async findPendingContentJob(
+    itemId: string,
+    videoId: string,
+  ): Promise<TikHubCaptionJobRecord | null> {
+    captionJobKey(itemId, videoId, "tracks");
+    return await this.withLock(async () => {
+      const matches = [...(await this.readJobs()).values()].filter(
+        (record) =>
+          record.stage === "content" &&
+          record.itemId === itemId &&
+          record.videoId === videoId,
+      );
+      if (matches.length > 1) {
+        throw new TikHubCaptionJobAmbiguityError();
+      }
+      return matches[0] ? cloneRecord(matches[0]) : null;
     });
   }
 

@@ -53,6 +53,10 @@ function deferred<T>(): {
 function createPanel(options: {
   cached?: YouTubeTranscriptCachedItemContent | null;
   get?: (request: YouTubeTranscriptRequest) => Promise<YouTubeTranscriptServiceResult>;
+  hasPendingContinuation?: () => Promise<boolean>;
+  continuePending?: (
+    request: YouTubeTranscriptRequest,
+  ) => Promise<YouTubeTranscriptServiceResult & { status: "ready" }>;
   locale?: "zh-CN" | "en";
   openTikHubSettings?: () => void | Promise<void>;
 } = {}) {
@@ -72,11 +76,21 @@ function createPanel(options: {
   const openExternal = vi.fn();
   const onReady = vi.fn();
   const revokeChoiceSet = vi.fn();
+  const hasPendingContinuation = vi.fn(
+    options.hasPendingContinuation ?? (async () => false),
+  );
+  const continuePending = vi.fn(
+    options.continuePending ?? (async () => {
+      throw new YouTubeTranscriptServiceError("tikhub-job-expired");
+    }),
+  );
   const runtime = {
     identity: "test-root",
     service: {
       get,
       readCached: loadCached,
+      hasPendingContinuation,
+      continuePending,
       revokeChoiceSet,
     } satisfies YouTubeTranscriptPanelService,
   };
@@ -101,6 +115,8 @@ function createPanel(options: {
     openExternal,
     onReady,
     revokeChoiceSet,
+    hasPendingContinuation,
+    continuePending,
   };
 }
 
@@ -142,6 +158,21 @@ describe("YouTubeTranscriptPanel", () => {
     expect(state(container)).toBe("idle");
     expect(container.querySelector(".rss-youtube-transcript-fetch")).not.toBeNull();
     expect(get).not.toHaveBeenCalled();
+  });
+
+  it("passively renders a durable continuation without starting listing or continuation work", async () => {
+    const { panel, container, get, hasPendingContinuation, continuePending } =
+      createPanel({ hasPendingContinuation: async () => true });
+
+    await panel.showCached();
+
+    expect(state(container)).toBe("tikhub-processing");
+    expect(container.textContent).toContain("Continue checking");
+    expect(hasPendingContinuation).toHaveBeenCalledTimes(1);
+    expect(get).not.toHaveBeenCalled();
+    expect(continuePending).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("$0.008");
+    expect(container.textContent).not.toContain("$0.016");
   });
 
   it("shows checking before an explicit initial fetch and renders a manual result", async () => {
@@ -304,6 +335,7 @@ describe("YouTubeTranscriptPanel", () => {
   it.each([
     ["tikhub-processing", "TikHub 正在处理字幕", "继续查询"],
     ["tikhub-invalid-key", "TikHub 密钥无效", "打开 TikHub 设置"],
+    ["tikhub-missing-key", "尚未配置 TikHub 密钥", "打开 TikHub 设置"],
     ["tikhub-insufficient-balance", "TikHub 余额不足", "检查 TikHub 余额"],
     ["tikhub-budget-unavailable", "今日 TikHub 请求额度已用完", "明天再试"],
     ["tikhub-rate-limited", "TikHub 请求过于频繁", "稍后重试"],
@@ -314,7 +346,9 @@ describe("YouTubeTranscriptPanel", () => {
     async (code, message, action) => {
       const { panel, container } = createPanel({
         locale: "zh-CN",
-        ...(code === "tikhub-invalid-key" || code === "tikhub-insufficient-balance"
+        ...(code === "tikhub-invalid-key" ||
+            code === "tikhub-missing-key" ||
+            code === "tikhub-insufficient-balance"
           ? { openTikHubSettings: vi.fn() }
           : {}),
         get: async () => {
@@ -337,6 +371,89 @@ describe("YouTubeTranscriptPanel", () => {
       expect(container.querySelector(".modal")).toBeNull();
     },
   );
+
+  it("uses only explicit continuation and preserves the same-session two-request usage", async () => {
+    const get = vi.fn(async () => {
+      throw new YouTubeTranscriptServiceError(
+        "tikhub-processing",
+        undefined,
+        [],
+        { tikhubPaidRequests: 2 },
+      );
+    });
+    const continuePending = vi.fn(async () => ({
+      status: "ready" as const,
+      source: "fresh" as const,
+      content: transcript({ provider: "tikhub" }),
+      usage: { tikhubPaidRequests: 0 as const },
+    }));
+    const { panel, container } = createPanel({ get, continuePending });
+
+    await panel.fetch();
+    expect(container.textContent).toContain("Estimated 2 TikHub request(s) (about $0.016)");
+    container
+      .querySelector<HTMLButtonElement>(".rss-youtube-transcript-continue")
+      ?.click();
+    await vi.waitFor(() => expect(state(container)).toBe("complete-manual"));
+
+    expect(continuePending).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("Estimated 2 TikHub request(s) (about $0.016)");
+  });
+
+  it.each([
+    ["tikhub-processing", 1, false, "$0.008"],
+    ["tikhub-processing", 2, false, "$0.016"],
+    ["no-captions", 1, false, "$0.008"],
+    ["temporarily-unavailable", 1, true, "$0.008"],
+    ["aborted", 0, true, ""],
+  ] as const)(
+    "keeps confirmed usage and independent ambiguity for %s with %s confirmed requests",
+    async (code, confirmed, possiblySent, cost) => {
+      const { panel, container } = createPanel({
+        locale: "en",
+        get: async () => {
+          throw new YouTubeTranscriptServiceError(
+            code,
+            undefined,
+            [],
+            { tikhubPaidRequests: confirmed },
+            possiblySent,
+          );
+        },
+      });
+
+      await panel.fetch();
+
+      if (cost) expect(container.textContent).toContain(cost);
+      else expect(container.textContent).not.toContain("Estimated 1 TikHub request");
+      expect(container.textContent.includes("request may have been sent")).toBe(
+        possiblySent,
+      );
+    },
+  );
+
+  it("re-renders a generic failure with exact usage and ambiguity in the new locale", async () => {
+    const { panel, container } = createPanel({
+      locale: "en",
+      get: async () => {
+        throw new YouTubeTranscriptServiceError(
+          "temporarily-unavailable",
+          undefined,
+          [],
+          { tikhubPaidRequests: 1 },
+          true,
+        );
+      },
+    });
+    await panel.fetch();
+
+    panel.refreshLocalization(createTranslator("zh-CN"), "zh-CN");
+
+    expect(container.textContent).toContain("预计1次 TikHub 请求（约 $0.008）");
+    expect(container.textContent).toContain("请求可能已发送，实际费用以 TikHub 账单为准");
+    expect(container.textContent).not.toContain("private provider detail");
+  });
 
   it("opens TikHub settings exactly once for a key recovery without retrying", async () => {
     const openTikHubSettings = vi.fn();
@@ -500,7 +617,13 @@ describe("YouTubeTranscriptPanel", () => {
   ] as const)("keeps %s failures inline", async (code, expectedState) => {
     const { panel, container } = createPanel({
       get: async () => {
-        throw new YouTubeTranscriptServiceError(code);
+        throw new YouTubeTranscriptServiceError(
+          code,
+          undefined,
+          [],
+          { tikhubPaidRequests: 1 },
+          true,
+        );
       },
     });
 
@@ -508,6 +631,8 @@ describe("YouTubeTranscriptPanel", () => {
 
     expect(state(container)).toBe(expectedState);
     expect(container.querySelector(".rss-youtube-transcript-error")).not.toBeNull();
+    expect(container.textContent).toContain("$0.008");
+    expect(container.textContent).toContain("request may have been sent");
     expect(document.body.querySelector(".modal")).toBeNull();
   });
 

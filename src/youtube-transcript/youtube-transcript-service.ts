@@ -7,6 +7,7 @@ import {
   snapshotTranscriptProviderOperationResult,
   YouTubeTranscriptError,
   type TranscriptProvider,
+  type TranscriptProviderContinuation,
   type TranscriptProviderOperationContext,
   type TranscriptProviderOperationEvidence,
   type TranscriptProviderOperationResult,
@@ -86,6 +87,12 @@ export interface YouTubeTranscriptCacheRequest {
   itemId: string;
   videoId: string;
   signal?: AbortSignal;
+}
+
+export interface YouTubeTranscriptContinuationRequest
+  extends YouTubeTranscriptCacheRequest {
+  sourceUrl?: string;
+  onProgress?: (progress: YouTubeTranscriptProgress) => void;
 }
 
 export interface YouTubeTranscriptTrackChoice {
@@ -355,6 +362,153 @@ export class YouTubeTranscriptService {
     }
   }
 
+  async hasPendingContinuation(
+    request: YouTubeTranscriptCacheRequest,
+  ): Promise<boolean> {
+    this.assertActive();
+    assertRequest(request);
+    assertNotAborted(request.signal);
+    const registration = this.providers.find(
+      ({ source, provider }) =>
+        source === "tikhub" &&
+        typeof provider.hasPendingContinuation === "function",
+    );
+    if (!registration?.provider.hasPendingContinuation) return false;
+    try {
+      const pending = await registration.provider.hasPendingContinuation(
+        providerOperationContext(request),
+      );
+      assertNotAborted(request.signal);
+      return pending === true;
+    } catch (error) {
+      if (error instanceof YouTubeTranscriptError) {
+        throw new YouTubeTranscriptServiceError(error.code);
+      }
+      if (error instanceof YouTubeTranscriptServiceError) throw error;
+      throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+    }
+  }
+
+  async continuePending(
+    request: YouTubeTranscriptContinuationRequest,
+  ): Promise<YouTubeTranscriptServiceResult & { status: "ready" }> {
+    this.assertActive();
+    assertRequest(request);
+    const resourceKey = requestKey(request.itemId, request.videoId);
+    const workKey = `${resourceKey}\0continue`;
+    const operationGeneration = Symbol(workKey);
+    return await this.subscribeToWork(
+      workKey,
+      request.signal,
+      async (sharedSignal) => await this.continuePendingInternal(
+        { ...request, signal: sharedSignal },
+        resourceKey,
+        operationGeneration,
+      ),
+      () => this.clearGeneration(resourceKey, operationGeneration),
+      () => this.beginGeneration(resourceKey, operationGeneration, true),
+    ) as YouTubeTranscriptServiceResult & { status: "ready" };
+  }
+
+  private async continuePendingInternal(
+    request: YouTubeTranscriptContinuationRequest,
+    key: string,
+    operationGeneration: symbol,
+  ): Promise<YouTubeTranscriptServiceResult & { status: "ready" }> {
+    const state: ProviderChainState = {
+      failures: [],
+      tikhubPaidRequests: 0,
+      tikhubPaidRequestPossiblySent: false,
+    };
+    const registration = this.providers.find(
+      ({ source, provider }) =>
+        source === "tikhub" &&
+        typeof provider.continuePending === "function",
+    );
+    if (!registration?.provider.continuePending) {
+      throw new YouTubeTranscriptServiceError("tikhub-job-expired");
+    }
+    const context = providerOperationContext(request);
+    try {
+      assertNotAborted(request.signal);
+      this.assertCurrentGeneration(key, operationGeneration);
+      emitProgress(request, "trying-tikhub", state);
+      let settled: {
+        value: TranscriptProviderContinuation;
+        persistenceToken?: unknown;
+      };
+      try {
+        settled = settleProviderOperation<TranscriptProviderContinuation>(
+          await registration.provider.continuePending(request.signal, context),
+          "tikhub",
+          true,
+          state,
+        );
+      } catch (error) {
+        if (error instanceof TranscriptProviderStageError) throw error;
+        throw providerOperationStageError(error, "tikhub", state);
+      }
+      assertNotAborted(request.signal);
+      this.assertCurrentGeneration(key, operationGeneration);
+      const continuation = settled.value;
+      if (
+        typeof continuation !== "object" ||
+        continuation === null ||
+        !Object.prototype.hasOwnProperty.call(continuation, "track") ||
+        !Object.prototype.hasOwnProperty.call(continuation, "transcript")
+      ) {
+        throw new TranscriptProviderStageError(
+          malformedProviderResponse("tikhub"),
+        );
+      }
+      assertProviderTrack(continuation.track, "tikhub");
+      assertProviderTranscript(request, continuation.transcript, "tikhub");
+      emitProgress(request, "saving", state);
+      const content = createCachedTranscript(
+        request,
+        continuation.transcript,
+        this.options.clock,
+      );
+      await this.options.contentRepository.transaction(
+        context.itemId,
+        async (transaction) => {
+          assertNotAborted(request.signal);
+          this.assertCurrentGeneration(key, operationGeneration);
+          const path = await transaction.write(content);
+          await this.repairMetadata(context.itemId, path);
+          assertNotAborted(request.signal);
+          this.assertCurrentGeneration(key, operationGeneration);
+        },
+      );
+      assertNotAborted(request.signal);
+      this.assertCurrentGeneration(key, operationGeneration);
+      try {
+        await registration.provider.onPersisted?.(
+          continuation.track,
+          continuation.transcript,
+          context,
+          settled.persistenceToken,
+        );
+      } catch {
+        // Durable content is authoritative; exact CAS cleanup can retry.
+      }
+      this.clearGeneration(key, operationGeneration);
+      return {
+        status: "ready",
+        source: "fresh",
+        content,
+        usage: freezeUsage(state.tikhubPaidRequests),
+      };
+    } catch (error) {
+      this.clearGeneration(key, operationGeneration);
+      if (error instanceof TranscriptProviderStageError) {
+        addFailure(state, "tikhub", error.failure.code);
+        throw chainFailure(state, error.failure.code);
+      }
+      throw normalizeLocalError(error, state);
+    }
+  }
+
   /** Releases all runtime-owned resources and permanently rejects new work. */
   dispose(): void {
     if (this.disposed) return;
@@ -461,17 +615,20 @@ export class YouTubeTranscriptService {
           this.clearGeneration(key, operationGeneration);
           return result;
         } catch (error) {
-          if (request.signal?.aborted || this.disposed) {
-            throw new YouTubeTranscriptServiceError("aborted");
-          }
-          if (this.currentGenerations.get(key) !== operationGeneration) {
-            throw new YouTubeTranscriptServiceError("temporarily-unavailable");
-          }
           if (!(error instanceof TranscriptProviderStageError)) {
+            if (request.signal?.aborted || this.disposed) {
+              throw new YouTubeTranscriptServiceError("aborted");
+            }
+            if (this.currentGenerations.get(key) !== operationGeneration) {
+              throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+            }
             throw normalizeLocalError(error, state);
           }
           const failure = error.failure;
           addFailure(state, registration.source, failure.code);
+          if (failure.code === "aborted") {
+            throw chainFailure(state, failure.code);
+          }
           if (failure.code === "tikhub-processing") {
             emitProgress(request, "waiting-tikhub", state);
             throw chainFailure(state, failure.code);
@@ -562,17 +719,20 @@ export class YouTubeTranscriptService {
           context,
         );
       } catch (error) {
-        if (request.signal?.aborted || this.disposed) {
-          throw new YouTubeTranscriptServiceError("aborted");
-        }
-        if (this.currentGenerations.get(key) !== operationGeneration) {
-          throw new YouTubeTranscriptServiceError("temporarily-unavailable");
-        }
         if (!(error instanceof TranscriptProviderStageError)) {
+          if (request.signal?.aborted || this.disposed) {
+            throw new YouTubeTranscriptServiceError("aborted");
+          }
+          if (this.currentGenerations.get(key) !== operationGeneration) {
+            throw new YouTubeTranscriptServiceError("temporarily-unavailable");
+          }
           throw normalizeLocalError(error, state);
         }
         const failure = error.failure;
         addFailure(state, registration.source, failure.code);
+        if (failure.code === "aborted") {
+          throw chainFailure(state, failure.code);
+        }
         if (failure.code === "tikhub-processing") {
           emitProgress(request, "waiting-tikhub", state);
           throw chainFailure(state, failure.code);
@@ -859,8 +1019,8 @@ export class YouTubeTranscriptService {
   ): Promise<YouTubeTranscriptServiceResult> {
     return await new Promise<YouTubeTranscriptServiceResult>((resolve, reject) => {
       let released = false;
-      const release = (cancelled: boolean) => {
-        if (released) return;
+      const release = (cancelled: boolean): boolean => {
+        if (released) return false;
         released = true;
         callerSignal?.removeEventListener("abort", onAbort);
         work.subscribers = Math.max(0, work.subscribers - 1);
@@ -868,11 +1028,24 @@ export class YouTubeTranscriptService {
           if (this.inFlight.get(key) === work) this.inFlight.delete(key);
           work.onAllCancelled();
           work.controller.abort();
+          return true;
         }
+        return false;
       };
       const onAbort = () => {
-        release(true);
-        reject(new YouTubeTranscriptServiceError("aborted"));
+        const cancelledUnderlying = release(true);
+        if (!cancelledUnderlying) {
+          reject(new YouTubeTranscriptServiceError("aborted"));
+          return;
+        }
+        void work.promise.then(
+          () => reject(new YouTubeTranscriptServiceError("aborted")),
+          (error: unknown) => reject(
+            error instanceof Error
+              ? error
+              : new YouTubeTranscriptServiceError("aborted"),
+          ),
+        );
       };
       callerSignal?.addEventListener("abort", onAbort, { once: true });
       if (callerSignal?.aborted) {

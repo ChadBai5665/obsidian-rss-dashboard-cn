@@ -121,6 +121,11 @@ export interface TranscriptProviderOperationContext {
   readonly videoId: string;
 }
 
+export interface TranscriptProviderContinuation {
+  readonly track: YouTubeCaptionTrack;
+  readonly transcript: YouTubeTranscript;
+}
+
 export interface TranscriptProvider {
   listTracks(
     videoId: string,
@@ -143,6 +148,13 @@ export interface TranscriptProvider {
     context: TranscriptProviderOperationContext,
     persistenceToken?: unknown,
   ): Promise<void>;
+  hasPendingContinuation?(
+    context: TranscriptProviderOperationContext,
+  ): Promise<boolean>;
+  continuePending?(
+    signal: AbortSignal | undefined,
+    context: TranscriptProviderOperationContext,
+  ): Promise<TranscriptProviderOperationResult<TranscriptProviderContinuation>>;
 }
 
 /** A stable, localization-safe transcript failure without provider payloads. */

@@ -20,6 +20,7 @@ import type { TikHubSettings } from "../types/types";
 import type { OptionalTranscriptProvider } from "./youtube-transcript-service";
 import {
   captionJobKey,
+  TikHubCaptionJobAmbiguityError,
   type TikHubCaptionJobIdentity,
   type TikHubCaptionJobRecord,
 } from "./tikhub-caption-job-repository";
@@ -47,6 +48,10 @@ export interface TikHubCaptionClient {
 
 export interface TikHubCaptionJobStore {
   read(key: string): Promise<TikHubCaptionJobRecord | null>;
+  findPendingContentJob(
+    itemId: string,
+    videoId: string,
+  ): Promise<TikHubCaptionJobRecord | null>;
   createIfAbsent(record: TikHubCaptionJobRecord): Promise<boolean>;
   replaceIfCurrent(
     identity: TikHubCaptionJobIdentity,
@@ -182,6 +187,9 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
   ): Promise<TranscriptProviderOperationResult<YouTubeCaptionTrack[]>> {
     const identity = operationIdentity(requestedVideoId, context);
     assertNotAborted(signal);
+    if (await this.pendingContentJob(identity)) {
+      throw stableError("tikhub-processing");
+    }
     const session = await this.currentSession(signal);
     const operation = await this.runStage(
       "tracks",
@@ -200,6 +208,66 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
     return createTranscriptProviderOperationResult(
       response.tracks.map((track) => createTrack(identity.videoId, track, evidence)),
       evidence,
+    );
+  }
+
+  async hasPendingContinuation(
+    context: TranscriptProviderOperationContext,
+  ): Promise<boolean> {
+    const identity = operationIdentity(context.videoId, context);
+    return (await this.pendingContentJob(identity)) !== null;
+  }
+
+  async continuePending(
+    signal: AbortSignal | undefined,
+    context: TranscriptProviderOperationContext,
+  ): Promise<TranscriptProviderOperationResult<{
+    track: YouTubeCaptionTrack;
+    transcript: YouTubeTranscript;
+  }>> {
+    const identity = operationIdentity(context.videoId, context);
+    assertNotAborted(signal);
+    const job = await this.pendingContentJob(identity);
+    if (!job || job.languageCode === undefined) {
+      throw stableError("tikhub-job-expired");
+    }
+    const session = await this.currentSession(signal);
+    if (session.connectionId !== job.connectionId) {
+      throw stableError("tikhub-job-expired");
+    }
+    const key = safeJobKey(identity, "content", job.languageCode);
+    const operation = await this.pollJob(
+      key,
+      job,
+      "content",
+      session,
+      signal,
+      FREE_OPERATION_EVIDENCE,
+    );
+    if (operation.response.kind !== "content") {
+      throw stableError("tikhub-malformed-response", operation.evidence);
+    }
+    const response = operation.response;
+    const track = createTrack(identity.videoId, {
+      languageCode: response.languageCode,
+      languageName: response.languageName,
+      isGenerated: response.isGenerated,
+    }, operation.evidence);
+    const transcript: YouTubeTranscript = {
+      videoId: identity.videoId,
+      languageCode: response.languageCode,
+      languageName: response.languageName,
+      isGenerated: response.isGenerated,
+      provider: "tikhub",
+      text: response.text,
+    };
+    if (!operation.completedJob) {
+      throw stableError("tikhub-malformed-response", operation.evidence);
+    }
+    return createTranscriptProviderOperationResult(
+      { track, transcript },
+      operation.evidence,
+      persistenceToken(key, operation.completedJob),
     );
   }
 
@@ -389,6 +457,41 @@ export class TikHubTranscriptProvider implements OptionalTranscriptProvider {
       signal,
       PAID_OPERATION_EVIDENCE,
     );
+  }
+
+  private async pendingContentJob(
+    identity: OperationIdentity,
+  ): Promise<TikHubCaptionJobRecord | null> {
+    let job: TikHubCaptionJobRecord | null;
+    try {
+      job = await this.options.jobs.findPendingContentJob(
+        identity.itemId,
+        identity.videoId,
+      );
+    } catch (error) {
+      throw stableError(
+        error instanceof TikHubCaptionJobAmbiguityError
+          ? "tikhub-job-expired"
+          : "tikhub-budget-unavailable",
+      );
+    }
+    if (job === null) return null;
+    const settings = this.currentSettings();
+    if (
+      !settings.enabled ||
+      !settings.youtubeTranscriptFallbackEnabled ||
+      job.languageCode === undefined ||
+      !isExpectedJob(
+        job,
+        identity,
+        "content",
+        job.languageCode,
+        settings.connectionId,
+      )
+    ) {
+      throw stableError("tikhub-job-expired");
+    }
+    return job;
   }
 
   private async pollJob(
@@ -855,7 +958,13 @@ function normalizeFailure(
   evidence: TranscriptProviderOperationEvidence = FREE_OPERATION_EVIDENCE,
   useClientAttemptEvidence = false,
 ): YouTubeTranscriptError {
-  if (signal?.aborted) return stableError("aborted", evidence);
+  const clientEvidence = error instanceof TikHubClientError &&
+      useClientAttemptEvidence
+    ? error.paidRequestAttempted
+      ? ATTEMPTED_OPERATION_EVIDENCE
+      : FREE_OPERATION_EVIDENCE
+    : evidence;
+  if (signal?.aborted) return stableError("aborted", clientEvidence);
   if (error instanceof YouTubeTranscriptError) {
     return stableError(error.code, evidence);
   }
@@ -869,11 +978,6 @@ function normalizeFailure(
     return stableError("tikhub-malformed-response", evidence);
   }
   if (error instanceof TikHubClientError) {
-    const clientEvidence = useClientAttemptEvidence
-      ? error.paidRequestAttempted
-        ? ATTEMPTED_OPERATION_EVIDENCE
-        : FREE_OPERATION_EVIDENCE
-      : evidence;
     if (
       resuming &&
       (error.code === "invalid-query" || error.code === "provider-rejected")

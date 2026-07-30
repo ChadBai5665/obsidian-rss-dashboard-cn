@@ -811,6 +811,165 @@ describe("YouTubeTranscriptService", () => {
     });
   });
 
+  it("preserves an ambiguous paid attempt when provider abort evidence and the signal arrive together", async () => {
+    const controller = new AbortController();
+    const provider: TranscriptProvider = {
+      async listTracks() {
+        controller.abort();
+        throw new YouTubeTranscriptError(
+          "aborted",
+          AMBIGUOUS_OPERATION_EVIDENCE,
+        );
+      },
+      async fetchTrack() {
+        throw new Error("unreachable");
+      },
+    };
+    const { service } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(service.get({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+      refresh: true,
+      signal: controller.signal,
+    })).rejects.toMatchObject({
+      code: "aborted",
+      usage: { tikhubPaidRequests: 0 },
+      tikhubPaidRequestPossiblySent: true,
+    });
+  });
+
+  it("detects a pending continuation through only the provider local probe", async () => {
+    const hasPendingContinuation = vi.fn(async () => true);
+    const listTracks = vi.fn(async () => {
+      throw new Error("paid listing must remain idle");
+    });
+    const provider = {
+      listTracks,
+      async fetchTrack() {
+        throw new Error("unreachable");
+      },
+      hasPendingContinuation,
+    } as TranscriptProvider & {
+      hasPendingContinuation(context: TranscriptProviderOperationContext): Promise<boolean>;
+    };
+    const { service } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(service.hasPendingContinuation({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+    })).resolves.toBe(true);
+
+    expect(hasPendingContinuation).toHaveBeenCalledWith({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+    });
+    expect(listTracks).not.toHaveBeenCalled();
+  });
+
+  it("persists an explicit free continuation and releases its exact token only after commit", async () => {
+    const selected = track({ source: "tikhub" });
+    const token = { opaque: "durable-content-job" };
+    const onPersisted = vi.fn();
+    const listTracks = vi.fn();
+    const provider = {
+      listTracks,
+      async fetchTrack() {
+        throw new Error("unreachable");
+      },
+      async hasPendingContinuation() {
+        return true;
+      },
+      async continuePending() {
+        return createTranscriptProviderOperationResult(
+          { track: selected, transcript: transcript(selected) },
+          FREE_OPERATION_EVIDENCE,
+          token,
+        );
+      },
+      onPersisted,
+    } as TranscriptProvider & {
+      hasPendingContinuation(context: TranscriptProviderOperationContext): Promise<boolean>;
+      continuePending(
+        signal: AbortSignal | undefined,
+        context: TranscriptProviderOperationContext,
+      ): Promise<unknown>;
+    };
+    const { service, content } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+
+    await expect(service.continuePending({
+      itemId: ITEM_ID,
+      videoId: VIDEO_ID,
+    })).resolves.toMatchObject({
+      status: "ready",
+      source: "fresh",
+      usage: { tikhubPaidRequests: 0 },
+      content: { provider: "tikhub" },
+    });
+
+    expect(content.writes).toHaveLength(1);
+    expect(onPersisted).toHaveBeenCalledWith(
+      selected,
+      expect.objectContaining({ provider: "tikhub" }),
+      { itemId: ITEM_ID, videoId: VIDEO_ID },
+      token,
+    );
+    expect(listTracks).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates repeated explicit continuation calls without listing", async () => {
+    const selected = track({ source: "tikhub" });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const continuePending = vi.fn(async () => {
+      await gate;
+      return createTranscriptProviderOperationResult(
+        { track: selected, transcript: transcript(selected) },
+        FREE_OPERATION_EVIDENCE,
+      );
+    });
+    const listTracks = vi.fn();
+    const provider = {
+      listTracks,
+      async fetchTrack() {
+        throw new Error("unreachable");
+      },
+      hasPendingContinuation: async () => true,
+      continuePending,
+    } as TranscriptProvider & {
+      hasPendingContinuation(context: TranscriptProviderOperationContext): Promise<boolean>;
+      continuePending(
+        signal: AbortSignal | undefined,
+        context: TranscriptProviderOperationContext,
+      ): Promise<unknown>;
+    };
+    const { service, content } = createService({
+      providers: [{ source: "tikhub", provider }],
+    });
+    const request = { itemId: ITEM_ID, videoId: VIDEO_ID };
+
+    const first = service.continuePending(request);
+    const second = service.continuePending(request);
+    await Promise.resolve();
+    release();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ status: "ready" }),
+      expect.objectContaining({ status: "ready" }),
+    ]);
+    expect(continuePending).toHaveBeenCalledTimes(1);
+    expect(content.writes).toHaveLength(1);
+    expect(listTracks).not.toHaveBeenCalled();
+  });
+
   it("leases list evidence once and does not double-add it during normalization", async () => {
     const tracks = [
       track({ source: "tikhub", url: "tikhub:caption/en" }),

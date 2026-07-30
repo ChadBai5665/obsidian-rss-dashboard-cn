@@ -253,6 +253,45 @@ describe("TikHubCaptionJobRepository", () => {
     expect(test.adapter.files.has(`${DATA_ROOT}/youtube-caption-jobs.json`)).toBe(false);
   });
 
+  it("finds only one exact content job by item and video without knowing its language", async () => {
+    const test = createRepository();
+    const content = createRecord();
+    const tracks = createRecord({
+      stage: "tracks",
+      languageCode: undefined,
+      jobId: OTHER_JOB_ID,
+    });
+    const otherItem = createRecord({
+      itemId: OTHER_ITEM_ID,
+      jobId: "323e4567-e89b-12d3-a456-426614174000",
+    });
+    await test.repository.write(content);
+    await test.repository.write(tracks);
+    await test.repository.write(otherItem);
+
+    await expect(
+      test.repository.findPendingContentJob(ITEM_ID, VIDEO_ID),
+    ).resolves.toEqual(content);
+    await expect(
+      test.repository.findPendingContentJob("c".repeat(64), VIDEO_ID),
+    ).resolves.toBeNull();
+  });
+
+  it("fails closed when more than one content language matches the same item and video", async () => {
+    const test = createRepository();
+    const english = createRecord({ languageCode: "en" });
+    const japanese = createRecord({
+      languageCode: "ja",
+      jobId: OTHER_JOB_ID,
+    });
+    await test.repository.write(english);
+    await test.repository.write(japanese);
+
+    await expect(
+      test.repository.findPendingContentJob(ITEM_ID, VIDEO_ID),
+    ).rejects.toThrow("Ambiguous TikHub caption content job");
+  });
+
   it("persists no API key, Authorization, provider payload, credential URL, or transcript", async () => {
     const test = createRepository();
     await test.repository.write(createRecord());

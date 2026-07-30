@@ -6,6 +6,7 @@ import type { TikHubResult } from "../../../src/sources/tikhub/tikhub-types";
 import type { TikHubSettings } from "../../../src/types/types";
 import {
   captionJobKey,
+  TikHubCaptionJobAmbiguityError,
   type TikHubCaptionJobIdentity,
   type TikHubCaptionJobRecord,
 } from "../../../src/youtube-transcript/tikhub-caption-job-repository";
@@ -59,6 +60,11 @@ const PAID_EVIDENCE: TranscriptProviderOperationEvidence = Object.freeze({
   tikhubPaidRequests: 1,
   paidRequestAttempted: true,
 });
+const AMBIGUOUS_OPERATION_EVIDENCE: TranscriptProviderOperationEvidence =
+  Object.freeze({
+    tikhubPaidRequests: 0,
+    paidRequestAttempted: true,
+  });
 type ClientOutcome = TikHubResult<unknown> | Error;
 
 class FakeCaptionClient implements TikHubCaptionClient {
@@ -107,6 +113,7 @@ class FakeJobs implements TikHubCaptionJobStore {
     replacement: TikHubCaptionJobRecord;
   }> = [];
   readonly conditionalRemoves: TikHubCaptionJobIdentity[] = [];
+  readonly contentFinds: Array<{ itemId: string; videoId: string }> = [];
   readFailure?: Error;
   createFailure?: Error;
   replaceFailure?: Error;
@@ -128,6 +135,23 @@ class FakeJobs implements TikHubCaptionJobStore {
     if (this.readFailure) throw this.readFailure;
     const record = this.records.get(key);
     return record ? { ...record } : null;
+  }
+
+  async findPendingContentJob(
+    itemId: string,
+    videoId: string,
+  ): Promise<TikHubCaptionJobRecord | null> {
+    this.events?.push("find-content-job");
+    this.contentFinds.push({ itemId, videoId });
+    if (this.readFailure) throw this.readFailure;
+    const matches = [...this.records.values()].filter(
+      (record) =>
+        record.stage === "content" &&
+        record.itemId === itemId &&
+        record.videoId === videoId,
+    );
+    if (matches.length > 1) throw new TikHubCaptionJobAmbiguityError();
+    return matches[0] ? { ...matches[0] } : null;
   }
 
   async createIfAbsent(record: TikHubCaptionJobRecord): Promise<boolean> {
@@ -703,6 +727,7 @@ describe("TikHubTranscriptProvider", () => {
 
     expect(tracks).toHaveLength(1);
     expect(events).toEqual([
+      "find-content-job",
       "read-job",
       "paid",
       "create-job",
@@ -811,6 +836,102 @@ describe("TikHubTranscriptProvider", () => {
     expect(client.paidInputs).toHaveLength(0);
     expect(client.resultInputs).toHaveLength(1);
   });
+
+  it("detects one pending content continuation locally without a key, client, or transport", async () => {
+    const jobs = new FakeJobs();
+    putJob(jobs, jobRecord("content"));
+    const test = createHarness({ jobs });
+
+    await expect(test.provider.hasPendingContinuation(CONTEXT)).resolves.toBe(true);
+
+    expect(jobs.contentFinds).toEqual([{ itemId: ITEM_ID, videoId: VIDEO_ID }]);
+    expect(test.getApiKey).not.toHaveBeenCalled();
+    expect(test.createClient).not.toHaveBeenCalled();
+    expect(test.client.paidInputs).toEqual([]);
+    expect(test.client.resultInputs).toEqual([]);
+  });
+
+  it("blocks ordinary paid listing when an exact content continuation is already durable", async () => {
+    const jobs = new FakeJobs();
+    putJob(jobs, jobRecord("content"));
+    const client = new FakeCaptionClient([tracksData()]);
+    const test = createHarness({ jobs, client });
+
+    await expectCode(
+      test.provider.listTracks(VIDEO_ID, undefined, CONTEXT),
+      "tikhub-processing",
+    );
+
+    expect(test.getApiKey).not.toHaveBeenCalled();
+    expect(test.createClient).not.toHaveBeenCalled();
+    expect(client.paidInputs).toEqual([]);
+    expect(client.resultInputs).toEqual([]);
+  });
+
+  it("continues the unique content job through only the free result endpoint", async () => {
+    const jobs = new FakeJobs();
+    const pending = jobRecord("content");
+    putJob(jobs, pending);
+    const client = new FakeCaptionClient([], [completedContentData()]);
+    const test = createHarness({ jobs, client });
+
+    const continued = expectOperationEnvelope<{
+      track: YouTubeCaptionTrack;
+      transcript: YouTubeTranscript;
+    }>(
+      await test.provider.continuePending(undefined, CONTEXT),
+      FREE_EVIDENCE,
+    );
+
+    expect(continued.value.track).toMatchObject({
+      source: "tikhub",
+      languageCode: "en",
+      languageName: "English",
+      format: "txt",
+    });
+    expect(continued.value.transcript).toMatchObject({
+      provider: "tikhub",
+      languageCode: "en",
+      text: "Completed from the free result endpoint.",
+    });
+    expect(continued.persistenceToken).toEqual(identityFor(pending));
+    expect(client.paidInputs).toEqual([]);
+    expect(client.resultInputs).toHaveLength(1);
+  });
+
+  it.each([
+    ["missing", []],
+    [
+      "malformed",
+      [jobRecord("content", { status: "completed" as "processing" })],
+    ],
+    ["connection-mismatched", [jobRecord("content", { connectionId: OTHER_CONNECTION_ID })]],
+    [
+      "multiple",
+      [
+        jobRecord("content", { languageCode: "en" }),
+        jobRecord("content", { languageCode: "ja", jobId: OTHER_JOB_ID }),
+      ],
+    ],
+  ] as const)(
+    "fails closed before key or transport work for a %s content continuation",
+    async (_case, records) => {
+      const jobs = new FakeJobs();
+      for (const record of records) putJob(jobs, record);
+      const client = new FakeCaptionClient([tracksData()]);
+      const test = createHarness({ jobs, client });
+
+      await expectCode(
+        test.provider.continuePending(undefined, CONTEXT),
+        "tikhub-job-expired",
+      );
+
+      expect(test.getApiKey).not.toHaveBeenCalled();
+      expect(test.createClient).not.toHaveBeenCalled();
+      expect(client.paidInputs).toEqual([]);
+      expect(client.resultInputs).toEqual([]);
+    },
+  );
 
   it("polls exactly ten times at three-second intervals, retains a pending job, and surfaces processing", async () => {
     const client = new FakeCaptionClient(
@@ -1218,6 +1339,39 @@ describe("TikHubTranscriptProvider", () => {
         expect(JSON.stringify(error)).not.toContain("private transport detail");
       },
     );
+
+    it("keeps a transport-started attempt ambiguous when abort wins the client failure race", async () => {
+      const controller = new AbortController();
+      const client = new FakeCaptionClient();
+      const clientError = new TikHubClientError(
+        "aborted",
+        "private aborted transport detail",
+        undefined,
+        undefined,
+        true,
+      );
+      client.paid.push(clientError);
+      const originalFetch = client.fetchYouTubeCaptions.bind(client);
+      client.fetchYouTubeCaptions = async (input) => {
+        controller.abort();
+        return await originalFetch(input);
+      };
+      const test = createHarness({ client });
+
+      const error = await test.provider
+        .listTracks(VIDEO_ID, controller.signal, CONTEXT)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: "aborted",
+        operationEvidence: AMBIGUOUS_OPERATION_EVIDENCE,
+      });
+      expect(Object.getOwnPropertyDescriptor(
+        clientError,
+        "paidRequestAttempted",
+      )).toMatchObject({ writable: false });
+      expect(JSON.stringify(error)).not.toContain("private aborted transport detail");
+    });
   });
 
   describe("expired job recovery", () => {
