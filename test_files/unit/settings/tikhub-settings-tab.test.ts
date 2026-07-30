@@ -343,15 +343,27 @@ describe("renderTikHubSettingsTab", () => {
     expect(save.getAttribute("aria-disabled")).toBe("false");
 
     document.body.empty();
-    const deletion = harness({ confirmed: true });
-    deletion.secretStore.delete.mockRejectedValueOnce(new Error("delete failed"));
+    const refresh = deferred<{ hasSecret: boolean }>();
+    const deletion = harness({
+      confirmed: true,
+      getStatus: vi.fn()
+        .mockResolvedValueOnce({ hasSecret: true })
+        .mockImplementationOnce(() => refresh.promise),
+    });
+    await flushPromises();
+    deletion.secretStore.delete.mockRejectedValueOnce(new Error());
     const remove = getButton(deletion.containerEl, "删除密钥");
     remove.click();
     expect(remove.disabled).toBe(true);
     await flushPromises();
     expect(deletion.secretStore.delete).toHaveBeenCalledTimes(1);
+    expect(deletion.secretStore.getStatus).toHaveBeenCalledTimes(2);
+    expect(getSecretStatus(deletion.containerEl).textContent).toBe("正在检查密钥状态…");
+    refresh.reject(new Error());
+    await flushPromises();
     expect(remove.disabled).toBe(false);
     expect(remove.getAttribute("aria-disabled")).toBe("false");
+    expect(getSecretStatus(deletion.containerEl).textContent).toBe("无法读取密钥状态，请稍后重试。");
   });
 
   it("updates every cap display immediately, restores the last valid value, and freezes the test snapshot", async () => {
@@ -443,7 +455,7 @@ describe("renderTikHubSettingsTab", () => {
     expect(invalid.secretStore.get).not.toHaveBeenCalled();
   });
 
-  it("does not let a stale status completion overwrite a newer render", async () => {
+  it("does not let a stale status completion mutate a cleared and rerendered tab", async () => {
     const first = deferred<{ hasSecret: boolean }>();
     const second = deferred<{ hasSecret: boolean }>();
     const test = harness({
@@ -451,7 +463,9 @@ describe("renderTikHubSettingsTab", () => {
         .mockImplementationOnce(() => first.promise)
         .mockImplementationOnce(() => second.promise),
     });
+    const staleStatusEl = getSecretStatus(test.containerEl);
 
+    test.containerEl.empty();
     renderTikHubSettingsTab(test.containerEl, test.plugin, {
       secretStore: test.secretStore,
       testConnection: test.testConnection,
@@ -460,16 +474,16 @@ describe("renderTikHubSettingsTab", () => {
       createConnectionId: () => CONNECTION_ID,
     });
     expect(test.secretStore.getStatus).toHaveBeenCalledTimes(2);
-    expect(test.containerEl.querySelectorAll(".rss-dashboard-secret-status")[1].textContent)
-      .toBe("正在检查密钥状态…");
+    const currentStatusEl = getSecretStatus(test.containerEl);
+    expect(test.containerEl.querySelectorAll(".rss-dashboard-secret-status")).toHaveLength(1);
+    expect(currentStatusEl.textContent).toBe("正在检查密钥状态…");
     second.resolve({ hasSecret: false });
     await flushPromises();
     first.resolve({ hasSecret: true });
     await flushPromises();
 
-    const statuses = test.containerEl.querySelectorAll<HTMLElement>(".rss-dashboard-secret-status");
-    expect(statuses).toHaveLength(2);
-    expect(statuses[1].textContent).toBe("状态：未配置");
+    expect(staleStatusEl.textContent).toBe("正在检查密钥状态…");
+    expect(currentStatusEl.textContent).toBe("状态：未配置");
   });
 
   it("leaves a disposed tab in its pending state when its status read completes late", async () => {
@@ -482,6 +496,55 @@ describe("renderTikHubSettingsTab", () => {
     await flushPromises();
 
     expect(statusEl.textContent).toBe("正在检查密钥状态…");
+  });
+
+  it("refreshes a safe configured projection after saving a key fails", async () => {
+    const refreshed = deferred<{ hasSecret: boolean }>();
+    const test = harness({
+      getStatus: vi.fn()
+        .mockResolvedValueOnce({ hasSecret: false })
+        .mockImplementationOnce(() => refreshed.promise),
+    });
+    await flushPromises();
+    test.secretStore.set.mockRejectedValueOnce(new Error());
+    const keySetting = getSetting(test.containerEl, "API 密钥");
+    const input = keySetting.querySelector<HTMLInputElement>("input")!;
+    input.value = syntheticCredential();
+
+    getButton(keySetting, "保存密钥").click();
+    await flushPromises();
+
+    expect(test.secretStore.getStatus).toHaveBeenCalledTimes(2);
+    expect(getSecretStatus(test.containerEl).textContent).toBe("正在检查密钥状态…");
+    refreshed.resolve({ hasSecret: true });
+    await flushPromises();
+
+    expect(getSecretStatus(test.containerEl).textContent).toBe("状态：已配置");
+  });
+
+  it("refreshes a safe missing projection after deletion cannot be persisted", async () => {
+    const refreshed = deferred<{ hasSecret: boolean }>();
+    const saveSettings = vi.fn(async () => { throw new Error(); });
+    const test = harness({
+      confirmed: true,
+      saveSettings,
+      getStatus: vi.fn()
+        .mockResolvedValueOnce({ hasSecret: true })
+        .mockImplementationOnce(() => refreshed.promise),
+    });
+    await flushPromises();
+
+    getButton(test.containerEl, "删除密钥").click();
+    await flushPromises();
+
+    expect(test.secretStore.delete).toHaveBeenCalledTimes(1);
+    expect(saveSettings).toHaveBeenCalledTimes(1);
+    expect(test.secretStore.getStatus).toHaveBeenCalledTimes(2);
+    expect(getSecretStatus(test.containerEl).textContent).toBe("正在检查密钥状态…");
+    refreshed.resolve({ hasSecret: false });
+    await flushPromises();
+
+    expect(getSecretStatus(test.containerEl).textContent).toBe("状态：未配置");
   });
 
   it("ignores a late initial secret status after a confirmed delete", async () => {
